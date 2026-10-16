@@ -1,0 +1,33 @@
+# LZ4 Compression on a NAS. Edit the left-hand side of each volume to your
+# own share paths, then:  docker compose -f nas/docker-compose.yml up -d
+# and open http://<NAS IP>:5920
+services:
+  lz4-compression:
+    build:
+      context: ..
+    image: lz4-compression-nas
+    container_name: lz4-compression
+    restart: unless-stopped
+    ports:
+      - "5920:5920"
+    environment:
+      # Your NAS user and group IDs, so new files stay editable over SMB/NFS.
+      # Find them with `id <user>` over SSH (Synology is often 1026 / 100).
+      # Set PUID to 0 to run as root.
+      - PUID=1000
+      - PGID=1000
+    volumes:
+      # Settings, history, logs and uploaded TOML profiles.
+      - ./config:/data/LZ4Compression
+      # Your game library: one folder per game (or .exfat/.ffpfs/.ffpfsc
+      # images). Shown as "Internal" in the page.
+      - /volume1/PS5/games:/data/homebrew
+      # Optional second library / destination, shown as "External SSD".
+      # - /volume2/PS5/games:/mnt/ext0/homebrew
+      # Optional TOML profiles to import (Import From Console).
+      # - /volume1/PS5/toml:/data/LZ4Compression/import
+    # Only needed to read games stored as .exfat images: uncomment both and
+    # set PUID=0 above (loop mounts need root).
+    # privileged: true
+    # devices:
+    #   - /dev/loop-control

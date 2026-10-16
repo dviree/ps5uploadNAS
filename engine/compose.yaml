@@ -1,6 +1,6 @@
 # ps5upload engine + web UI on a Linux server (homelab, NAS, mini PC).
 #
-#   docker compose -f engine/compose.yaml up -d
+#   docker compose -f engine/compose.yaml up -d --build
 #   then open http://<this server's LAN IP>:19113 from a browser on your LAN,
 #   or point the desktop app at it: Settings → Engine URL.
 #
@@ -53,5 +53,35 @@ services:
       # enough to install.
       - /srv/ps5/pkgs:/pkgs:ro
 
+
+  # The LZ4 Compression engine (lz4/), shown on the Convert Games page. It runs
+  # entirely here and works on the games in the folder mounted at
+  # /data/homebrew. See lz4/nas/README.md for the folders and options.
+  lz4-compression:
+    build:
+      context: ../lz4
+    image: lz4-compression-nas
+    container_name: lz4-compression
+    restart: unless-stopped
+    ports:
+      - "5920:5920"
+    environment:
+      # Your NAS user and group IDs, so new files stay editable over SMB/NFS
+      # (`id <user>` over SSH; Synology is often 1026 / 100). 0 runs as root.
+      - PUID=1000
+      - PGID=1000
+    volumes:
+      # Settings, history, logs and uploaded TOML profiles.
+      - lz4-config:/data/LZ4Compression
+      # EDIT: your game library, one folder per game (or .exfat/.ffpfs/.ffpfsc
+      # images). Shown as "Internal" in the page.
+      - /srv/ps5/games:/data/homebrew
+    # Only needed to read games stored as .exfat images: uncomment both and
+    # set PUID=0 above (loop mounts need root).
+    # privileged: true
+    # devices:
+    #   - /dev/loop-control
+
 volumes:
   ps5upload-data:
+  lz4-config:

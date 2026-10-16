@@ -72,3 +72,7 @@ Dockerfile*
 .env.*
 *.pem
 *.key
+
+# The LZ4 Compression engine is its own image, built from lz4/ as the context
+# (engine/compose.yaml); the ps5upload images don't need it.
+lz4/

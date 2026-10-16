@@ -1,0 +1,50 @@
+/* Glass theme for pkg-receiver's page: appended after its own CSS, so these
+   rules win. Purple gradient, frosted cards, gradient buttons. Plain values
+   first, so a browser without backdrop-filter still gets readable panels. */
+html{background:#24145c}
+body{min-height:100vh;color:#fff;font-family:-apple-system,'SF Pro Display','Segoe UI',Roboto,sans-serif;background:radial-gradient(620px 620px at 10% 12%,rgba(168,85,247,.75),transparent 70%),radial-gradient(640px 640px at 90% 8%,rgba(59,130,246,.62),transparent 70%),radial-gradient(720px 720px at 78% 95%,rgba(99,102,241,.7),transparent 70%),radial-gradient(560px 560px at 18% 96%,rgba(139,92,246,.55),transparent 70%),linear-gradient(135deg,#2e1a78,#1d1660 50%,#331a7a);background-attachment:fixed}
+h2,.hd h2{color:#fff;font-weight:700;letter-spacing:.3px;text-shadow:0 2px 18px rgba(20,10,70,.45)}
+.hd{gap:12px;margin-bottom:14px}
+.hd #ver{color:rgba(236,232,255,.74)}
+.hd #pcstat,.hd #space{background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.24);border-radius:999px;color:#fff;-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px)}
+.hd #pcstat{color:#7cf0c0}
+#tabs button,#chips button,#kind button,button.gh,.card button.sec,.mclose,.mx{background:linear-gradient(135deg,rgba(255,255,255,.16),rgba(255,255,255,.06));border:1px solid rgba(255,255,255,.24);border-radius:14px;color:#fff;-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px);transition:transform .12s,box-shadow .12s,background .12s}
+#tabs button.on,#chips button.on,#kind button.on,button.go,.card button,.member button{background:linear-gradient(135deg,#b794ff,#7c5cff 50%,#4f7bff);border:1px solid rgba(255,255,255,.35);border-radius:14px;color:#fff;font-weight:700;box-shadow:0 6px 22px rgba(79,60,200,.45),inset 0 1px 0 rgba(255,255,255,.35)}
+.card button.sec{box-shadow:none;font-weight:600}
+button.danger{background:linear-gradient(135deg,#ff8aa0,#f43f5e);border:1px solid rgba(255,255,255,.3);border-radius:14px;color:#fff;box-shadow:0 6px 22px rgba(244,63,94,.35)}
+button:hover{transform:translateY(-1px)}
+button:focus-visible,input:focus-visible,.card:focus{outline:3px solid #cdbfff;outline-offset:3px}
+input{background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.24);border-radius:14px;color:#fff;-webkit-backdrop-filter:blur(14px);backdrop-filter:blur(14px)}
+input::placeholder{color:rgba(236,232,255,.6)}
+.card,.fampanel,.frow,.member{background:rgba(255,255,255,.11);border:1px solid rgba(255,255,255,.24);border-radius:20px;-webkit-backdrop-filter:blur(18px) saturate(140%);backdrop-filter:blur(18px) saturate(140%);box-shadow:0 10px 36px rgba(15,8,50,.35)}
+.member{border-radius:16px}
+.frow{border-radius:16px}
+.card:hover{transform:translateY(-3px);box-shadow:0 14px 40px rgba(15,8,50,.5),0 0 0 1px rgba(205,191,255,.5)}
+.card.sel{outline:3px solid #cdbfff}
+.card img,.cov{background:rgba(255,255,255,.08)}
+.card img.cov4,.cov.cov4{border-radius:10px}
+.card img.cov5,.cov.cov5{border-radius:16px}
+.card img{box-shadow:0 8px 24px rgba(15,8,50,.45)}
+.card .t{font-weight:600}
+.card .m,.member .m,.frow .m,#fpath,.famgrp,.mbox .mm{color:rgba(236,232,255,.74)}
+.fc{color:#cdbfff;border-color:rgba(205,191,255,.6);background:rgba(255,255,255,.08)}
+.rb{background:linear-gradient(135deg,#b794ff,#4f7bff);color:#fff}
+.bdg{border-radius:999px;padding:3px 10px;box-shadow:0 2px 8px rgba(0,0,0,.25)}
+#qbar{background:rgba(255,255,255,.14);height:10px;border-radius:999px}
+#qfill{background:linear-gradient(90deg,#b794ff,#4f7bff);border-radius:999px}
+#msg{color:rgba(236,232,255,.8)}#msg.ok{color:#7cf0c0}#msg.err{color:#ffb0bb}
+#movl{position:fixed;top:0;left:0;right:0;bottom:0;z-index:9999;background:rgba(20,10,60,.55)!important;-webkit-backdrop-filter:blur(8px);backdrop-filter:blur(8px)}
+.mbox{background:rgba(46,30,110,.94);border:1px solid rgba(255,255,255,.28);border-radius:22px;box-shadow:0 24px 60px rgba(10,5,40,.6);-webkit-backdrop-filter:blur(22px);backdrop-filter:blur(22px)}
+.hd img{box-shadow:0 6px 20px rgba(15,8,50,.45)}
+#msg:not(:empty){padding:12px 18px;border-radius:16px;background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.24);margin-bottom:12px}
+#msg.ok:not(:empty){background:rgba(16,185,129,.22);border-color:rgba(124,240,192,.5)}
+#msg.err:not(:empty){background:rgba(244,63,94,.25);border-color:rgba(255,176,187,.55)}
+.vsel{display:flex;gap:6px;justify-content:center;margin:2px 0 8px}
+.vsel button{flex:1;margin:0;padding:10px 6px;font-size:16px;font-weight:600;background:linear-gradient(135deg,rgba(255,255,255,.16),rgba(255,255,255,.06));border:1px solid rgba(255,255,255,.24);border-radius:12px;color:#fff;box-shadow:none}
+.vsel button.on{background:linear-gradient(135deg,#b794ff,#7c5cff 50%,#4f7bff);border-color:rgba(255,255,255,.35);box-shadow:0 4px 14px rgba(79,60,200,.45)}
+.vfmt{display:inline-block;color:#fff;font-size:15px;font-weight:bold;border-radius:999px;padding:3px 10px}
+.hd #awake{font-size:12px;padding:6px 12px;border-radius:999px;background:rgba(255,255,255,.12);border:1px solid rgba(255,255,255,.24);color:rgba(236,232,255,.8);cursor:pointer;white-space:nowrap}
+.hd #awake.on{color:#fcd77a;border-color:rgba(252,215,122,.55);background:rgba(245,158,11,.18)}
+.inst{display:inline-block;align-self:center;margin:0 auto 10px;padding:4px 12px;border-radius:999px;font-size:14px;font-weight:600;color:#7cf0c0;background:rgba(16,185,129,.18);border:1px solid rgba(124,240,192,.45)}
+.member .inst{margin:6px 0 0;font-size:13px}
+.inst.dim{color:#fcd77a;background:rgba(245,158,11,.16);border-color:rgba(252,215,122,.45)}
