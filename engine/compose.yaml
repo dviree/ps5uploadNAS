@@ -1,6 +1,11 @@
-# ps5upload engine + web UI on a Linux server (homelab, NAS, mini PC).
+# ps5upload engine + web UI, with the LZ4 Compression engine beside it, on a
+# Linux server (homelab, NAS, mini PC). Both are built from this repository.
 #
 #   docker compose -f engine/compose.yaml up -d --build
+#
+# Replacing a PS5-LZ4-NAS container you run already: remove it first
+# (`docker rm -f lz4-compression`, or `docker compose -f nas/docker-compose.yml
+# down` in that copy), since this file uses the same name and port 5920.
 #   then open http://<this server's LAN IP>:19113 from a browser on your LAN,
 #   or point the desktop app at it: Settings → Engine URL.
 #
@@ -8,9 +13,12 @@
 
 services:
   ps5upload:
-    image: ghcr.io/phantomptr/ps5upload-engine-webui:latest
-    # Engine only, no web UI (for the desktop app):
-    # image: ghcr.io/phantomptr/ps5upload-engine:latest
+    # Built from this repository, so the web UI has the LZ4 Convert Games page.
+    # (The published ghcr.io/phantomptr/ps5upload-engine-webui image doesn't.)
+    build:
+      context: ..
+      dockerfile: engine/Dockerfile.webui
+    image: ps5upload-nas-webui
     container_name: ps5upload
     restart: unless-stopped
 
@@ -71,7 +79,9 @@ services:
       - PUID=1000
       - PGID=1000
     volumes:
-      # Settings, history, logs and uploaded TOML profiles.
+      # Settings, history, logs and uploaded TOML profiles. To keep the ones
+      # from a PS5-LZ4-NAS container, mount its config folder here instead,
+      # e.g. /path/to/PS5-LZ4-NAS/nas/config:/data/LZ4Compression
       - lz4-config:/data/LZ4Compression
       # EDIT: your game library, one folder per game (or .exfat/.ffpfs/.ffpfsc
       # images). Shown as "Internal" in the page.
