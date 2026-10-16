@@ -1,6 +1,18 @@
 {
   "ar": {
-    "missing": [],
+    "missing": [
+      "lz4.checking",
+      "lz4.connect",
+      "lz4.down_body",
+      "lz4.down_title",
+      "lz4.not_reachable",
+      "lz4.open_browser",
+      "lz4.reload",
+      "lz4.running_at",
+      "lz4.title",
+      "lz4.try_again",
+      "lz4.url_label"
+    ],
     "stale": [],
     "untranslated": [
       "br_issue_link_placeholder",
@@ -12,7 +24,19 @@
     ]
   },
   "bn": {
-    "missing": [],
+    "missing": [
+      "lz4.checking",
+      "lz4.connect",
+      "lz4.down_body",
+      "lz4.down_title",
+      "lz4.not_reachable",
+      "lz4.open_browser",
+      "lz4.reload",
+      "lz4.running_at",
+      "lz4.title",
+      "lz4.try_again",
+      "lz4.url_label"
+    ],
     "stale": [],
     "untranslated": [
       "br_issue_link_placeholder",
@@ -27,7 +51,19 @@
     ]
   },
   "de": {
-    "missing": [],
+    "missing": [
+      "lz4.checking",
+      "lz4.connect",
+      "lz4.down_body",
+      "lz4.down_title",
+      "lz4.not_reachable",
+      "lz4.open_browser",
+      "lz4.reload",
+      "lz4.running_at",
+      "lz4.title",
+      "lz4.try_again",
+      "lz4.url_label"
+    ],
     "stale": [],
     "untranslated": [
       "br_issue_link_placeholder",
@@ -40,14 +76,25 @@
       "payloads_tab_manager",
       "power_wake_signin_rpkey",
       "processes_pid",
-      "remotePlay",
       "remotePlay_slot",
       "remote_play",
       "smp_meta_json"
     ]
   },
   "es": {
-    "missing": [],
+    "missing": [
+      "lz4.checking",
+      "lz4.connect",
+      "lz4.down_body",
+      "lz4.down_title",
+      "lz4.not_reachable",
+      "lz4.open_browser",
+      "lz4.reload",
+      "lz4.running_at",
+      "lz4.title",
+      "lz4.try_again",
+      "lz4.url_label"
+    ],
     "stale": [],
     "untranslated": [
       "br_issue_link_placeholder",
@@ -57,13 +104,24 @@
       "payloads_tab_manager",
       "power_wake_signin_rpkey",
       "processes_pid",
-      "remotePlay",
       "remote_play",
       "smp_meta_json"
     ]
   },
   "fa": {
-    "missing": [],
+    "missing": [
+      "lz4.checking",
+      "lz4.connect",
+      "lz4.down_body",
+      "lz4.down_title",
+      "lz4.not_reachable",
+      "lz4.open_browser",
+      "lz4.reload",
+      "lz4.running_at",
+      "lz4.title",
+      "lz4.try_again",
+      "lz4.url_label"
+    ],
     "stale": [],
     "untranslated": [
       "br_issue_link_placeholder",
@@ -73,7 +131,19 @@
     ]
   },
   "fr": {
-    "missing": [],
+    "missing": [
+      "lz4.checking",
+      "lz4.connect",
+      "lz4.down_body",
+      "lz4.down_title",
+      "lz4.not_reachable",
+      "lz4.open_browser",
+      "lz4.reload",
+      "lz4.running_at",
+      "lz4.title",
+      "lz4.try_again",
+      "lz4.url_label"
+    ],
     "stale": [],
     "untranslated": [
       "br_issue_link_placeholder",
@@ -85,13 +155,24 @@
       "power_wake_signin_rpkey",
       "processes_pid",
       "queue_console_total",
-      "remotePlay",
       "remote_play",
       "smp_meta_json"
     ]
   },
   "hi": {
-    "missing": [],
+    "missing": [
+      "lz4.checking",
+      "lz4.connect",
+      "lz4.down_body",
+      "lz4.down_title",
+      "lz4.not_reachable",
+      "lz4.open_browser",
+      "lz4.reload",
+      "lz4.running_at",
+      "lz4.title",
+      "lz4.try_again",
+      "lz4.url_label"
+    ],
     "stale": [],
     "untranslated": [
       "br_issue_link_placeholder",
@@ -106,7 +187,19 @@
     ]
   },
   "hu": {
-    "missing": [],
+    "missing": [
+      "lz4.checking",
+      "lz4.connect",
+      "lz4.down_body",
+      "lz4.down_title",
+      "lz4.not_reachable",
+      "lz4.open_browser",
+      "lz4.reload",
+      "lz4.running_at",
+      "lz4.title",
+      "lz4.try_again",
+      "lz4.url_label"
+    ],
     "stale": [],
     "untranslated": [
       "br_issue_link_placeholder",
@@ -120,7 +213,6 @@
       "pkglib.auth.fake",
       "power_wake_signin_rpkey",
       "processes_pid",
-      "remotePlay",
       "remotePlay_title",
       "remote_play",
       "screenshots_png_hdr",
@@ -129,7 +221,19 @@
     ]
   },
   "id": {
-    "missing": [],
+    "missing": [
+      "lz4.checking",
+      "lz4.connect",
+      "lz4.down_body",
+      "lz4.down_title",
+      "lz4.not_reachable",
+      "lz4.open_browser",
+      "lz4.reload",
+      "lz4.running_at",
+      "lz4.title",
+      "lz4.try_again",
+      "lz4.url_label"
+    ],
     "stale": [],
     "untranslated": [
       "br_issue_link_placeholder",
@@ -141,14 +245,25 @@
       "health_cat_remoteplay",
       "payloads_tab_manager",
       "processes_pid",
-      "remotePlay",
       "remotePlay_slot",
       "remote_play",
       "smp_meta_json"
     ]
   },
   "it": {
-    "missing": [],
+    "missing": [
+      "lz4.checking",
+      "lz4.connect",
+      "lz4.down_body",
+      "lz4.down_title",
+      "lz4.not_reachable",
+      "lz4.open_browser",
+      "lz4.reload",
+      "lz4.running_at",
+      "lz4.title",
+      "lz4.try_again",
+      "lz4.url_label"
+    ],
     "stale": [],
     "untranslated": [
       "br_issue_link_placeholder",
@@ -157,7 +272,6 @@
       "ffpkg_inspect_sce_sys",
       "payloads_tab_manager",
       "processes_pid",
-      "remotePlay",
       "remotePlay_slot",
       "remote_play",
       "shortcuts_sec_filesystem",
@@ -166,7 +280,19 @@
     ]
   },
   "ja": {
-    "missing": [],
+    "missing": [
+      "lz4.checking",
+      "lz4.connect",
+      "lz4.down_body",
+      "lz4.down_title",
+      "lz4.not_reachable",
+      "lz4.open_browser",
+      "lz4.reload",
+      "lz4.running_at",
+      "lz4.title",
+      "lz4.try_again",
+      "lz4.url_label"
+    ],
     "stale": [],
     "untranslated": [
       "br_issue_link_placeholder",
@@ -180,7 +306,19 @@
     ]
   },
   "ko": {
-    "missing": [],
+    "missing": [
+      "lz4.checking",
+      "lz4.connect",
+      "lz4.down_body",
+      "lz4.down_title",
+      "lz4.not_reachable",
+      "lz4.open_browser",
+      "lz4.reload",
+      "lz4.running_at",
+      "lz4.title",
+      "lz4.try_again",
+      "lz4.url_label"
+    ],
     "stale": [],
     "untranslated": [
       "br_issue_link_placeholder",
@@ -195,7 +333,19 @@
     ]
   },
   "pl": {
-    "missing": [],
+    "missing": [
+      "lz4.checking",
+      "lz4.connect",
+      "lz4.down_body",
+      "lz4.down_title",
+      "lz4.not_reachable",
+      "lz4.open_browser",
+      "lz4.reload",
+      "lz4.running_at",
+      "lz4.title",
+      "lz4.try_again",
+      "lz4.url_label"
+    ],
     "stale": [],
     "untranslated": [
       "br_issue_link_placeholder",
@@ -209,7 +359,19 @@
     ]
   },
   "pt-BR": {
-    "missing": [],
+    "missing": [
+      "lz4.checking",
+      "lz4.connect",
+      "lz4.down_body",
+      "lz4.down_title",
+      "lz4.not_reachable",
+      "lz4.open_browser",
+      "lz4.reload",
+      "lz4.running_at",
+      "lz4.title",
+      "lz4.try_again",
+      "lz4.url_label"
+    ],
     "stale": [],
     "untranslated": [
       "br_issue_link_placeholder",
@@ -222,14 +384,25 @@
       "power_wake_signin_rpkey",
       "processes_pid",
       "queue_console_total",
-      "remotePlay",
       "remotePlay_slot",
       "remote_play",
       "smp_meta_json"
     ]
   },
   "ru": {
-    "missing": [],
+    "missing": [
+      "lz4.checking",
+      "lz4.connect",
+      "lz4.down_body",
+      "lz4.down_title",
+      "lz4.not_reachable",
+      "lz4.open_browser",
+      "lz4.reload",
+      "lz4.running_at",
+      "lz4.title",
+      "lz4.try_again",
+      "lz4.url_label"
+    ],
     "stale": [],
     "untranslated": [
       "br_issue_link_placeholder",
@@ -245,7 +418,19 @@
     ]
   },
   "th": {
-    "missing": [],
+    "missing": [
+      "lz4.checking",
+      "lz4.connect",
+      "lz4.down_body",
+      "lz4.down_title",
+      "lz4.not_reachable",
+      "lz4.open_browser",
+      "lz4.reload",
+      "lz4.running_at",
+      "lz4.title",
+      "lz4.try_again",
+      "lz4.url_label"
+    ],
     "stale": [],
     "untranslated": [
       "br_issue_link_placeholder",
@@ -258,7 +443,19 @@
     ]
   },
   "tr": {
-    "missing": [],
+    "missing": [
+      "lz4.checking",
+      "lz4.connect",
+      "lz4.down_body",
+      "lz4.down_title",
+      "lz4.not_reachable",
+      "lz4.open_browser",
+      "lz4.reload",
+      "lz4.running_at",
+      "lz4.title",
+      "lz4.try_again",
+      "lz4.url_label"
+    ],
     "stale": [],
     "untranslated": [
       "br_issue_link_placeholder",
@@ -268,14 +465,25 @@
       "payloads_tab_manager",
       "power_wake_signin_rpkey",
       "processes_pid",
-      "remotePlay",
       "screenshots_png_hdr",
       "screenshots_png_sdr",
       "smp_meta_json"
     ]
   },
   "vi": {
-    "missing": [],
+    "missing": [
+      "lz4.checking",
+      "lz4.connect",
+      "lz4.down_body",
+      "lz4.down_title",
+      "lz4.not_reachable",
+      "lz4.open_browser",
+      "lz4.reload",
+      "lz4.running_at",
+      "lz4.title",
+      "lz4.try_again",
+      "lz4.url_label"
+    ],
     "stale": [],
     "untranslated": [
       "br_issue_link_placeholder",
@@ -285,13 +493,24 @@
       "payloads_tab_manager",
       "power_wake_signin_rpkey",
       "processes_pid",
-      "remotePlay",
       "remote_play",
       "smp_meta_json"
     ]
   },
   "zh-CN": {
-    "missing": [],
+    "missing": [
+      "lz4.checking",
+      "lz4.connect",
+      "lz4.down_body",
+      "lz4.down_title",
+      "lz4.not_reachable",
+      "lz4.open_browser",
+      "lz4.reload",
+      "lz4.running_at",
+      "lz4.title",
+      "lz4.try_again",
+      "lz4.url_label"
+    ],
     "stale": [],
     "untranslated": [
       "br_issue_link_placeholder",
@@ -305,7 +524,19 @@
     ]
   },
   "zh-TW": {
-    "missing": [],
+    "missing": [
+      "lz4.checking",
+      "lz4.connect",
+      "lz4.down_body",
+      "lz4.down_title",
+      "lz4.not_reachable",
+      "lz4.open_browser",
+      "lz4.reload",
+      "lz4.running_at",
+      "lz4.title",
+      "lz4.try_again",
+      "lz4.url_label"
+    ],
     "stale": [],
     "untranslated": [
       "br_issue_link_placeholder",

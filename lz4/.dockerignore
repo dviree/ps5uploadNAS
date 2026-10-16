@@ -1,0 +1,15 @@
+.git
+build
+gen
+lz4-compression.elf
+app
+# ...except the original project's version number, for game reports.
+!app/lz4-compression/version.js
+assets-app
+tests
+# nas-lz4/Dockerfile builds the host packer from tests/host.
+!tests/host
+tools/art
+*.md
+!nas/README.md
+!profiles/README.md

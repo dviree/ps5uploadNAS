@@ -1,0 +1,2156 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>ps5-lz4</title>
+<style>
+:root{--btn1:#9b7bf7;--btn2:#5b5cf0;--btnglow:rgba(99,82,240,.3);--pri:linear-gradient(135deg,#b06cf7,#7c3aed 45%,#4f6cf5);--ghost:linear-gradient(135deg,#a39cc4,#7b739f);--hero:linear-gradient(135deg,#8b5cf6,#6366f1 55%,#3b82f6);--bg:#f3f1fb;--bgimg:radial-gradient(900px 520px at 0% -8%,rgba(167,139,250,.22),transparent 60%),radial-gradient(800px 520px at 100% 0%,rgba(96,165,250,.16),transparent 60%);--card:#ffffff;--line:#ebe7f7;--txt:#1f1937;--mut:#6f6890;--ok:#16794c;--okbg:#e2f5eb;--acc:#6d4ff0;--acc2:#3b82f6;--accbg:#efeaff;--warn:#9a6200;--warnbg:#fdf2d8;--bad:#c5340d;--badbg:#fdebe5;--chip:#f1edfc;--nd:rgba(99,82,240,.22);--nl:transparent;--shadow:0 12px 32px -14px rgba(91,60,200,.28),0 2px 6px rgba(60,40,140,.06);--inset:inset 0 0 0 1px #e3ddf6;--hdr:rgba(243,241,251,.85);--solid:#ffffff;--cardline:transparent;--blur:none}
+:root[data-theme="dark"]{--btn1:#a78bfa;--btn2:#7c3aed;--btnglow:rgba(124,58,237,.32);--pri:linear-gradient(135deg,#c084fc,#9333ea 50%,#6d28d9);--ghost:linear-gradient(135deg,#6d5a9e,#4c3d7a);--hero:linear-gradient(135deg,#6d28d9,#9333ea 55%,#a78bfa);--bgimg:none;--shadow:7px 7px 16px var(--nd),-7px -7px 16px var(--nl);--inset:inset 3px 3px 7px var(--nd),inset -3px -3px 7px var(--nl);--bg:#211a38;--card:#211a38;--line:#30275080;--txt:#ece8fa;--mut:#a097c2;--ok:#43c08f;--okbg:#1d3a31;--acc:#a78bfa;--acc2:#c084fc;--accbg:#33285a;--warn:#e7ad46;--warnbg:#3b3120;--bad:#f2807a;--badbg:#42262c;--chip:#211a38;--nd:rgba(8,5,20,.65);--nl:rgba(70,58,115,.38);--hdr:rgba(33,26,56,.88);--solid:#241c3e;--cardline:transparent;--blur:none}
+@media (prefers-color-scheme:dark){:root:not([data-theme]){--btn1:#a78bfa;--btn2:#7c3aed;--btnglow:rgba(124,58,237,.32);--pri:linear-gradient(135deg,#c084fc,#9333ea 50%,#6d28d9);--ghost:linear-gradient(135deg,#6d5a9e,#4c3d7a);--hero:linear-gradient(135deg,#6d28d9,#9333ea 55%,#a78bfa);--bgimg:none;--shadow:7px 7px 16px var(--nd),-7px -7px 16px var(--nl);--inset:inset 3px 3px 7px var(--nd),inset -3px -3px 7px var(--nl);--bg:#211a38;--card:#211a38;--line:#30275080;--txt:#ece8fa;--mut:#a097c2;--ok:#43c08f;--okbg:#1d3a31;--acc:#a78bfa;--acc2:#c084fc;--accbg:#33285a;--warn:#e7ad46;--warnbg:#3b3120;--bad:#f2807a;--badbg:#42262c;--chip:#211a38;--nd:rgba(8,5,20,.65);--nl:rgba(70,58,115,.38);--hdr:rgba(33,26,56,.88);--solid:#241c3e;--cardline:transparent;--blur:none}}
+:root[data-theme="glass"]{--btn1:rgba(255,255,255,.30);--btn2:rgba(255,255,255,.12);--btnglow:rgba(20,10,70,.35);--pri:linear-gradient(135deg,#b794ff,#7c5cff 50%,#4f7bff);--ghost:linear-gradient(135deg,rgba(255,255,255,.14),rgba(255,255,255,.05));--hero:linear-gradient(135deg,rgba(183,148,255,.55),rgba(79,123,255,.45));--bg:#24145c;--bgimg:radial-gradient(520px 520px at 12% 18%,rgba(168,85,247,.75),transparent 70%),radial-gradient(560px 560px at 88% 12%,rgba(59,130,246,.65),transparent 70%),radial-gradient(620px 620px at 75% 92%,rgba(99,102,241,.7),transparent 70%),radial-gradient(480px 480px at 20% 95%,rgba(139,92,246,.55),transparent 70%),linear-gradient(135deg,#2e1a78,#1d1660 50%,#331a7a);--card:rgba(255,255,255,.11);--cardline:rgba(255,255,255,.24);--blur:blur(18px) saturate(140%);--line:rgba(255,255,255,.16);--txt:#ffffff;--mut:rgba(236,232,255,.74);--ok:#7cf0c0;--okbg:rgba(16,185,129,.24);--acc:#cdbfff;--acc2:#93b4ff;--accbg:rgba(255,255,255,.18);--warn:#fcd77a;--warnbg:rgba(245,158,11,.22);--bad:#ffb0bb;--badbg:rgba(244,63,94,.25);--chip:rgba(255,255,255,.14);--nd:rgba(15,8,50,.35);--nl:transparent;--shadow:0 10px 36px rgba(15,8,50,.35);--inset:inset 0 0 0 1px rgba(255,255,255,.26);--hdr:rgba(255,255,255,.07);--solid:rgba(46,30,110,.94)}
+:root[data-theme="glass"] option{color:#1f1937;background:#fff}
+*{box-sizing:border-box}
+[hidden]{display:none!important}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bgimg),var(--bg);background-attachment:fixed;min-height:100vh;color:var(--txt);font:14px/1.5 -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,Inter,sans-serif;-webkit-font-smoothing:antialiased}
+a{color:var(--acc);text-decoration:none}a:hover{text-decoration:underline}
+code{font:12px/1.4 ui-monospace,SFMono-Regular,Menlo,monospace;background:var(--chip);padding:1px 5px;border-radius:5px}
+/* header */
+header{position:sticky;top:0;z-index:5;display:flex;flex-wrap:wrap;align-items:center;gap:10px 16px;padding:12px max(16px,calc((100% - 1280px)/2 + 16px));background:var(--hdr);backdrop-filter:saturate(180%) blur(14px);-webkit-backdrop-filter:saturate(180%) blur(14px);border-bottom:0;box-shadow:0 6px 14px -8px var(--nd)}
+.brand{display:flex;align-items:center;gap:10px;min-width:0}
+.themes{display:inline-flex;gap:2px;padding:3px;border-radius:12px;background:var(--chip);box-shadow:var(--inset)}
+.themes button{background:none;box-shadow:none;border:0;text-shadow:none;color:var(--mut);padding:4px 10px;font-size:12px;border-radius:9px;filter:none}
+.themes button.on{background:var(--pri);color:#fff;box-shadow:0 2px 8px var(--btnglow)}
+.logo{width:34px;height:34px;border-radius:10px;background:linear-gradient(135deg,var(--acc),var(--acc2));color:#fff;display:grid;place-items:center;font:800 11px/1 ui-monospace,Menlo,monospace;letter-spacing:.5px;box-shadow:0 4px 14px var(--btnglow)}
+header h1{font-size:17px;margin:0;letter-spacing:-.2px}.sub{color:var(--mut);font-size:12px;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.sp{flex:1}
+.hacts{display:flex;gap:8px;flex-wrap:wrap}
+/* buttons */
+button,label.btn,a.btn{text-decoration:none;font:inherit;font-weight:600;border:1px solid rgba(255,255,255,.18);border-radius:12px;padding:8px 15px;cursor:pointer;background:linear-gradient(135deg,var(--btn1),var(--btn2));color:#fff;text-shadow:0 1px 1px rgba(40,0,80,.25);box-shadow:4px 4px 10px var(--nd),-4px -4px 10px var(--nl),inset 0 1px 0 rgba(255,255,255,.22);transition:filter .15s,transform .08s,box-shadow .15s;display:inline-flex;align-items:center;gap:6px;line-height:1.3}
+button:hover,label.btn:hover,a.btn:hover{filter:brightness(1.08) saturate(1.05);box-shadow:0 4px 16px var(--btnglow),inset 0 1px 0 rgba(255,255,255,.25)}
+button:active{transform:translateY(1px)}
+button:focus-visible,select:focus-visible,input:focus-visible{outline:2px solid var(--btn1);outline-offset:2px}
+button.pri{background:var(--pri);box-shadow:0 4px 18px var(--btnglow),inset 0 1px 0 rgba(255,255,255,.3)}
+button.pri:hover{filter:brightness(1.07)}
+button.ghost{background:var(--ghost);box-shadow:0 2px 8px rgba(76,61,122,.25),inset 0 1px 0 rgba(255,255,255,.15)}
+button:disabled{opacity:.5;cursor:default;transform:none}
+button.sm{padding:5px 11px;font-size:12px;border-radius:8px}
+/* tabs */
+.tabs{position:sticky;top:59px;z-index:4;display:flex;gap:4px;margin:14px auto 0;padding:4px;max-width:max-content;background:var(--card);border:1px solid var(--line);border-radius:16px;box-shadow:var(--inset);border:0;overflow-x:auto;scrollbar-width:none}
+.tabs::-webkit-scrollbar{display:none}
+.tabs button{background:none;border:0;border-radius:9px;color:var(--mut);padding:7px 16px;white-space:nowrap;box-shadow:none;text-shadow:none;filter:none}
+.tabs button:hover{color:var(--txt);background:var(--chip)}
+.tabs button.on{background:linear-gradient(135deg,var(--btn1),var(--btn2));color:#fff;box-shadow:0 2px 10px var(--btnglow)}
+/* layout */
+main{padding:16px;display:grid;grid-template-columns:minmax(0,1fr);gap:14px;max-width:1280px;margin:0 auto}
+.card,.k{background:var(--card);border:1px solid var(--cardline);border-radius:20px;padding:18px 20px;box-shadow:var(--shadow);-webkit-backdrop-filter:var(--blur);backdrop-filter:var(--blur)}
+h2{font-size:15px;margin:0 0 10px;letter-spacing:-.1px}
+.mut{color:var(--mut)}
+.kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px}
+.k{position:relative;overflow:hidden}
+.k b{font-size:26px;display:block;letter-spacing:-.5px;font-variant-numeric:tabular-nums}
+.k span{color:var(--mut);font-size:13px}
+.k:first-child{background:var(--hero);box-shadow:0 8px 28px var(--btnglow);border:0;color:#fff}.k:first-child span{color:rgba(255,255,255,.85)}
+.k:nth-child(2) b{color:var(--ok)}
+/* job */
+.steps{display:grid;grid-template-columns:repeat(6,1fr);gap:6px;margin:12px 0}
+.st{padding:7px 4px;border-radius:8px;background:var(--chip);color:var(--mut);text-align:center;font-size:12px;font-weight:500}
+.st.d{background:var(--okbg);color:var(--ok)}.st.r{background:var(--accbg);color:var(--acc);font-weight:700;box-shadow:inset 0 0 0 1px var(--acc)}
+.bar{height:8px;background:var(--chip);border-radius:99px;overflow:hidden}
+.bar i{display:block;height:100%;background:linear-gradient(90deg,var(--acc),var(--acc2));border-radius:99px;transition:width .5s}
+.dl{padding:10px 0;border-top:1px solid var(--line)}.dl:first-child{border-top:0}.dl-top{display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px;margin-bottom:6px}.dl-top>*{min-width:0;overflow-wrap:anywhere}.dl-row{display:flex;align-items:center;gap:8px;padding:6px 0;border-top:1px solid var(--line);flex-wrap:wrap}.dl-name{font-weight:600}
+/* tables */
+.scroll{overflow-x:auto}
+table{width:100%;border-collapse:collapse;min-width:820px}
+th,td{text-align:left;padding:12px 10px;border-top:1px solid var(--line);vertical-align:top}
+th{color:var(--mut);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.04em;border-top:0;padding-top:4px}
+.num{text-align:right;font-variant-numeric:tabular-nums;white-space:nowrap}
+tr.row{cursor:pointer}tr.row td{transition:background .12s}tr.row:hover td{background:color-mix(in srgb,var(--chip) 60%,transparent)}
+.gname{font-weight:600;font-size:14.5px}
+.pill{display:inline-flex;align-items:center;gap:4px;padding:3px 10px;border-radius:99px;box-shadow:inset 1px 1px 3px var(--nd),inset -1px -1px 3px var(--nl);font-size:12px;font-weight:700;white-space:nowrap}
+.p-LZ4{background:var(--okbg);color:var(--ok)}.p-can{background:var(--accbg);color:var(--acc)}
+.p-no{background:var(--chip);color:var(--mut)}.p-err{background:var(--badbg);color:var(--bad)}
+.p-run{background:var(--warnbg);color:var(--warn)}
+.chips{display:flex;flex-wrap:wrap;gap:4px 6px;margin-top:6px}
+.chip{display:inline-flex;align-items:center;gap:4px;font-size:11.5px;padding:2px 8px;border-radius:99px;background:var(--chip);color:var(--mut);white-space:nowrap;max-width:100%;overflow:hidden;text-overflow:ellipsis}
+.chip.ok{background:var(--okbg);color:var(--ok)}.chip.bad{background:var(--badbg);color:var(--bad)}
+.chip.ps4{background:#0070D1;color:#fff}
+.pill.p-rar{background:linear-gradient(135deg,#f59e0b,#b45309);color:#fff}
+details.sav{margin-top:12px;border-top:1px solid var(--line);padding-top:8px}details.sav summary{display:flex;gap:8px;align-items:center;cursor:pointer;flex-wrap:wrap}
+button.send-on{background:linear-gradient(135deg,#34d399,#059669);color:#fff;border-color:rgba(255,255,255,.3)}
+button.send-off{background:linear-gradient(135deg,#fb7185,#e11d48);color:#fff;border-color:rgba(255,255,255,.3)}.pg-ico.ps4{border-radius:6px}
+.why{font-size:12px;color:var(--mut);max-width:420px}
+.sz{height:6px;margin-top:6px;min-width:90px;border-radius:99px;background:var(--okbg)}
+.sz i{display:block;height:100%;border-radius:99px;background:var(--acc)}
+select{font:inherit;padding:5px 8px;border-radius:8px;border:0;background:var(--card);box-shadow:var(--inset);color:var(--txt)}
+.good{color:var(--ok)}.bad{color:var(--bad)}
+.log div{overflow-wrap:anywhere;padding:8px 0;border-top:1px solid var(--line);font-size:13px}.log div:first-child{border-top:0}
+.log pre{margin:6px 0 0;white-space:pre-wrap;overflow-wrap:anywhere;font:12px/1.4 ui-monospace,Menlo,monospace;color:var(--mut);max-height:120px;overflow:auto;background:var(--bg);border-radius:8px;padding:8px}
+.steps-list{margin:10px 0 0;padding-left:20px;line-height:1.6}.steps-list ul{padding-left:18px;margin:4px 0}.steps-list li{margin-bottom:4px}
+.ico{float:left;width:44px;height:44px;border-radius:10px;object-fit:cover;margin:0 12px 4px 0;box-shadow:0 1px 3px rgba(0,0,0,.15)}
+.ico.big{width:84px;height:84px;border-radius:16px;margin-right:16px}
+.fi{display:inline-block;text-align:center;font-size:26px;line-height:44px;box-shadow:none}
+.filters{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0}
+.filters input,.filters select{font:inherit;padding:8px 12px;border-radius:10px;border:0;background:var(--card);box-shadow:var(--inset);color:var(--txt);flex:1;min-width:180px}
+.mine{font-size:10.5px;font-weight:700;color:var(--acc);background:var(--accbg);padding:1px 7px;border-radius:99px;margin-left:6px;vertical-align:2px}
+.cm{font-size:12px;margin-top:2px}.kind{font-weight:600}
+.csec{background:var(--bg);border:1px solid var(--line);border-radius:12px;padding:12px 14px;margin:14px 0}
+.rowbtns{display:flex;flex-direction:column;gap:6px;align-items:stretch}
+.aprres:not(:empty){margin-top:12px;padding:10px 14px;border-radius:12px;background:var(--chip);box-shadow:var(--inset);font-size:13px}.aprres div+div{margin-top:8px}
+.pair{display:grid;grid-template-columns:repeat(auto-fit,minmax(250px,1fr));gap:12px;margin:14px 0;clear:both}.pair .csec{margin:0}
+.pair .csec .kv{grid-template-columns:minmax(80px,auto) 1fr}
+.csec h4{margin:0 0 6px;font-size:14px}.cbar{display:flex;height:8px;border-radius:99px;overflow:hidden;background:var(--chip);margin:8px 0}
+.cbar i{display:block;height:100%}
+/* sheet */
+.modal{position:fixed;inset:0;background:rgba(10,12,18,.5);backdrop-filter:blur(3px);-webkit-backdrop-filter:blur(3px);display:flex;align-items:flex-start;justify-content:center;padding:48px 16px;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;z-index:30;animation:fade .15s}
+main{padding-bottom:110px}body.locked{overflow:hidden}body.locked #fab,body.locked #fabpop{display:none!important}
+.sheet{position:relative;background:var(--solid);-webkit-backdrop-filter:var(--blur);backdrop-filter:var(--blur);border:1px solid var(--line);border-radius:18px;padding:22px;width:100%;max-width:660px;box-shadow:0 20px 60px rgba(0,0,0,.25);animation:rise .2s ease-out}
+.sheet h3{margin:4px 32px 4px 0;font-size:20px;letter-spacing:-.3px}.sheet .x{position:absolute;top:14px;right:14px;padding:5px 11px;border-radius:99px}
+.kv{display:grid;grid-template-columns:150px minmax(0,1fr);gap:8px 14px;margin:16px 0;clear:both}.kv > div:nth-child(odd){color:var(--mut)}
+.kv div{overflow-wrap:anywhere}.acts{display:flex;flex-wrap:wrap;gap:8px;margin-top:16px}.acts.dels{margin-top:10px;padding-top:10px;border-top:1px dashed var(--line)}.acts.dels:empty{display:none}
+.err{background:var(--badbg);color:var(--bad);border-radius:10px;padding:10px 12px}
+footer{opacity:.8}
+.storelink{font-weight:700;text-decoration:none;padding:7px 13px;border-radius:12px;background:linear-gradient(135deg,var(--btn1),var(--btn2));color:#fff;box-shadow:0 2px 10px var(--btnglow)}
+.pg-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px;margin-top:6px}
+.pg{display:flex;gap:12px;padding:12px;border:1px solid var(--line);border-radius:14px;background:var(--bg);transition:opacity .2s}
+.pg.busy-del{opacity:.4;pointer-events:none}
+.pg-ico{width:72px;height:72px;border-radius:14px;object-fit:cover;flex:none;box-shadow:0 1px 3px rgba(0,0,0,.15)}
+.pg-ico.fi{display:grid;place-items:center;font-size:34px;background:var(--chip);box-shadow:none}
+.pg-body{flex:1;min-width:0}.pg-body .gname{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.pg-acts{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px;align-items:center}
+button.danger{background:linear-gradient(135deg,#f43f5e,#be123c);color:#fff;box-shadow:0 2px 10px rgba(225,29,72,.3),inset 0 1px 0 rgba(255,255,255,.2)}
+#fab{position:fixed;right:18px;bottom:18px;z-index:20;width:62px;height:62px;border-radius:99px;background:var(--solid);box-shadow:0 6px 24px rgba(0,0,0,.22);display:grid;place-items:center;cursor:pointer;border:1px solid var(--line);animation:rise .2s}
+#fab .ring{width:50px;height:50px;border-radius:99px;display:grid;place-items:center;transition:background .5s}
+#fab .ring span{width:40px;height:40px;border-radius:99px;background:var(--card);display:grid;place-items:center;font-size:12px;font-weight:800;font-variant-numeric:tabular-nums}
+#fab .fab-info{position:absolute;right:70px;top:50%;transform:translateY(-50%);background:var(--solid);border:1px solid var(--line);box-shadow:0 4px 16px rgba(0,0,0,.15);border-radius:12px;padding:5px 10px;font-size:12px;line-height:1.3;white-space:nowrap;display:flex;flex-direction:column;align-items:flex-end}#fab .fab-info span{color:var(--mut)}
+#fabpop .ftot{display:grid;grid-template-columns:repeat(3,1fr);gap:6px;margin:6px 0 8px}#fabpop .ftot span{background:var(--bg);border-radius:10px;padding:6px 8px;font-size:11px;color:var(--mut);display:flex;flex-direction:column}#fabpop .ftot b{font-size:14px;color:var(--txt)}
+#fab .fab-n{position:absolute;top:-4px;right:-4px;min-width:20px;height:20px;padding:0 5px;border-radius:99px;background:var(--acc);color:#fff;font-size:11px;font-weight:700;display:grid;place-items:center}
+#fabpop{position:fixed;right:18px;bottom:90px;z-index:20;width:min(330px,calc(100vw - 36px));max-height:60vh;overflow:auto;background:var(--solid);-webkit-backdrop-filter:var(--blur);backdrop-filter:var(--blur);border:1px solid var(--line);border-radius:16px;box-shadow:0 12px 40px rgba(0,0,0,.25);padding:12px 14px;animation:rise .15s}
+#fabpop .fh{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.04em;color:var(--mut);margin:8px 0 4px}#fabpop .fh:first-child{margin-top:0}
+#fabpop .fr{display:flex;align-items:center;gap:8px;padding:5px 0;font-size:13px}#fabpop .fn{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#fabpop .bar{height:5px;margin:0 0 4px}
+.dotlive{width:8px;height:8px;border-radius:99px;background:var(--ok);box-shadow:0 0 0 3px var(--okbg);flex:none}
+.drive{padding:12px 0;border-top:1px solid var(--line)}.drive:first-child{border-top:0}
+.dhead{display:flex;flex-wrap:wrap;align-items:center;gap:6px 8px;margin-bottom:6px}
+.dbar{height:10px;margin:4px 0 6px}.dbar.full i{background:var(--bad)}
+.help summary{cursor:pointer;font-weight:700;font-size:15px;list-style:none}.help summary::-webkit-details-marker{display:none}
+.help summary::before{content:'ⓘ';color:var(--acc);margin-right:8px}.help summary::after{content:' ›';color:var(--mut)}.help[open] summary::after{content:' ⌄'}
+.hgrid{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:4px 28px;margin-top:6px}
+.hgrid h4{margin:14px 0 4px;font-size:14px}.hgrid p,.hgrid li{color:var(--mut);margin:4px 0}.hgrid ul,.hgrid ol{padding-left:20px;margin:4px 0}
+.hgrid b,.hgrid i{color:var(--txt)}
+.tag{font-size:10.5px;font-weight:700;color:var(--mut);background:var(--chip);padding:1px 7px;border-radius:99px;margin-left:6px;vertical-align:1px}
+button.two{flex-direction:column;align-items:flex-start;gap:0;text-align:left;padding:7px 14px;max-width:210px}
+label.chk{display:inline-flex;align-items:center;gap:6px;flex:none;cursor:pointer}.filters label.chk input{width:auto;min-width:0;flex:none;margin:0;padding:0}
+button.upd{background:linear-gradient(135deg,#34d399,#059669);color:#fff;box-shadow:0 3px 14px rgba(16,185,129,.4),inset 0 1px 0 rgba(255,255,255,.25)}
+.updot{display:inline-block;width:9px;height:9px;border-radius:50%;background:#22c55e;margin-right:7px;vertical-align:1px;box-shadow:0 0 0 0 rgba(34,197,94,.7);animation:upblink 1.2s infinite}
+@keyframes upblink{0%,100%{opacity:1;box-shadow:0 0 0 0 rgba(34,197,94,.7)}50%{opacity:.25;box-shadow:0 0 0 5px rgba(34,197,94,0)}}
+button.two small{font-size:11px;font-weight:500;opacity:.88;line-height:1.25;white-space:normal}
+.badge{display:inline-block;min-width:18px;padding:0 6px;margin-left:6px;border-radius:99px;background:var(--acc);color:#fff;font-size:11px;line-height:18px;text-align:center}
+.busy{cursor:pointer;display:flex;flex-wrap:wrap;align-items:center;gap:6px 10px;background:var(--accbg);border-color:transparent}
+.busy .dot{color:var(--mut)}.busy .more{margin-left:auto;color:var(--acc);font-weight:600}
+.jobtitle{font-size:15px;margin-bottom:10px}
+.stats{display:flex;flex-wrap:wrap;gap:4px 14px;margin-top:8px;color:var(--mut);font-variant-numeric:tabular-nums}.stats b{color:var(--txt)}
+.qh{margin:16px 0 6px;font-size:13px;color:var(--mut)}
+.qrow{display:flex;align-items:center;gap:8px;padding:7px 0;border-top:1px solid var(--line)}
+.qn{width:22px;height:22px;border-radius:99px;background:var(--chip);display:grid;place-items:center;font-size:11px;font-weight:700;color:var(--mut)}
+.qname{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.qname .why{white-space:normal}
+.mob{display:none}
+@keyframes fade{from{opacity:0}}@keyframes rise{from{transform:translateY(12px);opacity:0}}
+/* phones */
+@media (max-width:760px){
+  #fab{width:52px;height:52px;right:12px;bottom:calc(12px + env(safe-area-inset-bottom))}#fab .fab-info{display:none!important}#fab .ring{width:42px;height:42px}#fab .ring span{width:34px;height:34px;font-size:11px}#fabpop{bottom:calc(74px + env(safe-area-inset-bottom))}
+  header{position:static;padding:10px 14px;gap:8px}
+  header .sub{display:none}.brand .logo{width:34px;height:34px;font-size:11px}.brand h1{font-size:20px}
+  .themes button{padding:5px 9px;font-size:13px}.storelink{padding:6px 12px}
+  .hacts button.two{padding:8px 12px}.hacts button.two small{display:none}
+  .kpis{grid-template-columns:repeat(4,1fr);gap:6px}.kpis .k{padding:8px 6px;border-radius:14px;text-align:center}
+  .kpis .k b{font-size:16px!important}.kpis .k span,.kpis .k div{font-size:11px;line-height:1.25!important;margin-top:2px}
+  .pg{padding:10px;gap:10px}.pg-ico{width:52px;height:52px;border-radius:12px}
+  .hacts{width:100%;flex-wrap:nowrap;overflow-x:auto;scrollbar-width:none;margin:0 -2px;padding:2px}
+  .hacts::-webkit-scrollbar{display:none}.hacts button{white-space:nowrap;flex:none}
+  .tabs{position:static;margin:12px 12px 0;max-width:none}
+  .hacts .pri{order:-1}.tabs button{flex:none;padding:7px 12px}
+  button.two{max-width:170px}
+  main{padding:12px}
+  .card{padding:14px}
+  .steps{grid-template-columns:repeat(3,1fr)}
+  .k b{font-size:16px}
+  table#games{min-width:0;width:100%}#games,#games tbody{display:block}
+  #games td.c-act button{white-space:nowrap}
+  #games tr:first-child{display:none}
+  #games tr.row{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px 10px;padding:14px 0;border-top:1px solid var(--line)}
+  #games tr.row:first-of-type{border-top:0}
+  #games td{border:0;padding:0}
+  #games td.c-game{grid-column:1}#games td.c-status{grid-column:2;grid-row:1;text-align:right}
+  #games td.c-src,#games td.c-out{display:none}
+  .mob{display:inline}
+  #games td.c-saved{grid-column:1/-1;text-align:left}#games td.c-saved .sz{max-width:none}
+  #games td.c-ps5:empty,#games td.c-act:empty{display:none}
+  #games td.c-ps5{grid-column:1}#games td.c-act{grid-column:2;text-align:right}
+  #games td.c-ps5 .mut{display:none}
+  #pkgs,#pkgs tbody,#comm,#comm tbody{display:block;min-width:0}#pkgs tr:first-child,#comm tr:first-child{display:none}
+  #pkgs tr,#comm tr{display:flex;flex-wrap:wrap;align-items:center;gap:4px 10px;padding:10px 0;border-top:1px solid var(--line)}
+  #pkgs td,#comm td{border:0;padding:0;overflow-wrap:anywhere}#pkgs td:first-child,#comm td:first-child{flex-basis:100%;font-weight:600}
+  .kv{grid-template-columns:1fr;gap:2px}.kv > div:nth-child(odd){margin-top:8px;font-size:12px;text-transform:uppercase;letter-spacing:.04em}
+  .modal{padding:40px 0 0;align-items:flex-start}
+  .sheet{border-radius:20px 20px 0 0;max-width:none;min-height:70vh;margin-top:auto;padding-bottom:calc(22px + env(safe-area-inset-bottom));animation:up .22s ease-out}
+}
+@keyframes up{from{transform:translateY(40px);opacity:.4}}
+</style>
+<script>try{document.documentElement.dataset.theme=localStorage.getItem('theme')||'glass'}catch(e){document.documentElement.dataset.theme='glass'}</script>
+</head>
+<body>
+<header>
+  <div class="themes" id="themes" title="Theme"><button data-t="glass" onclick="setTheme(this.dataset.t)">✨ Glass</button><button data-t="light" onclick="setTheme(this.dataset.t)">☀️ Light</button><button data-t="dark" onclick="setTheme(this.dataset.t)">🌙 Dark</button></div>
+  <div class="brand"><div class="logo">LZ4</div><div><h1>ps5-lz4</h1><span class="sub" id="sub"></span></div></div>
+  <a class="storelink" href="/store" title="Open the store view, made for the PS5 browser and a controller">🛒 Store</a><span class="sp"></span>
+  <div class="hacts">
+  <button class="two" id="b-resume" hidden onclick="act('resume')">Continue queue<small>resume interrupted packing</small></button>
+  <button class="two" id="b-elf" onclick="rcvHeader()"><span id="b-elf-t">Start ELF on PS5</span><small id="b-elf-st">pkg-receiver: installs .pkg from this NAS</small></button>
+  <button class="two" onclick="act('check')">Check all<small>check every game, read-only; unchanged ones from the saved results</small></button>
+  <button class="two ghost" onclick="act('check_full', 'Check every game again, ignoring earlier results?\n\nThis reads every LZ4 game in full and can take a while.')">Full re-check<small>check every game again from scratch</small></button>
+  <button class="two pri" id="b-fix"
+    onclick="act('fix', 'Compress every game that can be LZ4?\n\nThey are queued and compressed one at a time. If a job is running, this starts when it is done.')">Compress all<small>pack every game that can be LZ4, one at a time</small></button>
+  </div>
+</header>
+<nav class="tabs">
+  <button id="t-mine" class="on" onclick="tab('mine')">My games</button>
+  <button id="t-act" onclick="tab('act')">Activity<span class="badge" id="act-n" hidden></span></button>
+  <button id="t-pg" onclick="tab('pg')">PS5 games</button>
+  <button id="t-smp" onclick="tab('smp')">ShadowMount</button>
+  <button id="t-sav" onclick="tab('sav')">Saves</button>
+  <button id="t-up" onclick="tab('up')">PS5 Upload</button>
+  <button id="t-comm" onclick="tab('comm')">Community</button>
+  <button id="t-ps5" onclick="tab('ps5')">Remote</button>
+  <button id="t-ftp" onclick="tab('ftp')">FTP</button>
+</nav>
+<main id="p-mine">
+  <div id="error" class="err" hidden></div>
+  <div class="kpis" id="kpis"></div>
+  <div class="card busy" id="busy" hidden onclick="tab('act')"></div>
+  <details class="card help" id="help">
+    <summary>What the buttons do</summary>
+    <div class="hgrid">
+      <div><h4>Check all <span class="tag">read-only</span></h4>
+        <p>Looks at every game and changes nothing. It runs two checks and shows the result under <i>Recent actions</i> on the Activity tab:</p>
+        <ul>
+          <li><b>Every LZ4 game</b> in the LZ4 folder:
+            the pack format (<code>AMPRPAK4</code> index, <code>AMPRDAT3</code> volumes, CRC and <code>ampr_emu.index</code> sidecars);
+            that <code>fakelib/libSceAmpr.sprx</code> is exactly APR-EMU PackedStdio 0.4.2.1 (SHA-256), the only build that reads LZ4 packs;
+            that the files the PS5 opens straight from disk (PlayGo markers, empty placeholders, some boot files) are next to the packs and not only inside them;
+            that the runtime folder named in <code>eboot.bin</code> has the right upper/lower case;
+            and that games using PlayGo have a PlayGo emulator in <code>fakelib</code>.</li>
+          <li><b>Every original</b> in the library: is it already LZ4, can it become LZ4 (a program imports <code>libSceAmpr</code>),
+            or not, and why. exFAT images are read without unpacking them.</li>
+        </ul>
+        <p>Results are saved with each game's file sizes and dates. A game whose files haven't changed is not read again;
+          new or changed games are. If something is wrong, a <b>Repair</b> button appears with the result.</p></div>
+      <div><h4>Full re-check <span class="tag">read-only</span></h4>
+        <p>The same checks as <b>Check all</b>, but every LZ4 game and every original is read again, ignoring the saved results,
+          and the saved results are replaced. Use it after changing files by hand, copying games in some other way,
+          or when a result looks wrong. It takes longer: every eboot and every image is read.</p>
+        <p>Neither check decodes the packs again; that happened byte for byte when each game was packed (see Compress).</p></div>
+      <div><h4>Repair <span class="tag">changes LZ4 games</span></h4>
+        <p>Appears after a check that found problems. For each LZ4 game that needs it: puts the right APR-EMU back,
+          writes out the files the PS5 reads from disk from inside the packs, renames the runtime folder to the case the game asks for,
+          and copies a PlayGo emulator in if the game needs one. Nothing is repacked and originals are never touched.</p></div>
+      <div><h4>Compress all <span class="tag">writes new LZ4 copies</span></h4>
+        <p>Queues every game that <i>can be LZ4</i>, except <code>.ffpfsc</code> images (already compressed, so an LZ4 copy
+          is usually as large or larger; use Compress on one if you want it anyway), and packs them one at a time (one at a time because each needs the CPU and space).
+          For every game, in six steps:</p>
+        <ol>
+          <li><b>Source</b>: a game folder is used as it is; an <code>.exfat</code>, <code>.ffpfs</code> or <code>.ffpfsc</code> image is
+            unpacked to a work folder on the NAS and every file is checked against the image (and its <code>.vhash</code> if there is one).</li>
+          <li><b>Check</b>: a program must import <code>libSceAmpr</code>, otherwise APR-EMU would never load and the game is skipped.</li>
+          <li><b>Pack</b>: LZ4 HC level 9 with the game's profile, using all cores but one at low priority.</li>
+          <li><b>Verify</b>: every chunk is decoded and compared with the original.</li>
+          <li><b>Restore test</b>: the whole game is unpacked again and every file compared byte for byte.</li>
+          <li><b>Publish</b>: the boot files are fixed and the result moves to the LZ4 folder.</li>
+        </ol>
+        <p>Originals are read-only and never changed; an existing LZ4 game is never overwritten. If a job is already running,
+          this waits for it. A failed game keeps its work folder for troubleshooting.</p></div>
+      <div><h4>Continue queue</h4>
+        <p>Only shown when packing was interrupted (the container restarted, the NAS rebooted, or Stop was pressed).
+          Continues the same game from its last finished step (a step that was cut off is done again), then the rest of the queue.
+          The queue also continues by itself when the container starts.</p></div>
+      <div><h4>Compress <span class="tag">one game</span></h4>
+        <p>The same as Compress all for a single game; tap a game to see it.</p></div>
+    </div>
+  </details>
+  <div class="card" id="dupcard" hidden><h2>Duplicates on the NAS</h2>
+    <div class="mut">The same game (Title ID) is in the library more than once, as other versions or as a folder and an image.
+    The newest is marked; deleting an older one frees its space (needs DELETE_ORIGINALS=yes). Its LZ4 copy, if any, stays.</div>
+    <div id="dups"></div></div>
+  <div class="card"><h2>Library</h2><div id="unread"></div><div class="scroll"><table id="games"></table></div></div>
+  <div class="card" id="pkgcard" hidden><h2>Packages <span class="mut" style="font-weight:500">· .pkg, installed on the PS5 by pkg-receiver (Remote tab)</span></h2>
+    <div class="scroll"><table id="pkgs"></table></div></div>
+</main>
+<main id="p-act" hidden>
+  <div class="card" id="arccard" hidden><h2>RAR archives in the library</h2>
+    <div class="mut">A game packed as RAR parts (name.part1.rar, …) is extracted with unrar (every file's CRC checked) and made into a
+    checked <code>.exfat</code> in <code>_extracted</code> in the library, which then shows up as a game. The RAR files stay until you delete
+    them (after a finished extract, with DELETE_ORIGINALS=yes).</div>
+    <div id="arcs"></div></div>
+  <div class="card"><h2>Packing</h2><div id="job"></div><div id="pq"></div></div>
+  <div class="card" id="imgcard" hidden><h2>exFAT images</h2><div id="imgs"></div></div>
+  <div class="card"><h2>Transfers to the PS5</h2><div id="xfer"></div><div id="xq"></div><div id="xstop"></div>
+    <div class="why" style="margin-top:10px">While a game is sent, pkg-receiver on the PS5 (Glass build) keeps it awake. If it
+    goes to rest mode anyway, it is woken (Remote Play key) and the transfer continues where it stopped.</div></div>
+  <div class="card"><h2>Downloads to the PS5</h2>
+    <div class="mut">Packages and images the PS5 downloads from this NAS (installs from this page or from <i>pkg remote installer</i>),
+    with progress and speed, and the recent ones with <b>Retry</b>.</div>
+    <div id="dl-now" style="margin-top:10px"></div><div id="dl-hist"></div></div>
+  <div class="card" id="failed" hidden></div>
+  <div class="card"><h2>Report</h2>
+    <div class="mut">Pick the PS5 result in the <b>PS5</b> column for an LZ4 game. It is saved here, and
+    <i>Recent actions</i> then shows a filled-in link to share it with the community (the original project's game reports).</div>
+    <label style="display:inline-flex;gap:8px;align-items:center;margin-top:10px">Your firmware
+      <input id="fw" placeholder="e.g. 13.40" size="8" style="font:inherit;padding:4px 8px;border-radius:6px;border:1px solid var(--line);background:var(--card);color:var(--txt)"
+        oninput="localStorage.setItem('fw', this.value); render()"></label>
+  </div>
+  <div class="card"><h2>Recent actions</h2><div class="log" id="log"><span class="mut">None yet.</span></div></div>
+</main>
+<div id="fab" hidden onclick="document.getElementById('fabpop').hidden ^= 1">
+  <div class="ring" id="fab-ring"><span id="fab-pct"></span></div><span class="fab-n" id="fab-n"></span>
+  <div class="fab-info" id="fab-info" hidden></div>
+</div>
+<div id="fabpop" hidden></div>
+<div id="modal" class="modal" hidden onclick="if(event.target===this)closeGame()">
+  <div class="sheet"><button class="x" onclick="closeGame()">✕</button><div id="m-body">Loading…</div></div>
+</div>
+<main id="p-ps5" hidden>
+  <div class="card"><h2>Remote</h2>
+    <div class="filters" style="margin-top:0">
+      <span class="pill p-no" id="ps5st">PS5: ?</span>
+      <button id="b-wake" onclick="wakeNow()">Wake PS5 now</button>
+    </div>
+    <div class="why" id="wake-msg"></div>
+    <div class="mut" id="paired"></div>
+  </div>
+  <div class="card"><h2>ELF on the PS5 <span class="mut" style="font-weight:500">· pkg-receiver</span></h2>
+    <div class="mut">The PS5 side is <a href="https://github.com/Loopayeh/pkg-sender" target="_blank" rel="noopener">pkg-receiver</a>
+    from pkg-sender (MIT) in this project's Glass build, a payload on port 12800. It installs <code>.pkg</code> games, updates and DLC with the PS5's own
+    installer, downloading them straight from this NAS, and its own page on the PS5 (the <i>pkg remote installer</i>
+    shortcut on the home screen) lists this NAS's packages to install with the controller.
+    <b>Install and start</b> copies it into Payload Manager and starts it (once, or for a new version);
+    <b>Start</b> starts the copy already on the PS5, and this page also starts it by itself when the PS5 is on
+    and it isn't running (after a restart).</div>
+    <div class="filters"><span class="pill p-no" id="rcv-st" style="align-self:center">pkg-receiver: ?</span>
+      <button class="sm" onclick="rcvCheck()">Check</button>
+      <button class="two" onclick="rcvStart()">Start<small>the one already on the PS5</small></button>
+      <button class="two" onclick="rcvInstall()">Install and start<small>download from GitHub, copy over FTP, start it</small></button>
+      <label class="mut chk" style="align-self:center;display:flex;gap:8px;align-items:center;cursor:pointer"><input type="checkbox" id="rcv-auto" style="width:18px;height:18px;accent-color:#7c5cff" onchange="rcvAuto(this.checked)"> Start by itself when the PS5 is on</label>
+      <a class="sm" id="rcv-open" target="_blank" rel="noopener" style="align-self:center">Open its page</a></div>
+    <div class="why" id="rcv-msg"></div>
+  </div>
+  <div class="card"><h2>Notifications</h2>
+    <div class="mut">A push notification when packing, a check, a transfer to the PS5 or a download by the PS5 finishes or fails.
+    Use an <a href="https://ntfy.sh" target="_blank" rel="noopener">ntfy</a> topic (<code>https://ntfy.sh/your-secret-topic</code>, then
+    subscribe to it in the ntfy app) or any webhook, e.g. Home Assistant's (JSON with <code>title</code>, <code>message</code>, <code>ok</code>).
+    Empty: off.</div>
+    <div class="filters">
+      <input id="s-notify" placeholder="https://ntfy.sh/your-secret-topic" autocomplete="off">
+      <button onclick="saveNotify()">Save</button>
+      <button class="sm" onclick="testNotify()">Send a test</button>
+    </div>
+    <div class="why" id="notify-msg"></div>
+  </div>
+  <div class="card"><h2>PS5 storage</h2>
+    <div class="mut">The internal SSD's size and free space come live from pkg-receiver. For other drives, <b>Set size</b>
+    once (as PS5 Settings › Storage or the drive's label shows it) and <b>Measure</b> adds up the files on the drive.</div>
+    <div id="drives" style="margin-top:8px"><button class="sm" onclick="loadDrives()">Show drives</button></div>
+  </div>
+  <div class="card"><h2>1. Address</h2>
+    <div class="mut"><b>Send to PS5</b> copies a game straight over FTP to the PS5's ftpsrv (port 2121), not through a
+    mount. Every file's size is checked and program files are compared byte for byte; an interrupted transfer continues
+    where it stopped. The address and folder are saved as soon as you change them.</div>
+    <div class="filters">
+      <input id="s-ftp" placeholder="PS5 address, e.g. 192.168.1.50:2121" onchange="saveAddress()">
+      <input id="s-dest" placeholder="Folder on the PS5, e.g. /mnt/usb0/homebrew" onchange="saveAddress()">
+      <input id="s-pkg" placeholder="PS4 packages on the PS5, e.g. /mnt/usb0" title="Where .pkg files are sent; install them from there with ItemzFlow or etaHEN" onchange="saveAddress()">
+      <button onclick="saveAddress()">Save</button>
+      <button onclick="findPs5()" title="Search the network for PS5 consoles (also in rest mode)">🔍 Find PS5</button>
+    </div>
+    <div class="why good" id="s-saved"></div>
+    <div id="s-found"></div>
+  </div>
+  <div class="card"><h2>2. Pair for wake-up (Remote Play, like Chiaki)</h2>
+    <div class="mut">Pairing lets this page wake the PS5 from rest mode, by itself before a transfer or with
+    <b>Wake PS5 now</b>. You only do it once.</div>
+    <ol class="steps-list">
+      <li><b>PSN account ID</b> of the account signed in on the PS5, in the <b>base64 form Chiaki uses</b>:
+        12 characters ending in <code>=</code>, for example <code>Ab3dEf7hIjk=</code>.
+        <ul>
+          <li>Already set up in Chiaki / chiaki-ng? Use the same ID you entered there.</li>
+          <li>Normal PSN account: chiaki-ng can look it up when you sign in with PSN (in its settings).</li>
+          <li>Fake sign-in on a jailbroken PS5 (offline-activated account): the ID the activation tool gave the
+            account. A decimal number or <code>0x</code> hex works too; it is converted.</li>
+        </ul></li>
+      <li>On the PS5 open <i>Settings › System › Remote Play › Pair Device</i>. It shows an 8-digit PIN for a few
+        minutes.</li>
+      <li>Enter both here and press <b>Pair</b> while the PIN is still on screen.</li>
+    </ol>
+    <div class="filters">
+      <input id="p-acc" placeholder="PSN account ID, e.g. Ab3dEf7hIjk=" autocomplete="off" autocapitalize="off" spellcheck="false" oninput="accHint()">
+      <input id="p-pin" placeholder="PIN (8 digits)" inputmode="numeric" autocomplete="off" style="max-width:180px">
+      <button class="pri" onclick="pair()">Pair</button>
+    </div>
+    <div class="why" id="acc-hint"></div>
+  </div>
+  <div class="card"><h2>Or: key from Chiaki</h2>
+    <div class="mut">Already paired in Chiaki? Instead of pairing again, enter its <code>rp_regist_key</code>
+    (8 hex characters, in Chiaki's settings file) and press Save.</div>
+    <div class="filters">
+      <input id="s-key" placeholder="Remote Play key (rp_regist_key)" autocomplete="off">
+      <button onclick="saveSettings()">Save</button>
+    </div>
+  </div>
+</main>
+<main id="p-ftp" hidden>
+  <div class="card"><h2>PS5 files (FTP)</h2>
+    <div class="mut">Browse the PS5 over ftpsrv: the internal drive (<code>/data</code>), USB drives (<code>/mnt/usb0</code>)
+    and extended storage (<code>/mnt/ext0</code>). Tap a file to download it as it is on disk, or <b>ZIP</b> to download a whole folder. Upload files
+    and folders from this device into the folder you are in (inside <code>/data</code>, <code>/mnt/usbN</code> or <code>/mnt/extN</code>). <b>Delete</b> works only inside
+    <code>/data</code>, <code>/mnt/usbN</code> and <code>/mnt/extN</code>, at least two folders down, and asks first.</div>
+    <div class="filters">
+      <button onclick="ftpGo(ftpPath.replace(/\/[^/]*$/, '') || '/')">⬆ Up</button>
+      <input id="ftp-path" placeholder="/data" onkeydown="if(event.key==='Enter')ftpGo(this.value)">
+      <button onclick="ftpGo(document.getElementById('ftp-path').value)">Go</button>
+    </div>
+    <div class="filters" id="ftp-quick"></div>
+    <div class="filters" id="ftp-tools">
+      <label class="btn">Upload files<input type="file" multiple hidden onchange="ftpUpload(this.files); this.value=''"></label>
+      <label class="btn">Upload folder<input type="file" webkitdirectory multiple hidden onchange="ftpUpload(this.files); this.value=''"></label>
+      <button onclick="ftpMkdir()">New folder</button>
+      <button onclick="location.href='/api/ftp/zip?path=' + encodeURIComponent(ftpPath)">Download this folder (ZIP)</button>
+      <button onclick="measure(ftpPath, document.getElementById('ftp-msg'))">Folder size</button>
+    </div>
+    <div class="mut" id="ftp-addr"></div>
+    <div class="mut" id="ftp-msg"></div>
+    <table id="ftp-list" style="min-width:0"></table>
+  </div>
+</main>
+<main id="p-pg" hidden>
+  <div class="card">
+    <div class="dhead"><h2 style="margin:0">Games on the PS5</h2><span class="sp"></span>
+      <button class="sm" onclick="measureAll()">Measure sizes</button>
+      <button class="sm" onclick="loadPg()">Refresh</button></div>
+    <div class="mut" id="pg-sub">Game folders in <code>homebrew</code> and <code>etaHEN/games</code> on every drive, and installed PS4 games (<code>/user/app</code>), read over FTP.</div>
+    <div class="filters">
+      <input id="pg-q" placeholder="Search name or Title ID" oninput="renderPg()">
+      <select id="pg-d" onchange="renderPg()"><option value="">All drives</option></select>
+      <select id="pg-k" onchange="renderPg()"><option value="">PS5 and PS4</option><option value="ps5">PS5 games</option><option value="ps4">PS4 games (installed)</option><option value="att">⚠ Needs attention</option></select>
+      <select id="pg-s" onchange="renderPg()"><option value="name">Name</option><option value="size">Largest first</option><option value="drive">Drive</option></select>
+    </div>
+    <div id="pg-job"></div>
+    <div id="pg-list" class="pg-grid"></div>
+  </div>
+</main>
+<main id="p-smp" hidden>
+  <div class="card">
+    <div class="dhead"><h2 style="margin:0">ShadowMount library</h2><span class="sp"></span>
+      <button class="sm" onclick="smpLog('smp_log')">ShadowMount log</button>
+      <button class="sm" onclick="smpLog('smp_klog')">Kernel log</button>
+      <button class="sm" onclick="smpAct('smp_scan', '', '', 'Ask ShadowMountPlus to scan for games now?')">Rescan</button>
+      <button class="sm" onclick="loadSmp()">Refresh</button></div>
+    <div class="mut" id="smp-sub"><b id="smp-count"></b> What ShadowMountPlus has on the PS5's home screen.
+    <details style="margin-top:4px"><summary>What the buttons do</summary>
+    Read from ShadowMountPlus's own API through pkg-receiver (Glass build 7 or newer; ShadowMountPlus 1.7 or newer).
+    <b>Remove from home screen</b> takes the tile off and leaves the files; the next scan puts it back.
+    <b>Hide</b> also renames the folder or image with a leading dot, so scans skip it (undo: PS5 games tab, ⚠ Needs attention, Fix).
+    <b>🗑 Delete</b> unmounts it, takes it off the home screen and deletes its files on the PS5; a copy on the NAS stays.</details></div>
+    <div class="filters"><input id="smp-q" placeholder="Search name or Title ID" oninput="renderSmp()"></div>
+    <div id="smp-job"></div>
+    <div id="smp-log" hidden></div>
+    <div id="smp-list" class="pg-grid"></div>
+  </div>
+</main>
+<main id="p-up" hidden>
+  <div class="card">
+    <h2>PS5 Upload</h2>
+    <div class="mut"><a href="https://github.com/phantomptr/ps5upload" target="_blank" rel="noopener">ps5upload</a> (GPL-3.0) by phantomptr
+    runs in its own container on this NAS: uploads with resume, installs, collection, file browser, cheats, fan curve and more.
+    It opens in its own browser tab, where it remembers the PS5 (shown inside this page, Safari gives it storage it throws away).</div>
+    <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center;margin-top:12px">
+      <a class="btn" id="up-open" target="_blank" rel="noopener">Open PS5 Upload ↗</a>
+      <span id="up-msg" class="mut"></span>
+    </div>
+    <div class="mut" style="margin-top:12px">Address:
+      <input id="up-url" placeholder="http://NAS:19113" style="font:inherit;padding:4px 8px;border-radius:8px;border:1px solid var(--line);background:var(--card);color:var(--txt);min-width:240px" onchange="saveUp(this.value)">
+    </div>
+  </div>
+</main>
+<main id="p-sav" hidden>
+  <div class="card">
+    <div class="dhead"><h2 style="margin:0">Save data backups</h2><span class="sp"></span>
+      <button class="pri" onclick="savBackup()">Back up all saves now</button></div>
+    <div class="mut">Copies every save folder on the PS5 (PS5 <code>savedata_prospero</code> and PS4 <code>savedata</code>, every user)
+    to the NAS over FTP, only reading on the PS5. Each backup is kept by date in <code>state/saves</code>; download one as a .zip, or
+    <b>Restore</b> one game's saves to the same user on the same PS5 (close the game first). Saves are tied to the PS5 user, so
+    restoring to another console or user may not work.</div>
+    <div class="why" id="sav-job"></div>
+    <div id="sav-list"></div>
+  </div>
+</main>
+<main id="p-comm" hidden>
+  <div class="card">
+    <h2>Community reports</h2>
+    <div class="mut" id="c-sub"></div>
+    <div class="filters">
+      <input id="c-q" placeholder="Search game or Title ID" oninput="renderComm()">
+      <select id="c-f" onchange="renderComm()">
+        <option value="">All</option><option value="works">Works</option>
+        <option value="problems">Problems (won't start / crashes)</option><option value="mine">Only my games</option>
+      </select>
+      <select id="c-s" onchange="renderComm()">
+        <option value="date">Latest report</option><option value="reports">Most reports</option><option value="name">Name</option>
+      </select>
+    </div>
+    <div class="scroll"><table id="comm"></table></div>
+  </div>
+</main>
+<script>
+const STEP_EN = {source: 'Source', check: 'Check', pack: 'Pack', verify: 'Verify', restore: 'Restore test', publish: 'Publish'};
+const PS5_EN = {works: 'works', issues: 'with issues', nostart: "won't start", crash: 'crashes'};
+const KIND_EN = {folder: 'game folder', exfat: 'exFAT image', ffpfsc: '.ffpfsc image (PFSC compressed)', ffpfs: '.ffpfs image', lz4: 'LZ4 folder'};
+const ACT_EN = {verify_lz4: 'Verify LZ4', extract: 'Extract to exFAT', delete_rars: 'Delete RAR files', check: 'Check all', check_full: 'Full re-check', fix: 'Compress all', apr: 'Repair', stop: 'Stop', resume: 'Continue queue', start: 'Compress', community: 'PS5 result', remove: 'Delete LZ4 copy', delete_original: 'Delete original'};
+let data = null;
+
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+function gb(n) {
+  if (n == null) return '–';
+  const u = ['B', 'KB', 'MB', 'GB', 'TB']; let i = 0;
+  while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+  return (i ? n.toFixed(i >= 3 ? 1 : 0) : n) .toString() + ' ' + u[i];
+}
+function dur(s) {
+  if (s == null || !isFinite(s)) return '–';
+  const m = Math.round(s / 60);
+  return s < 90 ? '1 min' : m < 60 ? m + ' min' : Math.floor(m / 60) + ' h ' + (m % 60) + ' min';
+}
+// Time left from the progress seen over the last few minutes in this browser.
+const seen = {};
+function eta(key, prog) {
+  const now = Date.now(), h = seen[key] = (seen[key] || []).filter(x => now - x[0] < 300000 && x[1] <= prog[0]);
+  if (!h.length || h[h.length - 1][1] !== prog[0]) h.push([now, prog[0]]);
+  const [t0, b0] = h[0], rate = (prog[0] - b0) / ((now - t0) / 1000);
+  if (now - t0 < 20000 || !(rate > 0)) return '';
+  const s = (prog[1] - prog[0]) / rate, m = Math.round(s / 60);
+  return ' · about ' + (s < 90 ? '1 min' : m < 60 ? m + ' min' : Math.floor(m / 60) + ' h ' + (m % 60) + ' min');
+}
+// Speed and time left come from the server (j.eta); the browser's own
+// estimate is only a fallback for an older server.
+function jobEta(j, prog) {
+  const e = j.eta;
+  if (!e) return eta(j.step + (prog[2] || ''), prog);
+  const p = [];
+  if (e.rate) p.push(`<b>${gb(e.rate)}/s</b>`);
+  if (e.step_left != null) p.push(`this step about <b>${dur(e.step_left)}</b>`);
+  else p.push('measuring speed…');
+  if (e.job_left != null && e.later) p.push(`whole game about <b>${dur(e.job_left)}</b>`);
+  return ' · ' + p.join(' · ');
+}
+function renderImages(d) {
+  const jobs = (d.images || {}).jobs || {};
+  const list = Object.entries(jobs).filter(([k, j]) => (j.state === 'running' || (j.state !== 'done' && j.error)));
+  const card = document.getElementById('imgcard');
+  card.hidden = !list.length;
+  if (card.hidden) return;
+  const rows = list.map(([k, j]) => {
+    const pct = j.total ? Math.min(100, 100 * j.done / j.total) : 0;
+    return `<div style="margin-bottom:10px"><b>${esc(k)}</b> <span class="mut">LZ4 copy → .exfat</span>
+      ${j.state === 'running' ? `<div class="bar"><i style="width:${pct}%"></i></div><div class="mut">${esc(j.phase || '')}: ${gb(j.done)} / ${gb(j.total)} (${pct.toFixed(0)} %)</div>`
+        : `<div class="why bad">${esc(j.state)}: ${esc(j.error || '')}</div>`}</div>`;
+  });
+  if (list.some(([, j]) => j.state === 'running')) rows.push(`<button onclick="imageStop()">Stop</button>`);
+  document.getElementById('imgs').innerHTML = rows.join('');
+}
+// Send to PS5 when packed: on the packing job and each queued game; press
+// again to undo.
+function sendWhenPacked(id, small) {
+  const on = (data.send_after || []).includes(id);
+  if (!(data.settings || {}).ps5_ftp) return '';
+  return on
+    ? `<button class="${small ? 'sm ' : ''}send-on" data-g="${esc(id)}" onclick="sendAfterToggle(this.dataset.g, false)" title="On: it is sent to the PS5 by itself once packed and checked. Press to turn off">⬆️ ${small ? 'Sent when packed' : 'Sent to PS5 when packed'} ✓</button>`
+    : `<button class="${small ? 'sm ' : ''}send-off" data-g="${esc(id)}" onclick="sendAfterToggle(this.dataset.g, true)" title="Off: it stays on the NAS when packed. Press to send it to the PS5 by itself once packed and checked">⬆️ ${small ? 'Not sent when packed' : 'Not sent to PS5 when packed'} ✗</button>`;
+}
+async function sendAfterToggle(id, on) {
+  await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action: on ? 'send_after' : 'send_after_remove', game: id})});
+  load();
+}
+function renderPkgs(d) {
+  const pk = d.pkgs || [], card = document.getElementById('pkgcard');
+  card.hidden = !pk.length;
+  if (!pk.length) return;
+  const dest = (d.settings || {}).ps4_dest || '/mnt/usb0', tf = d.transfer && d.transfer.state === 'running' ? d.transfer : null;
+  document.getElementById('pkgs').innerHTML = '<tr><th>Package</th><th>Type</th><th class="num">Size</th><th>PS5</th><th></th></tr>' + pk.map(p => {
+    const t = (d.transfers || {})[p.file], queued = (d.transfer_queue || []).includes('pkg:' + p.id), sending = tf && tf.game === p.file;
+    const state = sending ? `<span class="pill p-run">⬆️ ${tf.total ? Math.floor(100 * tf.bytes / tf.total) : 0} %</span>`
+      : queued ? '<span class="pill p-run">queued</span>'
+      : t && t.state === 'done' ? `<span class="good">copied to ${esc(dest)}</span>`
+      : t && t.state === 'failed' ? `<span class="bad">stopped at ${t.total ? Math.round(100 * t.bytes / t.total) : 0} %</span>` : '<span class="mut">–</span>';
+    const btn = `<div class="rowbtns"><button class="sm pri" data-g="${esc(p.id)}" data-n="${esc(p.name)}" onclick="pkgInstall(this.dataset.g, this.dataset.n, 'url')" title="pkg-receiver on the PS5 downloads it from this NAS and installs it">⬇ Install on PS5</button>`
+      + (t && t.state === 'done' ? `<button class="sm ghost" data-g="${esc(p.id)}" data-n="${esc(p.name)}" onclick="pkgInstall(this.dataset.g, this.dataset.n, 'local')" title="Install the copy already in ${esc(dest)}">Install from ${esc(dest)}</button>` : '')
+      + (sending || queued ? '' : `<button class="sm ghost" data-g="${esc('pkg:' + p.id)}" data-n="${esc(p.name)}" onclick="pushPkg(this.dataset.g, this.dataset.n)">${t && t.state === 'failed' ? '▶ Resume copy' : t && t.state === 'done' ? 'Copy again' : '⬆️ Copy to ' + esc(dest)}</button>`) + '</div>';
+    return `<tr><td class="c-game"><img class="ico" alt="" loading="lazy" src="/api/pkg/icon?id=${encodeURIComponent(p.id)}" onerror="this.remove()"><span class="gname">${esc(p.name)}</span>
+        <div class="why">${esc(p.title_id || '')}${p.version ? ' · v' + esc(p.version) : ''} · ${esc(p.file)}${p.error ? ` · <span class="bad">${esc(p.error)}</span>` : ''}</div></td>
+      <td><span class="pill p-no">${esc(p.category || 'PS4')}</span></td><td class="num">${gb(p.size)}</td><td>${state}</td><td>${btn}</td></tr>`;
+  }).join('');
+}
+async function pkgInstall(id, name, via) {
+  const s = data.settings || {};
+  if (!s.ps5_ftp) { alert('Enter the PS5 address on the Remote tab first.'); tab('ps5'); return; }
+  if (!confirm(via === 'local' ? `Install ${name} on the PS5 from ${s.ps4_dest || '/mnt/usb0'}?`
+      : `Install ${name} on the PS5?\n\nThe PS5 downloads it from this NAS and installs it; follow it in the PS5's notifications / Downloads.`)) return;
+  const r = await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'pkg_install', game: id, via})});
+  const j = await r.json().catch(() => ({}));
+  alert(r.ok ? `Install of ${name} started on the PS5. Follow it there (Downloads / notifications).` : 'Not started: ' + (j.error || r.status));
+}
+function pushPkg(id, name) {
+  const s = data.settings || {};
+  if (!s.ps5_ftp) { alert('Enter the PS5 address on the Remote tab first.'); tab('ps5'); return; }
+  act('push', `Send the PS4 package ${name} to ${s.ps5_ftp}${s.ps4_dest || '/mnt/usb0'}?\n\nInstall it from there on the PS5 with ItemzFlow or etaHEN's package installer.`, {game: id});
+}
+function packLeft(j) {
+  const e = j.eta || {}, l = e.job_left != null ? e.job_left : e.step_left;
+  return (e.rate ? ' · ' + gb(e.rate) + '/s' : '') + (l != null ? ' · about ' + dur(l) + ' left' : '');
+}
+function community(c) {
+  if (!c || !c.reports) return '<span class="mut">no reports</span>';
+  const p = [];
+  if (c.works) p.push(`<span class="good">${c.works} work</span>`);
+  if (c.issues) p.push(`${c.issues} with issues`);
+  if (c.noStart) p.push(`<span class="bad">${c.noStart} won't start</span>`);
+  if (c.crash) p.push(`<span class="bad">${c.crash} crash</span>`);
+  return p.join(', ');
+}
+
+function setTheme(t) {
+  document.documentElement.dataset.theme = t;
+  try { localStorage.setItem('theme', t); } catch (e) {}
+  document.querySelectorAll('#themes button').forEach(b => b.classList.toggle('on', b.dataset.t === t));
+}
+setTheme(document.documentElement.dataset.theme || 'glass');
+async function act(action, confirmText, extra = {}) {
+  if (confirmText && !confirm(confirmText)) return;
+  const r = await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action, ...extra})});
+  if (!r.ok) { let m = r.status; try { m = (await r.json()).error || m; } catch (e) {} alert('Failed: ' + m); }
+  else if (action === 'push') {
+    const j = await r.json().catch(() => ({}));
+    if (j.position) alert(`Another game is being sent. This one is queued as number ${j.position}; see the Activity tab.`);
+  }
+  setTimeout(load, 800);
+}
+
+async function saveNotify() {
+  const r = await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action: 'settings', notify_url: document.getElementById('s-notify').value.trim()})});
+  const j = await r.json().catch(() => ({})), m = document.getElementById('notify-msg');
+  m.className = 'why ' + (r.ok ? 'good' : 'bad'); m.textContent = r.ok ? (j.notify_url ? 'Saved: notifications are on.' : 'Saved: notifications are off.') : 'Failed: ' + (j.error || r.status);
+}
+async function testNotify() {
+  const r = await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action: 'notify_test', url: document.getElementById('s-notify').value.trim()})});
+  const j = await r.json().catch(() => ({})), m = document.getElementById('notify-msg');
+  m.className = 'why ' + (r.ok ? 'good' : 'bad'); m.textContent = r.ok ? 'Test sent: check your phone.' : 'Failed: ' + (j.error || r.status);
+}
+async function saveSettings() {
+  const r = await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action: 'settings', ps5_ftp: document.getElementById('s-ftp').value,
+      ps5_dest: document.getElementById('s-dest').value,
+      ps5_wake_key: document.getElementById('s-key').value.trim() || (data.settings.ps5_wake_key ? 'set' : '')})});
+  const j = await r.json().catch(() => ({}));
+  alert(r.ok ? 'Saved.' : 'Failed: ' + (j.error || r.status));
+  settingsFilled = false; load();
+}
+let settingsFilled = false;
+// The address and folder are saved as soon as they are changed.
+// Find PS5 consoles on the network (the discovery message Remote Play uses),
+// e.g. after the router gave the PS5 a new address.
+async function findPs5() {
+  const el = document.getElementById('s-found');
+  el.innerHTML = '<div class="mut">Searching the network…</div>';
+  try {
+    const r = await fetch('/api/ps5/find', {cache: 'no-store'}), j = await r.json();
+    if (!r.ok) { el.innerHTML = `<div class="why bad">${esc(j.error || r.status)}</div>`; return; }
+    const cur = (document.getElementById('s-ftp').value || '').split(':')[0];
+    el.innerHTML = j.found.length ? j.found.map(p => `<div class="qrow"><span class="qname"><b>${esc(p.name || 'PS5')}</b> <span class="mut">${esc(p.ip)} · ${p.status === 'on' ? 'on' : p.status === 'standby' ? 'rest mode' : esc(p.status)}</span></span>
+        ${p.ip === cur ? '<span class="good">in use ✓</span>' : `<button class="sm pri" data-ip="${esc(p.ip)}" onclick="usePs5(this.dataset.ip)">Use this one</button>`}</div>`).join('')
+      : '<div class="why">No PS5 answered. Is it on or in rest mode with <i>Stay Connected to the Internet</i> on, and on the same network?</div>';
+  } catch (e) { el.innerHTML = `<div class="why bad">${esc(String(e))}</div>`; }
+}
+function usePs5(ip) {
+  const f = document.getElementById('s-ftp'), port = (f.value.split(':')[1] || '2121');
+  f.value = ip + ':' + port;
+  saveAddress().then(() => { document.getElementById('s-found').innerHTML = ''; });
+}
+async function saveAddress() {
+  const r = await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action: 'settings', ps5_ftp: document.getElementById('s-ftp').value.trim(),
+      ps5_dest: document.getElementById('s-dest').value.trim(), ps4_dest: document.getElementById('s-pkg').value.trim()})});
+  if (!r.ok) { const j = await r.json().catch(() => ({})); alert('Not saved: ' + (j.error || r.status)); return; }
+  data.settings.ps5_ftp = document.getElementById('s-ftp').value.trim();
+  data.settings.ps5_dest = document.getElementById('s-dest').value.trim();
+  data.settings.ps4_dest = document.getElementById('s-pkg').value.trim() || '/mnt/usb0';
+  const ok = document.getElementById('s-saved');
+  ok.textContent = 'Saved ✓ ' + data.settings.ps5_ftp; setTimeout(() => { ok.textContent = ''; }, 4000);
+  ftpLoaded = false; ps5State();
+}
+// Resume from the Activity list: straight into the queue while something is
+// sent, so several can be lined up without a question each time.
+// Every stopped or failed transfer: what reached the PS5 is deleted, one by one.
+async function deleteAllStopped() {
+  const tf = data.transfer && data.transfer.state === 'running' ? data.transfer : null, q = data.transfer_queue || [];
+  const keys = Object.entries(data.transfers || {}).filter(([id, t]) => t && t.state === 'failed' && !q.includes(id) && !(tf && tf.game === id)).map(([id]) => id);
+  if (!keys.length || !confirm(`Are you sure?\n\nDelete all ${keys.length} stopped transfers from the PS5 and from this list?\n\nWhat was sent so far is deleted; the games on the NAS stay.`)) return;
+  let bad = [];
+  for (const k of keys) {
+    const r = await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'transfer_delete', game: k})});
+    if (!r.ok) bad.push(k + ': ' + ((await r.json().catch(() => ({}))).error || r.status));
+  }
+  if (bad.length) alert('Not deleted:\n\n' + bad.join('\n'));
+  setTimeout(load, 500);
+}
+function transferDelete(key, name, running) {
+  const t = (data.transfers || {})[key] || {}, path = t.dest ? '/' + t.dest.split('/').slice(1).join('/') : '';
+  act('transfer_delete', (running ? `Stop sending ${name} and delete it from the PS5?` : `Delete ${name} from the PS5 and remove it from this list?`)
+    + `\n\n${path}\n\nWhat was sent so far is deleted; the game on the NAS stays.`, {game: key});
+}
+async function resumeTransfer(id, name) {
+  if (data.transfer || (data.transfer_queue || []).length) {
+    await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({action: 'push', game: id})});
+    if (!data.transfer) await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({action: 'push_queue_start'})});
+    setTimeout(load, 500);
+    return;
+  }
+  if (id.startsWith('src:')) act('push', `Resume sending ${name}? It continues where it stopped.`, {game: id});
+  else push(id, name);
+}
+async function resumeAll() {
+  const ids = Object.entries(data.transfers || {}).filter(([id, t]) => t && t.state === 'failed' && !(data.transfer_queue || []).includes(id))
+    .sort((a, b) => (b[1].finished || '').localeCompare(a[1].finished || '')).map(([id, t]) => t.request || id);
+  if (!ids.length || !confirm(`Resume ${ids.length} transfers, one after another?\n\nEach continues where it stopped.`)) return;
+  for (const id of ids) {
+    const r = await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({action: 'push', game: id})});
+    if (!r.ok) { alert('Failed: ' + ((await r.json().catch(() => ({}))).error || r.status)); break; }
+    await new Promise(ok => setTimeout(ok, 700));  // the first one starts; the rest queue behind it
+  }
+  setTimeout(load, 500);
+}
+// Send the game from the library as it is (folder or image file), not LZ4.
+async function pushSrc(gid) {
+  const g = (data.games || []).find(x => x.id === gid);
+  const s = data.settings || {};
+  if (!g) return;
+  if (!s.ps5_ftp) { alert('Enter the PS5 address on the Remote tab first.'); tab('ps5'); return; }
+  const key = g.rel.split('/').pop(), t = (data.transfers || {})[key];
+  const what = g.kind === 'folder' ? 'the game folder' : `the ${KIND_EN[g.kind] || g.kind} file`;
+  act('push', (t && t.state === 'failed'
+      ? `Resume sending ${g.name}? It continues where it stopped.`
+      : `Send ${g.name} to the PS5 as it is (${what}, ${gb(g.source_size || g.source_bytes)}), not LZ4-packed?\n\nTo: ${s.ps5_dest}/${key}`) +
+    (g.kind !== 'folder' ? '\n\nShadowMountPlus mounts the image from there.' : '') +
+    (g.verdict === 'can be LZ4' ? '\n\nThis game can be LZ4-packed first to save space on the PS5.' : ''), {game: 'src:' + g.id});
+}
+async function push(id, name) {
+  const s = data.settings || {};
+  if (!s.ps5_ftp) { alert('Enter the PS5 address on the Remote tab first.'); tab('ps5'); return; }
+  const t = (data.transfers || {})[id];
+  // Is the folder already on the PS5? (Only answerable while the PS5 is awake.)
+  let there = false;
+  try {
+    const r = await fetch('/api/ftp/list?path=' + encodeURIComponent(s.ps5_dest), {cache: 'no-store'});
+    if (r.ok) there = (await r.json()).items.some(i => i.name === id);
+  } catch (e) {}
+  const resume = t && t.state === 'failed';
+  act('push', (resume
+      ? `Resume sending ${name}?\n\nIt continues where it stopped (${t.total ? Math.round(100 * t.bytes / t.total) : 0} %): finished files are kept and a half-sent file continues.`
+      : there
+      ? `${name} is already on the PS5:\n${s.ps5_dest}/${id}\n\nOverwrite it? Files already there with the same size are kept; missing or different files are replaced.`
+      : `Send ${name} to ${s.ps5_ftp}${s.ps5_dest}?`) + '\n\n' +
+    (s.ps5_wake_key ? 'If the PS5 is in rest mode it is woken first.' : 'The PS5 must be on with the FTP server running.') +
+    (there && !resume ? '\n\nTo send everything again from scratch, delete the folder on the FTP tab first.' : ''), {game: id});
+}
+function xferText(t) {
+  if (!t) return '';
+  if (t.state === 'running') return `sending ${t.total ? Math.round(100 * t.bytes / t.total) : 0} %`;
+  if (t.state === 'done') return `<span class="good">on the PS5</span> ${esc((t.finished || '').slice(0, 16))}`;
+  return `<span class="bad">transfer ${(t.error || '').startsWith('stopped') ? 'stopped' : 'failed'}</span> at ${t.total ? Math.round(100 * t.bytes / t.total) : 0} %, resumable` +
+    (t.error && !t.error.startsWith('stopped') ? `<div class="why bad">${esc(t.error)}</div>` : '');
+}
+
+function render() {
+  const d = data;
+  if (!settingsFilled && d.settings) {
+    document.getElementById('s-ftp').value = d.settings.ps5_ftp || '';
+    document.getElementById('s-dest').value = d.settings.ps5_dest || '';
+    document.getElementById('s-pkg').value = d.settings.ps4_dest || '/mnt/usb0';
+    document.getElementById('s-notify').value = d.settings.notify_url || '';
+    const kf = document.getElementById('s-key');
+    kf.value = '';
+    kf.placeholder = d.settings.ps5_wake_key ? 'Remote Play key saved (leave empty to keep it)' : 'Remote Play key (rp_regist_key)';
+    const pd = d.settings.paired || {};
+    document.getElementById('paired').innerHTML = pd.ps5_paired
+      ? `<span class="good">Paired with ${esc(pd.ps5_nickname || 'PS5')} (${esc(pd.ps5_paired)}).</span>` :
+      d.settings.ps5_wake_key ? '<span class="good">Remote Play key saved: wake-up works.</span>'
+      : 'Not paired yet: transfers work, but waking the PS5 from rest mode needs step 2.';
+    settingsFilled = true;
+  }
+  const xf = document.getElementById('xfer'), tf = d.transfer, nameOf = id => {
+    id = String(id).replace(/^src:/, '');
+    const g = (d.games || []).find(g => (g.output && g.output.split('/').pop() === id) || g.id === id || (g.rel && g.rel.split('/').pop() === id));
+    return g ? g.name + (g.output && g.output.split('/').pop() === id ? '' : ' (original)') : id;
+  };
+  if (tf) {
+    const pct = tf.total ? 100 * tf.bytes / tf.total : 0;
+    xf.innerHTML = `<div class="jobtitle">Sending <b>${esc(nameOf(tf.game))}</b></div>
+      <div class="bar"><i style="width:${pct}%"></i></div>
+      <div class="stats"><b>${pct.toFixed(0)} %</b><span>${gb(tf.bytes)} / ${gb(tf.total)}</span>
+        ${tf.speed ? `<span>${gb(tf.speed)}/s</span><span>about ${dur(tf.eta)} left</span>` : '<span>measuring speed…</span>'}
+        <span>file ${tf.files_done} of ${tf.files}</span>${tf.woken ? `<span>woke the PS5 ${tf.woken}×</span>` : ''}${tf.kept_awake ? '<span class="good">kept awake by LZ4 Compression</span>' : ''}</div>
+      <div class="why">${esc(tf.current || '')}</div>
+      <div class="acts" style="margin-top:10px"><button onclick="act('push_stop', 'Stop sending this game? Finished files stay on the PS5 and it can be resumed later. The queue goes on with the next game.')">Stop (resumable)</button>
+        <button class="danger" data-k="${esc(tf.game)}" data-n="${esc(nameOf(tf.game))}" onclick="transferDelete(this.dataset.k, this.dataset.n, true)">🗑 Stop and delete</button></div>`;
+  } else xf.innerHTML = '<div class="mut">No transfer running.</div>';
+  // Stopped or failed transfers, newest first, each resumable where it stopped.
+  // They stay listed while another runs; Resume then queues them.
+  const tq0 = d.transfer_queue || [];
+  const stopped = Object.entries(d.transfers || {}).filter(([id, t]) => t && t.state === 'failed' && !tq0.includes(id) && !(tf && tf.game === id))
+    .sort((a, b) => (b[1].finished || '').localeCompare(a[1].finished || ''));
+  document.getElementById('xstop').innerHTML = stopped.length ? `<h4 class="qh">Stopped (${stopped.length})
+      ${stopped.length > 1 ? `<button class="sm danger" style="float:right;margin-left:8px" onclick="deleteAllStopped()">🗑 Delete all</button><button class="sm" style="float:right" onclick="resumeAll()">▶ Resume all</button>` : ''}</h4>` +
+    stopped.map(([id, t]) => {
+      const pct = t.total ? Math.round(100 * t.bytes / t.total) : 0, stop = (t.error || '').startsWith('stopped');
+      return `<div class="qrow"><span class="qname"><b>${esc(nameOf(id))}</b>
+          <div class="why">${stop ? 'stopped' : '<span class="bad">failed</span>'} at ${pct} % · ${gb(t.bytes)} / ${gb(t.total)} · ${esc((t.finished || '').slice(5, 16))}</div>
+          ${stop ? '' : `<div class="why bad">${esc(t.error || '')}</div>`}</span>
+        <button class="sm pri" data-id="${esc(t.request || id)}" data-name="${esc(nameOf(id))}" onclick="resumeTransfer(this.dataset.id, this.dataset.name)">${tf || tq0.length ? '＋ Queue' : '▶ Resume'}</button>
+        <button class="sm danger" data-k="${esc(id)}" data-n="${esc(nameOf(id))}" onclick="transferDelete(this.dataset.k, this.dataset.n)" title="Delete what was sent to the PS5 and remove it from this list">🗑 Delete</button></div>`;
+    }).join('') : '';
+  const tq = d.transfer_queue || [];
+  document.getElementById('xq').innerHTML = tq.length ? `<h4 class="qh">Queued (${tq.length})</h4>` + tq.map((x, i) =>
+    `<div class="qrow"><span class="qn">${i + 1}</span><span class="qname">${esc(nameOf(x))}</span>
+      ${i ? `<button class="sm" data-g="${esc(x)}" onclick="act('push_queue_up', null, {game: this.dataset.g})" title="Move up">↑</button>` : ''}
+      <button class="sm" data-g="${esc(x)}" onclick="act('push_queue_remove', null, {game: this.dataset.g})" title="Remove from the queue">✕</button></div>`).join('') +
+    (!tf ? `<div class="mut" style="margin-top:8px">Starts by itself in a few seconds…</div>` : '') : '';
+  const pqEl = document.getElementById('pq'), pqs = (d.queue || []).filter(x => !d.job || x !== d.job.id);
+  pqEl.innerHTML = pqs.length ? `<h4 class="qh">Queued (${pqs.length})</h4>` + pqs.map((x, i) =>
+    `<div class="qrow"><span class="qn">${i + 1}</span><span class="qname">${esc(((d.games || []).find(g => g.id === x) || {}).name || x)}</span>${sendWhenPacked(x, true)}</div>`).join('') : '';
+  renderPkgs(d);
+  const busyEl = document.getElementById('busy'), parts = [];
+  const ijobs = Object.entries((d.images || {}).jobs || {}).filter(([k, j]) => j.state === 'running');
+  ijobs.forEach(([k, j]) => parts.push(`💿 exFAT image <b>${esc(k)}</b> · ${esc(j.phase || '')} ${j.total ? Math.floor(100 * j.done / j.total) + ' %' : ''}`));
+  renderImages(d);
+  if (d.job) parts.push(`📦 Packing <b>${esc(((d.games || []).find(g => g.id === d.job.id) || {}).name || d.job.id)}</b>${d.job.progress && d.job.progress[1] ? ' · ' + Math.round(100 * d.job.progress[0] / d.job.progress[1]) + ' %' : ''}${packLeft(d.job)}`);
+  if (tf) parts.push(`⬆️ Sending <b>${esc(nameOf(tf.game))}</b> · ${tf.total ? Math.round(100 * tf.bytes / tf.total) : 0} %${tf.speed ? ' · ' + gb(tf.speed) + '/s · ' + dur(tf.eta) + ' left' : ''}`);
+  const nq = pqs.length + tq.length;
+  if (nq) parts.push(`${nq} queued`);
+  const nStopped = tf ? 0 : Object.values(d.transfers || {}).filter(t => t && t.state === 'failed').length;
+  if (nStopped) parts.push(`⏸ ${nStopped} transfer${nStopped === 1 ? '' : 's'} stopped, resumable`);
+  busyEl.hidden = !parts.length;
+  busyEl.innerHTML = parts.map(x => `<span>${x}</span>`).join('<span class="dot">·</span>') + ' <span class="more">Activity ›</span>';
+  const an = document.getElementById('act-n'), n = (d.job ? 1 : 0) + (tf ? 1 : 0) + nq;
+  an.hidden = !n; an.textContent = n;
+  fab(d, tf, tq, pqs, nameOf);
+  document.getElementById('sub').textContent = `LZ4 HC level ${d.level} · APR-EMU ${d.runtime}`;
+  document.getElementById('b-resume').hidden = !d.interrupted;
+  const t = d.totals, saved = t.source - t.output;
+  document.getElementById('kpis').innerHTML = [
+    [t.lz4, 'games LZ4 packed'],
+    [gb(saved), t.source ? `saved (${(100 * saved / t.source).toFixed(1)} %)` : 'saved'],
+    [d.running ? d.queue.length : 0, d.running ? 'queued' : 'no job running'],
+    [gb(d.free_bytes), 'free for output'],
+  ].map(([b, s]) => `<div class="k"><b>${esc(b)}</b><span>${esc(s)}</span></div>`).join('');
+
+  const job = document.getElementById('job');
+  if (d.job) {
+    const j = d.job, done = new Set(j.done), prog = j.progress;
+    const pct = prog && prog[1] ? Math.min(100, 100 * prog[0] / prog[1]) : 0;
+    const name = (d.games.find(g => g.id === j.id) || {}).name || j.id;
+    const next = d.queue.filter(x => x !== j.id);
+    job.innerHTML = `<div class="jobtitle">Packing <b>${esc(name)}</b></div>
+      <div class="steps">${j.steps.map(s => `<div class="st ${done.has(s) ? 'd' : s === j.step ? 'r' : ''}">${STEP_EN[s] || s}${done.has(s) ? ' ✓' : ''}</div>`).join('')}</div>
+      <div class="bar"><i style="width:${pct}%"></i></div>
+      <div class="mut" style="margin-top:6px">${prog ? `${prog[2] ? esc(prog[2]) + ': ' : ''}${gb(prog[0])} / ${gb(prog[1])} (${pct.toFixed(0)} %) · ${gb(Math.max(0, prog[1] - prog[0]))} left${jobEta(j, prog)}` : 'starting…'}${next.length ? ' · next: ' + esc(next.map(x => (d.games.find(g => g.id === x) || {}).name || x).join(', ')) : ''}</div>
+      <div class="acts" style="margin-top:10px"><button onclick="act('stop', 'Stop the job? It can be resumed later.')">Stop (resumable)</button>
+        ${sendWhenPacked(j.id, false)}</div>`;
+  } else job.innerHTML = '<div class="mut">No job running.</div>';
+
+  const failed = document.getElementById('failed');
+  failed.hidden = !d.failed.length;
+  failed.innerHTML = '<h2>Failed (work folder kept for troubleshooting)</h2>' +
+    d.failed.map(f => `<div><b>${esc(f.id)}</b> <span class="mut">${esc(f.step)}</span><div class="why">${esc(f.error)}</div></div>`).join('');
+
+  const busy = d.running;
+  document.getElementById('b-fix').disabled = false;
+  document.getElementById('games').innerHTML =
+    '<tr><th>Game</th><th>Status</th><th class="num">Original</th><th class="num">LZ4</th><th class="num">Saved</th><th>PS5</th><th></th></tr>' +
+    d.games.map(g => {
+      const v = g.running ? ['p-run', 'packing'] : g.queued ? ['p-run', 'queued'] :
+        g.verdict === 'LZ4' ? ['p-LZ4', 'LZ4'] : g.verdict === 'can be LZ4' ? ['p-can', 'can be LZ4'] :
+        g.verdict === 'error' ? ['p-err', 'error'] : ['p-no', 'not LZ4'];
+      const lz4 = g.verdict === 'LZ4' && g.output_bytes;
+      const ps5 = !g.output_only && g.rel ? `<select onclick="event.stopPropagation()" data-game="${esc(g.id)}" onchange="this.blur();if(this.value)act('community',null,{game:this.dataset.game,result:this.value})">
+          <option value="">${g.ps5 ? esc(PS5_EN[g.ps5]) : 'not tested'}</option>
+          ${Object.entries(PS5_EN).map(([k, s]) => `<option value="${k}">${s}</option>`).join('')}</select>` : '<span class="mut">–</span>';
+      const waiting = pendingFor(g.id), sendNext = (d.send_after || []).includes(g.id);
+      const txr = g.output ? (data.transfers || {})[g.output.split('/').pop()] : null;
+      const action = waiting ? '<span class="pill p-run">waiting</span>' : g.can_queue && !g.running && !g.queued
+        ? `<button class="sm pri" data-game="${esc(g.id)}" onclick="event.stopPropagation();compress(this.dataset.game, !!(data.settings || {}).ps5_ftp)" title="Compress with LZ4, then send it to the PS5 by itself">Compress &amp; send</button>`
+        : txr && txr.state === 'failed' && !d.transfer
+        ? `<button class="sm pri" data-id="${esc(g.output.split('/').pop())}" data-name="${esc(g.name)}" onclick="event.stopPropagation();push(this.dataset.id, this.dataset.name)">▶ Resume transfer</button>` : '';
+      const why = g.verdict !== 'LZ4' && !g.running ? `<div class="why">${esc(g.why)}</div>` : '';
+      const tx = txr && txr.state !== 'done' ? `<div class="cm">${xferText(txr)}</div>` : '';
+      return `<tr class="row" data-id="${esc(g.id)}" onclick="if(!event.target.closest('select,button,a'))openGame(this.dataset.id)"><td class="c-game"><img class="ico" alt="" loading="lazy" src="/api/icon?id=${encodeURIComponent(g.id)}" onerror="this.remove()"><span class="gname">${esc(g.name)}</span>${g.output_only ? '<span class="mine">LZ4 FOLDER</span>' : ''}<div class="why">${esc(g.title_id)} · <span class="kind">${esc(KIND_EN[g.kind] || g.kind)}</span>${g.source_size && !g.source_bytes ? ' · ' + gb(g.source_size) : ''}</div>${placeHtml(g)}<div class="cm">${community(g.community)}</div>${tx}${sendNext ? '<div class="cm"><span class="chip ok">⬆️ sent to the PS5 when packed</span></div>' : ''}${why}</td>
+        <td class="c-status"><span class="pill ${v[0]}">${v[1]}</span></td>
+        <td class="num c-src">${gb(g.source_bytes)}</td><td class="num c-out">${gb(g.output_bytes)}</td>
+        <td class="num c-saved">${g.saved_percent != null ? `<b>${gb(g.source_bytes - g.output_bytes)}</b> saved · ${Math.round(g.saved_percent)} %<span class="mut mob"> · ${gb(g.source_bytes)} → ${gb(g.output_bytes)}</span>
+          <div class="sz" title="LZ4 ${gb(g.output_bytes)} of original ${gb(g.source_bytes)}"><i style="width:${(100 - g.saved_percent).toFixed(1)}%"></i></div>` : ''}</td>
+        <td class="c-ps5">${lz4 && !g.output_only ? ps5 : ''}</td><td class="c-act">${action}</td></tr>`;
+    }).join('') +
+    // RAR archives: a game still packed as RAR parts, extracted to exFAT from here.
+    (d.archives || []).map(a => {
+      const st = a.state || {}, fresh = Date.now() / 1000 - (st.updated || 0) < 180;
+      const run = (st.state === 'running' || (st.state === 'done' && st.phase)) && fresh;
+      const pct = st.total ? Math.min(100, 100 * st.done / st.total) : 0;
+      const act = run ? `<span class="mut">${esc(st.phase || 'working')} · ${pct.toFixed(0)} %</span>`
+        : st.state === 'done' ? `<span class="chip ok">✓ extracted</span>`
+        : `<button class="sm pri" data-a="${esc(a.id)}" data-n="${esc(a.name)}" onclick="act('extract', 'Extract ' + this.dataset.n + ' and make a checked .exfat of it?\\n\\nIt needs about twice the game size free in the library for a while. The RAR files are not changed.', {game: this.dataset.a})">${st.state === 'failed' || st.state === 'stopped' ? '↻ Try again' : '📦 Extract to exFAT'}</button>`;
+      return `<tr class="row" onclick="if(!event.target.closest('button'))tab('act')"><td class="c-game"><span class="gname">📦 ${esc(a.name)}</span>
+          <div class="why">${a.parts} RAR part${a.parts > 1 ? 's' : ''} · ${esc(a.dir || '.')}</div>
+          ${run ? `<div class="bar" style="margin-top:6px"><i style="width:${pct.toFixed(1)}%"></i></div>` : ''}
+          ${st.state === 'failed' ? `<div class="why bad">${esc(st.error || '')}</div>` : ''}
+          ${st.state === 'done' ? `<div class="why">→ ${esc((st.image || '').split('/').pop())}${st.rars_deleted ? ' · RAR files deleted' : ''}</div>` : ''}</td>
+        <td class="c-status"><span class="pill p-rar">RAR</span></td>
+        <td class="num c-src">${gb(a.size)}</td><td class="num c-out">–</td><td class="num c-saved"></td>
+        <td class="c-ps5"></td><td class="c-act">${act}</td></tr>`;
+    }).join('');
+
+  const unr = d.unreadable || [];
+  document.getElementById('unread').innerHTML = unr.length ? `<div class="why bad" style="margin-bottom:10px">⚠ The NAS user (uid ${d.uid}) may not read
+    ${unr.map(x => '<code>' + esc(x) + '</code>').join(', ')}: they are left out. Fix it as root on the NAS:
+    <pre id="unread-cmd" class="log" style="white-space:pre-wrap;overflow-wrap:anywhere">${unr.map(x => `sudo chown -R ${d.uid}:${d.uid} "${esc((d.library_host || '/path/to/roms/ps5') + '/' + x)}"`).join('\n')}</pre>
+    <button class="sm" onclick="copyText(document.getElementById('unread-cmd').textContent, this)">Copy</button></div>` : '';
+  const dups = d.duplicates || [];
+  document.getElementById('dupcard').hidden = !dups.length;
+  document.getElementById('dups').innerHTML = dups.map(grp => `<div class="dl"><div class="dl-top"><b>${esc(grp.name)}</b><span class="mut">${esc(grp.title_id)} · ${grp.items.length} copies</span></div>` +
+    grp.items.map(i => {
+      const gg = (d.games || []).find(x => x.id === i.id) || {}, size = i.size || gg.source_size || gg.source_bytes;
+      return `<div class="dl-row"><span class="chip ${i.newest ? 'ok' : ''}">${i.newest ? '✓ newest' : i.version ? 'older' : 'version?'}</span>
+        <span class="dl-name">v${esc(i.version || '?')}</span><span class="mut">${esc(i.kind)}${size ? ' · ' + gb(size) : ''}${i.lz4 ? ' · has an LZ4 copy' : ''} · ${esc(i.rel)}</span><span class="sp"></span>
+        ${i.newest ? '' : d.delete_originals ? `<button class="sm danger" data-g="${esc(i.id)}" onclick="deleteOriginal(this.dataset.g)">🗑 Delete this one</button>` : '<span class="mut" style="font-size:12px">delete needs DELETE_ORIGINALS=yes</span>'}</div>`;
+    }).join('') + '</div>').join('');
+  const arcs = d.archives || [];
+  document.getElementById('arccard').hidden = !arcs.length;
+  document.getElementById('arcs').innerHTML = arcs.map(a => {
+    const st = a.state || {}, fresh = Date.now() / 1000 - (st.updated || 0) < 180;
+    const run = (st.state === 'running' || (st.state === 'done' && st.phase)) && fresh;
+    const pct = st.total ? Math.min(100, 100 * st.done / st.total) : 0;
+    return `<div class="dl"><div class="dl-top"><b>${esc(a.name)}</b><span class="mut">${a.parts} part${a.parts > 1 ? 's' : ''} · ${gb(a.size)} · ${esc(a.dir || '.')}</span><span class="sp"></span>
+      ${st.state === 'done' && run ? `<span class="chip">${esc(st.phase)}</span>`
+        : st.state === 'done' ? `<span class="chip ok">✓ ${esc((st.image || '').split('/').pop())}</span>` + (d.delete_originals && !a.tested ? ` <span class="mut" style="font-size:12px">test the game on the PS5 and mark it works, then the RAR files can go</span>` : '')
+          + (d.delete_originals && a.tested ? ` <button class="sm danger" data-a="${esc(a.id)}" data-n="${esc(a.name)}" onclick="act('delete_rars', 'Delete the ' + ${a.parts} + ' RAR files of ' + this.dataset.n + '?\n\nFirst every file in the archive is checked against the .exfat (size and CRC32); only if all match are they deleted. The game stays as the .exfat in _extracted.', {game: this.dataset.a})">🗑 Delete RAR files</button>` : '')
+        : run ? `<span class="chip">${esc(st.phase || 'working')}</span>`
+        : `<button class="sm pri" data-a="${esc(a.id)}" data-n="${esc(a.name)}" onclick="act('extract', 'Extract ' + this.dataset.n + ' and make a checked .exfat of it?\n\nIt needs about twice the game size free in the library for a while. The RAR files are not changed.', {game: this.dataset.a})">${st.state === 'failed' || st.state === 'stopped' ? '↻ Try again' : '📦 Extract to exFAT'}</button>`}</div>
+      ${run ? `<div class="bar"><i style="width:${pct.toFixed(1)}%"></i></div><div class="why">${gb(st.done)} of ${gb(st.total)}</div>` : ''}
+      ${st.state === 'failed' ? `<div class="why bad">${esc(st.error || '')}</div>` : ''}
+      ${st.check_error ? `<div class="why bad">${esc(st.check_error)}</div>` : ''}</div>`;
+  }).join('');
+  const log = document.getElementById('log');
+  const items = d.requests.recent;
+  const pend = d.requests.pending_list || [];
+  const pending = pend.length ? pend.map(r => `<div class="mut">⏳ ${esc(ACT_EN[r.action] || r.action)} ${esc(r.game || '')} – ${d.running && ['start', 'fix', 'resume'].includes(r.action) ? 'starts when the running job is done' : 'sent'}</div>`).join('') : '';
+  log.innerHTML = pending + (items.length ? items.map(r => {
+    let url = (r.output || '').match(/https:\/\/github\.com\/\S+/);
+    const fw = (localStorage.getItem('fw') || '').trim();
+    if (url && fw && !/[?&]firmware=/.test(url[0])) url = [url[0] + '&firmware=' + encodeURIComponent(fw)];
+    return `<div><b class="${r.ok ? 'good' : 'bad'}">${r.ok ? '✓' : '✗'}</b> ${esc(ACT_EN[r.action] || r.action)}
+      ${r.game ? esc(r.game) : ''}${r.result ? ': ' + esc(PS5_EN[r.result]) : ''} <span class="mut">${esc(r.finished)}</span>
+      ${url ? `<div><a href="${esc(url[0])}" target="_blank" rel="noopener">Share the result with the community</a></div>` : ''}
+      ${(r.action === 'check' || r.action === 'check_full') && !r.ok ? `<div style="margin:6px 0"><span class="bad">The check found problems.</span>
+        <button class="sm pri" onclick="act('apr', 'Repair the LZ4 games that need it?\n\nThe right APR-EMU is put back and the files the PS5 reads straight from disk are written out of the packs. Nothing is repacked.')">Repair</button></div>` : ''}
+      <pre>${esc((r.output || '').split('\n').slice(-6).join('\n'))}</pre></div>`;
+  }).join('') : (pending ? '' : '<span class="mut">None yet.</span>'));
+}
+
+function pendingFor(id) {
+  return data && (data.requests.pending_list || []).some(r => r.action === 'start' && r.game === id);
+}
+async function makeImage(on, name) {
+  if (!confirm(`Make an exFAT image of the LZ4 game ${name}?\n\nIt becomes one file, ${on}.exfat, next to the LZ4 folder (about as large as the LZ4 copy), and every file in it is compared byte for byte with the LZ4 folder. The LZ4 folder stays.`)) return;
+  act('make_exfat', null, {game: on});
+}
+function pushImage(file, name) {
+  const s = data.settings || {};
+  if (!s.ps5_ftp) { alert('Enter the PS5 address on the Remote tab first.'); tab('ps5'); return; }
+  act('push', `Send the exFAT image of ${name} to ${s.ps5_ftp}${s.ps5_dest}?\n\n${file}\n\nShadowMount+ mounts it from there.`, {game: 'img:' + file});
+}
+function removeImage(on, name) {
+  act('remove_exfat', `Delete the exFAT image of ${name} on the NAS?\n\n${on}.exfat\n\nThe LZ4 folder stays.`, {game: on});
+}
+function imageStop() {
+  act('image_stop', 'Stop making the exFAT image? The half-made image is thrown away; the LZ4 folder is not touched.');
+}
+async function compress(id, send, image) {
+  const g = (data.games || []).find(x => x.id === id) || {name: id};
+  const s = data.settings || {};
+  if (send && !s.ps5_ftp) { alert('Enter the PS5 address on the Remote tab first.'); tab('ps5'); return; }
+  const note = data.running ? '\n\nAnother game is being packed; this one starts when it is done.' : '';
+  const pfsc = g.kind === 'ffpfsc' ? `\n\nThis .ffpfsc image is already compressed (${gb(g.source_size)}). The LZ4 copy is usually about as large or larger, so it saves little or no space; Compress all leaves these out.` : '';
+  const then = image ? `\n\nThen an exFAT image of the LZ4 game is made and checked byte for byte, and the image is sent to ${s.ps5_ftp}${s.ps5_dest} by itself. Some games only start from an image.`
+    : send ? `\n\nWhen it is packed and checked, it is sent to ${s.ps5_ftp}${s.ps5_dest} by itself (queued if another transfer runs).` : '';
+  if (!confirm(`Compress ${g.name} with LZ4${send ? ' and send it to the PS5' : ''}?${pfsc}${note}${then}`)) return;
+  if (send) await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'send_after', game: id, image: !!image})});
+  act('start', null, {game: id});
+}
+function reportLink(repo, tid, name, status, extra = {}) {
+  const forms = {works: 'Works', issues: 'Works with issues', nostart: "Won't start (black screen or crash on launch)", crash: 'Crashes in game'};
+  const fw = (localStorage.getItem('fw') || '').trim();
+  const p = [['template', 'compat.yml'], ['title', `[Game report] ${name}${status ? ': ' + forms[status] : ''}`],
+    ['title_id', tid], ['game', name], ['status', forms[status] || ''], ['game_version', extra.version || ''],
+    ['level', extra.level || ''], ['source', extra.source || ''], ['firmware', fw], ['app_version', (data && data.lz4c_version) || 'ps5-lz4 NAS']]
+    .filter(([, v]) => v);
+  return `https://github.com/${repo}/issues/new?` + p.map(([k, v]) => k + '=' + encodeURIComponent(v)).join('&');
+}
+// The community's .ffpfsc compatibility sheet: the matching row, with the
+// sheet's own column names.
+function ffpfscHtml(g, det) {
+  const f = det && det.ffpfsc;
+  if (!f) return '';
+  const link = `<a href="${esc(f.url)}" target="_blank" rel="noopener">Open the sheet</a>`;
+  if (!f.at) return `<div class="csec"><h4>.ffpfsc list</h4><div class="mut">Not loaded yet (the page fetches it every 6 hours).</div><div class="acts">${link}</div></div>`;
+  if (!f.rows.length) return `<div class="csec"><h4>.ffpfsc list</h4><div class="mut">${esc(g.name || g.title_id || 'This game')} is not in the .ffpfsc compatibility list.</div><div class="acts">${link}</div></div>`;
+  const tone = v => /\b(yes|works?|working|ok|playable|good|fine|✅|✔)\b/i.test(v) ? 'good' : /\b(no|not|crash(es)?|broken|fails?|black screen|doesn'?t|won'?t|❌|✖)\b/i.test(v) ? 'bad' : '';
+  return `<div class="csec"><h4>.ffpfsc list <span class="mut" style="font-weight:500">· community sheet</span></h4>` +
+    f.rows.map(r => `<div class="kv" style="margin-top:6px">${Object.entries(r).map(([k, v]) =>
+      `<div>${esc(k)}</div><div class="${tone(v)}">${esc(v)}</div>`).join('')}</div>`).join('<hr style="border:0;border-top:1px solid var(--line);margin:8px 0">') +
+    `<div class="acts">${link}</div></div>`;
+}
+function communityHtml(g, det) {
+  if (!det) return '<div class="csec mut">Loading community reports…</div>';
+  const c = det.community, repo = det.community_repo, tid = det.title_id || g.title_id || '';
+  const all = tid ? `<a href="https://github.com/${esc(repo)}/issues?q=label%3Acompat+${encodeURIComponent(tid)}" target="_blank" rel="noopener">All reports</a>` : '';
+  const mine = g.ps5 || (det.report || {}).ps5_result || 'works';
+  const extra = {version: (det.version || {}).version || '',
+    level: (((det.report || {}).codec || '').match(/(\d+)$/) || [])[1] || '',
+    source: {folder: 'Folder', exfat: 'exFAT image', ffpfsc: 'Uncompressed .ffpfsc', ffpfs: 'Uncompressed .ffpfsc'}[g.kind] || ''};
+  const report = tid ? `<a href="${esc(reportLink(repo, tid, g.name || tid, mine, extra))}" target="_blank" rel="noopener">Report how it runs</a>` : '';
+  if (!c || !c.reports)
+    return `<div class="csec"><h4>LZ4 <span class="mut" style="font-weight:500">· community reports</span></h4><div class="mut">Nobody has reported ${esc(g.name || tid)} yet.</div>
+      <div class="acts">${report}</div></div>`;
+  const n = c.reports, seg = (k, col) => c[k] ? `<i style="width:${100 * c[k] / n}%;background:${col}"></i>` : '';
+  const l = c.lastReport || {};
+  const link = l.issue ? ` · <a href="https://github.com/${esc(repo)}/issues/${esc(l.issue)}" target="_blank" rel="noopener">#${esc(l.issue)}</a>` : '';
+  return `<div class="csec"><h4>LZ4 <span class="mut" style="font-weight:500">· ${n} community report${n === 1 ? '' : 's'}</span></h4>
+    <div>${community(c)}</div>
+    <div class="cbar">${seg('works', 'var(--ok)')}${seg('issues', 'var(--warn)')}${seg('noStart', 'var(--bad)')}${seg('crash', 'var(--bad)')}</div>
+    <div class="why">Latest: <b>${esc(ST_EN[l.status] || l.status || '–')}</b> ${esc((l.date || '').slice(0, 10))}${link}
+      ${l.source ? ' · packed from ' + esc(l.source) : ''}${l.level ? ' · level ' + esc(l.level) : ''}${l.firmware ? ' · FW ' + esc(l.firmware) : ''}${l.appVersion ? ' · ' + esc(l.appVersion) : ''}</div>
+    <div class="acts">${all}${report}</div></div>`;
+}
+let openId = null;
+function closeGame() { openId = null; document.getElementById('modal').hidden = true; document.body.classList.remove('locked'); }
+async function openGame(id) {
+  openId = id;
+  const m = document.getElementById('modal'), body = document.getElementById('m-body');
+  m.hidden = false;
+  document.body.classList.add('locked');
+  const g = (data.games || []).find(x => x.id === id) || {id, name: id};
+  body.innerHTML = gameHtml(g, null);
+  try {
+    const det = await (await fetch('/api/game?id=' + encodeURIComponent(id), {cache: 'no-store'})).json();
+    if (openId === id) body.innerHTML = gameHtml(g, det);
+    const pp = ps5Place(g), here = document.getElementById('ps5-here');
+    if (here && !(pp && pp.sent)) {
+      // Every copy of this game on the PS5, by Title ID, however it got there.
+      const copies = await ps5Copies(g.title_id);
+      if (openId !== id) return;
+      if (copies == null) here.textContent = 'the PS5 did not answer, so it is unknown whether the game is there';
+      else if (copies.length) {
+        here.innerHTML = copies.map(c => `<div><span class="good">on the PS5</span> ${esc(c.path)}${c.lz4 ? ' · LZ4' : ' · not LZ4'}${c.version ? ' · version ' + esc(c.version) : ''}</div>`).join('') +
+          (copies.length > 1 ? '<div class="bad">more than one copy: ShadowMountPlus mounts only one</div>' : '');
+        const acts = document.getElementById('m-acts'), dl = document.getElementById('dels');
+        if (acts && acts.querySelector('.mut')) acts.innerHTML = '';
+        copies.forEach(c => {
+          if (acts) acts.insertAdjacentHTML('afterbegin', `<button data-p="${esc(c.path)}" onclick="closeGame();tab('ftp');ftpGo(this.dataset.p)">Open on PS5${copies.length > 1 ? ' (' + esc(driveName(c.drive)) + ')' : ''}</button>` +
+            (c.lz4 ? `<button data-p="${esc(c.path)}" onclick="aprCheck(this.dataset.p, document.getElementById('apr-ps5'))">Check APR-EMU on PS5</button>` : ''));
+          if (dl) dl.insertAdjacentHTML('afterbegin', `<button class="danger" data-p="${esc(c.path)}" data-n="${esc(g.name)}" onclick="deleteFromPs5(this.dataset.p, this.dataset.n)">🗑 Delete from PS5${copies.length > 1 ? ' (' + esc(driveName(c.drive)) + ')' : ''}</button>`);
+        });
+      } else here.textContent = pp ? 'not on the PS5: this is where Send to PS5 puts it' : 'not on the PS5';
+    }
+  } catch (e) {}
+}
+function gameHtml(g, det) {
+  const r = det && det.report, f = det && det.folder, w = det && det.work;
+  const v = g.running ? 'packing now' : g.queued ? 'queued' : g.verdict;
+  const rows = [
+    ['Status', esc(v) + (g.why && g.verdict !== 'LZ4' ? `<div class="why">${esc(g.why)}</div>` : '')],
+    ['Title ID', esc(g.title_id || '–')],
+    ['Version', det && det.version && det.version.version ? esc(det.version.version) + (det.version.master ? `<div class="why">master ${esc(det.version.master)}</div>` : '') + (det.version.firmware ? `<div class="why">needs firmware ${esc(det.version.firmware)} or newer</div>` : '') : (det ? '–' : '…')],
+    ['Source', g.output_only ? 'not in the library' : `${esc(KIND_EN[g.kind] || g.kind)}${g.source_size ? ' · ' + gb(g.source_size) : ''}<div class="why">On the NAS: ${esc(g.source_path || g.rel || '')}</div>` +
+      (g.verdict === 'can be LZ4' && g.kind !== 'folder' ? '<div class="why">Unpacked to a work folder on the NAS before LZ4 packing; the original is not changed.</div>' : '')],
+    ['Original', gb(g.source_bytes)],
+    ['LZ4', gb(g.output_bytes)],
+    ['Saved', g.saved_percent != null ? `${gb(g.source_bytes - g.output_bytes)} (${Math.round(g.saved_percent)} %)` : '–'],
+  ];
+  const a = det && det.apr;
+  if (a) rows.push(['APR-EMU', `${a.ok ? '<span class="good">' + esc(a.build) + ' ✓</span>' : '<span class="bad">' + esc(a.build) + '</span> · Check all, then Repair'}${a.path ? `<div class="why">${esc(a.path)}</div>` : ''}`]);
+  const vv = g.output ? (data.verifies || {})[g.output.split('/').pop()] : null;
+  if (vv) rows.push(['Verify LZ4', vv.state === 'running' ? 'running…' : `${vv.state === 'passed' ? '<span class="good">✓ passed</span>' : '<span class="bad">✗ ' + esc(vv.state) + '</span>'} <span class="mut">${esc(vv.finished || '')}</span>` +
+    (vv.state !== 'passed' && vv.output ? `<pre class="log" style="max-height:160px;overflow:auto">${esc(vv.output.split('\n').slice(-8).join('\n'))}</pre>` : '')]);
+  const pp = ps5Place(g);
+  if (pp || g.title_id) rows.push(['On the PS5', `${pp ? esc(pp.path) : ''}<div class="why" id="ps5-here">${pp && pp.sent ? '<span class="good">sent by this page</span>' : 'checking the PS5…'}</div>`]);
+  if (f) rows.push(['LZ4 folder', `${esc(f.path)}<div class="why">${f.files} files · ${f.paks} LZ4 volumes · ${gb(f.bytes)}${f.problem ? ' · <span class="bad">' + esc(f.problem) + '</span>' : ' · format ok'}</div>`]);
+  if (r) {
+    rows.push(['Compression', `${esc(r.codec || '')}${r.profile ? `<div class="why">profile: ${esc(r.profile)}</div>` : ''}`]);
+    if (r.pack) rows.push(['Pack', `${r.pack.packed} files packed, ${r.pack.loose} loose · ${r.pack.lz4} LZ4 blocks`]);
+    rows.push(['Checks', `NAS: ${r.verified_on_nas ? '<span class="good">ok</span>' : 'no'}${r.verification ? `<div class="why">${esc(r.verification.restore_test || '')}</div>` : ''}`]);
+    rows.push(['PS5', esc(r.playable_on_ps5 || 'not tested')]);
+    rows.push(['Finished', esc(r.finished || '–')]);
+  }
+  const tx = (data.transfers || {})[g.output ? g.output.split('/').pop() : g.id];
+  if (tx) rows.push(['PS5 transfer', `${xferText(tx)}<div class="why">${esc(tx.dest || '')}${tx.verified ? ` · ${tx.verified} program files checked` : ''}${tx.playgo ? `<br>${esc(tx.playgo)}` : ''}${tx.note ? `<br><span class="bad">${esc(tx.note)}</span>` : ''}${tx.error ? `<br><span class="bad">${esc(tx.error)}</span>` : ''}</div>`]);
+  if (g.output) {
+    const on = g.output.split('/').pop(), im = data.images || {}, job = (im.jobs || {})[on], ready = (im.ready || {})[on];
+    if (ready) rows.push(['exFAT image', `${gb(ready)}<div class="why">${esc(on)}.exfat · checked byte for byte</div>`]);
+    else if (job && job.state !== 'done') rows.push(['exFAT image', job.state === 'running'
+      ? `${esc(job.phase || '')}: ${gb(job.done)} / ${gb(job.total)}` : `<span class="bad">${esc(job.state)}: ${esc(job.error || '')}</span>`]);
+  }
+  if (w && w.error) rows.push(['Last error', `<span class="bad">${esc(w.error)}</span><div class="why">step ${esc(w.step || '')}</div>`]);
+
+  const acts = [];
+  if (pendingFor(g.id)) acts.push('<span class="pill p-run">waiting to start</span>');
+  else if (g.can_queue && !g.running && !g.queued)
+    acts.push(`<button class="pri" data-game="${esc(g.id)}" onclick="compress(this.dataset.game, true)" title="Compress with LZ4, check it, then send it to the PS5 by itself">⚡ Compress &amp; send to PS5</button>`,
+      `<button class="ghost" data-game="${esc(g.id)}" onclick="compress(this.dataset.game)">Compress only</button>`,
+      `<button class="ghost" data-game="${esc(g.id)}" onclick="compress(this.dataset.game, true, true)" title="LZ4, then an exFAT image of the LZ4 game, then the image to the PS5">Compress, exFAT &amp; send</button>`);
+  if (!g.output_only && g.rel)
+    acts.push(`<select data-game="${esc(g.id)}" onchange="this.blur();if(this.value)act('community',null,{game:this.dataset.game,result:this.value})">
+      <option value="">PS5 result: ${g.ps5 ? esc(PS5_EN[g.ps5]) : 'not tested'}</option>
+      ${Object.entries(PS5_EN).map(([k, s]) => `<option value="${k}">${s}</option>`).join('')}</select>`);
+  if (g.running) acts.push(`<button onclick="act('stop', 'Stop the job? It can be resumed later.')">Stop</button>`);
+  const tr = (data.transfers || {})[g.output ? g.output.split('/').pop() : g.id];
+  if (pp && pp.sent) {
+    acts.push(`<button data-p="${esc(pp.path)}" onclick="closeGame();tab('ftp');ftpGo(this.dataset.p)">Open on PS5</button>`);
+    acts.push(`<button data-p="${esc(pp.path)}" onclick="aprCheck(this.dataset.p, document.getElementById('apr-ps5'))">Check APR-EMU on PS5</button>`);
+  }
+  // Deleting: the PS5 copy and the NAS LZ4 copy separately; never the original.
+  const dels = [];
+  if (pp && pp.sent) dels.push(`<button class="danger" data-p="${esc(pp.path)}" data-n="${esc(g.name)}" onclick="deleteFromPs5(this.dataset.p, this.dataset.n)">🗑 Delete from PS5</button>`);
+  if (!g.output_only && g.rel && !g.running) dels.push(data.delete_originals
+    ? `<button class="danger" data-g="${esc(g.id)}" onclick="deleteOriginal(this.dataset.g)">🗑 Delete original on NAS${g.verdict === 'LZ4' && (g.ps5 === 'works' || g.ps5 === 'issues') ? ' <small>(the LZ4 copy works on the PS5)</small>' : ''}</button>`
+    : `<button class="ghost" onclick="alert(ORIG_OFF)">🗑 Delete original…</button>`);
+  if (g.output && (g.verdict === 'LZ4' || g.output_only) && !g.running)
+    dels.push(`<button class="danger" data-g="${esc(g.id)}" data-n="${esc(g.name)}" onclick="deleteLz4(this.dataset.g, this.dataset.n)">🗑 Delete LZ4 copy on NAS</button>`);
+  if (g.verdict !== 'LZ4' && !g.output_only && g.rel) {
+    const key = g.rel.split('/').pop(), tro = (data.transfers || {})[key];
+    acts.push(`<button class="${g.verdict === 'not LZ4' ? 'pri' : ''}" data-g="${esc(g.id)}" onclick="pushSrc(this.dataset.g)">${tro && tro.state === 'failed' ? '▶ Resume sending original' : tro && tro.state === 'done' ? 'Send original again' : 'Send original to PS5'}</button>`);
+  }
+  if (g.verdict === 'LZ4' && g.output && !g.running) {
+    const on = g.output.split('/').pop(), v = (data.verifies || {})[on] || {};
+    acts.push(v.state === 'running' ? '<button class="ghost" disabled>🔍 Verifying LZ4…</button>'
+      : `<button class="${v.state === 'passed' ? 'send-on' : v.state === 'failed' ? 'send-off' : ''}" data-g="${esc(on)}" data-n="${esc(g.name)}"
+          onclick="act('verify_lz4', 'Verify the LZ4 copy of ' + this.dataset.n + '?\\n\\nEvery LZ4 block is decoded and its CRC checked, the file list and APR-EMU too. It reads the whole copy on the NAS (a few minutes per 100 GB) and changes nothing.', {game: this.dataset.g})"
+          title="${v.state ? esc((v.state === 'passed' ? 'Passed ' : 'Failed ') + (v.finished || '')) : 'Check the LZ4 copy before sending it'}">🔍 ${v.state === 'passed' ? 'LZ4 verified ✓' : v.state === 'failed' ? 'LZ4 verify failed ✗' : 'Verify LZ4'}</button>`);
+  }
+  if (g.verdict === 'LZ4' && g.output) {
+    const busy = data.transfer && data.transfer.state === 'running';
+    acts.push(`<button class="pri" ${busy ? 'title="another game is being sent: this one is queued after it"' : ''} data-id="${esc(g.output.split('/').pop())}" data-name="${esc(g.name)}"
+      onclick="push(this.dataset.id, this.dataset.name)">${tr && tr.state === 'done' ? 'Send again' : busy ? 'Send to PS5 (queue)' : 'Send to PS5'}</button>`);
+  }
+  // exFAT image of the LZ4 copy (some games only start from an image).
+  if (g.verdict === 'LZ4' && g.output && !g.running) {
+    const on = g.output.split('/').pop(), im = data.images || {}, job = (im.jobs || {})[on], ready = (im.ready || {})[on];
+    if (job && job.state === 'running') {
+      acts.push(`<span class="pill p-run">exFAT image: ${esc(job.phase || '')} ${job.total ? Math.floor(100 * job.done / job.total) + '%' : ''}</span>`,
+        `<button onclick="imageStop()">Stop image</button>`);
+    } else if (ready) {
+      acts.push(`<button class="pri" data-f="${esc(on + '.exfat')}" data-n="${esc(g.name)}" onclick="pushImage(this.dataset.f, this.dataset.n)">Send exFAT image to PS5</button>`);
+      dels.push(`<button class="danger" data-g="${esc(on)}" data-n="${esc(g.name)}" onclick="removeImage(this.dataset.g, this.dataset.n)">🗑 Delete exFAT image</button>`);
+    } else {
+      acts.push(`<button data-g="${esc(on)}" data-n="${esc(g.name)}" onclick="makeImage(this.dataset.g, this.dataset.n)" title="One .exfat file of the LZ4 game, checked byte for byte">Make exFAT image</button>`,
+        `<button data-g="${esc(g.id)}" onclick="compress(this.dataset.g, true, true)">Make exFAT and send to PS5</button>`);
+    }
+  }
+  return `<img class="ico big" alt="" src="/api/icon?id=${encodeURIComponent(g.id)}" onerror="this.remove()"><h3>${esc(g.name)}</h3><div class="mut">${esc(g.title_id || '')}</div>
+    <div class="kv">${rows.map(([k, x]) => `<div>${k}</div><div>${x}</div>`).join('')}</div>
+    <div class="acts" id="m-acts">${acts.join('') || '<span class="mut">Nothing to do for this game.</span>'}</div>
+    <div class="aprres" id="apr-ps5">${aprShown(g)}</div>
+    ${dels.length ? `<div class="acts dels" id="dels">${dels.join('')}</div>` : '<div class="acts dels" id="dels"></div>'}
+    <div class="pair">${ffpfscHtml(g, det) || ''}${communityHtml(g, det)}</div>`;
+}
+let ftpPath = '/', ftpLoaded = false;
+async function ftpGo(path) {
+  path = '/' + String(path || '/').trim().replace(/^\/+|\/+$/g, '');
+  const msg = document.getElementById('ftp-msg'), list = document.getElementById('ftp-list');
+  document.getElementById('ftp-path').value = path;
+  const dest = (data && data.settings && data.settings.ps5_dest) || '';
+  document.getElementById('ftp-quick').innerHTML = ['/', '/data', '/mnt/usb0', '/mnt/ext0', dest].filter((x, i, a) => x && a.indexOf(x) === i)
+    .map(x => `<button class="sm" data-p="${esc(x)}" onclick="ftpGo(this.dataset.p)">${esc(x)}</button>`).join('');
+  const ftp = (data && data.settings && data.settings.ps5_ftp) || '';
+  document.getElementById('ftp-addr').innerHTML = ftp
+    ? `PS5: <b>${esc(ftp)}</b> · <a href="#" onclick="tab('ps5');return false">change</a>`
+    : `<span class="bad">No PS5 address yet:</span> <a href="#" onclick="tab('ps5');return false">set it on the Remote tab</a>`;
+  msg.textContent = 'Loading…';
+  try {
+    const r = await fetch('/api/ftp/list?path=' + encodeURIComponent(path), {cache: 'no-store'});
+    const j = await r.json();
+    if (!r.ok) { msg.innerHTML = `<span class="bad">${esc(j.error || r.status)}</span>`; return; }
+    ftpPath = j.path; ftpLoaded = true; ftpItems = j.items;
+    const files = j.items.filter(i => !i.dir), bytes = files.reduce((n, i) => n + (i.size || 0), 0);
+    msg.textContent = `${j.items.length - files.length} folders, ${files.length} files` + (files.length ? ` (${gb(bytes)})` : '');
+    if (j.items.some(i => i.dir && i.name.toLowerCase() === 'fakelib'))
+      msg.innerHTML += ` · <button class="sm" onclick="aprCheck(ftpPath)">Check APR-EMU here</button>`;
+    const join = n => (ftpPath === '/' ? '' : ftpPath) + '/' + n;
+    const KEEP = ['etahen', 'pldmgr', 'homebrew', 'shadowmount', 'lz4compression', 'goldhen', 'payloads', 'kstuff', 'elfldr', 'websrv', 'ftpsrv', 'itemzflow', 'toolbox', 'app', 'system_data'];
+    const del = (p, dir) => /^\/(data|mnt\/(usb|ext)\d+)\/[^/]+/.test(p) && !(/^\/data\/[^/]+$/.test(p) && KEEP.includes(p.split('/').pop().toLowerCase()))
+      ? `<button class="sm" style="float:right;margin-left:8px" data-p="${esc(p)}" data-dir="${dir ? 1 : ''}" onclick="ftpDelete(this.dataset.p, this.dataset.dir)">Delete</button>` : '';
+    list.innerHTML = (j.items.length ? j.items.map(i => i.dir || i.link
+      ? `<tr class="row" data-p="${esc(join(i.name))}" onclick="if(!event.target.closest('button'))ftpGo(this.dataset.p)"><td style="white-space:normal">${del(join(i.name), !i.link)}<button class="sm" style="float:right;margin-left:8px" data-p="${esc(join(i.name))}" onclick="location.href='/api/ftp/zip?path=' + encodeURIComponent(this.dataset.p)">ZIP</button>${folderIcon(join(i.name))}${esc(i.name)}${i.link ? ' ↪' : ''}<div class="why">${esc(i.modified)}</div></td></tr>`
+      : `<tr><td style="white-space:normal">${del(join(i.name), false)}📄 <a href="/api/ftp/get?path=${encodeURIComponent(join(i.name))}" download>${esc(i.name)}</a><div class="why">${gb(i.size)} · ${esc(i.modified)}</div></td></tr>`
+    ).join('') : '<tr><td class="mut">Empty folder.</td></tr>');
+  } catch (e) { msg.innerHTML = `<span class="bad">${esc(String(e))}</span>`; }
+}
+async function ftpDelete(path, dir) {
+  const name = path.split('/').pop();
+  const sending = data && data.transfer && data.transfer.dest && ('/' + data.transfer.dest.split('/').slice(1).join('/') + '/').startsWith(path + '/');
+  if (!confirm((dir ? `Delete the folder ${name} and everything in it on the PS5?` : `Delete ${name} on the PS5?`) +
+      `\n\n${path}\n\n` + (sending ? 'It is being sent right now: that transfer is stopped first.\n\n' : '') + "This can't be undone.")) return;
+  const msg = document.getElementById('ftp-msg');
+  msg.textContent = 'Deleting ' + name + '…';
+  const r = await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action: 'ftp_delete', path})});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) alert('Not deleted: ' + (j.error || r.status));
+  else alert(`Deleted ${name}` + (dir ? ` (${j.files} files, ${j.folders} folders).` : '.'));
+  ftpGo(ftpPath);
+}
+// Where a game's LZ4 folder is (NAS) and where it is or will be on the PS5.
+function ps5Place(g) {
+  if (!g.output) return null;
+  const name = g.output.split('/').pop(), t = (data.transfers || {})[name];
+  if (t && t.dest) return {path: t.dest.replace(/^[^/]*/, ''), sent: t.state === 'done'};
+  const dest = (data.settings || {}).ps5_dest;
+  return dest ? {path: dest.replace(/\/$/, '') + '/' + name, sent: false} : null;
+}
+function placeHtml(g) {
+  if (!g.output) return '';
+  const pp = ps5Place(g);
+  const t = (data.transfers || {})[g.output.split('/').pop()];
+  const drive = pp && pp.sent ? (pp.path.match(/^\/mnt\/([^/]+)/) || [, 'internal'])[1] : '';
+  const bigger = g.kind !== 'folder' && g.source_size && g.output_bytes && g.output_bytes > g.source_size
+    ? `<span class="chip bad" title="The ${esc(KIND_EN[g.kind] || g.kind)} is ${gb(g.source_size)}; the LZ4 copy is ${gb(g.output_bytes)}">LZ4 copy ${gb(g.output_bytes - g.source_size)} larger than the image</span>` : '';
+  return `<div class="chips"><span class="chip" title="${esc(g.output)}">🗄 On NAS</span>${bigger}` +
+    (pp && pp.sent ? `<span class="chip ok" title="${esc(pp.path)}">🎮 On PS5 · ${esc(drive)}${t && t.finished ? ' · ' + esc(t.finished.slice(5, 16)) : ''}</span>` : '') + '</div>';
+}
+// Results of Check APR-EMU on PS5, by path: shown under the buttons and kept
+// when the page refreshes the game sheet.
+const aprResults = {};
+function aprShown(g) {
+  const tid = (g.title_id || '').toUpperCase(), on = g.output ? '/' + g.output.split('/').pop() : null;
+  const paths = Object.keys(aprResults).filter(p => (tid && p.toUpperCase().includes(tid)) || (on && p.endsWith(on)));
+  return paths.map(p => aprResults[p]).join('');
+}
+async function aprCheck(path, el) {
+  const inSheet = !!el && el.id === 'apr-ps5';
+  el = el || document.getElementById('ftp-msg');
+  const show = html => {
+    if (!inSheet) { el.innerHTML = html; return; }
+    aprResults[path] = `<div>${html}</div>`;
+    const cur = document.getElementById('apr-ps5');
+    if (!cur) return;
+    cur.innerHTML = aprShown((data.games || []).find(x => x.id === openId) || {}) || aprResults[path];
+    cur.scrollIntoView({block: 'nearest', behavior: 'smooth'});
+  };
+  show('Checking APR-EMU on the PS5…');
+  try {
+    const r = await fetch('/api/ftp/apr?path=' + encodeURIComponent(path), {cache: 'no-store'});
+    const j = await r.json();
+    show(!r.ok ? `<span class="bad">Could not check: ${esc(j.error || r.status)}</span>`
+      : j.ok ? `<span class="good">APR-EMU on the PS5: ${esc(j.build)} ✓</span><br><span class="mut">${esc(j.path)}</span>`
+      : `<span class="bad">APR-EMU on the PS5: ${esc(j.build)}</span>${j.path ? '<br><span class="mut">' + esc(j.path) + '</span>' : ''}<br>Send the game again to replace it.`);
+  } catch (e) { show(`<span class="bad">${esc(String(e))}</span>`); }
+}
+// Game folders (two levels down or more) get their icon0.png; others a folder sign.
+function folderIcon(p) {
+  return p.split('/').length > 3
+    ? `<img class="ico" alt="" loading="lazy" src="/api/ftp/icon?path=${encodeURIComponent(p)}" onerror="this.outerHTML='<span class=&quot;ico fi&quot;>📁</span>'">`
+    : '<span class="ico fi">📁</span>';
+}
+let ftpItems = [];
+const ftpWritable = p => /^\/(data|mnt\/(usb|ext)\d+)\/.+/.test(p);
+async function ftpUpload(files) {
+  files = [...files];
+  if (!files.length) return;
+  const msg = document.getElementById('ftp-msg'), base = ftpPath;
+  const rel = f => f.webkitRelativePath || f.name;
+  const target = f => (base === '/' ? '' : base) + '/' + rel(f);
+  if (!ftpWritable(target(files[0]))) { alert('Uploads go inside /data, /mnt/usbN or /mnt/extN. Open a folder there first.'); return; }
+  const tops = new Set(files.map(f => rel(f).split('/')[0]));
+  const clash = ftpItems.filter(i => tops.has(i.name)).map(i => i.name);
+  if (clash.length && !confirm(`Already in this folder: ${clash.join(', ')}\n\nReplace files with the same name?`)) return;
+  const total = files.reduce((n, f) => n + f.size, 0);
+  let done = 0, failed = [];
+  for (const [k, f] of files.entries()) {
+    try {
+      await new Promise((ok, bad) => {
+        const x = new XMLHttpRequest();
+        x.open('POST', '/api/ftp/put?path=' + encodeURIComponent(target(f)));
+        x.upload.onprogress = e => {
+          msg.textContent = `Uploading ${k + 1} of ${files.length}: ${rel(f)} · ${gb(done + e.loaded)} / ${gb(total)} (${total ? Math.round(100 * (done + e.loaded) / total) : 100} %)`;
+        };
+        x.onload = () => x.status === 200 ? ok() : bad(new Error((JSON.parse(x.responseText || '{}').error) || x.status));
+        x.onerror = () => bad(new Error('connection lost'));
+        x.send(f);
+      });
+    } catch (e) { failed.push(`${rel(f)}: ${e.message}`); }
+    done += f.size;
+  }
+  alert(failed.length ? `Uploaded ${files.length - failed.length} of ${files.length}.\n\nFailed:\n${failed.slice(0, 10).join('\n')}`
+                      : `Uploaded ${files.length} file${files.length === 1 ? '' : 's'} (${gb(total)}) to ${base}.`);
+  ftpGo(base);
+}
+async function ftpMkdir() {
+  const name = (prompt('New folder name in ' + ftpPath) || '').trim();
+  if (!name) return;
+  if (/[\/]/.test(name) || name === '.' || name === '..') { alert('A folder name, without /'); return; }
+  const path = (ftpPath === '/' ? '' : ftpPath) + '/' + name;
+  const r = await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action: 'ftp_mkdir', path})});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) alert('Not made: ' + (j.error || r.status));
+  ftpGo(ftpPath);
+}
+async function loadDrives() {
+  const el = document.getElementById('drives');
+  el.textContent = 'Asking the PS5…';
+  try {
+    const r = await fetch('/api/ps5/drives', {cache: 'no-store'}), j = await r.json();
+    if (!r.ok) { el.innerHTML = `<span class="bad">${esc(j.error || r.status)}</span> <button class="sm" onclick="loadDrives()">Try again</button>`; return; }
+    el.innerHTML = j.drives.map((d, i) => {
+      const live = d.live_total > 0, cap = live ? d.live_total : d.capacity, used = live ? d.live_total - d.live_free : d.used;
+      const pct = cap && used != null ? Math.min(100, 100 * used / cap) : null;
+      const usage = used == null ? '<span class="mut">not measured yet</span>'
+        : cap ? `<b>${gbd(Math.max(0, cap - used))} free</b> of ${gbd(cap)} · ${gbd(used)} used (${pct.toFixed(0)} %)${live ? ` <span class="good">· live from the ${esc(d.live_from)}</span>` : ''}`
+        : `<b>${gbd(used)} used</b> · <a href="#" data-p="${esc(d.path)}" onclick="driveSize(this.dataset.p);return false">enter the drive size</a> to see what is free`;
+      return `<div class="drive">
+        <div class="dhead"><b>${esc(d.label)}</b> <span class="mut">${esc(d.path)}</span><span class="sp"></span>
+          <button class="sm" data-p="${esc(d.path)}" data-i="${i}" onclick="measure(this.dataset.p, document.getElementById('du-' + this.dataset.i), true)">Measure</button>
+          ${live ? '' : `<button class="sm" data-p="${esc(d.path)}" onclick="driveSize(this.dataset.p)">${cap ? 'Size: ' + gbd(cap) : 'Set size'}</button>`}
+          <button class="sm" data-p="${esc(d.path)}" onclick="tab('ftp');ftpGo(this.dataset.p)">Open</button></div>
+        ${pct != null ? `<div class="bar dbar${pct > 90 ? ' full' : ''}"><i style="width:${pct}%"></i></div>` : ''}
+        <div class="why" id="du-${i}">${usage}</div>
+        <div class="why">${d.game_folders != null ? `${d.game_folders} game folder${d.game_folders === 1 ? '' : 's'} in homebrew` : ''}${d.games ? ` · ${d.games} sent by this page (${gb(d.game_bytes)})` : ''}${d.measured ? ` · measured ${esc(d.measured.slice(5, 16))}` : ''}</div>
+      </div>`;
+    }).join('') || '<span class="mut">No drives answered.</span>';
+  } catch (e) { el.innerHTML = `<span class="bad">${esc(String(e))}</span>`; }
+}
+// Drive sizes as the PS5 and drive makers write them (1 TB = 1000 GB).
+function gbd(n) { return n >= 1e12 ? +(n / 1e12).toFixed(2) + ' TB' : n >= 1e11 ? Math.round(n / 1e9) + ' GB' : +(n / 1e9).toFixed(1) + ' GB'; }
+async function driveSize(path) {
+  const v = prompt(`Size of ${path} (as shown in PS5 Settings › Storage, or on the drive), e.g. 1 TB or 931 GB.\nLeave empty to clear.`);
+  if (v === null) return;
+  const r = await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action: 'drive_size', path, size: v})});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { alert(j.error || r.status); return; }
+  loadDrives();
+}
+async function measure(path, el, drive) {
+  el.textContent = 'Measuring ' + path + '… (a full drive takes a minute or two)';
+  try {
+    const r = await fetch('/api/ftp/du?path=' + encodeURIComponent(path), {cache: 'no-store'}), j = await r.json();
+    if (r.ok && drive) { loadDrives(); return; }
+    el.innerHTML = r.ok ? `<b>${gb(j.bytes)}</b> used in ${esc(path)} · ${j.files.toLocaleString()} files, ${j.folders.toLocaleString()} folders`
+                        : `<span class="bad">${esc(j.error || r.status)}</span>`;
+  } catch (e) { el.innerHTML = `<span class="bad">${esc(String(e))}</span>`; }
+}
+// Bottom-right bubble: how much of all queued transfers is done, and a short list.
+function fab(d, tf, tq, pqs, nameOf) {
+  const el = document.getElementById('fab'), pop = document.getElementById('fabpop');
+  const outSize = id => ((d.games || []).find(g => g.output && g.output.split('/').pop() === id) || {}).output_bytes || 0;
+  const busy = tf || tq.length || d.job || pqs.length;
+  el.hidden = !busy;
+  if (!busy) { pop.hidden = true; return; }
+  // Transfers: bytes sent of the current game plus every queued game.
+  const total = (tf ? tf.total : 0) + tq.reduce((n, x) => n + outSize(x), 0), done = tf ? tf.bytes : 0;
+  let pct = total ? 100 * done / total : null;
+  if (pct == null && d.job && d.job.progress && d.job.progress[1]) pct = 100 * d.job.progress[0] / d.job.progress[1];
+  const p = pct == null ? 0 : Math.min(100, pct);
+  document.getElementById('fab-ring').style.background = `conic-gradient(var(--acc) ${p * 3.6}deg, var(--chip) 0)`;
+  document.getElementById('fab-pct').textContent = pct == null ? '…' : Math.floor(p) + '%';
+  const n = (tf ? 1 : 0) + tq.length + (d.job ? 1 : 0) + pqs.length;
+  document.getElementById('fab-n').textContent = n;
+  const left = tf && tf.speed && total ? dur((total - done) / tf.speed) : null;
+  const rows = [];
+  const info = document.getElementById('fab-info');
+  const je = !tf && d.job && d.job.eta;
+  info.hidden = !(tf && tf.speed) && !(je && je.rate);
+  if (tf && tf.speed) info.innerHTML = `<b>${gb(tf.speed)}/s</b><span>${left ? left + ' left' : ''}</span>`;
+  else if (je && je.rate) { const l = je.job_left != null ? je.job_left : je.step_left; info.innerHTML = `<b>${gb(je.rate)}/s</b><span>${l != null ? dur(l) + ' left' : ''}</span>`; }
+  if (tf || tq.length) rows.push(`<div class="fh">Transfers · ${gb(done)} of ${gb(total)}</div>
+    <div class="ftot"><span><b>${tf && tf.speed ? gb(tf.speed) + '/s' : '–'}</b>speed</span><span><b>${left || '–'}</b>total time left</span><span><b>${gb(Math.max(0, total - done))}</b>to send</span></div>`);
+  if (tf) rows.push(`<div class="fr"><span class="dotlive"></span><span class="fn">${esc(nameOf(tf.game))}</span><b>${tf.total ? Math.round(100 * tf.bytes / tf.total) : 0}%</b></div>
+    <div class="bar"><i style="width:${tf.total ? 100 * tf.bytes / tf.total : 0}%"></i></div>`);
+  tq.forEach((x, i) => rows.push(`<div class="fr"><span class="qn">${i + 1}</span><span class="fn">${esc(nameOf(x))}</span><span class="mut">${gb(outSize(x))}</span></div>`));
+  if (d.job || pqs.length) rows.push('<div class="fh">Packing</div>');
+  if (d.job) {
+    const pr = d.job.progress, jp = pr && pr[1] ? Math.round(100 * pr[0] / pr[1]) : null, e = d.job.eta || {};
+    if (e.rate || e.step_left != null) rows.push(`<div class="ftot"><span><b>${e.rate ? gb(e.rate) + '/s' : '–'}</b>speed</span><span><b>${e.step_left != null ? dur(e.step_left) : '–'}</b>this step</span><span><b>${e.job_left != null ? dur(e.job_left) : '–'}</b>whole game</span></div>`);
+    rows.push(`<div class="fr"><span class="dotlive"></span><span class="fn">${esc(((d.games || []).find(g => g.id === d.job.id) || {}).name || d.job.id)}</span><b>${esc(STEP_EN[d.job.step] || d.job.step || '')}${jp != null ? ' ' + jp + '%' : ''}</b></div>`);
+  }
+  pqs.forEach((x, i) => rows.push(`<div class="fr"><span class="qn">${i + 1}</span><span class="fn">${esc(((d.games || []).find(g => g.id === x) || {}).name || x)}</span></div>`));
+  rows.push(`<button class="sm" style="margin-top:10px;width:100%;justify-content:center" onclick="tab('act');document.getElementById('fabpop').hidden=true">Open Activity</button>`);
+  pop.innerHTML = rows.join('');
+}
+let pgData = null;
+async function loadPg() {
+  const el = document.getElementById('pg-list');
+  el.innerHTML = '<div class="mut">Reading the PS5…</div>';
+  try {
+    const r = await fetch('/api/ps5/games', {cache: 'no-store'}), j = await r.json();
+    if (!r.ok) { el.innerHTML = `<div class="bad">${esc(j.error || r.status)}</div>`; return; }
+    pgData = j; pgAt = Date.now(); pgJob();
+    const drives = [...new Set(j.games.map(g => g.drive))];
+    document.getElementById('pg-d').innerHTML = '<option value="">All drives</option>' + drives.map(d => `<option value="${esc(d)}">${esc(driveName(d))}</option>`).join('');
+    renderPg();
+  } catch (e) { el.innerHTML = `<div class="bad">${esc(String(e))}</div>`; }
+}
+function driveName(d) { return d === '/data' ? 'Internal SSD' : d.replace('/mnt/usb', 'USB ').replace('/mnt/ext', 'Extended '); }
+function renderPg() {
+  if (!pgData) return;
+  const q = document.getElementById('pg-q').value.trim().toLowerCase(), dv = document.getElementById('pg-d').value, sort = document.getElementById('pg-s').value;
+  const kv = document.getElementById('pg-k').value;
+  let gs = pgData.games.filter(g => (!dv || g.drive === dv) && (!kv || (kv === 'att' ? g.attention : (kv === 'ps4') === !!g.ps4)) && (!q || (g.name + ' ' + g.title_id + ' ' + g.folder).toLowerCase().includes(q)));
+  gs.sort(sort === 'size' ? (a, b) => (b.size || 0) - (a.size || 0) : sort === 'drive' ? (a, b) => a.drive.localeCompare(b.drive) || a.name.localeCompare(b.name) : (a, b) => a.name.localeCompare(b.name));
+  const total = pgData.games.reduce((n, g) => n + (g.size || 0), 0), measured = pgData.games.filter(g => g.size != null).length;
+  const n4 = pgData.games.filter(g => g.ps4).length, na = pgData.games.filter(g => g.attention).length;
+  document.getElementById('pg-sub').innerHTML = `${pgData.games.length - n4} PS5 games` + (n4 ? ` · ${n4} PS4 games installed` : '') +
+    (na ? ` · <a href="#" onclick="document.getElementById('pg-k').value='att';renderPg();return false" class="bad">⚠ ${na} need attention</a>` : '') + (measured ? ` · ${gbd(total)} measured (${measured} of ${pgData.games.length})` : '') +
+    ` · read ${esc((pgData.listed || '').slice(11, 16))}`;
+  document.getElementById('pg-list').innerHTML = gs.length ? gs.map((g, i) => `<div class="pg">
+      <img class="pg-ico${g.ps4 ? ' ps4' : ''}" alt="" loading="lazy" src="/api/ftp/icon?path=${encodeURIComponent(g.ps4 ? g.meta || g.path : g.path)}" onerror="this.outerHTML='<div class=&quot;pg-ico fi&quot;>🎮</div>'">
+      <div class="pg-body">
+        <div class="gname">${esc(niceName(g.name, g.title_id, g.path))}</div>
+        <div class="why">${esc(g.title_id || '–')}${g.version ? ' · version ' + esc(g.version) : ''}</div>
+        <div class="chips">
+          <span class="chip">${esc(driveName(g.drive))}</span>
+          ${g.ps4 ? `<span class="chip ps4">PS4 · installed</span>${g.patch != null ? `<span class="chip">patch ${gbd(g.patch)}</span>` : ''}`
+            : (g.issues || []).some(x => x.code === 'archive') ? '<span class="chip">archive</span>'
+            : g.image ? `<span class="chip">.${esc(g.image)} image</span>` : g.lz4 ? '<span class="chip ok">LZ4</span>' : '<span class="chip">not LZ4</span>'}
+          ${g.size != null ? `<span class="chip">${gbd(g.size)}</span>` : ''}
+          ${g.on_nas && g.on_nas.length ? '<span class="chip">🗄 also on NAS</span>' : ''}
+          ${g.duplicates.length ? `<span class="chip bad" title="${esc(g.duplicates.join('\n'))}">same Title ID ×${g.duplicates.length + 1}</span>` : ''}
+        </div>
+        ${(g.issues || []).map(x => `<div class="why bad">⚠ ${esc(x.text)}${x.fix ? ` <button class="sm" data-p="${esc(g.path)}" data-c="${esc(x.code)}" onclick="pgFix(this.dataset.p, this.dataset.c)">Fix</button>` : ''}</div>`).join('')}
+        ${g.duplicates && g.duplicates.length ? '<div class="why bad">⚠ ShadowMountPlus mounts only one copy per Title ID: delete or keep the others (see the chip).</div>' : ''}
+        <div class="why" id="pg-m-${i}"></div>
+        <div class="pg-acts">
+          <button class="sm" data-p="${esc(g.image ? g.path.replace(/\/[^/]*$/, '') : g.path)}" onclick="tab('ftp');ftpGo(this.dataset.p)">Open</button>
+          ${g.size == null && !g.ps4 ? `<button class="sm" data-p="${esc(g.path)}" data-i="${i}" onclick="measureGame(this.dataset.p, this.dataset.i)">Size</button>` : ''}
+          ${!g.ps4 && !g.image && !(g.issues || []).some(x => x.code === 'archive' || x.code === 'hidden') ? `<button class="sm" data-p="${esc(g.path)}" data-i="${i}" onclick="pgVerify(this.dataset.p, this.dataset.i)">Verify</button>` : ''}
+          ${!g.ps4 && !g.lz4 && /^PPSA/i.test(g.title_id || '') && !(g.issues || []).length ? `<button class="sm pri" data-p="${esc(g.path)}" data-t="${esc(g.title_id)}" data-n="${esc(g.name)}" onclick="pgCompress(this.dataset.p, this.dataset.t, this.dataset.n)">⚡ Compress on PS5</button>` : ''}
+          ${g.lz4 ? `<button class="sm" data-p="${esc(g.path)}" data-i="${i}" onclick="aprCheck(this.dataset.p, document.getElementById('pg-m-' + this.dataset.i))">APR-EMU</button>` : ''}
+          <span class="sp"></span>
+          ${g.ps4 ? `<button class="sm danger" data-t="${esc(g.title_id)}" data-n="${esc(g.name)}" onclick="pgUninstall(this.dataset.t, this.dataset.n)">🗑 Uninstall</button>` : `<button class="sm danger" data-p="${esc(g.path)}" data-n="${esc(g.name)}" onclick="deletePg(this.dataset.p, this.dataset.n)">🗑 Delete</button>`}
+        </div>
+      </div></div>`).join('') : '<div class="mut">No games found.</div>';
+}
+async function pgVerify(path, i) {
+  const el = document.getElementById('pg-m-' + i);
+  const r = await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'ps5_verify', path})});
+  const j0 = await r.json().catch(() => ({}));
+  if (!r.ok) { el.innerHTML = `<span class="bad">${esc(j0.error || r.status)}</span>`; return; }
+  for (;;) {
+    const j = await (await fetch('/api/ps5/verify?path=' + encodeURIComponent(path), {cache: 'no-store'})).json();
+    if (j.state === 'running') { el.textContent = `Verifying… ${j.done} of ${j.total} files${j.current ? ' · ' + j.current : ''}`; await new Promise(z => setTimeout(z, 1500)); continue; }
+    if (j.state === 'failed') { el.innerHTML = `<span class="bad">Verify failed: ${esc(j.error)}</span>`; return; }
+    const bad = j.missing.length + j.wrong.length;
+    const list = a => a.slice(0, 8).map(x => '<div class="mut">· ' + esc(x) + '</div>').join('') + (a.length > 8 ? `<div class="mut">… and ${a.length - 8} more</div>` : '');
+    el.innerHTML = bad ? `<span class="bad">✗ ${j.missing.length} missing, ${j.wrong.length} different</span> (of ${j.total} files)` +
+        (j.missing.length ? '<div><b>Missing:</b></div>' + list(j.missing) : '') + (j.wrong.length ? '<div><b>Different:</b></div>' + list(j.wrong) : '') +
+        '<div class="mut">Send it again from My games: files that match are skipped, the rest is sent.</div>'
+      : `<span class="good">✓ all ${j.total} files there with the right size; ${j.hashed} program files identical byte for byte${j.sampled ? `; ${j.sampled} large files spot-checked (4 MiB each)` : ''}</span>` +
+        (j.extra.length ? `<div class="mut">${j.extra.length} extra file(s) on the PS5 (e.g. ${esc(j.extra[0])})</div>` : '');
+    return;
+  }
+}
+async function pgUninstall(tid, name) {
+  if (!confirm(`Uninstall ${name} (${tid}) from the PS5?\n\nThe game and its tile go away, as with Delete on the PS5 itself. Saves stay.`)) return;
+  const r = await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'ps5_uninstall', tid})});
+  const j = await r.json().catch(() => ({}));
+  alert(r.ok ? `${name} uninstalled.` : 'Not uninstalled: ' + (j.error || r.status));
+  if (r.ok) loadPg();
+}
+function copyText(t, btn) {
+  // navigator.clipboard needs https; the page is plain http on the LAN, so fall back to a hidden textarea.
+  const done = () => { if (btn) { btn.textContent = 'Copied ✓'; setTimeout(() => btn.textContent = 'Copy', 1500); } };
+  if (navigator.clipboard && window.isSecureContext) { navigator.clipboard.writeText(t).then(done, () => {}); return; }
+  const ta = document.createElement('textarea');
+  ta.value = t; ta.setAttribute('readonly', ''); ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0';
+  document.body.appendChild(ta); ta.select(); ta.setSelectionRange(0, t.length);
+  try { document.execCommand('copy'); done(); } catch (e) {}
+  ta.remove();
+}
+// A real game name for a Title ID: the given one unless it is only the ID, else the
+// NAS library's, the PS5 list's, or the folder/image name without tags.
+const BARE_TID = /^\.?(PPSA|CUSA)\d{5}([-_ ]?app\d*)?([-_ ]?v?[\d.]+)?$/i;
+function niceName(name, tid, path) {
+  const ok = n => n && !BARE_TID.test(String(n).trim()) && String(n).trim().toUpperCase() !== String(tid || '').toUpperCase();
+  if (ok(name)) return name;
+  const T = String(tid || '').toUpperCase();
+  if (T) {
+    const nas = ((data && data.games) || []).find(x => (x.title_id || '').toUpperCase() === T && ok(x.name));
+    if (nas) return nas.name.replace(/\s*\[[^\]]*\]/g, '').trim() || nas.name;
+    const p5 = ((pgData && pgData.games) || []).find(x => (x.title_id || '').toUpperCase() === T && ok(x.name));
+    if (p5) return p5.name;
+  }
+  const last = String(path || '').split('/').filter(Boolean).pop() || '';
+  const clean = last.replace(/^\./, '').replace(/\.(exfat|ffpfsc?|pkg)$/i, '').replace(/[-_ ]?lz4$/i, '')
+    .replace(/\s*\[[^\]]*\]/g, '').replace(/_?(PPSA|CUSA)\d{5}_?/gi, ' ').replace(/[_]+/g, ' ').trim();
+  return ok(clean) ? clean : (name || tid || last);
+}
+function upUrl() {
+  let u = '';
+  try { u = localStorage.getItem('ps5upload') || ''; } catch (e) {}
+  return u || `${location.protocol}//${location.hostname}:19113/`;
+}
+function saveUp(v) { try { localStorage.setItem('ps5upload', v.trim()); } catch (e) {} loadUp(); }
+async function loadUp() {
+  const u = upUrl(), msg = document.getElementById('up-msg');
+  document.getElementById('up-url').value = u;
+  document.getElementById('up-open').href = u;
+  msg.textContent = 'checking…';
+  try {
+    await fetch(u, {mode: 'no-cors', cache: 'no-store'});
+    msg.innerHTML = '<span class="good">● running</span>';
+  } catch (e) {
+    msg.innerHTML = `<span class="bad">No ps5upload answers at ${esc(u)}.</span> Start its container, or enter its address below.`;
+  }
+}
+let savTimer = null;
+async function loadSav() {
+  let j;
+  try { j = await (await fetch('/api/saves', {cache: 'no-store'})).json(); } catch (e) { return; }
+  const job = j.job || {}, mb = b => b >= 1 << 30 ? (b / (1 << 30)).toFixed(2) + ' GB' : (b / (1 << 20)).toFixed(1) + ' MB';
+  document.getElementById('sav-job').innerHTML = job.state === 'running' ? `Backing up… ${job.titles} titles, ${job.files} files, ${mb(job.bytes)}${job.current ? ' · ' + esc(job.current) : ''}`
+    : job.state === 'failed' ? `<span class="bad">Backup failed: ${esc(job.error)}</span>` : job.state === 'done' ? `<span class="good">✓ Backed up ${job.titles} titles (${mb(job.bytes)})</span>` : '';
+  clearTimeout(savTimer);
+  if (job.state === 'running') savTimer = setTimeout(loadSav, 1500);
+  const bs = j.backups || [];
+  document.getElementById('sav-list').innerHTML = bs.length ? bs.map(b => `<details class="sav" ${b === bs[0] ? 'open' : ''}>
+      <summary><b>${esc(b.created || b.backup)}</b> · ${b.titles.length} titles · ${mb(b.bytes)}${b.incomplete ? ` <span class="bad">· incomplete: ${esc(b.incomplete)}</span>` : ''}
+        <span class="sp"></span><a class="sm" href="/api/saves/zip?b=${encodeURIComponent(b.backup)}">⬇ .zip</a>
+        <button class="sm danger" data-b="${esc(b.backup)}" onclick="savDelete(this.dataset.b)">🗑</button></summary>
+      ${b.titles.map(t => `<div class="dl-row"><span class="chip ${t.platform === 'PS4' ? 'ps4' : ''}">${esc(t.platform)}</span>
+        <span class="dl-name">${esc(t.name || t.title_id)}</span><span class="mut">${esc(t.title_id)} · user ${esc(t.user)} · ${t.files} files · ${mb(t.bytes)}</span>
+        <span class="sp"></span><button class="sm" data-b="${esc(b.backup)}" data-k="${esc(t.user + '/' + t.kind + '/' + t.title_id)}" data-n="${esc(t.name || t.title_id)}"
+          onclick="savRestore(this.dataset.b, this.dataset.k, this.dataset.n)">Restore</button></div>`).join('')}
+    </details>`).join('') : '<div class="mut" style="margin-top:10px">No backups yet.</div>';
+}
+async function savBackup() {
+  const r = await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'saves_backup'})});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) alert('Not started: ' + (j.error || r.status));
+  loadSav();
+}
+async function savRestore(backup, key, name) {
+  if (!confirm(`Restore the saves of ${name} from this backup?\n\nThey replace the saves of that game for user ${key.split('/')[0]} on the PS5. Close the game first.`)) return;
+  const r = await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'saves_restore', backup, key})});
+  const j = await r.json().catch(() => ({}));
+  alert(r.ok ? `Restored ${j.files} files.` : 'Not restored: ' + (j.error || r.status));
+}
+async function savDelete(backup) {
+  if (!confirm('Delete this backup from the NAS?')) return;
+  await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'saves_delete', backup})});
+  loadSav();
+}
+let smpData = null;
+async function loadSmp() {
+  const el = document.getElementById('smp-list');
+  el.innerHTML = '<div class="mut">Asking ShadowMountPlus…</div>';
+  try {
+    const r = await fetch('/api/smp/games', {cache: 'no-store'}), j = await r.json();
+    if (!r.ok) { el.innerHTML = `<div class="bad">${esc(j.error || r.status)}</div>`; return; }
+    smpData = j; renderSmp(); smpJob();
+  } catch (e) { el.innerHTML = `<div class="bad">${esc(String(e))}</div>`; }
+}
+function renderSmp() {
+  if (!smpData) return;
+  const q = document.getElementById('smp-q').value.trim().toLowerCase();
+  (smpData.games || []).forEach(g => { g.nice = niceName(g.title_name, g.title_id, g.path); });
+  const gs = (smpData.games || []).filter(g => !q || (g.nice + ' ' + g.title_id).toLowerCase().includes(q))
+    .sort((a, b) => (a.nice || '').localeCompare(b.nice || ''));
+  document.getElementById('smp-count').textContent = `${(smpData.games || []).length} games in ShadowMountPlus ${smpData.version || ''}.`;
+  document.getElementById('smp-list').innerHTML = gs.length ? gs.map(g => `<div class="pg">
+      <img class="pg-ico${g.platform === 'ps4' ? ' ps4' : ''}" alt="" loading="lazy" src="/api/smp/icon?tid=${encodeURIComponent(g.title_id)}" onerror="this.outerHTML='<div class=&quot;pg-ico fi&quot;>🎮</div>'">
+      <div class="pg-body">
+        <div class="gname">${esc(g.nice)}</div>
+        <div class="why">${esc(g.title_id)}${g.version ? ' · version ' + esc(g.version) : ''}</div>
+        <div class="chips">
+          <span class="chip ${g.platform === 'ps4' ? 'ps4' : ''}">${esc((g.platform || '').toUpperCase())}</span>
+          <span class="chip">${esc(g.source_type === 'image' ? (g.image_type || 'image') + ' image' : g.source_type || '')}</span>
+          ${g.installed ? '<span class="chip ok">on home screen</span>' : '<span class="chip">not on home screen</span>'}
+          ${g.mounted ? '<span class="chip ok">mounted</span>' : ''}
+          ${g.source_available === false ? '<span class="chip bad">source missing</span>' : ''}
+        </div>
+        <div class="why" title="${esc(g.path || '')}">${esc(g.path || '')}</div>
+        <div class="pg-acts">
+          ${g.mounted ? `<button class="sm" data-t="${esc(g.title_id)}" onclick="smpAct('smp_unmount', this.dataset.t, '', 'Unmount it now?')">Unmount</button>` : ''}
+          ${g.source_available !== false && g.path && !g.installed_pkg ? `<button class="sm" data-t="${esc(g.title_id)}" data-p="${esc(g.path)}" data-n="${esc(g.nice)}" onclick="smpMovePick(this, this.dataset.t, this.dataset.p, this.dataset.n)">Move…</button>` : ''}
+          <span class="sp"></span>
+          ${g.installed && g.can_uninstall !== false ? `<button class="sm" data-t="${esc(g.title_id)}" data-n="${esc(g.nice)}" onclick="smpAct('smp_uninstall', this.dataset.t, '', 'Take ' + this.dataset.n + ' off the home screen?\n\nIts files stay; the next ShadowMountPlus scan puts it back (use Hide to keep it off).')">Remove from home screen</button>` : ''}
+          ${g.installed && g.can_uninstall !== false && g.path && !g.path.split('/').pop().startsWith('.') ? `<button class="sm" data-t="${esc(g.title_id)}" data-p="${esc(g.path)}" data-n="${esc(g.nice)}" onclick="smpAct('smp_hide', this.dataset.t, this.dataset.p, 'Hide ' + this.dataset.n + '?\n\nThe tile goes off the home screen and its source is renamed with a leading dot, so scans skip it. Nothing is deleted.')">Hide</button>` : ''}
+          ${g.path && !g.installed_pkg && g.source_available !== false ? `<button class="sm danger" data-t="${esc(g.title_id)}" data-p="${esc(g.path)}" data-n="${esc(g.nice)}" onclick="smpAct('smp_delete', this.dataset.t, this.dataset.p, 'Delete ' + this.dataset.n + ' from the PS5?\n\n' + this.dataset.p + '\n\nIt is unmounted, taken off the home screen and its files are deleted. A copy on the NAS stays. This can\'t be undone.')">🗑 Delete</button>` : ''}
+        </div>
+      </div></div>`).join('') : '<div class="mut">No games.</div>';
+}
+async function smpLog(action) {
+  const el = document.getElementById('smp-log');
+  el.hidden = false; el.innerHTML = '<div class="mut">Reading the log…</div>';
+  const r = await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action})});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { el.innerHTML = `<div class="bad">${esc(j.error || r.status)}</div>`; return; }
+  // The log text is the longest string (or list of strings) in the answer.
+  let text = '';
+  for (const v of Object.values(j)) {
+    const t = Array.isArray(v) ? v.map(x => typeof x === 'string' ? x : JSON.stringify(x)).join('\n') : typeof v === 'string' ? v : '';
+    if (t.length > text.length) text = t;
+  }
+  const lines = (text || JSON.stringify(j, null, 2)).split('\n');
+  const bad = /error|fail|denied|panic|abort|cannot|can't|unable|invalid|timeout/i;
+  const nbad = lines.filter(l => bad.test(l)).length;
+  el.innerHTML = `<div class="dhead" style="margin-top:10px"><b>${action === 'smp_log' ? 'ShadowMount debug log' : 'Kernel log'}</b>
+      <span class="mut">${lines.length} lines${nbad ? ` · <span class="bad">${nbad} with errors</span>` : ''}</span><span class="sp"></span>
+      <button class="sm" onclick="document.getElementById('smp-log').hidden=true">Close</button></div>
+    <pre class="log" style="max-height:340px;overflow:auto;white-space:pre-wrap">${lines.slice(-400).map(l => bad.test(l) ? `<span class="bad">${esc(l)}</span>` : esc(l)).join('\n')}</pre>`;
+}
+async function smpMovePick(btn, tid, path, name) {
+  const r = await fetch('/api/smp/storage', {cache: 'no-store'}), j = await r.json().catch(() => ({}));
+  if (!r.ok) { alert('Could not read the drives: ' + (j.error || r.status)); return; }
+  const here = path.split('/').slice(0, 3).join('/');
+  const dests = (j.destinations || []).filter(x => !x.read_only && !path.startsWith(x.path + '/') && !(x.path + '/').startsWith(here + '/'));
+  if (!dests.length) { alert('No other drive ShadowMountPlus can move it to (it moves only into its scan folders).'); return; }
+  const box = document.createElement('div');
+  box.className = 'why';
+  box.innerHTML = '<b>Move to:</b> ' + dests.map((x, i) => `<button class="sm" data-i="${i}">${esc(x.path)} · ${(x.available_bytes / 2 ** 30).toFixed(0)} GB free</button>`).join(' ') +
+    ' <button class="sm ghost" data-x="1">Cancel</button>';
+  btn.closest('.pg-body').appendChild(box);
+  box.onclick = async ev => {
+    const b = ev.target.closest('button'); if (!b) return;
+    box.remove(); if (b.dataset.x) return;
+    const d = dests[+b.dataset.i];
+    if (!confirm(`Move ${name} to ${d.path}?\n\nShadowMountPlus copies it, checks it and removes the old copy (${path}). Close the game first. It can be cancelled until the copy is done.`)) return;
+    const r2 = await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'smp_move', tid, dest: d.path})});
+    const j2 = await r2.json().catch(() => ({}));
+    if (!r2.ok) { alert('Not moved: ' + (j2.error || r2.status)); return; }
+    smpJob();
+  };
+}
+let smpJobTimer = null;
+async function smpJob() {
+  clearTimeout(smpJobTimer);
+  const el = document.getElementById('smp-job');
+  let j;
+  try { const r = await fetch('/api/smp/job', {cache: 'no-store'}); j = await r.json(); if (!r.ok) { el.innerHTML = ''; return; } } catch (e) { return; }
+  if (!j.operation || (!j.active && !['completed', 'failed', 'cancelled'].includes(j.state))) { el.innerHTML = ''; return; }
+  const gbs = b => (b / 2 ** 30).toFixed(1) + ' GB';
+  el.innerHTML = `<div class="dl"><div class="dl-top"><b>${esc(j.operation)} ${esc(niceName('', j.title_id, j.source))}</b><span class="mut">${esc(j.source)} → ${esc(j.destination)}</span><span class="sp"></span>
+      <span class="chip ${j.state === 'completed' ? 'ok' : j.state === 'failed' ? 'bad' : ''}">${esc(j.state)}</span>
+      ${j.active && j.cancellable ? `<button class="sm danger" onclick="smpAct('smp_cancel', '', '', 'Cancel the move?', {job_id: ${j.job_id}})">Cancel</button>` : ''}</div>
+    ${j.active ? `<div class="bar"><i style="width:${(j.progress_percent || 0).toFixed(1)}%"></i></div>
+      <div class="why">${gbs(j.processed_bytes)} of ${gbs(j.total_bytes)} · ${(j.progress_percent || 0).toFixed(0)} %${j.speed_bytes_per_second ? ' · ' + (j.speed_bytes_per_second / 2 ** 20).toFixed(0) + ' MB/s' : ''}</div>` : ''}
+    ${j.result_error ? `<div class="why bad">${esc(j.result_error)}</div>` : ''}</div>`;
+  if (j.active) smpJobTimer = setTimeout(smpJob, 2000);
+  else if (j.state === 'completed') setTimeout(loadSmp, 1000);
+}
+async function smpAct(action, tid, path, question, extra) {
+  if (question && !confirm(question)) return;
+  const r = await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action, tid, path, ...(extra || {})})});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { alert('Failed: ' + (j.error || r.status)); return; }
+  if (action === 'smp_cancel') { smpJob(); return; }
+  if (j.scan_deferred) alert('Done. ShadowMountPlus will scan when it can (' + (j.scan_deferred_reason || 'later') + ').');
+  setTimeout(loadSmp, 1500);
+}
+async function pgCompress(path, tid, name) {
+  if (!confirm(`LZ4-pack ${name} on the PS5?\n\nThe PS5's LZ4 Compression engine does it (it is started, or installed and started, if needed). ` +
+      `The original stays; the LZ4 copy is written next to it as a "-lz4" folder, so the drive needs room for it. Keep the game closed until it is done.`)) return;
+  const r = await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'ps5_lz4', path, tid})});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { alert('Not started: ' + (j.error || r.status)); return; }
+  pgJob();
+}
+let pgJobTimer = null;
+async function pgJob() {
+  clearTimeout(pgJobTimer);
+  const el = document.getElementById('pg-job');
+  let j;
+  try { j = await (await fetch('/api/ps5/lz4job', {cache: 'no-store'})).json(); } catch (e) { return; }
+  if (!j || j.off || (!j.busy && !j.error)) { el.innerHTML = ''; return; }
+  const pct = j.totalBytes ? Math.min(100, 100 * (j.copiedBytes || 0) / j.totalBytes) : 0;
+  el.innerHTML = `<div class="dl"><div class="dl-top"><b>⚡ On the PS5: ${esc(j.verb || 'LZ4')} ${esc(j.current || '')}</b><span class="sp"></span>
+      <span class="chip">${esc(j.phase || (j.busy ? 'working' : 'done'))}</span>
+      ${j.busy ? `<button class="sm danger" onclick="if(confirm('Cancel the job on the PS5?'))fetch('/api/action',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'ps5_lz4_cancel'})}).then(pgJob)">Cancel</button>` : ''}</div>
+    ${j.busy ? `<div class="bar"><i style="width:${pct.toFixed(1)}%"></i></div><div class="why">${gbd(j.copiedBytes || 0)} of ${gbd(j.totalBytes || 0)} · ${pct.toFixed(0)} %</div>` : ''}
+    ${j.error ? `<div class="why bad">${esc(j.error)}</div>` : ''}</div>`;
+  if (j.busy) pgJobTimer = setTimeout(pgJob, 3000);
+}
+async function pgFix(path, code) {
+  const what = {hidden: 'Rename it without the leading dot?', wrapper: 'Move the game folder inside up one level (and remove the empty outer folder)?'}[code] || 'Fix it?';
+  if (!confirm(what + '\n\n' + path)) return;
+  const r = await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'ps5_fix', path, code})});
+  const j = await r.json().catch(() => ({}));
+  alert(r.ok ? 'Done: ' + (j.renamed || j.moved) : 'Failed: ' + (j.error || r.status));
+  loadPg();
+}
+async function measureGame(path, i) {
+  const el = document.getElementById('pg-m-' + i);
+  el.textContent = 'Measuring…';
+  const r = await fetch('/api/ftp/du?path=' + encodeURIComponent(path), {cache: 'no-store'}), j = await r.json().catch(() => ({}));
+  if (!r.ok) { el.innerHTML = `<span class="bad">${esc(j.error || r.status)}</span>`; return; }
+  const g = pgData.games.find(x => x.path === path); if (g) g.size = j.bytes;
+  renderPg();
+}
+async function measureAll() {
+  for (const g of (pgData || {games: []}).games.filter(x => x.size == null)) {
+    document.getElementById('pg-sub').textContent = 'Measuring ' + g.name + '…';
+    const r = await fetch('/api/ftp/du?path=' + encodeURIComponent(g.path), {cache: 'no-store'}), j = await r.json().catch(() => ({}));
+    if (r.ok) g.size = j.bytes;
+  }
+  renderPg();
+}
+async function deletePg(path, name) {
+  const sending = data && data.transfer && data.transfer.dest && ('/' + data.transfer.dest.split('/').slice(1).join('/') + '/').startsWith(path + '/');
+  if (!confirm(`Delete ${name} from the PS5?\n\n${path}\n\n` + (sending ? 'It is being sent right now: that transfer is stopped first.\n\n' : '') +
+      "Everything in the folder is deleted. This can't be undone" + (pgData.games.find(g => g.path === path && g.on_nas && g.on_nas.length) ? ' (the LZ4 copy on the NAS stays; you can send it again).' : '.'))) return;
+  const card = [...document.querySelectorAll('.pg')].find(c => c.querySelector(`[data-p="${CSS.escape(path)}"]`));
+  if (card) card.classList.add('busy-del');
+  const r = await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action: 'ftp_delete', path})});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { alert('Not deleted: ' + (j.error || r.status)); if (card) card.classList.remove('busy-del'); return; }
+  if (j.home_screen && j.home_screen !== 'removed') alert(`Deleted. Home screen tile ${j.home_screen}.`);
+  pgData.games = pgData.games.filter(g => g.path !== path);
+  pgData.games.forEach(g => { g.duplicates = g.duplicates.filter(p => p !== path); });
+  renderPg(); setTimeout(load, 500);
+}
+async function deleteFromPs5(path, name) {
+  const sending = data && data.transfer && data.transfer.dest && ('/' + data.transfer.dest.split('/').slice(1).join('/') + '/').startsWith(path + '/');
+  if (!confirm(`Delete ${name} from the PS5?\n\n${path}\n\n` + (sending ? 'It is being sent right now: that transfer is stopped first.\n\n' : '') +
+      "The LZ4 copy on the NAS stays, so you can send it again.")) return;
+  const r = await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'ftp_delete', path})});
+  const j = await r.json().catch(() => ({}));
+  alert(r.ok ? `Deleted ${name} from the PS5 (${j.files} files).` + (j.home_screen ? ` Home screen tile: ${j.home_screen}.` : '') : 'Not deleted: ' + (j.error || r.status));
+  if (r.ok) { pgData = null; closeGame(); setTimeout(load, 500); }
+}
+const ORIG_OFF = "Deleting original games is turned off: the library is mounted read-only so nothing can harm the originals.\n\n" +
+  "To allow it, reinstall with DELETE_ORIGINALS=yes (see the guide, \"Deleting originals\"). After that this button deletes the original from the NAS.";
+function deleteOriginal(gid) {
+  const g = (data.games || []).find(x => x.id === gid);
+  if (!g) return;
+  const lz4 = g.verdict === 'LZ4' && g.output;
+  if (lz4 && g.ps5 !== 'works' && g.ps5 !== 'issues')
+    return alert(`Test the LZ4 copy of ${g.name} on the PS5 first.\n\nWhen it starts and plays, set its PS5 result to "works"; then the original can be deleted.`);
+  closeGame();
+  act('delete_original', `Delete the ORIGINAL of ${g.name} from the NAS?\n\n${g.source_path}\n${gb(g.source_size || g.source_bytes)}\n\n` +
+    (lz4 ? 'The LZ4 copy stays and still works on the PS5.' : 'There is no LZ4 copy: after this the game is gone from the NAS.') +
+    "\n\nThis can't be undone.", {game: gid});
+}
+function deleteLz4(id, name) {
+  closeGame();
+  act('remove', `Delete the LZ4 copy of ${name} on the NAS?\n\nIt frees its space and the game shows as "can be LZ4" again. The original game is never touched, and a copy on the PS5 stays.`, {game: id});
+}
+let pgAt = 0;
+async function ps5Copies(tid) {
+  if (!tid) return [];
+  if (!pgData || Date.now() - pgAt > 60000) {
+    try {
+      const r = await fetch('/api/ps5/games', {cache: 'no-store'});
+      if (!r.ok) return null;
+      pgData = await r.json(); pgAt = Date.now();
+    } catch (e) { return null; }
+  }
+  return pgData.games.filter(c => (c.title_id || '').toUpperCase() === tid.toUpperCase());
+}
+let comm = null;
+function tab(t) {
+  for (const k of ['mine', 'act', 'pg', 'smp', 'sav', 'up', 'ps5', 'comm', 'ftp']) {
+    document.getElementById('p-' + k).hidden = t !== k;
+    document.getElementById('t-' + k).classList.toggle('on', t === k);
+  }
+  try { localStorage.setItem('tab', t); } catch (e) {}
+  if (t === 'comm') loadComm();
+  if (t === 'smp') loadSmp();
+  if (t === 'sav') loadSav();
+  if (t === 'up') loadUp();
+  if (t === 'act') setTimeout(loadPkgAct, 0);
+  if (t === 'pg' && !pgData) loadPg();
+  if (t === 'ps5') rcvCheck();
+  if (t === 'ps5' && !window._drives) { window._drives = 1; loadDrives(); }
+  if (t === 'ftp' && !ftpLoaded) ftpGo(ftpPath);
+}
+function ago(iso) {
+  const s = Math.max(0, (Date.now() - Date.parse(iso)) / 1000);
+  return s < 90 ? 'just now' : s < 5400 ? Math.round(s / 60) + ' min ago' : s < 129600 ? Math.round(s / 3600) + ' h ago' : iso.slice(0, 10);
+}
+async function loadComm(refresh) {
+  try {
+    if (refresh) document.getElementById('c-sub').textContent = 'Fetching the reports from GitHub…';
+    comm = await (await fetch('/api/community' + (refresh ? '?refresh=1' : ''), {cache: 'no-store'})).json();
+    renderComm();
+  } catch (e) { document.getElementById('c-sub').textContent = 'Could not read the reports: ' + e; }
+}
+const ST_EN = {works: 'works', issues: 'with issues', noStart: "won't start", crash: 'crashes'};
+function renderComm() {
+  if (!comm) return;
+  const mine = new Set((data ? data.games : []).map(g => (g.title_id || '').toUpperCase()));
+  const q = document.getElementById('c-q').value.trim().toLowerCase();
+  const f = document.getElementById('c-f').value, sort = document.getElementById('c-s').value;
+  let rows = Object.entries(comm.games || {}).map(([tid, g]) => ({tid, ...g}));
+  const total = rows.reduce((n, r) => n + (r.reports || 0), 0);
+  document.getElementById('c-sub').innerHTML =
+    `${rows.length} games, ${total} reports from <a href="https://github.com/${esc(comm.repo)}/issues?q=label%3Acompat" target="_blank" rel="noopener">${esc(comm.repo)}</a>` +
+    ` · ${{live: 'live from the GitHub reports', repo: "from the original project's list", image: 'from this image'}[comm.source] || ''}` +
+    (comm.updated ? `, updated ${esc(ago(comm.updated))}` : '') +
+    ` · <button class="sm" onclick="loadComm(true)">Refresh now</button>`;
+  if (q) rows = rows.filter(r => (r.name || '').toLowerCase().includes(q) || r.tid.toLowerCase().includes(q));
+  if (f === 'works') rows = rows.filter(r => r.works);
+  if (f === 'problems') rows = rows.filter(r => r.noStart || r.crash);
+  if (f === 'mine') rows = rows.filter(r => mine.has(r.tid));
+  const date = r => (r.lastReport || {}).date || '';
+  rows.sort(sort === 'name' ? (a, b) => (a.name || '').localeCompare(b.name || '') :
+            sort === 'date' ? (a, b) => date(b).localeCompare(date(a)) :
+            (a, b) => (b.reports || 0) - (a.reports || 0) || (a.name || '').localeCompare(b.name || ''));
+  document.getElementById('comm').innerHTML =
+    '<tr><th>Game</th><th>Result</th><th>Latest report</th><th>Packed from</th><th>Firmware</th><th>Version</th></tr>' +
+    (rows.length ? rows.map(r => {
+      const l = r.lastReport || {};
+      const link = l.issue ? `https://github.com/${comm.repo}/issues/${l.issue}` : '';
+      return `<tr><td>${esc(r.name || r.tid)}${mine.has(r.tid) ? '<span class="mine">IN YOUR LIBRARY</span>' : ''}<div class="why">${esc(r.tid)}</div></td>
+        <td>${community(r)}</td>
+        <td>${l.status ? `<span class="${l.status === 'works' ? 'good' : (l.status === 'noStart' || l.status === 'crash') ? 'bad' : ''}">${esc(ST_EN[l.status] || l.status)}</span>` : '–'}
+          <div class="why">${esc((l.date || '').slice(0, 10))}${link ? ` · <a href="${esc(link)}" target="_blank" rel="noopener">#${esc(l.issue)}</a>` : ''}</div></td>
+        <td>${esc(l.source || '–')}${l.level ? `<div class="why">level ${esc(l.level)}</div>` : ''}</td>
+        <td>${esc(l.firmware || '–')}</td><td>${esc(l.appVersion || '–')}</td></tr>`;
+    }).join('') : '<tr><td colspan="6" class="mut">No reports match.</td></tr>');
+}
+
+async function load() {
+  try {
+    const r = await fetch('/api/dashboard', {cache: 'no-store'});
+    const d = await r.json();
+    const err = document.getElementById('error');
+    if (d.error) { err.hidden = false; err.textContent = 'Error: ' + d.error; return; }
+    err.hidden = true;
+    data = d;
+    // Re-rendering while a menu is open (the PS5 result) closes it on phones and
+    // lets the tap land on the row, which opens the game instead.
+    const a = document.activeElement;
+    if (!(a && a.tagName === 'SELECT')) render();
+    if (!window._hashOpened && location.hash.startsWith('#game=')) { window._hashOpened = 1; openGame(decodeURIComponent(location.hash.slice(6))); }
+  } catch (e) {
+    const err = document.getElementById('error');
+    err.hidden = false; err.textContent = 'Cannot reach ps5-lz4-ui: ' + e;
+  }
+}
+try { document.getElementById('fw').value = localStorage.getItem('fw') || ''; } catch (e) {}
+// What the typed account ID is read as, before pairing.
+function accHint() {
+  const t = document.getElementById('p-acc').value.trim(), el = document.getElementById('acc-hint');
+  let n = null;
+  try {
+    if (/^[A-Za-z0-9+/]{11}=$/.test(t)) {
+      const b = atob(t); n = 0n;
+      for (let i = 7; i >= 0; i--) n = (n << 8n) | BigInt(b.charCodeAt(i));
+      el.innerHTML = `<span class="good">base64 like Chiaki ✓</span> account ${n}`;
+      return;
+    }
+    if (/^\d{1,20}$/.test(t) || /^0x[0-9a-f]{1,16}$/i.test(t)) {
+      n = BigInt(t); const b = new Uint8Array(8);
+      for (let i = 0; i < 8; i++) b[i] = Number((n >> BigInt(8 * i)) & 0xffn);
+      el.innerHTML = `<span class="good">number ✓</span> as Chiaki base64: <code>${btoa(String.fromCharCode(...b))}</code>`;
+      return;
+    }
+  } catch (e) {}
+  el.innerHTML = t ? '<span class="bad">not an account ID: use the 12-character base64 form ending in =</span>' : '';
+}
+async function pair() {
+  const acc = document.getElementById('p-acc').value.trim(), pin = document.getElementById('p-pin').value.trim();
+  if (!acc || !/^\d{8}$/.test(pin)) { alert('Enter the account ID and the PIN (8 digits) shown on the PS5.'); return; }
+  const btn = event.target; btn.disabled = true; btn.textContent = 'Pairing…';
+  try {
+    const r = await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({action: 'pair', pin, account_id: acc,
+        ps5_ftp: document.getElementById('s-ftp').value.trim(), ps5_dest: document.getElementById('s-dest').value.trim()})});
+    const j = await r.json().catch(() => ({}));
+    alert(r.ok ? `Paired with ${j.nickname || 'the PS5'}. It can now be woken from rest mode.` : 'Pairing failed: ' + (j.error || r.status));
+    if (r.ok) { document.getElementById('p-pin').value = ''; settingsFilled = false; load(); }
+  } finally { btn.disabled = false; btn.textContent = 'Pair'; }
+}
+async function engCheck() {
+  const st = document.getElementById('eng-st'), info = document.getElementById('eng-info');
+  st.className = 'pill p-no'; st.textContent = 'Engine: checking…';
+  try {
+    const j = await (await fetch('/api/engine', {cache: 'no-store'})).json();
+    const m = {connected: ['p-LZ4', 'Engine: connected ✓'], original: ['p-run', 'Engine: running, original build'],
+      off: ['p-no', 'Engine: not running'], 'no-address': ['p-no', 'Engine: set the PS5 address'],
+      unknown: ['p-no', 'Engine: ?']}[j.state] || ['p-no', 'Engine: ?'];
+    st.className = 'pill ' + m[0]; st.textContent = m[1];
+    const why = {
+      connected: 'Connected: transfers keep the PS5 awake through the engine.',
+      original: 'The engine runs but is the original build, so it can\'t keep the PS5 awake. Press Install ELF on PS5, then Start it now: the new engine takes over from this one.',
+      off: 'Nothing answers on port 5920. Start LZ4 Compression from the Payload Manager on the PS5, or press Start it now.',
+      'no-address': 'Save the PS5 address below first.'}[j.state] || '';
+    engInfo = j; engInst(j);
+    document.getElementById('eng-restore').hidden = !(j.installed && j.installed.orig);
+    document.getElementById('eng-auto').checked = !!j.auto;
+    const rs = j.rest || {};
+    document.getElementById('rest-auto').checked = rs.on !== false;
+    document.getElementById('rest-info').innerHTML = rs.error ? `<span class="bad">Rest mode: ${esc(rs.error)}</span>`
+      : rs.woke_at ? 'This page woke the PS5: it goes back to rest mode a few minutes after the last game is sent.'
+      : rs.last ? `Last put in rest mode: ${esc(rs.last)}` : '';
+    info.innerHTML = esc(why) + (j.running_version ? `<br>Running: <b>${esc(j.running_version)}</b> (process ${esc(String(j.pid))})` : '') + (j.host ? `<br>Engine at <code>http://${esc(j.host)}:${j.port}</code>` : '')
+      + `<br>Installed to <code>${esc(j.path)}</code> from <code>${esc(j.repo)}</code>` + (j.cached ? ` · downloaded: ${esc(j.cached)}` : '');
+  } catch (e) { st.textContent = 'Engine: ?'; }
+}
+// One click from the header: install the engine ELF, then try to start it.
+async function engOneClick() {
+  const upd = engInfo && engInfo.update;
+  if (!confirm((upd ? `Update the LZ4 Compression engine on the PS5 from ${engInfo.installed.tag} to ${engInfo.latest}?`
+    : 'Install the LZ4 Compression engine (ELF) on the PS5?') + `\n\nThe newest release is downloaded from GitHub (${engInfo ? engInfo.repo : 'your repository'}), `
+    + 'copied over FTP into the Payload Manager (overwriting the old file) and started through Payload Manager, taking over from the engine that runs now.')) return;
+  const b = document.getElementById('b-elf'), small = document.getElementById('b-elf-st'), was = small.textContent;
+  b.disabled = true; small.textContent = 'downloading and copying…';
+  const post = action => fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action})}).then(async r => ({ok: r.ok, j: await r.json().catch(() => ({}))}));
+  try {
+    const ins = await post('engine_install');
+    if (!ins.ok) { alert('Not installed: ' + (ins.j.error || '?')); return; }
+    // Payload Manager loads the new engine; it takes over from one that runs.
+    small.textContent = 'starting…';
+    const run = await post('engine_start');
+    const w = run.ok ? await engWaitNew(run.j.before_pid) : null;
+    alert(`Installed ${ins.j.tag} on the PS5.\n\n`
+      + (w && w.state === 'connected' ? `The new engine runs (${w.running_version || ins.j.tag}) and is connected: transfers now keep the PS5 awake.`
+        : run.ok ? `Started through ${run.j.via}, but the new engine doesn't answer yet. Press Check on the Remote tab in a moment.`
+        : (run.j.error || 'It could not be started from here.')));
+  } finally { b.disabled = false; small.textContent = was; engHeader(); if (!document.getElementById('p-ps5').hidden) engCheck(); }
+}
+let engInfo = null;
+// After a start: wait until an engine with another process ID answers.
+async function engWaitNew(oldPid) {
+  let j = null;
+  for (let i = 0; i < 15; i++) {
+    await new Promise(r => setTimeout(r, 2000));
+    j = await (await fetch('/api/engine', {cache: 'no-store'})).json().catch(() => null);
+    if (j && j.state === 'connected' && (!oldPid || j.pid !== oldPid)) return j;
+  }
+  return j;
+}
+async function engHeader() {
+  try {
+    const j = engInfo = await (await fetch('/api/engine', {cache: 'no-store'})).json();
+    const inst = j.installed || {};
+    document.getElementById('b-elf').classList.toggle('pri', !j.update && (j.state === 'original' || j.state === 'off'));
+    document.getElementById('b-elf').classList.toggle('upd', !!j.update);
+    document.getElementById('b-elf-t').innerHTML = j.update ? '<span class="updot"></span>Update available' : 'Install ELF on PS5';
+    document.getElementById('b-elf-st').textContent = j.update ? `${inst.tag} on the PS5 → ${j.latest}: click to update`
+      : {connected: `connected ✓${inst.tag ? ' · ' + inst.tag : ''}`,
+         original: 'original engine runs: install this one', off: 'engine not running: install and start'}[j.state]
+      || 'put the LZ4 engine on the PS5 and start it';
+  } catch (e) {}
+}
+function engInst(j) {
+  const i = j.installed, el = document.getElementById('eng-inst');
+  if (!i) { el.innerHTML = '<div class="mut">The ELF on the PS5 hasn\'t been read yet: press <b>Read the ELF on the PS5</b>.</div>'; return; }
+  const when = new Date(i.at * 1000).toLocaleString();
+  const what = i.state === 'missing' ? '<span class="bad">No engine ELF in the Payload Manager.</span>'
+    : i.state === 'other' ? `<b>Not one of your releases</b> (probably the original engine), ${(i.bytes / 1048576).toFixed(1)} MB. Auto-update leaves it alone; Install ELF on PS5 replaces it.`
+    : j.update || i.state === 'outdated' ? `<span class="updot"></span><b>${esc(i.tag)}</b>, update available: <b>${esc(j.latest || i.latest)}</b>`
+    : `<span class="good"><b>${esc(i.tag)}</b>, the newest ✓</span>`;
+  el.innerHTML = `<div class="why">On the PS5: ${what}${i.orig ? ' · previous file kept as .orig' : ''} <span class="mut">(read ${esc(when)})</span></div>`;
+}
+async function engRead() {
+  const el = document.getElementById('eng-inst');
+  el.innerHTML = '<div class="mut">Reading the ELF on the PS5 over FTP…</div>';
+  const r = await fetch('/api/engine/read', {cache: 'no-store'}), j = await r.json().catch(() => ({}));
+  if (!r.ok) { el.innerHTML = `<div class="why bad">Could not read it: ${esc(j.error || r.status)}</div>`; return; }
+  engCheck(); engHeader();
+}
+async function restAuto(on) {
+  await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'rest_auto', on})});
+}
+async function restNow() {
+  if (data.transfer && data.transfer.state === 'running' && !confirm('A game is being sent right now. Put the PS5 in rest mode anyway? The transfer is woken up and continued later.')) return;
+  if (!confirm('Put the PS5 in rest mode now?')) return;
+  const msg = document.getElementById('wake-msg');
+  const r = await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'ps5_rest'})});
+  const j = await r.json().catch(() => ({}));
+  msg.className = 'why ' + (r.ok ? 'good' : 'bad');
+  msg.textContent = r.ok ? 'The PS5 goes to rest mode in a few seconds.' : 'Not in rest mode: ' + (j.error || r.status);
+  setTimeout(ps5State, 8000);
+}
+async function engAuto(on) {
+  await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'engine_auto', on})});
+}
+async function appCheck() {
+  const st = document.getElementById('app-st');
+  try {
+    const j = await (await fetch('/api/app', {cache: 'no-store'})).json();
+    st.className = 'pill ' + (j.installed ? 'p-LZ4' : 'p-no');
+    st.textContent = j.installed ? 'App: installed ✓' : j.installed === false ? 'App: not installed' : 'App: PS5 not reachable';
+  } catch (e) { st.textContent = 'App: ?'; }
+}
+async function appInstall() {
+  if (!confirm('Install the LZ4 Compression app (tile) on the PS5?\n\nIt is downloaded from GitHub and copied over FTP to /data/homebrew/PPSA99420, overwriting an older copy.')) return;
+  const msg = document.getElementById('app-msg');
+  msg.className = 'why'; msg.textContent = 'Downloading and copying to the PS5…';
+  const r = await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'app_install'})});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { msg.className = 'why bad'; msg.textContent = 'Failed: ' + (j.error || r.status); return; }
+  msg.className = 'why good';
+  msg.textContent = `Installed ${j.tag} (${j.files} files). The LZ4 Compression tile shows up on the home screen once ShadowMount+ has scanned (close any running game).`;
+  appCheck();
+}
+async function rcvCheck() {
+  const st = document.getElementById('rcv-st'), msg = document.getElementById('rcv-msg');
+  try {
+    const j = await (await fetch('/api/receiver', {cache: 'no-store'})).json();
+    const host = ((data && data.settings && data.settings.ps5_ftp) || '').split(':')[0];
+    const open = document.getElementById('rcv-open');
+    if (open) { open.hidden = !(j.running && host); if (host) open.href = `http://${host}:12800/`; }
+    document.getElementById('b-elf').classList.toggle('pri', !j.running);
+    rcvRunning = !!j.running;
+    document.getElementById('rcv-auto').checked = j.auto !== false;
+    document.getElementById('b-elf-t').textContent = j.running ? 'ELF on PS5' : 'Start ELF on PS5';
+    document.getElementById('b-elf-st').textContent = j.running ? `pkg-receiver running ✓${j.build ? ' · ' + j.build : ''}` : 'not running: press to start pkg-receiver';
+    st.className = 'pill ' + (j.running ? 'p-LZ4' : 'p-no');
+    st.textContent = j.running ? `pkg-receiver: running ✓ ${j.build ? '(' + j.build + ')' : ''}` : 'pkg-receiver: not running';
+    const sp = j.space || {}, busy = j.status && j.status.busy;
+    msg.className = 'why';
+    msg.innerHTML = j.running ? `Internal SSD: <b>${gb(sp.free)}</b> free of ${gb(sp.total)}${busy ? ` · installing ${j.status.active}` : ''}`
+      : 'Not answering on port 12800. Press Start (or Install and start the first time).';
+  } catch (e) { st.textContent = 'pkg-receiver: ?'; }
+}
+let rcvRunning = false;
+async function rcvHeader() {
+  if (rcvRunning) { tab('ps5'); return; }
+  const r = await rcvStart();
+  if (!r || !r.started) {
+    if (confirm('pkg-receiver could not be started from the PS5 (is it installed in Payload Manager?).\n\nInstall it now?')) rcvInstall();
+  }
+}
+async function rcvStart() {
+  const msg = document.getElementById('rcv-msg'), small = document.getElementById('b-elf-st');
+  msg.className = 'why'; msg.textContent = 'Starting pkg-receiver on the PS5…'; small.textContent = 'starting…';
+  const r = await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'receiver_start'})});
+  const j = await r.json().catch(() => ({}));
+  msg.className = 'why ' + (r.ok && j.started ? 'good' : 'bad');
+  msg.textContent = r.ok ? (j.started ? `Started (${j.started}).` : j.note || 'Not started.') : 'Failed: ' + (j.error || r.status);
+  setTimeout(rcvCheck, 3000);
+  return r.ok ? j : null;
+}
+async function rcvAuto(on) {
+  await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'receiver_auto', on})});
+  rcvCheck();
+}
+async function rcvInstall(fromHeader) {
+  if (!confirm('Install the ELF on the PS5?\n\npkg-receiver.elf with the Glass theme (the pkg-receiver-glass release of this project, built from Loopayeh/pkg-sender) is downloaded, copied into Payload Manager on the PS5 and started. It replaces a running pkg-receiver.')) return;
+  const msg = document.getElementById('rcv-msg'), small = document.getElementById('b-elf-st');
+  msg.className = 'why'; msg.textContent = 'Downloading and copying to the PS5…'; small.textContent = 'installing…';
+  const r = await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'receiver_install'})});
+  const j = await r.json().catch(() => ({}));
+  const text = r.ok ? `Installed to ${j.installed}. ` + (j.started ? `Started (${j.started}).` : j.note || '') : 'Failed: ' + (j.error || r.status);
+  msg.className = 'why ' + (r.ok ? 'good' : 'bad'); msg.textContent = text;
+  if (fromHeader) alert(text);
+  setTimeout(rcvCheck, 4000);
+}
+async function engAct(action, confirmText) {
+  if (confirmText && !confirm(confirmText)) return;
+  const msg = document.getElementById('eng-msg');
+  msg.className = 'why'; msg.textContent = {engine_install: 'Downloading and copying to the PS5…',
+    engine_start: 'Sending to the ELF loader…', engine_restore: 'Restoring…'}[action];
+  const r = await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action})});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) { msg.className = 'why bad'; msg.textContent = (action === 'engine_start' ? '' : 'Failed: ') + (j.error || r.status); return; }
+  msg.className = 'why good';
+  msg.textContent = action === 'engine_install' ? `Installed ${j.tag} (${(j.bytes / 1048576).toFixed(1)} MB).`
+      + ' Restart the PS5 or press Start it now to run it.'
+    : action === 'engine_start' ? `Started through ${j.via}; the new engine answers in a few seconds.` : 'The original engine is back; it runs after the next start.';
+  if (action === 'engine_start') { const w = await engWaitNew(j.before_pid); msg.textContent = w && w.state === 'connected' ? `The new engine runs (${w.running_version || '?'}) ✓` : 'Started, but the new engine doesn\'t answer yet: press Check in a moment.'; }
+  setTimeout(() => { engCheck(); engHeader(); }, 500);
+}
+// Wake and watch: the PS5 answers the same discovery port in rest mode
+// ("standby"), so the result says whether the wake-up got there.
+async function wakeNow() {
+  const msg = document.getElementById('wake-msg'), b = document.getElementById('b-wake');
+  const say = (cls, html) => { msg.className = 'why ' + cls; msg.innerHTML = html; };
+  b.disabled = true; say('', 'Sending the wake-up…');
+  try {
+    const r = await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'wake'})});
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok) { say('bad', esc(j.error || r.status) + ' — pair under <b>2. Pair for wake-up</b> below.'); return; }
+    if (j.before === 'on') { say('good', 'The PS5 is already on ✓'); ps5State(); return; }
+    for (let i = 0; i < 20; i++) {
+      say('', `Woken from ${j.before === 'standby' ? 'rest mode' : 'an unknown state'}, waiting for the PS5… ${(i + 1) * 3} s`);
+      await new Promise(r => setTimeout(r, 3000));
+      const st = (await (await fetch('/api/ps5', {cache: 'no-store'})).json().catch(() => ({}))).status;
+      if (st === 'on') { say('good', 'The PS5 is on ✓'); ps5State(); return; }
+    }
+    say('bad', j.before === 'standby'
+      ? 'The PS5 answers in rest mode but did not turn on, so it did not accept the key. Pair again under <b>2. Pair for wake-up</b> '
+        + '(the PS5 forgets a pairing when Remote Play is turned off or the user signs out).'
+      : 'The PS5 does not answer at all, so the wake-up does not reach it. On the PS5: <i>Settings › System › Power Saving › '
+        + 'Features Available in Rest Mode</i>: turn on <b>Stay Connected to the Internet</b> and <b>Enable Turning On PS5 from Network</b>. '
+        + 'Also check that the PS5 address is right and the PS5 is in rest mode, not fully off.');
+    ps5State();
+  } finally { b.disabled = false; }
+}
+async function ps5State() {
+  try {
+    const r = await (await fetch('/api/ps5', {cache: 'no-store'})).json();
+    const el = document.getElementById('ps5st'), m = {on: ['p-LZ4', 'PS5: on'], standby: ['p-run', 'PS5: rest mode'],
+      unknown: ['p-no', 'PS5: no answer'], unset: ['p-no', 'PS5: no address']}[r.status] || ['p-no', 'PS5: ?'];
+    el.className = 'pill ' + m[0]; el.textContent = m[1];
+  } catch (e) {}
+}
+load(); setInterval(load, 5000);
+async function loadPkgAct() {
+  if (document.getElementById('p-act').hidden) return;
+  let j;
+  try { j = await (await fetch('/api/pkg/activity', {cache: 'no-store'})).json(); } catch (e) { return; }
+  const mb = b => b >= 1 << 30 ? (b / (1 << 30)).toFixed(2) + ' GB' : (b / (1 << 20)).toFixed(0) + ' MB';
+  document.getElementById('dl-now').innerHTML = j.downloads.length ? j.downloads.map(d => `<div class="dl">
+      <div class="dl-top"><b>${esc(d.name)}</b><span class="sp"></span><span class="chip ${d.status === 'done' ? 'ok' : ''}">${
+        d.status === 'done' ? '✓ downloaded' : d.status === 'paused' ? 'paused' : d.rate ? mb(d.rate) + '/s' : 'downloading'}</span></div>
+      <div class="bar"><i style="width:${Math.min(100, d.percent)}%"></i></div>
+      <div class="why">${mb(d.got)} of ${mb(d.total)} · ${d.percent} %${d.status === 'downloading' && d.rate ? ` · about ${Math.ceil((d.total - d.got) / d.rate / 60)} min left` : ''}</div></div>`).join('')
+    : '<div class="mut">Nothing is downloading right now.</div>';
+  const h = (j.history || []).slice(0, 15);
+  document.getElementById('dl-hist').innerHTML = h.length ? '<h3 style="margin:14px 0 6px;font-size:14px">Recent</h3>' + h.map(r => `<div class="dl-row">
+      <span class="chip ${r.ok ? 'ok' : 'bad'}">${r.kind === 'install' ? (r.ok ? 'install asked' : 'install failed') : (r.ok ? 'downloaded' : 'stopped')}</span>
+      <span class="dl-name">${esc(r.name || r.id)}</span>
+      <span class="mut">${esc((r.at || '').slice(5, 16))}${r.size ? ' · ' + mb(r.size) : ''}${r.seconds ? ' · ' + Math.max(1, Math.round(r.seconds / 60)) + ' min' : ''}${r.error && r.error !== 'stopped' ? ' · ' + esc(r.error) : ''}</span>
+      <span class="sp"></span>
+      ${!r.ok && r.id && !String(r.id).startsWith('img/') ? `<button class="sm" data-id="${esc(r.id)}" data-n="${esc(r.name || r.id)}" onclick="pkgInstall(this.dataset.id, this.dataset.n, 'url')">Retry</button>` : ''}
+    </div>`).join('') : '';
+}
+loadPkgAct(); setInterval(loadPkgAct, 3000);
+setInterval(() => { if (!document.getElementById('p-comm').hidden) loadComm(); }, 60000); ps5State(); setInterval(ps5State, 15000); rcvCheck(); setInterval(rcvCheck, 60000);
+try {
+  const saved = {'#community': 'comm', '#remote': 'ps5', '#ftp': 'ftp', '#activity': 'act', '#games': 'pg'}[location.hash] || localStorage.getItem('tab');
+  if (['comm', 'ps5', 'ftp', 'act', 'pg'].includes(saved)) tab(saved);
+} catch (e) {}
+</script>
+<footer class="mut" style="text-align:center;padding:16px;font-size:12px">ps5-lz4 ·
+  <a href="https://github.com/dviree/PS5-LZ4-NAS" target="_blank" rel="noopener">source code</a> (GPL-3.0; Remote Play pairing
+  is ported from <a href="https://github.com/streetpea/chiaki-ng" target="_blank" rel="noopener">chiaki-ng</a>, AGPL-3.0)</footer>
+</body>
+</html>

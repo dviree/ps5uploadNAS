@@ -1,0 +1,7 @@
+build/
+gen/
+lz4-compression.elf
+.DS_Store
+tests/ui/out/
+__pycache__/
+*.pyc

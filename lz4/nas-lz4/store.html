@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PS5 Store</title>
+<style>
+:root{--bg:#f3f1fb;--bgimg:radial-gradient(900px 520px at 0% -8%,rgba(167,139,250,.22),transparent 60%),radial-gradient(800px 520px at 100% 0%,rgba(96,165,250,.16),transparent 60%);--card:#ffffff;--card2:#ffffff;--line:#e4def6;--cardline:#ebe7f7;--txt:#1f1937;--mut:#6f6890;--acc:#6d4ff0;--acc2:#3b82f6;--pri:linear-gradient(135deg,#b06cf7,#7c3aed 45%,#4f6cf5);--btn:linear-gradient(135deg,#9b7bf7,#5b5cf0);--chip:#ece7fb;--ok:#16794c;--okbg:#e2f5eb;--bad:#c5340d;--badbg:#fdebe5;--warn:#9a6200;--blur:none;--hdr:rgba(243,241,251,.85);--shadow:0 12px 32px -14px rgba(91,60,200,.28),0 2px 6px rgba(60,40,140,.06);--glow:rgba(99,82,240,.3);--cover:linear-gradient(135deg,#e9e3fb,#f6f3ff)}
+:root[data-theme="dark"]{--bg:#211a38;--bgimg:none;--card:#271f42;--card2:#2c2349;--line:#3a2f60;--cardline:#3a2f60;--txt:#ece8fa;--mut:#a097c2;--acc:#a78bfa;--acc2:#c084fc;--pri:linear-gradient(135deg,#c084fc,#9333ea 50%,#6d28d9);--btn:linear-gradient(135deg,#a78bfa,#7c3aed);--chip:#30264f;--ok:#43c08f;--okbg:#1d3a31;--bad:#f2807a;--badbg:#42262c;--warn:#e7ad46;--hdr:rgba(33,26,56,.88);--shadow:0 10px 30px rgba(8,5,20,.5);--glow:rgba(124,58,237,.35);--cover:linear-gradient(135deg,#2f2552,#211a38)}
+:root[data-theme="glass"]{--bg:#24145c;--bgimg:radial-gradient(520px 520px at 12% 18%,rgba(168,85,247,.75),transparent 70%),radial-gradient(560px 560px at 88% 12%,rgba(59,130,246,.65),transparent 70%),radial-gradient(620px 620px at 75% 92%,rgba(99,102,241,.7),transparent 70%),radial-gradient(480px 480px at 20% 95%,rgba(139,92,246,.55),transparent 70%),linear-gradient(135deg,#2e1a78,#1d1660 50%,#331a7a);--card:rgba(255,255,255,.11);--card2:rgba(46,30,110,.94);--line:rgba(255,255,255,.18);--cardline:rgba(255,255,255,.24);--txt:#fff;--mut:rgba(236,232,255,.74);--acc:#cdbfff;--acc2:#93b4ff;--pri:linear-gradient(135deg,#b794ff,#7c5cff 50%,#4f7bff);--btn:linear-gradient(135deg,rgba(255,255,255,.30),rgba(255,255,255,.12));--chip:rgba(255,255,255,.14);--ok:#7cf0c0;--okbg:rgba(16,185,129,.24);--bad:#ffb0bb;--badbg:rgba(244,63,94,.25);--warn:#fcd77a;--blur:blur(18px) saturate(140%);--hdr:rgba(255,255,255,.07);--shadow:0 10px 36px rgba(15,8,50,.35);--glow:rgba(20,10,70,.35);--cover:linear-gradient(135deg,rgba(255,255,255,.16),rgba(255,255,255,.04))}
+:root[data-theme="glass"] option{color:#1f1937}
+*{box-sizing:border-box}[hidden]{display:none!important}
+html,body{margin:0;color:var(--txt);font:16px/1.45 -apple-system,BlinkMacSystemFont,"SF Pro Text","Segoe UI",Roboto,sans-serif;-webkit-font-smoothing:antialiased}
+html{background:var(--bg)}
+body{background:var(--bgimg),var(--bg);background-attachment:fixed;min-height:100vh}
+a{color:var(--acc)}
+header{position:sticky;top:0;z-index:5;display:flex;flex-wrap:wrap;align-items:center;gap:12px 20px;padding:18px max(20px,calc((100% - 1500px)/2 + 20px));background:var(--hdr);backdrop-filter:blur(16px);-webkit-backdrop-filter:blur(16px);border-bottom:1px solid var(--line)}
+.logo{width:44px;height:44px;border-radius:13px;background:var(--pri);color:#fff;display:grid;place-items:center;font:800 13px ui-monospace,Menlo,monospace;box-shadow:0 6px 20px var(--glow)}
+h1{margin:0;font-size:24px;letter-spacing:-.4px}.sub{color:var(--mut);font-size:13px}
+.sp{flex:1}
+.pill{display:inline-flex;align-items:center;gap:6px;padding:6px 12px;border-radius:99px;background:var(--card);border:1px solid var(--cardline);-webkit-backdrop-filter:var(--blur);backdrop-filter:var(--blur);font-size:13px;color:var(--mut);white-space:nowrap}
+.pill b{color:var(--txt)}
+nav{display:flex;flex-wrap:wrap;gap:8px;padding:16px max(20px,calc((100% - 1500px)/2 + 20px)) 0}
+nav button,.btn{font:inherit;font-weight:650;border:1px solid rgba(255,255,255,.18);border-radius:14px;padding:10px 18px;background:var(--btn);color:#fff;cursor:pointer;box-shadow:0 3px 12px var(--glow),inset 0 1px 0 rgba(255,255,255,.22);text-shadow:0 1px 1px rgba(30,0,70,.2)}
+nav button{background:var(--chip);color:var(--mut);box-shadow:none;text-shadow:none;border-color:transparent}
+nav button.on{background:var(--pri);color:#fff;box-shadow:0 3px 12px var(--glow)}
+.themes{display:inline-flex;gap:2px;padding:3px;border-radius:12px;background:var(--chip)}.themes button{font:inherit;font-size:13px;border:0;border-radius:9px;padding:5px 11px;background:none;color:var(--mut);cursor:pointer}.themes button.on{background:var(--pri);color:#fff}
+input.search{font:inherit;padding:10px 16px;border-radius:12px;border:1px solid var(--cardline);background:var(--card);color:var(--txt);min-width:240px;flex:1;max-width:420px;-webkit-backdrop-filter:var(--blur);backdrop-filter:var(--blur)}
+button:focus-visible,input:focus-visible,.tile:focus-visible{outline:3px solid var(--acc);outline-offset:3px}
+main{padding:18px max(20px,calc((100% - 1500px)/2 + 20px)) 120px}
+.now{display:none;margin-bottom:18px;padding:16px 18px;border-radius:18px;background:var(--card);border:1px solid var(--cardline);box-shadow:var(--shadow);-webkit-backdrop-filter:var(--blur);backdrop-filter:var(--blur)}
+.now.on{display:block}.now .t{font-weight:700;margin-bottom:8px}
+.bar{height:10px;background:var(--chip);border-radius:99px;overflow:hidden}.bar i{display:block;height:100%;background:var(--pri);transition:width .6s}
+.stats{display:flex;flex-wrap:wrap;gap:4px 18px;margin-top:8px;color:var(--mut);font-size:14px}.stats b{color:var(--txt)}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(230px,1fr));gap:18px}
+.tile{position:relative;display:flex;flex-direction:column;border-radius:20px;background:var(--card);border:1px solid var(--cardline);box-shadow:var(--shadow);-webkit-backdrop-filter:var(--blur);backdrop-filter:var(--blur);overflow:hidden;cursor:pointer;transition:transform .12s,border-color .12s,box-shadow .12s;text-align:left;color:inherit;font:inherit;padding:0}
+.tile:hover,.tile:focus-visible{transform:translateY(-3px) scale(1.02);border-color:var(--acc);box-shadow:0 16px 44px var(--glow)}
+.cover{aspect-ratio:1/1;width:100%;background:var(--cover);display:grid;place-items:center;font-size:64px;position:relative}
+.cover img{width:100%;height:100%;object-fit:cover;display:block}
+.fav{position:absolute;bottom:8px;right:10px;font-size:26px;line-height:1;color:rgba(255,255,255,.85);text-shadow:0 2px 8px rgba(0,0,0,.6);cursor:pointer}
+.fav.on{color:#fcd34d}
+.spot-h{font-size:18px;margin:6px 0 10px}.grid.spot{margin-bottom:22px}
+select.sort{min-width:0;flex:none;max-width:200px;font:inherit;padding:10px 14px;border-radius:12px;border:1px solid var(--cardline);background:var(--card);color:var(--txt);-webkit-backdrop-filter:var(--blur);backdrop-filter:var(--blur)}
+select.sort option{color:#1f1937;background:#fff}
+.badge{position:absolute;top:10px;left:10px;padding:4px 10px;border-radius:99px;font-size:12px;font-weight:800;background:rgba(0,0,0,.55);color:#fff;backdrop-filter:blur(6px)}
+.badge.inst{background:#5eeab0;color:#06231a}
+.badge.lz4{left:auto;right:10px;background:var(--pri);color:#fff}.badge.fmt{left:auto;right:10px;background:rgba(0,0,0,.55);color:#fff}.badge.fmt:empty{display:none}
+.info{padding:12px 14px 14px}
+.name{font-weight:700;font-size:16px;line-height:1.25;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;min-height:2.5em}
+.meta{color:var(--mut);font-size:13px;margin-top:4px}
+.stars{font-size:13px;margin-top:4px}.good{color:var(--ok)}.bad{color:var(--bad)}
+.prog{margin-top:8px}.prog .bar{height:6px}
+.empty{color:var(--mut);padding:40px 0;text-align:center}
+/* detail */
+.sheet-bg{position:fixed;inset:0;z-index:20;background:rgba(0,0,0,.6);backdrop-filter:blur(6px);display:flex;align-items:center;justify-content:center;padding:20px}
+.sheet{width:min(860px,100%);max-height:92vh;overflow:auto;background:var(--card2);-webkit-backdrop-filter:var(--blur);backdrop-filter:var(--blur);border:1px solid var(--cardline);border-radius:24px;box-shadow:0 30px 80px rgba(0,0,0,.45);display:grid;grid-template-columns:280px 1fr;gap:24px;padding:24px}
+.sheet .cover{border-radius:18px;overflow:hidden}
+.sheet h2{margin:0 0 4px;font-size:26px;letter-spacing:-.4px}
+.rows{margin:14px 0;display:grid;grid-template-columns:130px 1fr;gap:8px 14px;font-size:14px}.rows div:nth-child(odd){color:var(--mut)}
+.acts{display:flex;flex-wrap:wrap;gap:10px;margin-top:16px}
+.btn.pri{background:var(--pri);color:#fff}
+.btn.danger{background:linear-gradient(135deg,#f43f5e,#be123c);color:#fff}
+.btn.ghost{background:var(--chip);color:var(--txt);box-shadow:none;text-shadow:none}
+.btn:disabled{opacity:.5}
+.toast{position:fixed;left:50%;bottom:24px;transform:translateX(-50%);z-index:30;background:var(--card2);border:1px solid var(--line);padding:12px 18px;border-radius:14px;box-shadow:0 10px 30px rgba(0,0,0,.5)}
+@media (max-width:700px){.sheet{grid-template-columns:1fr}.sheet .cover{max-width:220px}.grid{grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:12px}h1{font-size:20px}}
+</style>
+<script>try{document.documentElement.dataset.theme=localStorage.getItem('theme')||'glass'}catch(e){document.documentElement.dataset.theme='glass'}</script>
+</head>
+<body>
+<header>
+  <div class="themes" id="themes"><button data-t="glass" onclick="setTheme(this.dataset.t)">✨ Glass</button><button data-t="light" onclick="setTheme(this.dataset.t)">☀️ Light</button><button data-t="dark" onclick="setTheme(this.dataset.t)">🌙 Dark</button></div>
+  <div class="logo">LZ4</div>
+  <div><h1>PS5 Store</h1><div class="sub">Your NAS library · install over FTP · <a href="/">ps5-lz4</a></div></div>
+  <span class="sp"></span>
+  <span class="pill" id="ps5">PS5: …</span>
+  <span class="pill" id="space"></span>
+</header>
+<nav>
+  <button class="on" data-f="all" onclick="setF(this)">All</button>
+  <button data-f="installed" onclick="setF(this)">Installed</button>
+  <button data-f="available" onclick="setF(this)">Not installed</button>
+  <button data-f="lz4" onclick="setF(this)">LZ4</button>
+  <button data-f="fav" onclick="setF(this)">★ Favorites</button>
+  <select class="search sort" id="sort" onchange="saveSort(this.value)" title="Sort">
+    <option value="name">A–Z</option><option value="new">Newest packed</option><option value="rated">Best rated</option>
+    <option value="big">Biggest</option><option value="small">Smallest</option><option value="saved">Most saved</option></select>
+  <input class="search" id="q" placeholder="Search name or Title ID" oninput="render()">
+</nav>
+<main>
+  <div class="now" id="now"></div>
+  <div id="spot"></div>
+  <div class="grid" id="grid"><div class="empty">Loading your library…</div></div>
+</main>
+<div class="sheet-bg" id="sheet" hidden onclick="if(event.target===this)closeSheet()"><div class="sheet" id="sheet-body"></div></div>
+<div class="toast" id="toast" hidden></div>
+<script>
+function setTheme(t) {
+  document.documentElement.dataset.theme = t;
+  try { localStorage.setItem('theme', t); } catch (e) {}
+  document.querySelectorAll('#themes button').forEach(b => b.classList.toggle('on', b.dataset.t === t));
+}
+setTheme(document.documentElement.dataset.theme || 'glass');
+let dash = null, ps5 = null, filter = 'all', open = null;
+const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
+function gb(n) { if (n == null) return '–'; return n >= 1e12 ? (n / 1e12).toFixed(2) + ' TB' : n >= 1e9 ? (n / 1e9).toFixed(1) + ' GB' : Math.round(n / 1e6) + ' MB'; }
+function dur(s) { if (s == null || !isFinite(s)) return '–'; const m = Math.round(s / 60); return s < 90 ? '1 min' : m < 60 ? m + ' min' : Math.floor(m / 60) + ' h ' + (m % 60) + ' min'; }
+const clean = n => String(n).replace(/\s*\[[^\]]*\]/g, '').trim() || n;
+function toast(t) { const el = document.getElementById('toast'); el.textContent = t; el.hidden = false; clearTimeout(toast._t); toast._t = setTimeout(() => el.hidden = true, 3500); }
+async function post(body) {
+  const r = await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || r.status);
+  return j;
+}
+
+// One store item per game: the LZ4 copy when there is one, else the original.
+function items() {
+  if (!dash) return [];
+  const byTid = {};
+  (ps5 ? ps5.games : []).forEach(c => { if (c.title_id) (byTid[c.title_id.toUpperCase()] = byTid[c.title_id.toUpperCase()] || []).push(c); });
+  const seen = new Set();
+  return dash.games.filter(g => g.title_id && !seen.has(g.title_id) && seen.add(g.title_id)).map(g => {
+    const lz4 = g.verdict === 'LZ4' && g.output;
+    const key = lz4 ? g.output.split('/').pop() : (g.rel || '').split('/').pop();
+    return {g, lz4, key, req: lz4 ? key : 'src:' + g.id, size: lz4 ? g.output_bytes : (g.source_size || g.source_bytes),
+            copies: byTid[(g.title_id || '').toUpperCase()] || [], tx: (dash.transfers || {})[key]};
+  });
+}
+// Favorites and sort order (ideas from Overdrive), kept in this browser.
+let favs = new Set();
+try { favs = new Set(JSON.parse(localStorage.getItem('favs') || '[]')); } catch (e) {}
+function toggleFav(tid, ev) {
+  ev.stopPropagation();
+  favs.has(tid) ? favs.delete(tid) : favs.add(tid);
+  try { localStorage.setItem('favs', JSON.stringify([...favs])); } catch (e) {}
+  render();
+}
+function saveSort(v) { try { localStorage.setItem('sort', v); } catch (e) {} render(); }
+try { const v = localStorage.getItem('sort'); if (v) document.getElementById('sort').value = v; } catch (e) {}
+function rating(g) { const c = g.community || {}; return c.reports ? (c.works + c.issues) / c.reports + c.works / 1000 : -1; }
+const SORTS = {
+  name: (a, b) => a.g.name.localeCompare(b.g.name),
+  new: (a, b) => (b.g.finished || '').localeCompare(a.g.finished || '') || a.g.name.localeCompare(b.g.name),
+  rated: (a, b) => rating(b.g) - rating(a.g) || a.g.name.localeCompare(b.g.name),
+  big: (a, b) => (b.size || 0) - (a.size || 0),
+  small: (a, b) => (a.size || 0) - (b.size || 0),
+  saved: (a, b) => (b.g.saved_percent || -1) - (a.g.saved_percent || -1),
+};
+function tileHtml(it) {
+  const s = state(it), fav = favs.has(it.g.title_id);
+  const badge = s.k === 'installed' ? '<span class="badge inst">✓ Installed</span>' : s.k === 'sending' ? '<span class="badge">Installing…</span>'
+    : s.k === 'queued' ? '<span class="badge">Queued</span>' : s.k === 'stopped' ? '<span class="badge">Paused</span>' : '';
+  return `<button class="tile" data-id="${esc(it.g.id)}" onclick="showGame(this.dataset.id)">
+    <div class="cover"><img alt="" loading="lazy" src="/api/icon?id=${encodeURIComponent(it.g.id)}" onerror="this.replaceWith(document.createTextNode('🎮'))">${badge}${it.lz4 ? '<span class="badge lz4">LZ4</span>' : `<span class="badge fmt">${{folder: 'Folder', exfat: 'exFAT', ffpfs: '.ffpfs', ffpfsc: '.ffpfsc'}[it.g.kind] || ''}</span>`}
+      <span class="fav ${fav ? 'on' : ''}" role="button" title="${fav ? 'Remove from favorites' : 'Add to favorites'}" data-t="${esc(it.g.title_id)}" onclick="toggleFav(this.dataset.t, event)">${fav ? '★' : '☆'}</span></div>
+    <div class="info"><div class="name">${esc(clean(it.g.name))}</div>
+      <div class="meta">${gb(it.size)}${it.g.saved_percent != null && it.lz4 ? ` · ${Math.round(it.g.saved_percent)} % smaller` : ''}</div>
+      <div class="stars">${community(it.g.community)}</div>
+      ${s.pct != null ? `<div class="prog"><div class="bar"><i style="width:${s.pct}%"></i></div></div>` : ''}</div></button>`;
+}
+function setF(b) { document.querySelectorAll('nav button').forEach(x => x.classList.toggle('on', x === b)); filter = b.dataset.f; render(); }
+function community(c) {
+  if (!c || !c.reports) return '<span style="color:var(--mut)">no reports yet</span>';
+  const ok = c.works + c.issues, bad = c.noStart + c.crash;
+  return `<span class="good">${'★'.repeat(Math.round(5 * ok / c.reports))}</span><span style="opacity:.3">${'★'.repeat(5 - Math.round(5 * ok / c.reports))}</span> ${c.works} work${bad ? ` · <span class="bad">${bad} fail</span>` : ''}`;
+}
+function state(it) {
+  const q = dash.transfer_queue || [], tf = dash.transfer;
+  if (tf && tf.game === it.key) return {k: 'sending', pct: tf.total ? 100 * tf.bytes / tf.total : 0};
+  if (q.includes(it.req)) return {k: 'queued'};
+  if (it.copies.length) return {k: 'installed'};
+  if (it.tx && it.tx.state === 'failed') return {k: 'stopped', pct: it.tx.total ? 100 * it.tx.bytes / it.tx.total : 0};
+  return {k: 'available'};
+}
+function render() {
+  if (!dash) return;
+  const q = document.getElementById('q').value.trim().toLowerCase();
+  let list = items().filter(it => !q || (it.g.name + ' ' + it.g.title_id).toLowerCase().includes(q));
+  list = list.filter(it => { const s = state(it).k; return filter === 'all' || (filter === 'installed' ? s === 'installed' : filter === 'available' ? s !== 'installed' : filter === 'fav' ? favs.has(it.g.title_id) : it.lz4); });
+  list.sort(SORTS[document.getElementById('sort').value] || SORTS.name);
+  document.getElementById('grid').innerHTML = list.length ? list.map(tileHtml).join('')
+    : `<div class="empty">${filter === 'fav' ? 'No favorites yet: press ☆ on a game.' : 'Nothing here.'}</div>`;
+  // Spotlight rows (on the full list only): newest packed and best rated.
+  const all = items(), spot = document.getElementById('spot');
+  if (!q && filter === 'all' && all.length > 6) {
+    const newest = all.filter(it => it.g.finished).sort(SORTS.new).slice(0, 6);
+    const rated = all.filter(it => rating(it.g) >= 0).sort(SORTS.rated).slice(0, 6);
+    const row = (t, l) => l.length ? `<h2 class="spot-h">${t}</h2><div class="grid spot">${l.map(tileHtml).join('')}</div>` : '';
+    spot.innerHTML = row('🆕 Newest packed', newest) + row('⭐ Best rated by the community', rated) + (newest.length || rated.length ? '<h2 class="spot-h">All games</h2>' : '');
+  } else spot.innerHTML = '';
+  // Now installing
+  const tf = dash.transfer, now = document.getElementById('now'), tq = dash.transfer_queue || [];
+  if (tf) {
+    const total = tf.total + tq.reduce((n, r) => { const it = items().find(x => x.req === r); return n + (it ? it.size || 0 : 0); }, 0);
+    const pct = tf.total ? 100 * tf.bytes / tf.total : 0, it = items().find(x => x.key === tf.game);
+    now.className = 'now on';
+    now.innerHTML = `<div class="t">Installing ${esc(it ? it.g.name : tf.game)} · ${pct.toFixed(0)} %</div><div class="bar"><i style="width:${pct}%"></i></div>
+      <div class="stats"><span><b>${gb(tf.bytes)}</b> / ${gb(tf.total)}</span>${tf.speed ? `<span><b>${gb(tf.speed)}/s</b></span><span>about <b>${dur(tf.eta)}</b> left</span>` : ''}
+      ${tq.length ? `<span>${tq.length} more queued · all done in about <b>${tf.speed ? dur((total - tf.bytes) / tf.speed) : '–'}</b></span>` : ''}</div>`;
+  } else now.className = 'now';
+  if (open) showGame(open, true);
+}
+const KIND = {folder: 'game folder', exfat: 'exFAT image', ffpfs: '.ffpfs image', ffpfsc: '.ffpfsc image (compressed)'};
+// The community .ffpfsc sheet's row for a game, fetched once per game.
+const ffp = {};
+function ffpfscText(id) {
+  if (!(id in ffp)) {
+    ffp[id] = null;
+    fetch('/api/game?id=' + encodeURIComponent(id), {cache: 'no-store'}).then(r => r.json())
+      .then(j => { ffp[id] = j.ffpfsc || {rows: [], off: true}; if (open === id) showGame(id, true); }).catch(() => {});
+  }
+  const f = ffp[id];
+  if (!f) return '<span class="meta">loading…</span>';
+  if (f.off) return '<span class="meta">off</span>';
+  if (!f.at) return '<span class="meta">not loaded yet</span>';
+  if (!f.rows.length) return '<span class="meta">not in the list</span>';
+  const tone = v => /\b(yes|works?|working|ok|playable|good|fine)\b/i.test(v) ? 'good' : /\b(no|not|crash(es)?|broken|fails?|black screen|doesn'?t|won'?t)\b/i.test(v) ? 'bad' : '';
+  const skip = new Set(['game', 'name', 'title', 'title id', 'titleid', 'id']);
+  return f.rows.map(r => Object.entries(r).filter(([k]) => !skip.has(k.toLowerCase()))
+    .map(([k, v]) => `<span class="meta">${esc(k)}:</span> <span class="${tone(v)}">${esc(v)}</span>`).join('<br>')).join('<hr style="border:0;border-top:1px solid var(--line);margin:6px 0">')
+    + (f.url ? `<br><a href="${esc(f.url)}" target="_blank" rel="noopener">Open the sheet</a>` : '');
+}
+function showGame(id, refresh) {
+  const it = items().find(x => x.g.id === id); if (!it) return;
+  open = id;
+  const g = it.g, s = state(it), sb = document.getElementById('sheet-body');
+  const rows = [['Title ID', esc(g.title_id)], ['Size', gb(it.size) + (it.lz4 && g.saved_percent != null ? ` (LZ4, ${Math.round(g.saved_percent)} % smaller than ${gb(g.source_bytes)})` : it.lz4 ? '' : ' (original, not LZ4)')],
+    ['Format', it.lz4 ? 'LZ4 folder' + (g.kind && KIND[g.kind] ? ` <span class="meta">(packed from ${KIND[g.kind]})</span>` : '') : (KIND[g.kind] || esc(g.kind || '–'))],
+    ['.ffpfsc list', ffpfscText(id)],
+    ['LZ4 reports', community(g.community)],
+    ['On the PS5', it.copies.length ? it.copies.map(c => esc(c.path) + (c.version ? ' · v' + esc(c.version) : '')).join('<br>') : (ps5 ? 'not installed' : 'PS5 not answering')]];
+  const acts = [];
+  if (s.k === 'available' && !it.lz4 && g.can_queue && !g.running && !g.queued)
+    acts.push(`<button class="btn pri" onclick="compressInstall('${esc(id)}')">⚡ Compress and install</button>`);
+  if (g.running || g.queued || (dash.send_after || []).includes(g.id))
+    acts.push(`<span class="meta">${g.running ? 'Being compressed' : 'Waiting to be compressed'}${(dash.send_after || []).includes(g.id) ? '; installs by itself when packed' : ''}</span>`);
+  if (s.k === 'available') acts.push(`<button class="btn ${!it.lz4 && g.can_queue ? 'ghost' : 'pri'}" onclick="install('${esc(id)}')">⬇ Install${!it.lz4 && g.can_queue ? ' as it is' : ''}</button>`);
+  if (s.k === 'stopped') acts.push(`<button class="btn pri" onclick="install('${esc(id)}')">▶ Resume install</button>`);
+  if (s.k === 'installed') acts.push(`<button class="btn ghost" onclick="install('${esc(id)}')">↻ Reinstall / repair</button>`);
+  if (s.k === 'sending') acts.push(`<button class="btn ghost" onclick="stopIt()">⏸ Pause</button>`);
+  if (s.k === 'queued') acts.push(`<button class="btn ghost" onclick="unqueue('${esc(it.req)}')">Remove from queue</button>`);
+  it.copies.forEach(c => acts.push(`<button class="btn danger" data-p="${esc(c.path)}" onclick="uninstall(this.dataset.p)">🗑 Uninstall${it.copies.length > 1 ? ' (' + esc(c.drive) + ')' : ''}</button>`));
+  acts.push(`<button class="btn ghost" onclick="closeSheet()">Close</button>`);
+  sb.innerHTML = `<div class="cover"><img alt="" src="/api/icon?id=${encodeURIComponent(id)}" onerror="this.replaceWith(document.createTextNode('🎮'))"></div>
+    <div><h2>${esc(clean(g.name))}</h2><div class="sub">${it.lz4 ? 'LZ4 packed · APR-EMU PackedStdio' : 'Original · ' + (KIND[g.kind] || g.kind || '')}${s.pct != null && s.k === 'sending' ? ` · installing ${s.pct.toFixed(0)} %` : ''}</div>
+      <div class="rows">${rows.map(([k, v]) => `<div>${k}</div><div>${v}</div>`).join('')}</div>
+      <div class="acts">${acts.join('')}</div></div>`;
+  document.getElementById('sheet').hidden = false;
+  if (!refresh) { const b = sb.querySelector('.btn'); if (b) b.focus(); }
+}
+function closeSheet() { open = null; document.getElementById('sheet').hidden = true; }
+async function compressInstall(id) {
+  const it = items().find(x => x.g.id === id);
+  try {
+    await post({action: 'send_after', game: id});
+    await post({action: 'start', game: id});
+    toast(`Compressing ${it.g.name}; it installs by itself when it is packed`);
+    setTimeout(load, 800);
+  } catch (e) { toast('Failed: ' + e.message); }
+}
+async function install(id) {
+  const it = items().find(x => x.g.id === id);
+  try {
+    const j = await post({action: 'push', game: it.req});
+    toast(j.position ? `Queued (${j.position} in line)` : `Installing ${it.g.name}…`);
+  } catch (e) { toast('Could not start: ' + e.message); }
+  setTimeout(load, 800);
+}
+async function uninstall(path) {
+  if (!confirm(`Uninstall from the PS5?\n\n${path}\n\nThe copy on the NAS stays, so you can install it again.`)) return;
+  try { const j = await post({action: 'ftp_delete', path}); toast(`Uninstalled (${j.files} files)`); ps5 = null; } catch (e) { toast('Not uninstalled: ' + e.message); }
+  load(true);
+}
+async function stopIt() { try { await post({action: 'push_stop'}); toast('Paused; Resume install continues where it stopped'); } catch (e) { toast(e.message); } setTimeout(load, 800); }
+async function unqueue(req) { try { await post({action: 'push_queue_remove', game: req}); } catch (e) {} setTimeout(load, 500); }
+async function load(withPs5) {
+  try {
+    const dr = await fetch('/api/dashboard', {cache: 'no-store'}), dj = await dr.json().catch(() => ({}));
+    if (!dr.ok || !Array.isArray(dj.games)) throw new Error(dj.error || 'the NAS page answered ' + dr.status);
+    dash = dj;
+    if (withPs5 || !ps5 || Date.now() - (ps5._at || 0) > 60000) {
+      const r = await fetch('/api/ps5/games', {cache: 'no-store'});
+      ps5 = r.ok ? await r.json() : null; if (ps5) ps5._at = Date.now();
+      document.getElementById('ps5').innerHTML = ps5 ? `PS5: <b>${ps5.games.length} games</b>` : 'PS5: not answering';
+    }
+    const st = await (await fetch('/api/ps5', {cache: 'no-store'})).json().catch(() => ({}));
+    document.getElementById('space').innerHTML = {on: '● <b>PS5 on</b>', standby: '◐ rest mode', unknown: '○ PS5 off', unset: 'no PS5 address'}[st.status] || '';
+    render();
+  } catch (e) { document.getElementById('grid').innerHTML = `<div class="empty">Cannot reach the NAS: ${esc(String(e))}</div>`; }
+}
+document.addEventListener('keydown', e => { if (e.key === 'Escape' && open) closeSheet(); });
+load(true); setInterval(load, 5000);
+</script>
+</body>
+</html>

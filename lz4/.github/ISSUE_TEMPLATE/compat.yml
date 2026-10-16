@@ -1,0 +1,66 @@
+name: Game report
+description: Tell everyone how a game runs after LZ4 packing
+title: "[Game report] "
+labels: [compat]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Reports are counted on the game's page in the app, so others know what to expect before they pack.
+  - type: input
+    id: title_id
+    attributes:
+      label: Title ID
+      placeholder: PPSA26344
+    validations:
+      required: true
+  - type: input
+    id: game
+    attributes:
+      label: Game
+      placeholder: Ghost of Yotei
+  - type: dropdown
+    id: status
+    attributes:
+      label: How does it run?
+      options:
+        - Works
+        - Works with issues
+        - Won't start (black screen or crash on launch)
+        - Crashes in game
+    validations:
+      required: true
+  - type: input
+    id: game_version
+    attributes:
+      label: Game version
+      placeholder: "02.002.000"
+  - type: input
+    id: level
+    attributes:
+      label: LZ4 level
+      placeholder: "9"
+  - type: dropdown
+    id: source
+    attributes:
+      label: Packed from
+      options:
+        - Folder
+        - exFAT image
+        - Uncompressed .ffpfsc
+        - Downloaded already packed
+  - type: input
+    id: firmware
+    attributes:
+      label: Firmware
+      placeholder: "13.60"
+  - type: input
+    id: app_version
+    attributes:
+      label: LZ4 Compression version
+      placeholder: "1.5.0"
+  - type: textarea
+    id: notes
+    attributes:
+      label: Notes
+      description: Anything worth knowing (stutter, fixes you needed, error codes).
