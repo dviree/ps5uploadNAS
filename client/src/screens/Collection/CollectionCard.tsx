@@ -107,8 +107,16 @@ export const CollectionCard = memo(function CollectionCard({
         interactive
         overlay={
           <>
-            <div className="absolute left-2 top-2">
+            <div className="absolute left-2 top-2 flex gap-1">
               <PlatformTag platform={game.platform} />
+              {game.locations.some((l) => l.lz4) && (
+                <CoverTag
+                  tone="accent"
+                  title={tr("collection.lz4_hint", undefined, "Packed with LZ4 for APR-EMU (ps5-lz4).")}
+                >
+                  {tr("lz4.title", undefined, "LZ4")}
+                </CoverTag>
+              )}
             </div>
             {game.is_duplicate && (
               <span className="absolute right-2 top-2">

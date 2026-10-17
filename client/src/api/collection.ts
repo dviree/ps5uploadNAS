@@ -64,6 +64,8 @@ export interface CollectionLocation {
   date_source?: string;
   added_ts: number;
   pkg?: CollectionPkg;
+  /** A game folder packed by ps5-lz4 / LZ4 Compression (ampr_assets.index at its root). */
+  lz4?: boolean;
 }
 
 export interface CollectionGame {
