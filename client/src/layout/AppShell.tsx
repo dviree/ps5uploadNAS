@@ -1414,8 +1414,8 @@ export default function AppShell() {
     try {
       document.title =
         multiConsoleTitle && activeProfile
-          ? `PS5Upload — ${activeProfile.name}`
-          : "PS5Upload";
+          ? `ps5lz4uploader — ${activeProfile.name}`
+          : "ps5lz4uploader";
     } catch {
       // non-DOM test environments
     }
@@ -1449,7 +1449,7 @@ export default function AppShell() {
       <div className="h-top-bar flex items-center gap-2.5 px-4 pb-2 pt-[calc(env(safe-area-inset-top)_+_0.5rem)] md:hidden">
         <NavigationControls />
         <AppLogo size={28} />
-        <span className="text-base font-semibold tracking-[-0.02em]">PS5Upload</span>
+        <span className="text-base font-semibold tracking-[-0.02em]">ps5lz4uploader</span>
       </div>
       <HelperVersionBanner />
       <SessionBanner />

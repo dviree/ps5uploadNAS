@@ -186,7 +186,7 @@ export default function Sidebar() {
           {!collapsed && (
             <span className="min-w-0">
               <span className="block truncate text-[1.25rem] leading-tight font-semibold tracking-[-0.02em]">
-                PS5Upload
+                ps5lz4uploader
               </span>
               {/* Deliberately NOT `uppercase` like the nav section headings:
                   that would render "v5.4.19" as "V5.4.19". Tabular figures

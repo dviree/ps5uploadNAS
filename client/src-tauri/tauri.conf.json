@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "PS5Upload",
+        "title": "ps5lz4uploader",
         "width": 1280,
         "height": 820,
         "minWidth": 960,
