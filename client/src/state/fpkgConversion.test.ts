@@ -82,12 +82,22 @@ vi.mock("./roster", async (orig) => ({
   useRosterStore: { getState: () => roster },
 }));
 
-import { POLL_MS, useFpkgConversion } from "./fpkgConversion";
+import { POLL_MS, resumeRememberedRun, useFpkgConversion } from "./fpkgConversion";
 import { commandTask, taskCapabilities } from "./taskControls";
 import { useTaskStore } from "./tasks";
 
 const req = { source: "/games/a", outputDir: "/out" };
 const tick = () => vi.advanceTimersByTimeAsync(POLL_MS + 50);
+
+/** A page's localStorage, for the remembered-run tests (the test runs without a window). */
+function memoryStorage() {
+  const m = new Map<string, string>();
+  return {
+    getItem: (k: string) => m.get(k) ?? null,
+    setItem: (k: string, v: string) => void m.set(k, v),
+    removeItem: (k: string) => void m.delete(k),
+  };
+}
 
 describe("fpkg pipeline", () => {
   beforeEach(() => {
@@ -826,5 +836,38 @@ describe("fpkg pipeline", () => {
       packagePath: "/out/a.pkg",
     });
   });
-});
 
+  it("a reloaded page follows an LZ4 folder build the engine is still running", async () => {
+    const localStorage = memoryStorage();
+    vi.stubGlobal("window", { localStorage });
+    localStorage.setItem(
+      "ps5upload.convert.running_job",
+      JSON.stringify({ jobId: "lz", mode: "folder", source: "/games/Game.exfat", stage: "pack", startedMs: 5 }),
+    );
+    jobStatus.mockResolvedValue({ status: "running", bytes_sent: 0, total_bytes: 0 });
+    await resumeRememberedRun();
+    expect(useFpkgConversion.getState().pipeline).toMatchObject({
+      phase: "running",
+      mode: "folder",
+      jobId: "lz",
+      source: "/games/Game.exfat",
+      startedMs: 5,
+    });
+    expect(jobStatus).toHaveBeenCalledWith("lz");
+    vi.unstubAllGlobals();
+  });
+
+  it("a remembered build the engine no longer runs is forgotten", async () => {
+    const localStorage = memoryStorage();
+    vi.stubGlobal("window", { localStorage });
+    localStorage.setItem(
+      "ps5upload.convert.running_job",
+      JSON.stringify({ jobId: "gone", mode: "folder", source: "/g", stage: "pack", startedMs: 1 }),
+    );
+    jobStatus.mockRejectedValue(new Error("unknown job"));
+    await resumeRememberedRun();
+    expect(useFpkgConversion.getState().pipeline.phase).toBe("idle");
+    expect(localStorage.getItem("ps5upload.convert.running_job")).toBeNull();
+    vi.unstubAllGlobals();
+  });
+});
