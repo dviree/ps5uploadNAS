@@ -25,6 +25,8 @@ pub struct Found {
     pub kind: String,
     /// (size, mtime, created) from the listing that found it, so no second look is needed.
     pub stat: (u64, i64, i64),
+    /// A game folder packed by LZ4 Compression (see `is_lz4_folder`).
+    pub lz4: bool,
 }
 
 fn visible(name: &str) -> bool {
@@ -172,6 +174,14 @@ fn is_app_folder(fs: &Fsys, entries: &[Ent]) -> bool {
         .any(|e| !e.is_dir && (e.name == "param.json" || e.name == "param.sfo"))
 }
 
+/// A game folder LZ4 Compression (lz4/) has packed: `ampr_assets.index` sits at its root, as
+/// the LZ4 engine's own check (`ampr_pack_probe`) looks for it.
+pub fn is_lz4_folder(entries: &[Ent]) -> bool {
+    entries
+        .iter()
+        .any(|e| !e.is_dir && e.name.eq_ignore_ascii_case("ampr_assets.index"))
+}
+
 /// The immediate `.rar` parts of a folder (from its listing), which make it one multipart set.
 fn rar_parts(entries: &[Ent]) -> Vec<&Ent> {
     entries
@@ -215,6 +225,7 @@ pub fn discover(fs: &Fsys, root: &str, cancel: &AtomicBool) -> Vec<Found> {
                         abs: e.path,
                         kind: "folder".into(),
                         stat,
+                        lz4: is_lz4_folder(&inner),
                     });
                 } else if !rar_parts(&inner).is_empty() {
                     found.push(Found {
@@ -222,6 +233,7 @@ pub fn discover(fs: &Fsys, root: &str, cancel: &AtomicBool) -> Vec<Found> {
                         abs: e.path,
                         kind: "rar".into(),
                         stat,
+                        lz4: false,
                     });
                 } else if depth < MAX_DEPTH {
                     walk(fs, root, &e.path, depth + 1, found, cancel);
@@ -232,6 +244,7 @@ pub fn discover(fs: &Fsys, root: &str, cancel: &AtomicBool) -> Vec<Found> {
                     stat: (e.size, e.mtime, e.created),
                     abs: e.path,
                     kind: kind.into(),
+                    lz4: false,
                 });
             }
         }
@@ -474,6 +487,7 @@ pub fn scan(
                 date_source: Some(date_source.into()),
                 added_ts: added,
                 pkg,
+                lz4: it.lz4,
             };
             group::place(&mut games, &gid, loc);
         }
@@ -620,6 +634,20 @@ mod tests {
             3,
             "dot-files and other files are not items: {kinds:?}"
         );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_game_folder_packed_by_lz4_is_marked() {
+        let root = tmp("lz4");
+        app(&root.join("Packed"), "PPSA01234", "Packed", "01.000.000");
+        std::fs::write(root.join("Packed/ampr_assets.index"), b"AMPRPAK4").unwrap();
+        std::fs::write(root.join("Packed/ampr_assets-000.pak"), b"pak").unwrap();
+        app(&root.join("Plain"), "PPSA05678", "Plain", "01.000.000");
+        let found = discover(&Fsys::Local, &s(&root), &AtomicBool::new(false));
+        let lz4 = |rel: &str| found.iter().find(|f| f.rel == rel).map(|f| f.lz4);
+        assert_eq!(lz4("Packed"), Some(true));
+        assert_eq!(lz4("Plain"), Some(false));
         let _ = std::fs::remove_dir_all(&root);
     }
 

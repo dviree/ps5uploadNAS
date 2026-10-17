@@ -101,6 +101,14 @@ pub struct Location {
     pub added_ts: i64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pkg: Option<PkgInfo>,
+    /// A game folder packed by LZ4 Compression (lz4/): it has `ampr_assets.index` at its root,
+    /// and its data is in `ampr_assets-*.pak` volumes that APR-EMU reads while the game runs.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub lz4: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 impl Location {
