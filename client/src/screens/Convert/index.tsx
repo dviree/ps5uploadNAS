@@ -6,6 +6,8 @@ import { useSearchParams } from "react-router";
 import { PackagePlus } from "lucide-react";
 
 import { PageHeader, Tabs } from "../../components";
+import { useConvertPrefs } from "../../state/convertPrefs";
+import { useFpkgConversion } from "../../state/fpkgConversion";
 import { useTr } from "../../state/lang";
 import FpkgConvertScreen from "../FpkgConvert";
 import { Compatibility } from "./Compatibility";
@@ -27,11 +29,15 @@ export default function ConvertScreen() {
     p.set("tab", next);
     setParams(p);
   };
-  /** Open the converter on one game, with LZ4 asset packs on (FpkgConvert reads the state). */
+  /** Pack one game into an LZ4 game folder (`<name>-lz4`) in the LZ4 folder, as ps5-lz4
+   *  does, adding ampr_emu 0.4.2.1 when the game's own cannot read the packs; the Convert tab
+   *  shows it running. The original is only read. */
   const convertWithLz4 = (path: string) => {
-    const p = new URLSearchParams(params);
-    p.set("tab", "convert");
-    setParams(p, { state: { source: path, lz4: true } });
+    const { lz4Dir, outputDir } = useConvertPrefs.getState();
+    void useFpkgConversion
+      .getState()
+      .buildFolder(path, lz4Dir.trim() || outputDir.trim() || undefined, { installRuntime: true });
+    setTab("convert");
   };
 
   const tabs = (
@@ -63,7 +69,7 @@ export default function ConvertScreen() {
             ? tr(
                 "lz4mine.subtitle",
                 undefined,
-                "The PS5 games in your library folders and which of them can be LZ4. Convert to LZ4 packs a game's data into LZ4 asset packs that APR-EMU reads while the game runs, in a game image ShadowMount+ mounts.",
+                "The PS5 games in your library folders and which of them can be LZ4. Convert to LZ4 packs a game's data into LZ4 asset packs that APR-EMU reads while the game runs, and saves it as a game folder (name-lz4) in the LZ4 folder, as ps5-lz4 does. The original is only read.",
               )
             : tr(
                 "lz4compat.subtitle",

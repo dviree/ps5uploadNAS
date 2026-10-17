@@ -140,8 +140,9 @@ export interface ConversionState {
     /** Pack the game's files into AMPR LZ4 asset packs first (an .exfat image). */
     lz4?: AmprLz4Options,
   ) => Promise<void>;
-  /** Unpack a game image or a debug-key package into a plain folder in `outputDir`. */
-  buildFolder: (source: string, outputDir: string | undefined) => Promise<void>;
+  /** Unpack a game image or a debug-key package into a plain folder in `outputDir`; with
+   *  `lz4`, pack a game folder or image into an LZ4 game folder (`<name>-lz4`) there. */
+  buildFolder: (source: string, outputDir: string | undefined, lz4?: AmprLz4Options) => Promise<void>;
   /** Put the finished image in the Upload queue. */
   uploadImage: (plan: ImageUploadPlan) => void;
   /** Install the kept package again: after a failed install, or Install again on a result. */
@@ -778,16 +779,22 @@ export const useFpkgConversion = create<ConversionState>((set, get) => ({
     }
   },
 
-  buildFolder: async (source, outputDir) => {
+  buildFolder: async (source, outputDir, lz4) => {
     if (get().pipeline.phase === "running") return;
     pendingImageUpload = null;
-    beginRun("folder", source, null, "write");
+    beginRun("folder", source, null, lz4 ? "pack" : "write");
     try {
-      const { job_id } = await fpkg.buildFolder(source, outputDir, undefined, useConvertPrefs.getState().fullVerify);
+      const { job_id } = await fpkg.buildFolder(
+        source,
+        outputDir,
+        undefined,
+        useConvertPrefs.getState().fullVerify,
+        lz4,
+      );
       update({ jobId: job_id });
       poll(job_id, null);
     } catch (error) {
-      fail("write", error instanceof Error ? error.message : String(error), null);
+      fail(lz4 ? "pack" : "write", error instanceof Error ? error.message : String(error), null);
     }
   },
 
