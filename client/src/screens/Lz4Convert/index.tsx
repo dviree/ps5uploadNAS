@@ -17,24 +17,25 @@ import {
 } from "./lz4Url";
 import logo from "./lz4-logo.png";
 
-// The LZ4 Compression page's own look (lz4/assets/lz4-compression.html): always dark, with its
-// colours, fonts and glass panels, so the bar around the engine's page matches it.
+// The LZ4 Compression page's glass look (lz4/assets/lz4-compression.html, html.lz4.glass):
+// frosted see-through panels with light edges and violet buttons, so the bar around the
+// engine's page matches it.
 const LZ4 = {
-  bg: "#101313",
-  surface: "rgba(25,28,28,0.96)",
-  line: "rgba(240,245,240,0.11)",
-  text: "#f1f0eb",
-  muted: "#aaa8a1",
-  panelBg: "rgba(31,34,34,0.88)",
+  bg: "#24145c",
+  surface: "rgba(46,30,110,0.96)",
+  line: "rgba(255,255,255,0.2)",
+  text: "#ffffff",
+  muted: "rgba(236,232,255,0.74)",
+  panelBg: "rgba(255,255,255,0.1)",
 };
 const LZ4_FONT =
   '-apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Avenir Next", "Segoe UI", sans-serif';
 const LZ4_TITLE_FONT =
   '"SST", "SF Pro Display", -apple-system, BlinkMacSystemFont, "Helvetica Neue", "Segoe UI", sans-serif';
 const control =
-  "rounded-[10px] border border-[rgba(240,245,240,0.11)] bg-[rgba(35,38,38,0.9)] text-[#f1f0eb]";
+  "rounded-[10px] border border-[rgba(255,255,255,0.24)] bg-[rgba(255,255,255,0.12)] text-white";
 const primary =
-  "rounded-[10px] bg-[linear-gradient(145deg,#2b86bd,#1d5f8c)] px-4 py-2 text-[13px] font-semibold text-white shadow-[0_18px_42px_rgba(20,103,151,0.25)] hover:brightness-110";
+  "rounded-[10px] bg-[linear-gradient(135deg,#b794ff,#7c5cff_50%,#4f7bff)] px-4 py-2 text-[13px] font-semibold text-white shadow-[0_6px_22px_rgba(60,30,160,0.45)] hover:brightness-110";
 const iconBtn = `${control} inline-flex h-9 w-9 shrink-0 items-center justify-center hover:brightness-110`;
 
 type Reach = "checking" | "up" | "down";
@@ -87,7 +88,7 @@ export default function Lz4ConvertScreen() {
   return (
     <div
       className="flex h-[calc(100dvh-13rem)] min-h-[560px] flex-col gap-2.5 rounded-[18px] p-2.5 text-[15px] antialiased [color-scheme:dark]"
-      style={{ background: LZ4.bg, color: LZ4.text, fontFamily: LZ4_FONT }}
+      style={{ color: LZ4.text, fontFamily: LZ4_FONT }}
       data-testid="lz4-convert"
     >
       <div
@@ -127,7 +128,7 @@ export default function Lz4ConvertScreen() {
             onChange={(e) => setDraft(e.target.value)}
             placeholder={defaultLz4Url(engineUrl)}
             spellCheck={false}
-            className={`${control} min-w-0 flex-1 px-3 py-2 text-[13px] focus:outline-2 focus:outline-offset-1 focus:outline-[#2b86bd]`}
+            className={`${control} min-w-0 flex-1 px-3 py-2 text-[13px] focus:outline-2 focus:outline-offset-1 focus:outline-[#b794ff]`}
           />
           <button type="submit" className={primary}>
             {tr("lz4.connect", undefined, "Connect")}
