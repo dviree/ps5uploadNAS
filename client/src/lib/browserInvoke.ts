@@ -743,6 +743,9 @@ export async function browserInvoke<T>(
       // TS caller: { paths }
       return postJson<T>("/api/lz4/status", { paths: args["paths"] });
     }
+    case "lz4_ffpfsc": {
+      return getJson<T>(args["refresh"] ? "/api/lz4/ffpfsc?refresh=true" : "/api/lz4/ffpfsc");
+    }
     case "fpkg_build": {
       return postJson<T>("/api/fpkg/build", {
         source: args["source"],

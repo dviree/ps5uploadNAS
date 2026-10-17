@@ -11,6 +11,9 @@ import {
   canBeLz4,
   compatReportUrl,
   compatVerdict,
+  ffpfscCells,
+  ffpfscRowsFor,
+  ffpfscTone,
   lz4,
   type CompatEntry,
   type Lz4State,
@@ -35,7 +38,12 @@ import {
   useCollectionStore,
 } from "../../state/collection";
 import { useTr } from "../../state/lang";
-import { loadLz4Compat, useLz4Compat } from "../../state/lz4Compat";
+import {
+  loadFfpfscSheet,
+  loadLz4Compat,
+  useFfpfscSheet,
+  useLz4Compat,
+} from "../../state/lz4Compat";
 import { CollectionCover } from "../Collection/CollectionCover";
 
 /** What the converter can read and write LZ4 packs for: a game folder or a game image. */
@@ -64,6 +72,7 @@ export function MyGames({ onConvert }: { onConvert: (path: string) => void }) {
   const loading = useCollectionStore((s) => s.loading);
   const scanning = useCollectionStore((s) => s.scan?.running ?? false);
   const compat = useLz4Compat((s) => s.data);
+  const sheet = useFfpfscSheet((s) => s.sheet);
   const [statuses, setStatuses] = useState<Record<string, Lz4Status>>(() =>
     Object.fromEntries(known),
   );
@@ -74,6 +83,7 @@ export function MyGames({ onConvert }: { onConvert: (path: string) => void }) {
   useEffect(() => {
     if (!useCollectionStore.getState().library) void loadCollection();
     void loadLz4Compat();
+    void loadFfpfscSheet();
   }, []);
 
   const rows: Row[] = useMemo(
@@ -118,6 +128,10 @@ export function MyGames({ onConvert }: { onConvert: (path: string) => void }) {
     };
   }, [rows]);
 
+  const ffpfscFor = (g: CollectionGame): [string, string][] | null => {
+    const hit = sheet && ffpfscRowsFor(sheet, g.game_id, g.title)[0];
+    return sheet && hit ? ffpfscCells(sheet.headers, hit) : null;
+  };
   const stateOf = (r: Row): Lz4State | undefined =>
     statuses[r.loc.absolute_path]?.status;
 
@@ -287,6 +301,7 @@ export function MyGames({ onConvert }: { onConvert: (path: string) => void }) {
                   state={stateOf(r)}
                   status={statuses[r.loc.absolute_path]}
                   compat={compat?.games[r.game.game_id]}
+                  ffpfsc={ffpfscFor(r.game)}
                   onConvert={() => onConvert(r.loc.absolute_path)}
                 />
               ))}
@@ -326,12 +341,15 @@ function GameRow({
   state,
   status,
   compat,
+  ffpfsc,
   onConvert,
 }: {
   row: Row;
   state: Lz4State | undefined;
   status: Lz4Status | undefined;
   compat: CompatEntry | undefined;
+  /** The game's row in the community's .ffpfsc list, in the sheet's column order. */
+  ffpfsc: [string, string][] | null;
   onConvert: () => void;
 }) {
   const tr = useTr();
@@ -353,6 +371,7 @@ function GameRow({
           {formatCollectionBytes(loc.size_bytes)}
         </div>
         <CommunityLine compat={compat} />
+        <FfpfscLine cells={ffpfsc} />
       </div>
       <div className="flex shrink-0 flex-col items-start gap-1">
         <StateBadge state={state} status={status} />
@@ -457,6 +476,38 @@ function CommunityLine({ compat }: { compat: CompatEntry | undefined }) {
         { playing, count: compat.reports },
         "community: plays for {playing} of {count}",
       )}
+    </div>
+  );
+}
+
+/** What the community's .ffpfsc list says about the game: its row's cells, coloured where a
+ *  cell reads as works or not. */
+function FfpfscLine({ cells: all }: { cells: [string, string][] | null }) {
+  const tr = useTr();
+  if (!all?.length) return null;
+  const cells = all.filter(([, v]) => !/^[A-Z]{4}\d{5}$/.test(v));
+  const tones = cells.map(([, v]) => ffpfscTone(v));
+  const tone = tones.includes("bad")
+    ? "bad"
+    : tones.includes("good")
+      ? "good"
+      : null;
+  const color =
+    tone === "good"
+      ? "text-[var(--color-good)]"
+      : tone === "bad"
+        ? "text-[var(--color-bad)]"
+        : "text-[var(--color-muted)]";
+  return (
+    <div
+      className={`truncate text-xs ${color}`}
+      title={cells.map(([k, v]) => `${k}: ${v}`).join("\n")}
+    >
+      {tr("ffpfsc.line", undefined, ".ffpfsc list")}:{" "}
+      {cells
+        .slice(1)
+        .map(([, v]) => v)
+        .join(" · ")}
     </div>
   );
 }

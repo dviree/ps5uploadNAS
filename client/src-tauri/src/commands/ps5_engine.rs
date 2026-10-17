@@ -2324,6 +2324,15 @@ pub async fn lz4_status(paths: Vec<String>) -> Result<JsonValue, String> {
     post_json(&url, &serde_json::json!({ "paths": paths })).await
 }
 
+/// The community's .ffpfsc compatibility list (Convert Games' Compatibility).
+/// GET /api/lz4/ffpfsc.
+#[tauri::command]
+pub async fn lz4_ffpfsc(refresh: Option<bool>) -> Result<JsonValue, String> {
+    let base = engine::url();
+    let fresh = if refresh.unwrap_or(false) { "?refresh=true" } else { "" };
+    get_json(&format!("{base}/api/lz4/ffpfsc{fresh}")).await
+}
+
 /// Start converting a game source into an installable FPKG. Returns a job id
 /// to poll with `job_status`; the finished job carries the package's path.
 /// POST /api/fpkg/build.

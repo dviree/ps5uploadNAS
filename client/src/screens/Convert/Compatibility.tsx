@@ -1,6 +1,7 @@
-// Convert Games' Compatibility: every game other players have reported with LZ4 asset packs
-// (the LZ4 Compression project's compat.json, as ps5-lz4's Community tab shows it), with
-// search, a filter and three sorts. Games in your own library are marked.
+// Convert Games' Compatibility, in two lists: LZ4 reports (every game other players have
+// reported with LZ4 asset packs, the LZ4 Compression project's compat.json, as ps5-lz4's
+// Community tab shows it, with search, a filter and three sorts) and the community's .ffpfsc
+// list. Games in your own library are marked.
 
 import { useEffect, useMemo, useState } from "react";
 import { ExternalLink, RefreshCw, Search, Users } from "lucide-react";
@@ -20,6 +21,7 @@ import {
   Input,
   Select,
   Spinner,
+  Tabs,
 } from "../../components";
 import { openExternalUrl } from "../../lib/openExternalUrl";
 import {
@@ -29,11 +31,12 @@ import {
 } from "../../state/collection";
 import { useTr } from "../../state/lang";
 import { loadLz4Compat, useLz4Compat } from "../../state/lz4Compat";
+import { FfpfscList } from "./FfpfscList";
 
 type Filter = "all" | "good" | "problems" | "mine";
 type Sort = "latest" | "most" | "name";
 
-export function Compatibility() {
+function Lz4Reports() {
   const tr = useTr();
   const data = useLz4Compat((s) => s.data);
   const loading = useLz4Compat((s) => s.loading);
@@ -275,5 +278,32 @@ function ReportRow({
         </Button>
       )}
     </li>
+  );
+}
+
+export function Compatibility() {
+  const tr = useTr();
+  const [list, setList] = useState<"lz4" | "ffpfsc">("lz4");
+  return (
+    <div className="flex flex-col gap-4">
+      <Tabs
+        variant="pills"
+        size="sm"
+        ariaLabel={tr("lz4compat.tab", undefined, "Compatibility")}
+        value={list}
+        onChange={(id) => setList(id as "lz4" | "ffpfsc")}
+        tabs={[
+          {
+            id: "lz4",
+            label: tr("lz4compat.list_lz4", undefined, "LZ4 reports"),
+          },
+          {
+            id: "ffpfsc",
+            label: tr("lz4compat.list_ffpfsc", undefined, ".ffpfsc list"),
+          },
+        ]}
+      />
+      {list === "lz4" ? <Lz4Reports /> : <FfpfscList />}
+    </div>
   );
 }

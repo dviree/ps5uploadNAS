@@ -1,6 +1,11 @@
 import { create } from "zustand";
 
-import { fetchCompat, type CompatData } from "../api/lz4";
+import {
+  ffpfscSheet,
+  fetchCompat,
+  type CompatData,
+  type FfpfscSheet,
+} from "../api/lz4";
 
 /** The community's LZ4 game reports, read once per session (and on Refresh) and shared by
  *  Convert Games' My games and Compatibility tabs. */
@@ -35,4 +40,38 @@ export function loadLz4Compat(force = false): Promise<void> {
       inFlight = null;
     });
   return inFlight;
+}
+
+/** The community's .ffpfsc compatibility list, read through the engine once per session (and
+ *  on Refresh). */
+interface SheetState {
+  sheet: FfpfscSheet | null;
+  loading: boolean;
+  error: string | null;
+}
+
+export const useFfpfscSheet = create<SheetState>(() => ({
+  sheet: null,
+  loading: false,
+  error: null,
+}));
+
+let sheetInFlight: Promise<void> | null = null;
+
+export function loadFfpfscSheet(force = false): Promise<void> {
+  if (sheetInFlight) return sheetInFlight;
+  if (useFfpfscSheet.getState().sheet && !force) return Promise.resolve();
+  useFfpfscSheet.setState({ loading: true, error: null });
+  sheetInFlight = ffpfscSheet(force)
+    .then((sheet) => useFfpfscSheet.setState({ sheet, loading: false }))
+    .catch((e: unknown) =>
+      useFfpfscSheet.setState({
+        loading: false,
+        error: e instanceof Error ? e.message : String(e),
+      }),
+    )
+    .finally(() => {
+      sheetInFlight = null;
+    });
+  return sheetInFlight;
 }
