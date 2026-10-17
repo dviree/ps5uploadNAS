@@ -1,6 +1,6 @@
 // Convert Games' LZ4 tab: ps5-lz4's web page (lz4/nas-lz4, the ps5-lz4-ui container on port
-// 5921) as it is, in its own look: My games with what can be LZ4, Activity, PS5 games,
-// ShadowMount, Saves, Community reports, Remote and FTP. This screen only finds it; the
+// 5921) in its own look, with only My games (what can be LZ4, compress) and Community (the
+// compatibility reports): ?embed=convert hides the rest. This screen only finds it; the
 // address is asked for only when it can't be reached.
 
 import { useCallback, useEffect, useState } from "react";
@@ -111,7 +111,7 @@ export default function Lz4ConvertScreen() {
 
   return (
     <iframe
-      src={`${url}/`}
+      src={`${url}/?embed=convert`}
       title={tr("lz4.title", undefined, "LZ4")}
       className="h-[calc(100dvh-13rem)] min-h-[560px] w-full rounded-[18px] border"
       style={{ borderColor: LZ4.line, background: "#24145c" }}

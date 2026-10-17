@@ -6254,7 +6254,8 @@ def cmd_ui(args) -> int:
             self.wfile.write(body)
 
         def do_GET(self):
-            if self.path in ("/", "/index.html"):
+            # The page reads its own query string (?embed=convert inside ps5upload).
+            if self.path.split("?", 1)[0] in ("/", "/index.html"):
                 return self.send(200, UI_HTML.encode(), "text/html")
             if self.path in ("/store", "/store/"):
                 return self.send(200, STORE_HTML.encode(), "text/html")

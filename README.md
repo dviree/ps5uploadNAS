@@ -33,9 +33,9 @@
   rest. Organize, de-duplicate and clean up the drives. Replaces PS Game Library.
 - **Convert Games.** Build an installable package from a decrypted game folder or an
   image, or write a game folder as a game image (`.exfat`, `.ffpkg`, `.ffpfs`, or the smaller
-  `.ffpfsc`) that ShadowMount+ mounts. The **LZ4** tab shows ps5-lz4
-  ([lz4/nas-lz4](lz4/nas-lz4/README.md)): which games can be LZ4, packing them for APR-EMU,
-  sending them to the PS5, community reports and FTP. `scripts/nas-install.sh` sets up both on
+  `.ffpfsc`) that ShadowMount+ mounts. The **LZ4** tab shows ps5-lz4's
+  My games and Community ([lz4/nas-lz4](lz4/nas-lz4/README.md)): which games can be LZ4,
+  compressing them for APR-EMU, and the compatibility reports. `scripts/nas-install.sh` sets up both on
   a NAS.
 - **Browse and manage.** Files, games, disk images (mount, edit in place), saves, screenshots
   and video clips; register, launch, stop and uninstall games; copy, move (Move to…),
