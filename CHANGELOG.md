@@ -4,6 +4,51 @@ What's new in ps5upload, written for humans.
 
 ---
 
+## 7.0.33
+
+- **A PS5 update package installs even when its base game isn't there.** The app refused any
+  update whose base game wasn't installed ("Install the base game first"), but some PS5 updates
+  carry the whole app: a YouTube update package installed fine through the PS5's own debug
+  Package Installer while ps5upload refused it. For PS5 packages the app now warns ("the PS5 may
+  still accept it") and lets the PS5 decide; if it can't, the PS5's own error still shows. PS4
+  updates are still refused, since there Sony accepts the request and installs nothing.
+  Stream-installed on both consoles (FW 13.60) with YouTube removed first.
+- **An install counts as done when its exact bytes are on the console.** Such a package lands as
+  the app, not in the updates folder, so the app looked in the wrong place: it called an
+  installed copy "not installed" and could not confirm a finished install.
+- **About links to the website.** About now has a Website link to ps5upload.phantomptr.com, and
+  the author's name opens phantomptr.com.
+
+## 7.0.32
+
+- **Rest mode is found on a computer with Wi-Fi and a cable at once.** A Mac on both, sending
+  through Wi-Fi, got "Host is down" from a sleeping PS5 and showed it as not answering, though
+  the same console answered "standby" over the cable. The app now asks every network connection
+  on the computer that shares the console's network, and treats "Host is down" as a reason to ask.
+  Wake goes out the same way, so it now reaches a sleeping console from such a computer too
+  (Mac, Linux and Android; Windows still uses its default connection).
+- **Wake is offered whenever the console isn't awake.** The PS5 power card showed Wake only when
+  it had confirmed rest mode; it now shows whenever wake is set up and the console isn't known
+  to be awake. The card says "In rest mode" or "Not answering", and greys out Rest mode, Reboot
+  and Shut down while the console sleeps, since those need the helper.
+
+## 7.0.31
+
+- **Rest mode is shown as rest mode, not as a problem.** A PS5 in rest mode used to look the
+  same as one that was off or broken: a red "Not connected", "Helper isn't running" on every
+  console screen, and Connection's Check blaming the jailbreak or a VPN. The app now asks the
+  console the way Remote Play does (it answers "standby" while it sleeps), and shows a calm,
+  blue "In rest mode" in the status bar, the console tabs, Home and the game page. Console screens
+  say "Your PS5 is in rest mode" with a Wake button when wake is set up. A console that answers
+  nothing at all reads "Not answering", with the setting it needs to stay reachable in rest mode
+  (Settings › System › Power Saving › Features Available in Rest Mode).
+- **Nothing fights a sleeping console.** The automatic reconnect no longer pokes a console in rest
+  mode every 30 seconds all night; it waits, and sends the helper again once the console is
+  awake. Uploads that meet rest mode wait ("Waiting for the PS5 to wake") and carry on after the
+  wake, without using up their retries; in the browser version they used to fail. Keep-awake skips
+  a sleeping console. Measured on both consoles on FW 13.60, including a full rest → wake →
+  helper back → rest cycle on the Pro.
+
 ## 7.0.30
 
 - **Files fits on a phone (#470).** On a narrow screen every file and folder row carried up to
