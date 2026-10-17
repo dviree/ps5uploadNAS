@@ -34,8 +34,8 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: "Release tag to publish (e.g. v3.3.16). Must already exist."
-        required: true
+        description: "Release tag to publish (e.g. v3.3.16). Must already exist. Empty: build the chosen branch (lz4-<commit>, lz4, latest)."
+        required: false
 
 # Least privilege at the top: read-only by default. Only the jobs that actually
 # push to GHCR (build*, merge*) opt into packages:write below — the PR
