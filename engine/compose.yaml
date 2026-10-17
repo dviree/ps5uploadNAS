@@ -1,11 +1,8 @@
-# ps5upload engine + web UI, with the LZ4 Compression engine beside it, on a
-# Linux server (homelab, NAS, mini PC). Both are built from this repository.
+# ps5upload engine + web UI on a Linux server (homelab, NAS, mini PC), built
+# from this repository. Its Convert Games page shows ps5-lz4 (lz4/nas-lz4) on
+# port 5921 in an LZ4 tab; scripts/nas-install.sh sets up both.
 #
 #   docker compose -f engine/compose.yaml up -d --build
-#
-# Replacing a PS5-LZ4-NAS container you run already: remove it first
-# (`docker rm -f lz4-compression`, or `docker compose -f nas/docker-compose.yml
-# down` in that copy), since this file uses the same name and port 5920.
 #   then open http://<this server's LAN IP>:19113 from a browser on your LAN,
 #   or point the desktop app at it: Settings → Engine URL.
 #
@@ -38,9 +35,9 @@ services:
       # usual choice; keep it to networks you trust. Never expose the engine
       # to the internet.
       PS5UPLOAD_ALLOW_IP: "192.168.1.0/24"
-      # Where the web UI's file browser opens: your PS5 and PS4 ROMs and the
-      # LZ4 folder (mounted below). Comma-separated.
-      PS5UPLOAD_BROWSE_ROOTS: "/roms/ps5,/roms/ps4,/lz4"
+      # Where the web UI's file browser opens: ROMs PS5, ROMs PS4 and the LZ4
+      # folder (mounted below), as ps5-lz4 set it up. Comma-separated.
+      PS5UPLOAD_BROWSE_ROOTS: "/games,/pkgs,/lz4"
       # Only needed without host networking: this server's LAN IP.
       # PS5UPLOAD_PKG_HOST_IP: "192.168.1.10"
 
@@ -55,46 +52,13 @@ services:
     volumes:
       # The engine's own state: saved servers, install history, artwork cache.
       - ps5upload-data:/data
-      # EDIT: your folders. ROMs PS5 and ROMs PS4 hold the packages and game
-      # folders; the LZ4 folder is the same one the LZ4 Compression engine
-      # works in below, so packed games show up here too.
-      - /srv/roms/ps5:/roms/ps5
-      - /srv/roms/ps4:/roms/ps4
-      - /srv/lz4:/lz4
+      # EDIT: your folders, read-only like ps5-lz4 mounts them: ROMs PS5, ROMs
+      # PS4 and ps5-lz4's LZ4 folder (Collection marks the games packed there).
+      - /path/to/roms/ps5:/games:ro
+      - /path/to/roms/ps4:/pkgs:ro
+      - /path/to/ps5-lz4:/lz4:ro
 
 
-  # The LZ4 Compression engine (lz4/), shown on the Convert Games page. It runs
-  # entirely here and works on the games in the folder mounted at
-  # /data/homebrew. See lz4/nas/README.md for the folders and options.
-  lz4-compression:
-    build:
-      context: ../lz4
-    image: lz4-compression-nas
-    container_name: lz4-compression
-    restart: unless-stopped
-    ports:
-      - "5920:5920"
-    environment:
-      # Your NAS user and group IDs, so new files stay editable over SMB/NFS
-      # (`id <user>` over SSH; Synology is often 1026 / 100). 0 runs as root.
-      - PUID=1000
-      - PGID=1000
-    volumes:
-      # Settings, history, logs and uploaded TOML profiles. To keep the ones
-      # from a PS5-LZ4-NAS container, mount its config folder here instead,
-      # e.g. /path/to/PS5-LZ4-NAS/nas/config:/data/LZ4Compression
-      - lz4-config:/data/LZ4Compression
-      # EDIT: the LZ4 folder, as in your PS5-LZ4-NAS container: one folder per
-      # game (or .exfat/.ffpfs/.ffpfsc images). Shown as "Internal" in the page.
-      - /srv/lz4:/data/homebrew
-      # Your PS5 ROMs as a second library and copy/move target ("External SSD").
-      - /srv/roms/ps5:/mnt/ext0/homebrew
-    # Only needed to read games stored as .exfat images: uncomment both and
-    # set PUID=0 above (loop mounts need root).
-    # privileged: true
-    # devices:
-    #   - /dev/loop-control
 
 volumes:
   ps5upload-data:
-  lz4-config:

@@ -39,7 +39,7 @@ const SettingsScreen = lazyWithReload(() => import("./screens/Settings"));
 const MoreScreen = lazyWithReload(() => import("./screens/More"));
 const UploadScreen = lazyWithReload(() => import("./screens/Upload"));
 const InstallPackageScreen = lazyWithReload(() => import("./screens/InstallPackage"));
-// Convert Games: ps5upload's converter and the LZ4 Compression engine (lz4/), a tab each.
+// Convert Games: ps5upload's converter and ps5-lz4 (lz4/nas-lz4), a tab each.
 const ConvertScreen = lazyWithReload(() => import("./screens/Convert"));
 const GamesScreen = lazyWithReload(() => import("./screens/Games"));
 const CollectionScreen = lazyWithReload(() => import("./screens/Collection"));
