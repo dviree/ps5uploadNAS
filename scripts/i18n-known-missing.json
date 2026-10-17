@@ -1,6 +1,9 @@
 {
   "ar": {
     "missing": [
+      "convert.engine",
+      "convert.lz4_subtitle",
+      "convert.tab_ps5upload",
       "lz4.checking",
       "lz4.connect",
       "lz4.down_body",
@@ -25,6 +28,9 @@
   },
   "bn": {
     "missing": [
+      "convert.engine",
+      "convert.lz4_subtitle",
+      "convert.tab_ps5upload",
       "lz4.checking",
       "lz4.connect",
       "lz4.down_body",
@@ -52,6 +58,9 @@
   },
   "de": {
     "missing": [
+      "convert.engine",
+      "convert.lz4_subtitle",
+      "convert.tab_ps5upload",
       "lz4.checking",
       "lz4.connect",
       "lz4.down_body",
@@ -83,6 +92,9 @@
   },
   "es": {
     "missing": [
+      "convert.engine",
+      "convert.lz4_subtitle",
+      "convert.tab_ps5upload",
       "lz4.checking",
       "lz4.connect",
       "lz4.down_body",
@@ -110,6 +122,9 @@
   },
   "fa": {
     "missing": [
+      "convert.engine",
+      "convert.lz4_subtitle",
+      "convert.tab_ps5upload",
       "lz4.checking",
       "lz4.connect",
       "lz4.down_body",
@@ -132,6 +147,9 @@
   },
   "fr": {
     "missing": [
+      "convert.engine",
+      "convert.lz4_subtitle",
+      "convert.tab_ps5upload",
       "lz4.checking",
       "lz4.connect",
       "lz4.down_body",
@@ -161,6 +179,9 @@
   },
   "hi": {
     "missing": [
+      "convert.engine",
+      "convert.lz4_subtitle",
+      "convert.tab_ps5upload",
       "lz4.checking",
       "lz4.connect",
       "lz4.down_body",
@@ -188,6 +209,9 @@
   },
   "hu": {
     "missing": [
+      "convert.engine",
+      "convert.lz4_subtitle",
+      "convert.tab_ps5upload",
       "lz4.checking",
       "lz4.connect",
       "lz4.down_body",
@@ -222,6 +246,9 @@
   },
   "id": {
     "missing": [
+      "convert.engine",
+      "convert.lz4_subtitle",
+      "convert.tab_ps5upload",
       "lz4.checking",
       "lz4.connect",
       "lz4.down_body",
@@ -252,6 +279,9 @@
   },
   "it": {
     "missing": [
+      "convert.engine",
+      "convert.lz4_subtitle",
+      "convert.tab_ps5upload",
       "lz4.checking",
       "lz4.connect",
       "lz4.down_body",
@@ -281,6 +311,9 @@
   },
   "ja": {
     "missing": [
+      "convert.engine",
+      "convert.lz4_subtitle",
+      "convert.tab_ps5upload",
       "lz4.checking",
       "lz4.connect",
       "lz4.down_body",
@@ -307,6 +340,9 @@
   },
   "ko": {
     "missing": [
+      "convert.engine",
+      "convert.lz4_subtitle",
+      "convert.tab_ps5upload",
       "lz4.checking",
       "lz4.connect",
       "lz4.down_body",
@@ -334,6 +370,9 @@
   },
   "pl": {
     "missing": [
+      "convert.engine",
+      "convert.lz4_subtitle",
+      "convert.tab_ps5upload",
       "lz4.checking",
       "lz4.connect",
       "lz4.down_body",
@@ -360,6 +399,9 @@
   },
   "pt-BR": {
     "missing": [
+      "convert.engine",
+      "convert.lz4_subtitle",
+      "convert.tab_ps5upload",
       "lz4.checking",
       "lz4.connect",
       "lz4.down_body",
@@ -391,6 +433,9 @@
   },
   "ru": {
     "missing": [
+      "convert.engine",
+      "convert.lz4_subtitle",
+      "convert.tab_ps5upload",
       "lz4.checking",
       "lz4.connect",
       "lz4.down_body",
@@ -419,6 +464,9 @@
   },
   "th": {
     "missing": [
+      "convert.engine",
+      "convert.lz4_subtitle",
+      "convert.tab_ps5upload",
       "lz4.checking",
       "lz4.connect",
       "lz4.down_body",
@@ -444,6 +492,9 @@
   },
   "tr": {
     "missing": [
+      "convert.engine",
+      "convert.lz4_subtitle",
+      "convert.tab_ps5upload",
       "lz4.checking",
       "lz4.connect",
       "lz4.down_body",
@@ -472,6 +523,9 @@
   },
   "vi": {
     "missing": [
+      "convert.engine",
+      "convert.lz4_subtitle",
+      "convert.tab_ps5upload",
       "lz4.checking",
       "lz4.connect",
       "lz4.down_body",
@@ -499,6 +553,9 @@
   },
   "zh-CN": {
     "missing": [
+      "convert.engine",
+      "convert.lz4_subtitle",
+      "convert.tab_ps5upload",
       "lz4.checking",
       "lz4.connect",
       "lz4.down_body",
@@ -525,6 +582,9 @@
   },
   "zh-TW": {
     "missing": [
+      "convert.engine",
+      "convert.lz4_subtitle",
+      "convert.tab_ps5upload",
       "lz4.checking",
       "lz4.connect",
       "lz4.down_body",

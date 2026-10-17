@@ -1,4 +1,4 @@
-// Convert Games: the LZ4 Compression engine (lz4/, from PS5-LZ4-NAS) and nothing else. The
+// Convert Games' LZ4 tab: the LZ4 Compression engine (lz4/, from PS5-LZ4-NAS). The
 // engine serves its own page on port 5920 with every function it has (LZ4 asset packs,
 // .ffpfsc, images, validate and repair, APR-EMU versions, copy and move, history), so this
 // screen shows that page as it is, in its own theme, and only keeps track of where it runs.
@@ -86,7 +86,7 @@ export default function Lz4ConvertScreen() {
 
   return (
     <div
-      className="flex h-[calc(100dvh-7rem)] min-h-[560px] flex-col gap-2.5 rounded-[18px] p-2.5 text-[15px] antialiased [color-scheme:dark]"
+      className="flex h-[calc(100dvh-13rem)] min-h-[560px] flex-col gap-2.5 rounded-[18px] p-2.5 text-[15px] antialiased [color-scheme:dark]"
       style={{ background: LZ4.bg, color: LZ4.text, fontFamily: LZ4_FONT }}
       data-testid="lz4-convert"
     >
