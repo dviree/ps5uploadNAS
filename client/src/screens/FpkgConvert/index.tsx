@@ -72,6 +72,7 @@ export default function FpkgConvertScreen({ headerRight }: { headerRight?: React
 
   const outputDir = useConvertPrefs((s) => s.outputDir);
   const setOutputDir = useConvertPrefs((s) => s.setOutputDir);
+  const lz4Dir = useConvertPrefs((s) => s.lz4Dir);
   const compression = useConvertPrefs((s) => s.compression);
   const setCompression = useConvertPrefs((s) => s.setCompression);
 
@@ -134,7 +135,7 @@ export default function FpkgConvertScreen({ headerRight }: { headerRight?: React
     const u = useUploadStore.getState();
     return useConvertQueue.getState().add({
       source: src,
-      outputDir: outputDir.trim() || undefined,
+      outputDir: (lz4 && lz4Dir.trim()) || outputDir.trim() || undefined,
       compression,
       build: build.kind === "image" && lz4 ? { ...build, lz4 } : build,
       imageDest:
@@ -346,7 +347,8 @@ export default function FpkgConvertScreen({ headerRight }: { headerRight?: React
       const u = useUploadStore.getState();
       void buildImage(
         src,
-        outputDir.trim() || undefined,
+        // A game converted to LZ4 goes to the LZ4 folder (My games sets it).
+        (lz4Active(build.format, lz4Choice) && lz4Dir.trim()) || outputDir.trim() || undefined,
         build.compress && !lz4Active(build.format, lz4Choice),
         build.format,
         then === "upload"
@@ -612,7 +614,10 @@ export default function FpkgConvertScreen({ headerRight }: { headerRight?: React
                             ? tr("fpkg.run.what_folder", undefined, "a game folder")
                             : tr("fpkg.run.what_pkg", undefined, "a package (.pkg)"),
                       title: inspection.title || inspection.content_id || source.trim(),
-                      dir: outputDir.trim() || "~/Downloads/fpkgs",
+                      dir:
+                        (build.kind === "image" && lz4Active(build.format, lz4Choice) && lz4Dir.trim()) ||
+                        outputDir.trim() ||
+                        "~/Downloads/fpkgs",
                     },
                     "Makes {what} of {title} in {dir}.",
                   )
