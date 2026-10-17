@@ -38,10 +38,9 @@ services:
       # usual choice; keep it to networks you trust. Never expose the engine
       # to the internet.
       PS5UPLOAD_ALLOW_IP: "192.168.1.0/24"
-      # Where the web UI's file browser opens. Without this it starts at the
-      # engine's home directory (/data), not at your packages below.
-      # Comma-separate the value to offer more than one root.
-      PS5UPLOAD_BROWSE_ROOTS: "/pkgs"
+      # Where the web UI's file browser opens: your PS5 and PS4 ROMs and the
+      # LZ4 folder (mounted below). Comma-separated.
+      PS5UPLOAD_BROWSE_ROOTS: "/roms/ps5,/roms/ps4,/lz4"
       # Only needed without host networking: this server's LAN IP.
       # PS5UPLOAD_PKG_HOST_IP: "192.168.1.10"
 
@@ -56,10 +55,12 @@ services:
     volumes:
       # The engine's own state: saved servers, install history, artwork cache.
       - ps5upload-data:/data
-      # EDIT: where your packages and game folders are. The web UI's file
-      # browser opens here (see PS5UPLOAD_BROWSE_ROOTS above); read-only is
-      # enough to install.
-      - /srv/ps5/pkgs:/pkgs:ro
+      # EDIT: your folders. ROMs PS5 and ROMs PS4 hold the packages and game
+      # folders; the LZ4 folder is the same one the LZ4 Compression engine
+      # works in below, so packed games show up here too.
+      - /srv/roms/ps5:/roms/ps5
+      - /srv/roms/ps4:/roms/ps4
+      - /srv/lz4:/lz4
 
 
   # The LZ4 Compression engine (lz4/), shown on the Convert Games page. It runs
@@ -83,9 +84,11 @@ services:
       # from a PS5-LZ4-NAS container, mount its config folder here instead,
       # e.g. /volume1/docker/PS5-LZ4-NAS/nas/config:/data/LZ4Compression
       - lz4-config:/data/LZ4Compression
-      # EDIT: your game library, one folder per game (or .exfat/.ffpfs/.ffpfsc
-      # images). Shown as "Internal" in the page.
-      - /srv/ps5/games:/data/homebrew
+      # EDIT: the LZ4 folder, as in your PS5-LZ4-NAS container: one folder per
+      # game (or .exfat/.ffpfs/.ffpfsc images). Shown as "Internal" in the page.
+      - /srv/lz4:/data/homebrew
+      # Your PS5 ROMs as a second library and copy/move target ("External SSD").
+      - /srv/roms/ps5:/mnt/ext0/homebrew
     # Only needed to read games stored as .exfat images: uncomment both and
     # set PUID=0 above (loop mounts need root).
     # privileged: true
