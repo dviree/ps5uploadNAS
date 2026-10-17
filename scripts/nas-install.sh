@@ -46,6 +46,8 @@ BK="$BACKUP_ROOT/backup-$(date +%Y%m%d-%H%M)"
 mkdir -p "$BK"
 FOUND=
 LZ4_CONFIG=
+OLD_LZ4_DIR=
+OLD_EXT_DIR=
 for C in $OLD; do
   if ! docker inspect "$C" >/dev/null 2>&1; then
     echo "$C finns inte, hoppar över."
@@ -61,7 +63,11 @@ for C in $OLD; do
   docker inspect -f '{{range .Mounts}}{{.Source}}|{{.Destination}}{{"\n"}}{{end}}' "$C" > "$BK/$C-mounts.txt"
   while IFS='|' read -r SRC DST; do
     [ -n "$SRC" ] && [ -e "$SRC" ] || continue
-    [ "$DST" = /data/LZ4Compression ] && LZ4_CONFIG=$SRC
+    case "$DST" in
+      /data/LZ4Compression) LZ4_CONFIG=$SRC ;;
+      /data/homebrew) OLD_LZ4_DIR=$SRC ;;
+      /mnt/ext0/homebrew) OLD_EXT_DIR=$SRC ;;
+    esac
     SIZE=$(du -sh "$SRC" 2>/dev/null | cut -f1)
     # Game and package libraries are big and stay where they are anyway.
     if [ "$DST" = /data/LZ4Compression ] || [ "$DST" = /data ] ||
@@ -91,6 +97,7 @@ fi
 # ── 3. Download the code ─────────────────────────────────────────────────────
 say "Hämtar koden till $DIR"
 if [ -d "$DIR/.git" ] && command -v git >/dev/null; then
+  git -C "$DIR" checkout -- engine/compose.yaml 2>/dev/null || true
   git -C "$DIR" fetch origin "$BRANCH"
   git -C "$DIR" checkout -B "$BRANCH" "origin/$BRANCH"
 elif command -v git >/dev/null; then
@@ -102,7 +109,7 @@ else
     tar -xz -C "$DIR" --strip-components=1
 fi
 CF="$DIR/engine/compose.yaml"
-[ -f "$CF.orig" ] || cp "$CF" "$CF.orig"
+cp "$CF" "$CF.orig"
 
 # ── 4. Settings ──────────────────────────────────────────────────────────────
 say "Inställningar (Enter tar förslaget inom [ ])"
@@ -114,24 +121,30 @@ DEF_UID=1026; DEF_GID=100
 
 PS5_IP=$(ask "PS5:ans IP-adress" "192.168.1.50")
 ALLOW=$(ask "Vilka får använda appen (ditt nätverk)" "$NET")
-PKGS=$(ask "Mapp med dina paket (.pkg)" "/path/to/PS5/pkgs")
-GAMES=$(ask "Mapp med dina spel (för LZ4)" "/path/to/PS5/games")
+# The LZ4 folders default to what the old PS5-LZ4-NAS container used.
+ROMS_PS5=$(ask "Mapp ROMs PS5" "${OLD_EXT_DIR:-/path/to/ROMs/PS5}")
+ROMS_PS4=$(ask "Mapp ROMs PS4" "/path/to/ROMs/PS4")
+LZ4_DIR=$(ask "LZ4-mappen (samma som ps5-lz4 använde)" "${OLD_LZ4_DIR:-/path/to/ROMs/LZ4}")
 P_UID=$(ask "PUID (ägare till nya filer)" "$DEF_UID")
 P_GID=$(ask "PGID" "$DEF_GID")
 if [ -n "$LZ4_CONFIG" ]; then
-  LZ4_CONFIG=$(ask "LZ4-inställningar från gamla containern (tomt = börja om)" "$LZ4_CONFIG")
+  LZ4_CONFIG=$(ask "LZ4-inställningar från gamla containern (skriv ny för att börja om)" "$LZ4_CONFIG")
+  [ "$LZ4_CONFIG" = ny ] && LZ4_CONFIG=
 fi
 
 cp "$CF.orig" "$CF"
 sed -i \
   -e "s|PS5_ADDR: \"192.168.1.50\"|PS5_ADDR: \"$PS5_IP\"|" \
   -e "s|PS5UPLOAD_ALLOW_IP: \"192.168.1.0/24\"|PS5UPLOAD_ALLOW_IP: \"$ALLOW\"|" \
-  -e "s|- /srv/ps5/pkgs:/pkgs:ro|- $PKGS:/pkgs:ro|" \
-  -e "s|- /srv/ps5/games:/data/homebrew|- $GAMES:/data/homebrew|" \
+  -e "s|- /srv/roms/ps5:|- $ROMS_PS5:|" \
+  -e "s|- /srv/roms/ps4:|- $ROMS_PS4:|" \
+  -e "s|- /srv/lz4:|- $LZ4_DIR:|" \
   -e "s|- PUID=1000|- PUID=$P_UID|" \
   -e "s|- PGID=1000|- PGID=$P_GID|" \
+  -e "s|# user: \"1234:77777\"|user: \"$P_UID:$P_GID\"|" \
   "$CF"
-[ -n "$LZ4_CONFIG" ] && sed -i "s|- lz4-config:/data/LZ4Compression|- $LZ4_CONFIG:/data/LZ4Compression|" "$CF"
+if [ -n "$LZ4_CONFIG" ]; then sed -i "s|- lz4-config:/data/LZ4Compression|- $LZ4_CONFIG:/data/LZ4Compression|" "$CF"; fi
+for D in "$ROMS_PS5" "$ROMS_PS4" "$LZ4_DIR"; do mkdir -p "$D"; done
 
 # ── 5. Build and start ───────────────────────────────────────────────────────
 say "Bygger och startar (första gången kan det ta 20–40 minuter)"
