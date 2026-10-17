@@ -39,7 +39,8 @@ const SettingsScreen = lazyWithReload(() => import("./screens/Settings"));
 const MoreScreen = lazyWithReload(() => import("./screens/More"));
 const UploadScreen = lazyWithReload(() => import("./screens/Upload"));
 const InstallPackageScreen = lazyWithReload(() => import("./screens/InstallPackage"));
-const ConvertScreen = lazyWithReload(() => import("./screens/FpkgConvert"));
+// Convert Games: My games, the converter and Compatibility, a tab each.
+const ConvertScreen = lazyWithReload(() => import("./screens/Convert"));
 const GamesScreen = lazyWithReload(() => import("./screens/Games"));
 const CollectionScreen = lazyWithReload(() => import("./screens/Collection"));
 const SearchScreen = lazyWithReload(() => import("./screens/Search"));

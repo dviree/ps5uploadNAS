@@ -1,0 +1,103 @@
+import { invoke } from "../lib/invokeLogged";
+
+/** Whether a game is packed with AMPR LZ4 asset packs, can be, or cannot (engine
+ *  /api/lz4/status, the converter's own check). */
+export type Lz4State =
+  /** Already LZ4: `ampr_assets.index` at the game's root. */
+  | "packed"
+  /** Can be LZ4: it reads through AMPR and its ampr_emu serves packs. */
+  | "ok"
+  /** Can be LZ4 once ampr_emu 0.4.2.1 goes into it, which Convert does. */
+  | "runtime"
+  /** It does not read through AMPR, so nothing could serve packs. */
+  | "no_ampr"
+  /** It could not be read. */
+  | "error";
+
+export interface Lz4Status {
+  path: string;
+  status: Lz4State;
+  reason?: string;
+  runtime_version?: string;
+}
+
+/** The engine takes at most this many games per request. */
+export const LZ4_STATUS_BATCH = 64;
+
+export const lz4 = {
+  status: (paths: string[]) =>
+    invoke<{ results: Lz4Status[] }>("lz4_status", { paths }).then(
+      (r) => r.results,
+    ),
+};
+
+export function canBeLz4(s: Lz4State | undefined): boolean {
+  return s === "ok" || s === "runtime";
+}
+
+/** Game reports players file on GitHub ("Game report" issues), counted per game into
+ *  compat.json by the LZ4 Compression project, which ps5-lz4 and the PS5 app read too. */
+export const COMPAT_REPO = "theghostonline/PS5-LZ4-Compression";
+const COMPAT_URL = `https://raw.githubusercontent.com/${COMPAT_REPO}/main/compat/compat.json`;
+
+export type CompatStatus = "works" | "issues" | "noStart" | "crash";
+
+export interface CompatReport {
+  status: CompatStatus;
+  game?: string;
+  gameVersion?: string;
+  level?: string;
+  source?: string;
+  firmware?: string;
+  appVersion?: string;
+  date?: string;
+  /** The GitHub issue number. */
+  issue?: number;
+}
+
+export interface CompatEntry {
+  name?: string;
+  works: number;
+  issues: number;
+  noStart: number;
+  crash: number;
+  reports: number;
+  lastReport?: CompatReport;
+}
+
+export interface CompatData {
+  updated?: string;
+  games: Record<string, CompatEntry>;
+}
+
+export async function fetchCompat(signal?: AbortSignal): Promise<CompatData> {
+  const r = await fetch(COMPAT_URL, { cache: "no-store", signal });
+  if (!r.ok) throw new Error(`compat.json: HTTP ${r.status}`);
+  const data = (await r.json()) as Partial<CompatData>;
+  return { updated: data.updated, games: data.games ?? {} };
+}
+
+/** How the reports for one game come out overall: everyone can play it, some can, or nobody
+ *  can (it does not start or it crashes). */
+export function compatVerdict(e: CompatEntry): "good" | "mixed" | "bad" {
+  const playing = e.works + e.issues;
+  const broken = e.noStart + e.crash;
+  if (playing && !broken) return "good";
+  if (!playing) return "bad";
+  return broken > playing ? "bad" : "mixed";
+}
+
+export function compatIssueUrl(issue: number): string {
+  return `https://github.com/${COMPAT_REPO}/issues/${issue}`;
+}
+
+/** A prefilled "Game report" issue for one game, the form the PS5 app and ps5-lz4 open. */
+export function compatReportUrl(titleId: string, name: string): string {
+  const params = new URLSearchParams({
+    template: "compat.yml",
+    title: `[Game report] ${name || titleId}`,
+    title_id: titleId,
+    game: name.slice(0, 60),
+  });
+  return `https://github.com/${COMPAT_REPO}/issues/new?${params.toString()}`;
+}

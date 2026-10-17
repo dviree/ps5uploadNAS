@@ -323,6 +323,7 @@ pub fn run() {
             commands::ps5_app_register,
             commands::ps5_app_unregister,
             commands::fpkg_inspect,
+            commands::lz4_status,
             commands::game_inspect,
             commands::game_inspect_image,
             commands::game_inspect_files,
