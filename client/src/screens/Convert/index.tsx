@@ -50,7 +50,7 @@ export default function ConvertScreen() {
         description={tr(
           "convert.lz4_subtitle",
           undefined,
-          "ps5-lz4: which games can be LZ4, packing them for APR-EMU, sending them to the PS5, PS5 games, ShadowMount, saves, community reports and FTP.",
+          "ps5-lz4: your games and which of them can be LZ4, compressing them for APR-EMU, and the community's compatibility reports.",
         )}
         right={tabs}
       />

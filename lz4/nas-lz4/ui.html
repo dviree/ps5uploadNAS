@@ -199,6 +199,19 @@ button.two small{font-size:11px;font-weight:500;opacity:.88;line-height:1.25;whi
 @keyframes up{from{transform:translateY(40px);opacity:.4}}
 </style>
 <script>try{document.documentElement.dataset.theme=localStorage.getItem('theme')||'glass'}catch(e){document.documentElement.dataset.theme='glass'}</script>
+<script>
+/* ?embed=convert: shown inside ps5upload's Convert Games page, which wants only My games and
+   Community. The other tabs, the theme switch, the store link, the PS5 ELF button and every
+   button into FTP or the Remote tab go. */
+const EMBED = new URLSearchParams(location.search).get('embed') === 'convert';
+const EMBED_TABS = ['mine', 'comm'];
+if (EMBED) document.documentElement.classList.add('embed');
+</script>
+<style>
+html.embed .themes, html.embed .storelink, html.embed #b-elf,
+html.embed .tabs > button:not(#t-mine):not(#t-comm),
+html.embed [onclick*="tab('ftp')"], html.embed [onclick*="tab('ps5')"] { display: none !important }
+</style>
 </head>
 <body>
 <header>
@@ -1780,11 +1793,12 @@ async function ps5Copies(tid) {
 }
 let comm = null;
 function tab(t) {
+  if (EMBED && !EMBED_TABS.includes(t)) return;
   for (const k of ['mine', 'act', 'pg', 'smp', 'sav', 'up', 'ps5', 'comm', 'ftp']) {
     document.getElementById('p-' + k).hidden = t !== k;
     document.getElementById('t-' + k).classList.toggle('on', t === k);
   }
-  try { localStorage.setItem('tab', t); } catch (e) {}
+  if (!EMBED) try { localStorage.setItem('tab', t); } catch (e) {}
   if (t === 'comm') loadComm();
   if (t === 'smp') loadSmp();
   if (t === 'sav') loadSav();
