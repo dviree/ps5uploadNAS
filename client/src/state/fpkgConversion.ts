@@ -6,6 +6,7 @@ import { installErrorLink } from "../lib/installErrorDoc";
 import { create } from "zustand";
 
 import { useConvertPrefs } from "./convertPrefs";
+import { safeGetItem, safeRemoveItem, safeSetItem } from "../lib/safeStorage";
 
 import { imageUploadItem, type ImageUploadPlan } from "../lib/imageUpload";
 import { useUploadQueueStore } from "./uploadQueue";
@@ -842,3 +843,62 @@ export const useFpkgConversion = create<ConversionState>((set, get) => ({
     set({ pipeline: { ...p, deleted: true } });
   },
 }));
+
+// A build the engine runs on its own (an LZ4 game folder, a game image, a .ffpfsc) outlives
+// the page: it is remembered while it runs, and a reloaded page follows it again instead of
+// losing it and refusing a second start as "already being built". Package builds and installs
+// are not: their later steps run here, in the page.
+const KEY_RUNNING = "ps5upload.convert.running_job";
+const RESUMABLE: readonly PipelineMode[] = ["folder", "image", "ffpfsc"];
+
+interface RememberedRun {
+  jobId: string;
+  mode: PipelineMode;
+  source: string;
+  stage: PipelineStage;
+  startedMs: number;
+}
+
+useFpkgConversion.subscribe((s) => {
+  const p = s.pipeline;
+  if (p.phase === "running" && p.jobId && RESUMABLE.includes(p.mode)) {
+    const run: RememberedRun = {
+      jobId: p.jobId,
+      mode: p.mode,
+      source: p.source,
+      stage: p.stage,
+      startedMs: p.startedMs,
+    };
+    safeSetItem(KEY_RUNNING, JSON.stringify(run));
+  } else if (p.phase !== "running") {
+    safeRemoveItem(KEY_RUNNING);
+  }
+});
+
+/** Follow a remembered build again, if the engine is still running it. */
+export async function resumeRememberedRun(): Promise<void> {
+  let run: RememberedRun | null;
+  try {
+    run = JSON.parse(safeGetItem(KEY_RUNNING) ?? "null") as RememberedRun | null;
+  } catch {
+    run = null;
+  }
+  if (!run?.jobId || useFpkgConversion.getState().pipeline.phase !== "idle") return;
+  let snapshot;
+  try {
+    snapshot = await jobStatus(run.jobId);
+  } catch {
+    // The engine restarted (the job is gone) or is not reachable yet: nothing to follow.
+    safeRemoveItem(KEY_RUNNING);
+    return;
+  }
+  if (snapshot.status !== "running" || useFpkgConversion.getState().pipeline.phase !== "idle") {
+    safeRemoveItem(KEY_RUNNING);
+    return;
+  }
+  beginRun(run.mode, run.source, null, run.stage);
+  update({ jobId: run.jobId, startedMs: run.startedMs });
+  poll(run.jobId, null);
+}
+
+if (typeof window !== "undefined") void resumeRememberedRun();
