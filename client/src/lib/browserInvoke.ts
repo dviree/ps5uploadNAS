@@ -764,7 +764,8 @@ export async function browserInvoke<T>(
     }
     case "lz4_status": {
       // TS caller: { paths }
-      return postJson<T>("/api/lz4/status", { paths: args["paths"] });
+      // A large game image on a NAS disk can take longer than a standard request to read.
+      return postJson<T>("/api/lz4/status", { paths: args["paths"] }, true);
     }
     case "lz4_ffpfsc": {
       return getJson<T>(args["refresh"] ? "/api/lz4/ffpfsc?refresh=true" : "/api/lz4/ffpfsc");

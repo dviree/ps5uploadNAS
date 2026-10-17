@@ -7,7 +7,6 @@ import { useNavigate } from "react-router";
 import { FolderPlus, Gamepad2, RefreshCw, Search } from "lucide-react";
 
 import {
-  LZ4_STATUS_BATCH,
   canBeLz4,
   compatReportUrl,
   compatVerdict,
@@ -66,7 +65,14 @@ interface Row {
 /** Statuses by path, kept for the session so switching tabs does not read every game again. */
 const known = new Map<string, Lz4Status>();
 
-export function MyGames({ onConvert }: { onConvert: (path: string) => void }) {
+export function MyGames({
+  onConvert,
+  onFfpfsc,
+}: {
+  onConvert: (path: string) => void;
+  /** Compress the game into a .ffpfsc instead (`isFolder`: a game folder, not an image). */
+  onFfpfsc: (path: string, isFolder: boolean) => void;
+}) {
   const tr = useTr();
   const navigate = useNavigate();
   const library = useCollectionStore((s) => s.library);
@@ -106,7 +112,8 @@ export function MyGames({ onConvert }: { onConvert: (path: string) => void }) {
     [rows],
   );
 
-  // Read each game's LZ4 status, a batch at a time, so the list fills in as it goes.
+  // Read each game's LZ4 status one at a time, so the list fills in as it goes: a large image
+  // on a NAS disk can take a while to read, and one that fails is marked, not left checking.
   useEffect(() => {
     const todo = rows
       .map((r) => r.loc.absolute_path)
@@ -114,16 +121,18 @@ export function MyGames({ onConvert }: { onConvert: (path: string) => void }) {
     if (todo.length === 0) return;
     let live = true;
     void (async () => {
-      const step = Math.min(8, LZ4_STATUS_BATCH);
-      for (let i = 0; i < todo.length && live; i += step) {
+      for (const path of todo) {
+        if (!live) return;
         try {
-          const got = await lz4.status(todo.slice(i, i + step));
-          for (const s of got) known.set(s.path, s);
-          if (live) setStatuses(Object.fromEntries(known));
-        } catch {
-          // The engine is busy or gone: the rest stay "checking" until the tab is opened again.
-          return;
+          for (const s of await lz4.status([path])) known.set(s.path, s);
+        } catch (e) {
+          known.set(path, {
+            path,
+            status: "error",
+            reason: e instanceof Error ? e.message : String(e),
+          });
         }
+        if (live) setStatuses(Object.fromEntries(known));
       }
     })();
     return () => {
@@ -318,6 +327,7 @@ export function MyGames({ onConvert }: { onConvert: (path: string) => void }) {
                   compat={compat?.games[r.game.game_id]}
                   ffpfsc={ffpfscFor(r.game)}
                   onConvert={() => onConvert(r.loc.absolute_path)}
+                  onFfpfsc={() => onFfpfsc(r.loc.absolute_path, r.loc.type === "folder")}
                 />
               ))}
             </ul>
@@ -358,6 +368,7 @@ function GameRow({
   compat,
   ffpfsc,
   onConvert,
+  onFfpfsc,
 }: {
   row: Row;
   state: Lz4State | undefined;
@@ -366,6 +377,7 @@ function GameRow({
   /** The game's row in the community's .ffpfsc list, in the sheet's column order. */
   ffpfsc: [string, string][] | null;
   onConvert: () => void;
+  onFfpfsc: () => void;
 }) {
   const tr = useTr();
   const { game, loc } = row;
@@ -397,6 +409,22 @@ function GameRow({
             {tr("lz4mine.convert", undefined, "Convert to LZ4")}
           </Button>
         )}
+        {/* An image or folder can always be compressed instead; an .ffpfs/.ffpfsc is one. */}
+        {(loc.type === "folder" || loc.type === "mount.exfat" || loc.type === "mount.ffpkg") &&
+          state !== "packed" && (
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={onFfpfsc}
+              title={tr(
+                "lz4mine.ffpfsc_hint",
+                undefined,
+                "Compress the game into a .ffpfsc image (PFSC) in the output folder under Convert; the original is only read.",
+              )}
+            >
+              {tr("lz4mine.ffpfsc", undefined, "Convert to .ffpfsc")}
+            </Button>
+          )}
         {state === "packed" && (
           <Button
             size="sm"

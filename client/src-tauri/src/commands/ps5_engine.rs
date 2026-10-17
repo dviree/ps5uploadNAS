@@ -2321,7 +2321,8 @@ pub async fn fpkg_inspect(source: String, output_dir: Option<String>) -> Result<
 pub async fn lz4_status(paths: Vec<String>) -> Result<JsonValue, String> {
     let base = engine::url();
     let url = format!("{base}/api/lz4/status");
-    post_json(&url, &serde_json::json!({ "paths": paths })).await
+    // A large game image on a NAS disk can take longer than a standard request to read.
+    post_json_long(&url, &serde_json::json!({ "paths": paths })).await
 }
 
 /// The community's .ffpfsc compatibility list (Convert Games' Compatibility).
