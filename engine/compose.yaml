@@ -1,4 +1,4 @@
-# ps5lz4uploader: the ps5upload engine + web UI, with the LZ4 Compression engine beside it, on a
+# ps5upload engine + web UI, with the LZ4 Compression engine beside it, on a
 # Linux server (homelab, NAS, mini PC). Both are built from this repository.
 #
 #   docker compose -f engine/compose.yaml up -d --build
@@ -12,14 +12,14 @@
 # Edit the three values marked EDIT first.
 
 services:
-  ps5lz4uploader:
+  ps5upload:
     # Built from this repository, so the web UI has the LZ4 Convert Games page.
     # (The published ghcr.io/phantomptr/ps5upload-engine-webui image doesn't.)
     build:
       context: ..
       dockerfile: engine/Dockerfile.webui
-    image: ps5lz4uploader
-    container_name: ps5lz4uploader
+    image: ps5upload-lz4
+    container_name: ps5upload
     restart: unless-stopped
 
     # Host networking, so the PS5 can reach the engine. A stream install makes
