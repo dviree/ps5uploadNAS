@@ -37,6 +37,7 @@ import {
   startCollectionScan,
   useCollectionStore,
 } from "../../state/collection";
+import { useConvertPrefs } from "../../state/convertPrefs";
 import { useTr } from "../../state/lang";
 import {
   loadFfpfscSheet,
@@ -73,6 +74,8 @@ export function MyGames({ onConvert }: { onConvert: (path: string) => void }) {
   const scanning = useCollectionStore((s) => s.scan?.running ?? false);
   const compat = useLz4Compat((s) => s.data);
   const sheet = useFfpfscSheet((s) => s.sheet);
+  const lz4Dir = useConvertPrefs((s) => s.lz4Dir);
+  const setLz4Dir = useConvertPrefs((s) => s.setLz4Dir);
   const [statuses, setStatuses] = useState<Record<string, Lz4Status>>(() =>
     Object.fromEntries(known),
   );
@@ -273,6 +276,18 @@ export function MyGames({ onConvert }: { onConvert: (path: string) => void }) {
                 : tr("lz4mine.rescan", undefined, "Scan folders")}
             </Button>
           </div>
+
+          <Input
+            label={tr("lz4mine.lz4_dir", undefined, "LZ4 folder")}
+            hint={tr(
+              "lz4mine.lz4_dir_hint",
+              undefined,
+              "Games converted to LZ4 are saved here, like ps5-lz4's LZ4 folder. In the Docker setup it is /lz4. Empty: the output folder under Convert.",
+            )}
+            value={lz4Dir}
+            onChange={(e) => setLz4Dir(e.target.value)}
+            spellCheck={false}
+          />
 
           {shown.length === 0 ? (
             <EmptyState

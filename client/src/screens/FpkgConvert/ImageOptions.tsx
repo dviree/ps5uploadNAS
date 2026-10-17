@@ -35,6 +35,7 @@ export function lz4Active(format: ImageFormat, lz4: Lz4Choice | undefined): bool
 }
 
 function Lz4Option({ lz4 }: { lz4: Lz4Choice }) {
+  const lz4Dir = useConvertPrefs((s) => s.lz4Dir);
   const tr = useTr();
   const refusal = lz4Refused(lz4);
   const kind = lz4.readiness.kind ?? (lz4.readiness.refusal ? "runtime" : "ok");
@@ -114,6 +115,11 @@ function Lz4Option({ lz4 }: { lz4: Lz4Choice }) {
             )}
           </div>
         )
+      )}
+      {lz4.on && !refusal && lz4Dir.trim() && (
+        <p className="text-xs text-[var(--color-muted)]" data-testid="lz4-dir">
+          {tr("fpkg.image.lz4_dir", { dir: lz4Dir.trim() }, "The image goes to the LZ4 folder: {dir}")}
+        </p>
       )}
       {lz4.on && !refusal && (
         <div className="flex flex-wrap items-center gap-2 text-xs">
