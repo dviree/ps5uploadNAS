@@ -31,6 +31,62 @@ export const lz4 = {
     ),
 };
 
+/** The community's .ffpfsc compatibility list (a Google Sheet, read by the engine), with the
+ *  sheet's own column names. */
+export interface FfpfscSheet {
+  /** The sheet as people open it; empty when the list is turned off. */
+  url: string;
+  headers: string[];
+  rows: Record<string, string>[];
+}
+
+export const ffpfscSheet = (refresh = false) =>
+  invoke<FfpfscSheet>("lz4_ffpfsc", { refresh });
+
+/** The sheet's rows for one game: by Title ID in any cell, else by name. */
+export function ffpfscRowsFor(
+  sheet: FfpfscSheet,
+  titleId: string,
+  name: string,
+): Record<string, string>[] {
+  const tid = titleId.toUpperCase();
+  const byId = sheet.rows.filter(
+    (r) => tid && Object.values(r).some((c) => c.toUpperCase().includes(tid)),
+  );
+  if (byId.length) return byId.slice(0, 5);
+  const norm = (s: string) =>
+    s
+      .toLowerCase()
+      .replace(/&/g, "and")
+      .replace(/[^a-z0-9]+/g, "");
+  const n = norm(name.replace(/\[[^\]]*\]|\([^)]*\)/g, ""));
+  if (n.length < 4) return [];
+  return sheet.rows
+    .filter((r) => Object.values(r).some((c) => norm(c) === n))
+    .slice(0, 5);
+}
+
+/** A row's filled cells in the sheet's own column order. */
+export function ffpfscCells(
+  headers: string[],
+  row: Record<string, string>,
+): [string, string][] {
+  return headers.filter((h) => row[h]).map((h) => [h, row[h]]);
+}
+
+/** How a sheet cell reads: works, does not, or neither. */
+export function ffpfscTone(cell: string): "good" | "bad" | null {
+  if (/\b(yes|works?|working|ok|playable|good|fine)\b|✅|✔/i.test(cell))
+    return "good";
+  if (
+    /\b(no|not|crash(es)?|broken|fails?|black screen|doesn'?t|won'?t)\b|❌|✖/i.test(
+      cell,
+    )
+  )
+    return "bad";
+  return null;
+}
+
 export function canBeLz4(s: Lz4State | undefined): boolean {
   return s === "ok" || s === "runtime";
 }

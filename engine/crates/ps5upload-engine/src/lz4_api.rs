@@ -1,7 +1,8 @@
 //! POST /api/lz4/status: for each game (a folder or a game image), whether it is packed with
 //! AMPR LZ4 asset packs already, can be, or cannot, for Convert Games' My games list. The same
 //! check the converter makes (`ampr_pack::image::readiness`), read through the game's own
-//! tree, so an image is read in place and never mounted.
+//! tree, so an image is read in place and never mounted. GET /api/lz4/ffpfsc: the community's
+//! .ffpfsc compatibility list, for Convert Games' Compatibility tab.
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -193,5 +194,200 @@ mod tests {
         let s = status_of("/no/such/game/anywhere");
         assert_eq!(s.status, "error");
         assert!(s.reason.is_some());
+    }
+}
+
+/// The community's .ffpfsc compatibility list, a Google Sheet ps5-lz4 shows too, read as CSV.
+/// `PS5UPLOAD_FFPFSC_SHEET` replaces the sheet's CSV export URL ("" turns it off).
+const FFPFSC_SHEET: &str = "https://docs.google.com/spreadsheets/d/1dgu0p7U2yB_mhcUELz-Wkc7Yhs-avoWLY1Gcm0n5XJw/export?format=csv&gid=357033774";
+/// Read again after this long.
+const FFPFSC_EVERY: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
+
+#[derive(Debug, Clone, Serialize, Default)]
+pub(crate) struct FfpfscSheet {
+    /// The sheet as people open it.
+    url: String,
+    /// The sheet's own column names.
+    headers: Vec<String>,
+    /// One map of column name to cell per game row (empty cells left out).
+    rows: Vec<std::collections::BTreeMap<String, String>>,
+}
+
+fn sheet_url() -> Option<String> {
+    let url = std::env::var("PS5UPLOAD_FFPFSC_SHEET").unwrap_or_else(|_| FFPFSC_SHEET.into());
+    (!url.trim().is_empty()).then_some(url)
+}
+
+/// The sheet's page for a CSV export URL (`…/export?format=csv&gid=N` → `…/edit#gid=N`).
+fn sheet_page(csv_url: &str) -> String {
+    match csv_url.split_once("/export?format=csv&gid=") {
+        Some((base, gid)) => format!("{base}/edit#gid={gid}"),
+        None => csv_url.to_string(),
+    }
+}
+
+/// RFC 4180 CSV: quoted cells may hold commas, newlines and doubled quotes.
+fn parse_csv(text: &str) -> Vec<Vec<String>> {
+    let mut rows = Vec::new();
+    let mut row = Vec::new();
+    let mut cell = String::new();
+    let mut quoted = false;
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if quoted {
+            match c {
+                '"' if chars.peek() == Some(&'"') => {
+                    cell.push('"');
+                    chars.next();
+                }
+                '"' => quoted = false,
+                _ => cell.push(c),
+            }
+            continue;
+        }
+        match c {
+            '"' => quoted = true,
+            ',' => row.push(std::mem::take(&mut cell)),
+            '\r' => {}
+            '\n' => {
+                row.push(std::mem::take(&mut cell));
+                rows.push(std::mem::take(&mut row));
+            }
+            _ => cell.push(c),
+        }
+    }
+    if !cell.is_empty() || !row.is_empty() {
+        row.push(cell);
+        rows.push(row);
+    }
+    rows
+}
+
+fn has_title_id(s: &str) -> bool {
+    let b = s.as_bytes();
+    b.windows(9)
+        .any(|w| w[..4].iter().all(u8::is_ascii_uppercase) && w[4..].iter().all(u8::is_ascii_digit))
+}
+
+/// The sheet's rows under its own header: the header is the last row with two or more filled
+/// cells before the first row naming a Title ID (sheets often open with a title or notes).
+fn sheet_from_csv(text: &str, url: String) -> FfpfscSheet {
+    let rows: Vec<Vec<String>> = parse_csv(text.trim_start_matches('\u{feff}'))
+        .into_iter()
+        .map(|r| {
+            r.into_iter()
+                .map(|c| c.trim().to_string())
+                .collect::<Vec<_>>()
+        })
+        .filter(|r| r.iter().any(|c| !c.is_empty()))
+        .collect();
+    let first_data = rows
+        .iter()
+        .position(|r| r.iter().any(|c| has_title_id(c)))
+        .unwrap_or(rows.len());
+    let head = (0..first_data)
+        .rev()
+        .find(|&i| rows[i].iter().filter(|c| !c.is_empty()).count() >= 2);
+    let width = rows.iter().map(Vec::len).max().unwrap_or(0);
+    let name = |i: usize, h: Option<&String>| match h {
+        Some(h) if !h.is_empty() => h.clone(),
+        _ => format!("Column {}", i + 1),
+    };
+    let headers: Vec<String> = (0..width)
+        .map(|i| name(i, head.and_then(|h| rows[h].get(i))))
+        .collect();
+    let data = rows
+        .iter()
+        .skip(head.map_or(0, |h| h + 1))
+        .map(|r| {
+            r.iter()
+                .enumerate()
+                .filter(|(_, c)| !c.is_empty())
+                .map(|(i, c)| (headers[i].clone(), c.clone()))
+                .collect::<std::collections::BTreeMap<_, _>>()
+        })
+        .filter(|cells| cells.len() >= 2)
+        .collect();
+    FfpfscSheet {
+        url: sheet_page(&url),
+        headers,
+        rows: data,
+    }
+}
+
+fn sheet_cache() -> &'static Mutex<Option<(std::time::Instant, FfpfscSheet)>> {
+    static SHEET: OnceLock<Mutex<Option<(std::time::Instant, FfpfscSheet)>>> = OnceLock::new();
+    SHEET.get_or_init(Default::default)
+}
+
+#[derive(Deserialize)]
+pub(crate) struct SheetQuery {
+    #[serde(default)]
+    refresh: bool,
+}
+
+/// GET /api/lz4/ffpfsc: the .ffpfsc compatibility list, read at most every six hours (or
+/// now, with `?refresh=true`).
+pub(crate) async fn lz4_ffpfsc_handler(
+    axum::extract::Query(q): axum::extract::Query<SheetQuery>,
+) -> impl IntoResponse {
+    let Some(url) = sheet_url() else {
+        return (StatusCode::OK, Json(FfpfscSheet::default())).into_response();
+    };
+    if !q.refresh {
+        if let Some((at, sheet)) = &*sheet_cache().lock().unwrap_or_else(|e| e.into_inner()) {
+            if at.elapsed() < FFPFSC_EVERY {
+                return (StatusCode::OK, Json(sheet.clone())).into_response();
+            }
+        }
+    }
+    let fetched = tokio::task::spawn_blocking(move || -> Result<FfpfscSheet, String> {
+        let text = ureq::get(&url)
+            .header("User-Agent", "ps5upload")
+            .call()
+            .map_err(|e| format!("fetching the .ffpfsc list: {e}"))?
+            .body_mut()
+            .with_config()
+            .limit(20 << 20)
+            .read_to_string()
+            .map_err(|e| format!("reading the .ffpfsc list: {e}"))?;
+        Ok(sheet_from_csv(&text, url))
+    })
+    .await;
+    match fetched {
+        Ok(Ok(sheet)) => {
+            *sheet_cache().lock().unwrap_or_else(|e| e.into_inner()) =
+                Some((std::time::Instant::now(), sheet.clone()));
+            (StatusCode::OK, Json(sheet)).into_response()
+        }
+        Ok(Err(e)) => json_err(StatusCode::BAD_GATEWAY, e).into_response(),
+        Err(join) => json_err(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("the .ffpfsc list task failed: {join}"),
+        )
+        .into_response(),
+    }
+}
+
+#[cfg(test)]
+mod sheet_tests {
+    use super::*;
+
+    #[test]
+    fn the_header_is_the_row_above_the_first_game() {
+        let csv = "PS5 .ffpfsc compatibility,,\r\nNotes: see below,,\r\nGame,Title ID,Works?\r\n\"Astro Bot, Deluxe\",PPSA01234,Yes\r\nReturnal,PPSA01284,\"No \"\"black\"\" screen\"\r\n,,\r\n";
+        let s = sheet_from_csv(csv, FFPFSC_SHEET.into());
+        assert_eq!(s.headers, ["Game", "Title ID", "Works?"]);
+        assert_eq!(s.rows.len(), 2);
+        assert_eq!(s.rows[0]["Game"], "Astro Bot, Deluxe");
+        assert_eq!(s.rows[1]["Works?"], "No \"black\" screen");
+        assert!(s.url.ends_with("/edit#gid=357033774"), "{}", s.url);
+    }
+
+    #[test]
+    fn a_sheet_without_a_header_names_its_columns() {
+        let s = sheet_from_csv("PPSA01234,Yes\nPPSA05678,No\n", "x".into());
+        assert_eq!(s.headers, ["Column 1", "Column 2"]);
+        assert_eq!(s.rows[1]["Column 2"], "No");
     }
 }

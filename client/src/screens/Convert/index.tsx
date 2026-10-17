@@ -68,7 +68,7 @@ export default function ConvertScreen() {
             : tr(
                 "lz4compat.subtitle",
                 undefined,
-                "How games packed with LZ4 run for other players, from their game reports on GitHub. Add yours with Report how it runs on a packed game in My games.",
+                "How games run for other players: packed with LZ4 (their game reports on GitHub; add yours with Report how it runs on a packed game in My games) and as .ffpfsc images (the community's .ffpfsc list).",
               )
         }
         right={tabs}

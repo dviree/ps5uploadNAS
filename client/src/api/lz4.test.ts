@@ -1,6 +1,15 @@
 import { describe, expect, it } from "vitest";
 
-import { canBeLz4, compatReportUrl, compatVerdict, type CompatEntry } from "./lz4";
+import {
+  canBeLz4,
+  compatReportUrl,
+  compatVerdict,
+  ffpfscCells,
+  ffpfscRowsFor,
+  ffpfscTone,
+  type CompatEntry,
+  type FfpfscSheet,
+} from "./lz4";
 
 const entry = (p: Partial<CompatEntry>): CompatEntry => ({
   works: 0,
@@ -22,8 +31,12 @@ describe("lz4", () => {
 
   it("sums up the community's reports", () => {
     expect(compatVerdict(entry({ works: 2, reports: 2 }))).toBe("good");
-    expect(compatVerdict(entry({ issues: 1, crash: 1, reports: 2 }))).toBe("mixed");
-    expect(compatVerdict(entry({ works: 1, noStart: 2, reports: 3 }))).toBe("bad");
+    expect(compatVerdict(entry({ issues: 1, crash: 1, reports: 2 }))).toBe(
+      "mixed",
+    );
+    expect(compatVerdict(entry({ works: 1, noStart: 2, reports: 3 }))).toBe(
+      "bad",
+    );
     expect(compatVerdict(entry({ crash: 1, reports: 1 }))).toBe("bad");
   });
 
@@ -33,5 +46,34 @@ describe("lz4", () => {
     expect(u.searchParams.get("template")).toBe("compat.yml");
     expect(u.searchParams.get("title_id")).toBe("PPSA01289");
     expect(u.searchParams.get("title")).toBe("[Game report] Sackboy");
+  });
+
+  it("finds a game in the .ffpfsc list by Title ID, else by name", () => {
+    const sheet: FfpfscSheet = {
+      url: "",
+      headers: ["Game", "ID", "Works?"],
+      rows: [
+        { Game: "Astro Bot", ID: "PPSA01234", "Works?": "Yes" },
+        { Game: "Marvel's Spider-Man 2", "Works?": "No, black screen" },
+      ],
+    };
+    expect(ffpfscRowsFor(sheet, "ppsa01234", "x")).toHaveLength(1);
+    expect(
+      ffpfscRowsFor(sheet, "PPSA99999", "Marvel's Spider-Man 2 [PPSA99999]")[0][
+        "Works?"
+      ],
+    ).toBe("No, black screen");
+    expect(ffpfscRowsFor(sheet, "PPSA99999", "Unknown")).toEqual([]);
+    expect(ffpfscCells(sheet.headers, sheet.rows[1])).toEqual([
+      ["Game", "Marvel's Spider-Man 2"],
+      ["Works?", "No, black screen"],
+    ]);
+  });
+
+  it("reads a sheet cell as works or not", () => {
+    expect(ffpfscTone("Yes")).toBe("good");
+    expect(ffpfscTone("✅")).toBe("good");
+    expect(ffpfscTone("Crashes in chapter 2")).toBe("bad");
+    expect(ffpfscTone("01.005")).toBe(null);
   });
 });
