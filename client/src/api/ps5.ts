@@ -4319,6 +4319,11 @@ export function humanizeJobErrorReason(
         "joberr.ava1_unreachable",
         "The PS5 could not be reached. Check that it is on and on the same network, and that the helper is running, then click Retry.",
       );
+    case "console_rest_mode":
+      return trStatic(
+        "joberr.console_rest_mode",
+        "The PS5 is in rest mode. Wake it, and the transfer carries on from where it stopped.",
+      );
     case "ava1_no_space":
       return trStatic(
         "joberr.fs_write_failed_no_space",
@@ -4732,12 +4737,22 @@ export async function payloadCheck(ip: string): Promise<{
    *  went wrong (TCP connect refused, STATUS_ACK timeout, etc.)
    *  instead of just "didn't come up". null when reachable. */
   error: string | null;
+  /** The engine's token for why the probe failed (`console_rest_mode`, `ava1_unreachable`,
+   *  `helper_not_ava1`, `not_paired`, ...), from the status 502 body. Absent when reachable
+   *  or from an engine too old to send it. */
+  reason?: string;
+  /** What DDP said about the console's power when the engine asked it: `rest` (DDP 620),
+   *  `unreachable` (no DDP reply and no TCP answer), `awake` (DDP 200). Absent when the
+   *  engine did not ask. */
+  power?: "awake" | "rest" | "unreachable";
 }> {
   const resp = await invoke<{
     reachable?: boolean;
     loaded?: boolean;
     engine?: boolean;
     error?: string;
+    reason?: string;
+    power?: string;
     status?: {
       version?: string;
       ps5_kernel?: string;
@@ -4746,7 +4761,16 @@ export async function payloadCheck(ip: string): Promise<{
     };
   }>("payload_check", { ip });
   const error = resp?.reachable ? null : (resp?.error ?? null);
+  const reason =
+    !resp?.reachable && typeof resp?.reason === "string" ? resp.reason : undefined;
+  const power =
+    !resp?.reachable &&
+    (resp?.power === "awake" || resp?.power === "rest" || resp?.power === "unreachable")
+      ? resp.power
+      : undefined;
   return {
+    ...(reason !== undefined ? { reason } : {}),
+    ...(power !== undefined ? { power } : {}),
     reachable: !!resp?.reachable,
     loaded: !!resp?.loaded,
     engineReachable: resp?.engine !== false,
