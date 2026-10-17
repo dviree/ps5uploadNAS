@@ -34,7 +34,8 @@ name: publish
 # See https://securitylab.github.com/research/github-actions-untrusted-input/
 on:
   push:
-    tags: ['v*']
+    # A -lz4 tag only publishes the Docker images (docker-engine.yml), not the apps.
+    tags: ['v*', '!v*-lz4*']
   workflow_dispatch:
     inputs:
       tag:
