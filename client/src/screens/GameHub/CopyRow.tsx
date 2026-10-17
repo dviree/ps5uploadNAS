@@ -204,6 +204,15 @@ export function CopyRow({
         {p?.title && p.kind === "dlc" && <span className="text-[var(--color-text)]">{p.title}</span>}
         {p?.version && <span className="text-[var(--color-muted)]">v{p.version}</span>}
         {p?.region && <span className="text-[var(--color-muted)]">{p.region}</span>}
+        {loc.lz4 && (
+          <Badge
+            tone="accent"
+            size="sm"
+            title={tr("collection.lz4_hint", undefined, "Packed with LZ4 for APR-EMU (ps5-lz4).")}
+          >
+            {tr("lz4.title", undefined, "LZ4")}
+          </Badge>
+        )}
         {p?.complete === false && (
           <Badge tone="warn" size="sm">
             {tr("collection.incomplete", undefined, "Incomplete")}
