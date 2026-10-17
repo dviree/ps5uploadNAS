@@ -31,7 +31,7 @@ const ALLOWED_STRINGS = new Set([
   // units / symbols
   "ms", "MB/s", "MiB/s", "MiB", "KB", "MB", "GB", "%", "·", "—", "–", "/", "@",
   // brand / proper nouns
-  "PS5Upload", "PS5", "GitHub", "Discord", "PhantomPtr", "@phantomptr", "GPL-3",
+  "PS5Upload", "ps5lz4uploader", "PS5", "GitHub", "Discord", "PhantomPtr", "@phantomptr", "GPL-3",
   // payload names — identifiers of a binary, not prose. Their .elf siblings
   // ("a53_ppr_install_fast.elf", "shadowmountplus.elf") already match the
   // filename pattern below; this one is written without the extension.

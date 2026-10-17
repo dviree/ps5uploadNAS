@@ -52,7 +52,7 @@ export default function AboutScreen() {
           aria-hidden
           className="mb-5 h-24 w-24 rounded-2xl shadow-[var(--shadow-logo)]"
         />
-        <h1 className="text-4xl font-semibold tracking-tight">PS5Upload</h1>
+        <h1 className="text-4xl font-semibold tracking-tight">ps5lz4uploader</h1>
         <div className="mt-2 flex items-center gap-2">
           {version && (
             <Badge tone="neutral" variant="outline" size="md" className="font-mono">
