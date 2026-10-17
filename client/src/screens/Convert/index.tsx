@@ -1,5 +1,5 @@
-// Convert Games: ps5upload's own converter (package, game image, folder) and, beside it, the
-// LZ4 Compression engine (lz4/, from PS5-LZ4-NAS). The tab is in the URL (?tab=lz4), so a
+// Convert Games: ps5upload's own converter (package, game image, folder) and, beside it,
+// ps5-lz4 (lz4/nas-lz4, from PS5-LZ4-NAS). The tab is in the URL (?tab=lz4), so a
 // refresh or a link keeps it.
 
 import { useSearchParams } from "react-router";
@@ -36,7 +36,7 @@ export default function ConvertScreen() {
           id: "convert",
           label: tr("convert.tab_ps5upload", undefined, "Package & image"),
         },
-        { id: "lz4", label: tr("lz4.title", undefined, "LZ4 Compression") },
+        { id: "lz4", label: tr("lz4.title", undefined, "LZ4") },
       ]}
     />
   );
@@ -50,7 +50,7 @@ export default function ConvertScreen() {
         description={tr(
           "convert.lz4_subtitle",
           undefined,
-          "LZ4 asset packs for APR-EMU, .ffpfsc compression, exFAT/PFS images, validate and repair, APR-EMU versions, copy and move, with the LZ4 Compression engine.",
+          "ps5-lz4: which games can be LZ4, packing them for APR-EMU, sending them to the PS5, PS5 games, ShadowMount, saves, community reports and FTP.",
         )}
         right={tabs}
       />

@@ -31,10 +31,12 @@
 - **Collection.** Every game in your folders (including folders on a NAS, scanned in place),
   grouped with its updates and DLC, with what each PS5 already has and one click to install the
   rest. Organize, de-duplicate and clean up the drives. Replaces PS Game Library.
-- **Convert Games.** The LZ4 Compression engine ([lz4/](lz4/README.md), from PS5-LZ4-NAS)
-  in its own look: LZ4 asset packs for APR-EMU, `.ffpfsc` compression, exFAT/PFS images,
-  validate and repair, APR-EMU versions, copy and move, and a history of every job. It runs
-  next to the engine in the [compose file](engine/compose.yaml) on port 5920.
+- **Convert Games.** Build an installable package from a decrypted game folder or an
+  image, or write a game folder as a game image (`.exfat`, `.ffpkg`, `.ffpfs`, or the smaller
+  `.ffpfsc`) that ShadowMount+ mounts. The **LZ4** tab shows ps5-lz4
+  ([lz4/nas-lz4](lz4/nas-lz4/README.md)): which games can be LZ4, packing them for APR-EMU,
+  sending them to the PS5, community reports and FTP. `scripts/nas-install.sh` sets up both on
+  a NAS.
 - **Browse and manage.** Files, games, disk images (mount, edit in place), saves, screenshots
   and video clips; register, launch, stop and uninstall games; copy, move (Move to…),
   delete, set permissions.

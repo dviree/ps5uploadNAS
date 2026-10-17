@@ -4,8 +4,8 @@ import {
   safeSetItem,
 } from "../../lib/safeStorage";
 
-/** The port the LZ4 Compression engine (lz4/) serves its page and API on. */
-export const LZ4_PORT = 5920;
+/** The port ps5-lz4's web page (lz4/nas-lz4, the ps5-lz4-ui container) listens on. */
+export const LZ4_PORT = 5921;
 const KEY_LZ4_URL = "ps5upload.lz4_url";
 
 /** Trim and drop any trailing slash; a bare host or host:port gets http://. */
@@ -15,8 +15,8 @@ export function normalizeLz4Url(raw: string): string {
   return /^https?:\/\//i.test(v) ? v : `http://${v}`;
 }
 
-/** Where the LZ4 engine is when nothing is set: the same host as the ps5upload engine
- *  (the Docker compose file runs both on one server), on the LZ4 port. */
+/** Where ps5-lz4 is when nothing is set: the same host as the ps5upload engine (both run on
+ *  the NAS), on ps5-lz4's port. */
 export function defaultLz4Url(engineUrl: string): string {
   try {
     const u = new URL(engineUrl);
