@@ -44,36 +44,39 @@
 }
 
 /* ── Dark ─────────────────────────────────────────────────────────────── */
+/* ps5lz4's glass look (lz4/assets/lz4-compression.html, html.lz4.glass): a
+ * violet-blue gradient behind see-through panels with light edges, violet
+ * accents and white text. */
 :root {
   color-scheme: dark;
 
   /* Surfaces, from the deepest well to the most raised. */
-  --color-surface: rgb(255 255 255 / 0.04);
-  --color-surface-2: rgb(255 255 255 / 0.06);
-  --color-surface-3: rgb(255 255 255 / 0.1);
-  --color-surface-raised: rgb(255 255 255 / 0.07);
+  --color-surface: rgb(255 255 255 / 0.1);
+  --color-surface-2: rgb(255 255 255 / 0.07);
+  --color-surface-3: rgb(255 255 255 / 0.16);
+  --color-surface-raised: rgb(255 255 255 / 0.12);
   /* Floating layers (menus, dialogs): nearly opaque, so what is behind them
    * never competes with their text. */
-  --color-float: rgb(44 44 46 / 0.96);
+  --color-float: rgb(46 30 110 / 0.97);
   /* The sidebar material. */
-  --color-canvas: rgb(255 255 255 / 0.035);
-  --glass-edge: rgb(255 255 255 / 0.1);
+  --color-canvas: rgb(255 255 255 / 0.08);
+  --glass-edge: rgb(255 255 255 / 0.2);
   /* The selected sidebar row / chip. */
-  --color-pill: rgb(255 255 255 / 0.12);
+  --color-pill: rgb(255 255 255 / 0.18);
 
-  --color-border: rgb(255 255 255 / 0.1);
-  --color-border-strong: rgb(255 255 255 / 0.2);
-  --color-muted: #a1a1a8;
-  --color-text: #f5f5f7;
-  --color-accent: #4da3ff;
+  --color-border: rgb(255 255 255 / 0.2);
+  --color-border-strong: rgb(255 255 255 / 0.34);
+  --color-muted: rgb(236 232 255 / 0.74);
+  --color-text: #ffffff;
+  --color-accent: #c9b0ff;
   --color-accent-contrast: #ffffff;
   /* Soft accent for hover/selected chip backgrounds that should read
    * as "accent-adjacent" without competing with the primary accent. */
-  --color-accent-soft: rgb(10 132 255 / 0.18);
-  --color-accent-bright: #3b9bff;
-  --color-accent-pink: #3b9bff;
-  --accent-fill: linear-gradient(#0a72e8, #0a72e8);
-  --accent-glow: 0 1px 2px rgb(0 0 0 / 0.3);
+  --color-accent-soft: rgb(183 148 255 / 0.22);
+  --color-accent-bright: #b794ff;
+  --color-accent-pink: #b794ff;
+  --accent-fill: linear-gradient(135deg, #8f6bff, #6a4cf0 50%, #3f68f0);
+  --accent-glow: 0 6px 22px rgb(60 30 160 / 0.45), inset 0 1px 0 rgb(255 255 255 / 0.3);
 
   --color-good: #32d074;
   --color-good-soft: rgb(50 208 116 / 0.14);
@@ -100,15 +103,20 @@
   --overlay-scrim: rgb(0 0 0 / 0.45);
 
   /* The window background: flat and neutral. */
-  --atmosphere-base: #1e1e20;
-  --atmosphere: none;
+  --atmosphere-base: #24145c;
+  --atmosphere:
+    radial-gradient(620px 620px at 12% 18%, rgb(168 85 247 / 0.75), transparent 70%),
+    radial-gradient(680px 680px at 88% 12%, rgb(59 130 246 / 0.65), transparent 70%),
+    radial-gradient(760px 760px at 75% 92%, rgb(99 102 241 / 0.7), transparent 70%),
+    radial-gradient(560px 560px at 20% 95%, rgb(139 92 246 / 0.55), transparent 70%),
+    linear-gradient(135deg, #2e1a78, #1d1660 50%, #331a7a);
   --dot-color: transparent;
 
   --glass-blur: 24px;
 
   /* Product shell — one shared rhythm for every screen. Concentric: each
    * radius is the one outside it minus the padding between them. */
-  --color-accent-glow: rgb(10 132 255 / 0.25);
+  --color-accent-glow: rgb(183 148 255 / 0.3);
   --radius-control: 999px;
   --radius-field: 0.5rem;
   --radius-card: 0.875rem;
@@ -219,6 +227,7 @@
   --overlay-scrim: rgb(0 0 0 / 0.7);
 
   --atmosphere-base: #000000;
+  --atmosphere: none;
   --glass-blur: 0px;
 }
 
