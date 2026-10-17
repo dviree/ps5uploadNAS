@@ -26,6 +26,9 @@ name: docker-engine
 on:
   push:
     tags: ['v*']
+    # Every push to main publishes the images too (tags lz4-<commit>, lz4 and latest), so a
+    # NAS pulls this fork's build instead of compiling it.
+    branches: [main]
   pull_request:
     paths: ['engine/**', 'client/**', 'payload/**', 'scripts/docker-smoke.sh', '.github/workflows/docker-engine.yml']
   workflow_dispatch:
@@ -143,14 +146,27 @@ jobs:
         env:
           INPUT_TAG: ${{ github.event.inputs.tag || github.ref_name }}
           OWNER: ${{ github.repository_owner }}
+          REF_TYPE: ${{ github.event.inputs.tag && 'tag' || github.ref_type }}
+          SHA: ${{ github.sha }}
         run: |
+          owner_lc="$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')"
+          if [ "$REF_TYPE" = branch ]; then
+            # A push to main: check out that commit, tag the images lz4-<commit>, lz4, latest.
+            {
+              echo "tag=$SHA"
+              echo "version=lz4-${SHA:0:7}"
+              echo "major_minor=lz4"
+              echo "image=ghcr.io/${owner_lc}/ps5upload-engine"
+              echo "image_webui=ghcr.io/${owner_lc}/ps5upload-engine-webui"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           raw_tag="$INPUT_TAG"
           if ! printf '%s' "$raw_tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([-+._A-Za-z0-9]*)?$'; then
             echo "::error::Refusing to proceed: '$raw_tag' is not a valid version tag"
             exit 1
           fi
           version="${raw_tag#v}"
-          owner_lc="$(printf '%s' "$OWNER" | tr '[:upper:]' '[:lower:]')"
           {
             echo "tag=$raw_tag"
             echo "version=$version"
