@@ -1,4 +1,8 @@
-import { safeGetItem, safeRemoveItem, safeSetItem } from "../../lib/safeStorage";
+import {
+  safeGetItem,
+  safeRemoveItem,
+  safeSetItem,
+} from "../../lib/safeStorage";
 
 /** The port the LZ4 Compression engine (lz4/) serves its page and API on. */
 export const LZ4_PORT = 5920;
