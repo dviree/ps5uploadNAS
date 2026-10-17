@@ -39,6 +39,16 @@ export default function ConvertScreen() {
       .buildFolder(path, lz4Dir.trim() || outputDir.trim() || undefined, { installRuntime: true });
     setTab("convert");
   };
+  /** Compress one game into a .ffpfsc image in the output folder under Convert: an image is
+   *  compressed as it is, a game folder written as a compressed image. The original is only
+   *  read. */
+  const convertToFfpfsc = (path: string, isFolder: boolean) => {
+    // Not next to the source (the default for an image): the library is mounted read-only.
+    const out = useConvertPrefs.getState().outputDir.trim() || "~/Downloads/fpkgs";
+    const run = useFpkgConversion.getState();
+    void (isFolder ? run.buildImage(path, out, true, "exfat") : run.compress(path, out));
+    setTab("convert");
+  };
 
   const tabs = (
     <Tabs
@@ -80,7 +90,7 @@ export default function ConvertScreen() {
         right={tabs}
       />
       {tab === "mine" ? (
-        <MyGames onConvert={convertWithLz4} />
+        <MyGames onConvert={convertWithLz4} onFfpfsc={convertToFfpfsc} />
       ) : (
         <Compatibility />
       )}

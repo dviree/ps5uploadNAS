@@ -21,8 +21,6 @@ export interface Lz4Status {
   runtime_version?: string;
 }
 
-/** The engine takes at most this many games per request. */
-export const LZ4_STATUS_BATCH = 64;
 
 export const lz4 = {
   status: (paths: string[]) =>
