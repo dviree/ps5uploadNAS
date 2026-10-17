@@ -164,4 +164,16 @@ describe("stageRows", () => {
       expect(rows[1]).toMatchObject({ done: 3, total: 6 });
     }
   });
+
+  it("an LZ4 game folder packs, then writes and reads back", () => {
+    const rows = stageRows(
+      { phase: "running", ...base, source: "/games/Game", mode: "folder", stage: "write", stageDone: 1, stageTotal: 4, stageMs: { pack: 9 } },
+      null,
+    );
+    expect(rows.map((r) => [r.stage, r.state])).toEqual([
+      ["pack", "done"],
+      ["write", "active"],
+      ["verify", "pending"],
+    ]);
+  });
 });

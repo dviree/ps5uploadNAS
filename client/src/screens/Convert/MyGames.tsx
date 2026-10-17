@@ -282,7 +282,7 @@ export function MyGames({ onConvert }: { onConvert: (path: string) => void }) {
             hint={tr(
               "lz4mine.lz4_dir_hint",
               undefined,
-              "Games converted to LZ4 are saved here, like ps5-lz4's LZ4 folder. In the Docker setup it is /lz4. Empty: the output folder under Convert.",
+              "Games converted to LZ4 are saved here as game folders (name-lz4), like ps5-lz4's LZ4 folder. In the Docker setup it is /lz4. Empty: the output folder under Convert.",
             )}
             value={lz4Dir}
             onChange={(e) => setLz4Dir(e.target.value)}
@@ -439,7 +439,7 @@ function StateBadge({
           title={tr(
             "lz4mine.s_runtime_hint",
             undefined,
-            "Convert puts ampr_emu 0.4.2.1, the APR-EMU build that reads LZ4 packs, into the game.",
+            "Convert to LZ4 puts ampr_emu 0.4.2.1, the APR-EMU build that reads LZ4 packs, into the LZ4 copy (the original is not touched).",
           )}
         >
           {tr("lz4mine.s_can_runtime", undefined, "can be LZ4 (adds APR-EMU)")}

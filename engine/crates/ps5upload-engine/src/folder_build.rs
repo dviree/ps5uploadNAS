@@ -360,12 +360,13 @@ fn verify(
 }
 
 /// Writes `tree` as the folder `target`: checked, written into `<target>.partial/`, read back
-/// against a source `reopen` opens afresh, then renamed. `stage(id, done, total)` reports
+/// against a source `reopen` opens afresh (or, without `reopen`, against `tree` itself: an LZ4
+/// pack overlay, which no fresh source reproduces), then renamed. `stage(id, done, total)` reports
 /// `write` and `verify`. The caller has claimed the `.partial` (`fpkg_api::Writing`); on any
 /// failure it is removed here.
 pub(crate) fn build(
     tree: &mut dyn SourceTree,
-    reopen: &dyn Fn() -> Result<Box<dyn SourceTree>, String>,
+    reopen: Option<&dyn Fn() -> Result<Box<dyn SourceTree>, String>>,
     target: &Path,
     mode: VerifyMode,
     cancel: &AtomicBool,
@@ -415,12 +416,15 @@ pub(crate) fn build(
             return Err("cancelled".into());
         }
 
-        let mut fresh = reopen()?;
+        let mut fresh = reopen.map(|r| r()).transpose()?;
         let summary = verify(
             &partial,
             &listed,
             &empty_dirs,
-            &mut *fresh,
+            match fresh.as_mut() {
+                Some(f) => &mut **f,
+                None => &mut *tree,
+            },
             mode,
             cancel,
             &mut |d, t| stage("verify", d, t),
@@ -480,6 +484,90 @@ mod tests {
         game
     }
 
+    /// A game packed with LZ4 as a folder (what ps5-lz4 keeps in its LZ4 folder): written from
+    /// the pack overlay and read back against it, with the manifest and volumes in, packed
+    /// originals out, and every file readable to its source bytes through the packs.
+    #[test]
+    fn an_lz4_packed_game_folder_reads_back_to_the_source() {
+        use ps5upload_fpkg::ampr_pack::{self, Reader};
+        let root = scratch("lz4");
+        let src = game(&root);
+        let mut eboot: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+        eboot[1000..1014].copy_from_slice(b"libSceAmpr.prx");
+        std::fs::write(src.join("eboot.bin"), eboot).unwrap();
+        std::fs::create_dir_all(src.join("fakelib")).unwrap();
+        let mut module = vec![0u8; 4096];
+        module[100..108].copy_from_slice(b"AMPRPAK4");
+        module[200..217].copy_from_slice(b"ampr_assets.index");
+        module[300..321].copy_from_slice(b"\x000.4.2.1 (c) Drakmor\0");
+        std::fs::write(src.join("fakelib/libSceAmpr.sprx"), module).unwrap();
+        let text: Vec<u8> = (0..400_000u32)
+            .flat_map(|i| format!("asset {} ", i % 977).into_bytes())
+            .take(400_000)
+            .collect();
+        std::fs::write(src.join("data/table.bin"), &text).unwrap();
+        std::fs::write(src.join("data/settings.json"), b"{\"a\":1}").unwrap();
+
+        let target = root.join("PPSA99999-app-lz4");
+        let spool = root.join("spool");
+        let mut tree = FolderSource::open(&src).unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut control = ampr_pack::Control {
+            progress: None,
+            cancel: Some(&cancel),
+        };
+        let (mut overlay, _) = ampr_pack::image::prepare(
+            &mut tree,
+            &ampr_pack::default_profile(9, 16),
+            &spool,
+            0,
+            &mut control,
+        )
+        .unwrap();
+        build(
+            &mut overlay,
+            None,
+            &target,
+            VerifyMode::Full,
+            &cancel,
+            &mut |_, _, _| {},
+        )
+        .unwrap();
+        drop(overlay);
+
+        let mut out = FolderSource::open(&target).unwrap();
+        let written: Vec<String> = out.files().iter().map(|f| f.path.clone()).collect();
+        assert!(
+            written.contains(&"ampr_assets.index".to_string()),
+            "{written:?}"
+        );
+        assert!(written.iter().any(|p| p.ends_with(".pak")), "{written:?}");
+        let reader = Reader::open(&mut out, "ampr_assets.index").unwrap();
+        let mut source = FolderSource::open(&src).unwrap();
+        let mut packed = 0;
+        for f in source.files().to_vec() {
+            let i = reader
+                .find(&f.path)
+                .expect("every source file is in the manifest");
+            let want = source.read(&f.path).unwrap();
+            if reader.manifest.files[i].packed() {
+                packed += 1;
+                assert!(!written.contains(&f.path), "{} is packed and loose", f.path);
+                assert_eq!(
+                    reader.read_file(i, &mut out, "").unwrap(),
+                    want,
+                    "{}",
+                    f.path
+                );
+            } else {
+                assert_eq!(out.read(&f.path).unwrap(), want, "{}", f.path);
+            }
+        }
+        assert!(packed >= 1, "data is packed");
+        assert!(!partial_of(&target).exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     fn scratch(tag: &str) -> PathBuf {
         let root =
             std::env::temp_dir().join(format!("ps5upload-fold-{tag}-{}", std::process::id()));
@@ -512,7 +600,7 @@ mod tests {
         let mut stages: Vec<String> = Vec::new();
         let r = build(
             &mut *tree,
-            &reopen,
+            Some(&reopen),
             target,
             mode,
             &cancel,
@@ -598,7 +686,7 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let err = build(
             &mut tree,
-            &reopen,
+            Some(&reopen),
             &target,
             VerifyMode::Full,
             &cancel,
@@ -666,7 +754,7 @@ mod tests {
             let mut tree = listed(&paths);
             let err = build(
                 &mut tree,
-                &reopen,
+                Some(&reopen),
                 &target,
                 VerifyMode::Full,
                 &AtomicBool::new(false),
@@ -682,7 +770,7 @@ mod tests {
             let mut tree = listed(paths);
             assert!(build(
                 &mut tree,
-                &reopen,
+                Some(&reopen),
                 &target,
                 VerifyMode::Full,
                 &AtomicBool::new(false),

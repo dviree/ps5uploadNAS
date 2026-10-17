@@ -155,7 +155,22 @@ export const fpkg = {
   /** Unpack a game image (.exfat, .ffpkg, .ffpfs, .ffpfsc) or a package made with the debug
    *  key into a plain folder in the output folder, named after the source (or `name`). One
    *  job: written, read back (sizes, and SHA-256 of a sample or of every file), then given its
-   *  name; the job's `dest` is the folder. */
-  buildFolder: (source: string, outputDir?: string, name?: string, fullVerify = false) =>
-    invoke<{ job_id: string }>("folder_build", { source, outputDir, name, fullVerify }),
+   *  name; the job's `dest` is the folder. With `lz4`, a game folder or image is packed into
+   *  AMPR LZ4 asset packs first and written as `<name>-lz4`, as ps5-lz4 keeps it. */
+  buildFolder: (
+    source: string,
+    outputDir?: string,
+    name?: string,
+    fullVerify = false,
+    lz4?: AmprLz4Options,
+  ) =>
+    invoke<{ job_id: string }>("folder_build", {
+      source,
+      outputDir,
+      name,
+      fullVerify,
+      amprLz4: lz4
+        ? { level: lz4.level, profile_toml: lz4.profileToml, install_runtime: lz4.installRuntime ?? false }
+        : undefined,
+    }),
 };

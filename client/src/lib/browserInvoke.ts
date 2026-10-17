@@ -831,6 +831,7 @@ export async function browserInvoke<T>(
         output_dir: args["outputDir"],
         name: args["name"],
         full_verify: args["fullVerify"] ?? false,
+        ampr_lz4: args["amprLz4"],
       });
     }
     case "job_status": {

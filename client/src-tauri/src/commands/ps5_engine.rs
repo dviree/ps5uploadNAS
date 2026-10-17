@@ -2498,6 +2498,7 @@ pub async fn folder_build(
     output_dir: Option<String>,
     name: Option<String>,
     full_verify: Option<bool>,
+    ampr_lz4: Option<JsonValue>,
 ) -> Result<JsonValue, String> {
     let base = engine::url();
     let url = format!("{base}/api/folder/build");
@@ -2508,6 +2509,7 @@ pub async fn folder_build(
             "output_dir": output_dir,
             "name": name,
             "full_verify": full_verify.unwrap_or(false),
+            "ampr_lz4": ampr_lz4,
         }),
     )
     .await

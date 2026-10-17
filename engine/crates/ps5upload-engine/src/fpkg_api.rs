@@ -817,6 +817,37 @@ impl AmprLz4Req {
     }
 }
 
+/// A game made ready for LZ4 asset packs, or why it cannot be: with `install_runtime`, a game
+/// whose own ampr_emu is missing or too old gets the release one (its own kept beside it as
+/// `.orig`); only a game that reads through AMPR. Refused here, before a job exists.
+fn lz4_ready(
+    mut tree: Box<dyn ps5upload_fpkg::source::SourceTree>,
+    install_runtime: bool,
+) -> Result<Box<dyn ps5upload_fpkg::source::SourceTree>, String> {
+    if install_runtime {
+        let ready = ps5upload_fpkg::ampr_pack::image::readiness(&mut *tree);
+        match ready.as_ref().map(|r| r.kind) {
+            Some("runtime") => {
+                let bytes = crate::ampr_trace::release_runtime()?;
+                tree = Box::new(
+                    ps5upload_fpkg::ampr_pack::image::RuntimeInstalled::new(tree, bytes)
+                        .map_err(|e| e.to_string())?,
+                );
+            }
+            Some("ok") => {}
+            _ => {
+                return Err(ready
+                    .and_then(|r| r.refusal)
+                    .unwrap_or_else(|| "the game cannot use asset packs".into()))
+            }
+        }
+    }
+    if let Some(why) = ps5upload_fpkg::ampr_pack::image::refusal(&mut *tree) {
+        return Err(why);
+    }
+    Ok(tree)
+}
+
 /// POST /api/exfat/build — write a game folder as one `.exfat` or `.ffpkg` image ShadowMountPlus
 /// mounts (`format`).
 /// Runs as a job like a package build: the ticker publishes bytes written, and the job's
@@ -900,34 +931,12 @@ pub(crate) async fn exfat_build_handler(
     let check_packs = packs.is_some();
     let install_runtime = req.ampr_lz4.as_ref().is_some_and(|r| r.install_runtime);
     let scanned = tokio::task::spawn_blocking(move || {
-        let mut tree = ps5upload_fpkg::source::open(&scan_source).map_err(|e| e.to_string())?;
-        if check_packs && install_runtime {
-            // The game's own ampr_emu is missing or too old for packs: the image gets the
-            // release one, its own kept beside it. Only for a game that reads through AMPR.
-            let ready = ps5upload_fpkg::ampr_pack::image::readiness(&mut *tree);
-            match ready.as_ref().map(|r| r.kind) {
-                Some("runtime") => {
-                    let bytes = crate::ampr_trace::release_runtime()?;
-                    tree = Box::new(
-                        ps5upload_fpkg::ampr_pack::image::RuntimeInstalled::new(tree, bytes)
-                            .map_err(|e| e.to_string())?,
-                    );
-                }
-                Some("ok") => {}
-                _ => {
-                    return Err(ready
-                        .and_then(|r| r.refusal)
-                        .unwrap_or_else(|| "the game cannot use asset packs".into()))
-                }
-            }
-        }
-        // Refused here, before a job exists, when the game cannot use the packs.
+        let tree = ps5upload_fpkg::source::open(&scan_source).map_err(|e| e.to_string())?;
         if check_packs {
-            if let Some(why) = ps5upload_fpkg::ampr_pack::image::refusal(&mut *tree) {
-                return Err(why);
-            }
+            lz4_ready(tree, install_runtime)
+        } else {
+            Ok(tree)
         }
-        Ok(tree)
     })
     .await;
     let tree = match scanned {
@@ -1164,6 +1173,11 @@ pub(crate) struct FolderBuildReq {
     /// Compare every file by SHA-256. Off (the default): every size, and a seeded sample.
     #[serde(default)]
     full_verify: bool,
+    /// Pack the game's files into AMPR LZ4 asset packs, as ps5-lz4 does: the folder is
+    /// `<name>-lz4` with `ampr_assets.index` and its volumes, and the source may be a game
+    /// folder too.
+    #[serde(default)]
+    ampr_lz4: Option<AmprLz4Req>,
 }
 
 /// POST /api/folder/build — unpack a game image or a debug-key package into a plain folder
@@ -1176,7 +1190,13 @@ pub(crate) async fn folder_build_handler(
     use crate::folder_build;
     let source = resolve_engine_path(&req.source);
     let remote = ps5upload_fpkg::remote_source::is_remote(&source);
-    if !remote && tokio::fs::metadata(&source).await.is_ok_and(|m| m.is_dir()) {
+    let packs = match req.ampr_lz4.as_ref().map(AmprLz4Req::options) {
+        None => None,
+        Some(Ok(p)) => Some(p),
+        Some(Err(e)) => return json_err(StatusCode::BAD_REQUEST, e).into_response(),
+    };
+    let install_runtime = req.ampr_lz4.as_ref().is_some_and(|r| r.install_runtime);
+    if packs.is_none() && !remote && tokio::fs::metadata(&source).await.is_ok_and(|m| m.is_dir()) {
         return json_err(
             StatusCode::BAD_REQUEST,
             format!("{} is already a folder", source.display()),
@@ -1189,7 +1209,7 @@ pub(crate) async fn folder_build_handler(
     } else {
         crate::image_build::is_image_file(&source)
     };
-    if !named_as_image {
+    if packs.is_none() && !named_as_image {
         return json_err(
             StatusCode::BAD_REQUEST,
             format!("{} is not a game image or package", source.display()),
@@ -1207,6 +1227,7 @@ pub(crate) async fn folder_build_handler(
             }
             n.to_string()
         }
+        None if packs.is_some() => format!("{}-lz4", crate::image_build::stem_of(&source)),
         None => crate::image_build::stem_of(&source),
     };
     let out_dir = output_dir(req.output_dir.as_deref());
@@ -1237,8 +1258,14 @@ pub(crate) async fn folder_build_handler(
         .into_response();
     }
     let scan_source = source.clone();
+    let check_packs = packs.is_some();
     let scanned = tokio::task::spawn_blocking(move || {
-        ps5upload_fpkg::source::open(&scan_source).map_err(|e| e.to_string())
+        let tree = ps5upload_fpkg::source::open(&scan_source).map_err(|e| e.to_string())?;
+        if check_packs {
+            lz4_ready(tree, install_runtime)
+        } else {
+            Ok(tree)
+        }
     })
     .await;
     let tree = match scanned {
@@ -1328,7 +1355,7 @@ pub(crate) async fn folder_build_handler(
         );
         sweep_output_leftovers(&out_dir);
         let mut tree = tree;
-        const STAGES: [&str; 2] = ["write", "verify"];
+        const STAGES: [&str; 3] = ["pack", "write", "verify"];
         let mut report = |id: &str, done: u64, total: u64| {
             if id == "write" {
                 bytes.store(done, Ordering::Relaxed);
@@ -1345,7 +1372,47 @@ pub(crate) async fn folder_build_handler(
         let reopen_source = source.clone();
         let reopen =
             move || ps5upload_fpkg::source::open(&reopen_source).map_err(|e| e.to_string());
-        let outcome = folder_build::build(&mut *tree, &reopen, &target, mode, &cancel, &mut report);
+        let outcome = match &packs {
+            None => folder_build::build(
+                &mut *tree,
+                Some(&reopen),
+                &target,
+                mode,
+                &cancel,
+                &mut report,
+            ),
+            // The game's files packed into LZ4 volumes in a spool beside the folder, then the
+            // packed game (originals left out, packs and manifest in) written as the folder and
+            // read back against that same packed view. The spool goes either way.
+            Some(packs) => {
+                use ps5upload_fpkg::ampr_pack;
+                let config = packs
+                    .profile
+                    .clone()
+                    .unwrap_or_else(|| ampr_pack::default_profile(packs.level, packs.block_shift));
+                let spool = crate::image_build::lz4_spool(&target);
+                let mtime = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs() as i64);
+                report("pack", 0, 0);
+                let prepared = {
+                    let mut progress = |done: u64, total: u64| report("pack", done, total);
+                    let mut control = ampr_pack::Control {
+                        progress: Some(&mut progress),
+                        cancel: Some(&cancel),
+                    };
+                    ampr_pack::image::prepare(&mut *tree, &config, &spool, mtime, &mut control)
+                };
+                let outcome = match prepared {
+                    Ok((mut overlay, _)) => {
+                        folder_build::build(&mut overlay, None, &target, mode, &cancel, &mut report)
+                    }
+                    Err(e) => Err(e.to_string()),
+                };
+                let _ = std::fs::remove_dir_all(&spool);
+                outcome
+            }
+        };
         drop(tree);
         drop(writing);
         if outcome.is_err() {
