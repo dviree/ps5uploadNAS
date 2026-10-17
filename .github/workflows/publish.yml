@@ -33,9 +33,8 @@ name: publish
 # regex-validates the tag before anything downstream consumes it.
 # See https://securitylab.github.com/research/github-actions-untrusted-input/
 on:
-  push:
-    # A -lz4 tag only publishes the Docker images (docker-engine.yml), not the apps.
-    tags: ['v*', '!v*-lz4*']
+  # This fork only publishes the Docker images automatically (docker-engine.yml);
+  # run this by hand from the Actions tab when you want it.
   workflow_dispatch:
     inputs:
       tag:

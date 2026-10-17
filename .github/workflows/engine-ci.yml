@@ -5,15 +5,8 @@ name: ci
 # blocks use static strings only.
 
 on:
-  push:
-    branches: [main]
-    # Explicitly *not* tags — tag pushes are the release workflow's
-    # trigger. Leaving this list out would inherit the "all refs"
-    # default and double-fire on `vX.Y.Z` tags that point at HEAD,
-    # wasting a full CI run on a commit the release workflow is
-    # already validating end-to-end.
-    tags-ignore: ['**']
-  pull_request:
+  # This fork only publishes the Docker images automatically (docker-engine.yml);
+  # run this by hand from the Actions tab when you want it.
   workflow_dispatch:
 
 # One concurrency group per ref: if you push twice in a row (e.g.

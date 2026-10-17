@@ -14,16 +14,8 @@ name: pages
 # - by hand (Actions → pages → Run workflow).
 
 on:
-  push:
-    branches: [main]
-    paths: ["site/**", "scripts/site-releases.mjs", ".github/workflows/pages.yml"]
-  workflow_run:
-    workflows: [publish]
-    types: [completed]
-  # No `release` trigger: that run's ref is the tag, and the github-pages environment only
-  # deploys from main, so it was always rejected ("Tag ... is not allowed to deploy").
-  schedule:
-    - cron: "17 6 * * *"
+  # This fork only publishes the Docker images automatically (docker-engine.yml);
+  # run this by hand from the Actions tab when you want it.
   workflow_dispatch:
 
 permissions:
