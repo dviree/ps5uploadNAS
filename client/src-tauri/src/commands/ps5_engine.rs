@@ -2315,6 +2315,15 @@ pub async fn fpkg_inspect(source: String, output_dir: Option<String>) -> Result<
     .await
 }
 
+/// For each game, whether it is packed with LZ4 already, can be, or cannot (Convert Games'
+/// My games). POST /api/lz4/status.
+#[tauri::command]
+pub async fn lz4_status(paths: Vec<String>) -> Result<JsonValue, String> {
+    let base = engine::url();
+    let url = format!("{base}/api/lz4/status");
+    post_json(&url, &serde_json::json!({ "paths": paths })).await
+}
+
 /// Start converting a game source into an installable FPKG. Returns a job id
 /// to poll with `job_status`; the finished job carries the package's path.
 /// POST /api/fpkg/build.

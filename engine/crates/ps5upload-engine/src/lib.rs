@@ -59,6 +59,7 @@ mod install;
 mod link;
 mod local_fs;
 mod log_dedup;
+mod lz4_api;
 mod mgmt_route;
 mod migrate_6;
 mod net_health;
@@ -10278,6 +10279,7 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
             get(inspect::inspect_files_handler),
         )
         .route("/api/fpkg/inspect", post(fpkg_api::fpkg_inspect_handler))
+        .route("/api/lz4/status", post(lz4_api::lz4_status_handler))
         .route("/api/fpkg/build", post(fpkg_api::fpkg_build_handler))
         .route("/api/fpkg/delete", post(fpkg_api::fpkg_delete_handler))
         .route("/api/fpkg/estimate", post(fpkg_api::fpkg_estimate_handler))

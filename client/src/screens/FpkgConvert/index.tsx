@@ -7,7 +7,7 @@
 // remembered options, and hands every action the exact package the run names.
 
 import { useMakeWay } from "../../lib/useMakeWay";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { PackagePlus } from "lucide-react";
 
@@ -59,7 +59,8 @@ function dirOf(path: string): string {
   return i > 0 ? path.slice(0, i) : path;
 }
 
-export default function FpkgConvertScreen() {
+/** `headerRight`: Convert Games' tabs (screens/Convert). */
+export default function FpkgConvertScreen({ headerRight }: { headerRight?: ReactNode } = {}) {
   const tr = useTr();
   const host = useConnectionStore((s) => s.host) ?? "";
   const profiles = useRosterStore((s) => s.profiles);
@@ -252,11 +253,21 @@ export default function FpkgConvertScreen() {
 
   const dropActive = useWebviewDrop(chooseSource, !locked);
 
-  // A game handed over from elsewhere (the viewer's Convert… on a drop).
+  // A game handed over from elsewhere (the viewer's Convert… on a drop, or My games' Convert
+  // to LZ4, which also asks for an .exfat image with LZ4 asset packs, adding ampr_emu 0.4.2.1
+  // when the game's own cannot read them).
   const location = useLocation();
-  const handed = (location.state as { source?: string } | null)?.source;
+  const handedState = location.state as { source?: string; lz4?: boolean } | null;
+  const handed = handedState?.source;
   useEffect(() => {
-    if (handed) chooseSource(handed);
+    if (!handed) return;
+    chooseSource(handed);
+    if (handedState?.lz4) {
+      setMake("image");
+      setImageChoice("exfat", false);
+      setLz4On(true);
+      setLz4InstallRuntime(true);
+    }
     // Once per hand-over.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [handed]);
@@ -468,6 +479,7 @@ export default function FpkgConvertScreen() {
           undefined,
           "Turn a game folder or game image into an installable package (.pkg), or a game folder into a game image (.exfat, or the smaller .ffpfsc) that ShadowMount+ mounts. The work runs on this computer, not the console.",
         )}
+        right={headerRight}
       />
 
       {/* Building still works (it runs on this computer), but a PS5 fake GAME
