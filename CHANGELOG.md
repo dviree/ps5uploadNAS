@@ -4,6 +4,59 @@ What's new in ps5upload, written for humans.
 
 ---
 
+## 7.1.1
+
+- **The app scrolls again on macOS Big Sur.** On Big Sur's older built-in web engine the app
+  window lost its fixed height, so no screen could scroll, and the side bar's rows lost their
+  left padding. The app's styles now carry the older forms that engine understands.
+
+---
+
+## 7.1.0
+
+- **PS5Upload Files: manage your files from the couch.** A new PS5Upload Files tile on the
+  PS5 home screen opens a page in the PS5 browser that fills the TV. It has four sections:
+  **Home** (the running game with Close game, the tasks that are running with Cancel, and your
+  drives), **Files**, **Cheats** (switch the running game's cheats on and off) and **Settings**.
+  The PS5Upload helper must be loaded. If it isn't, the page tries to show a note that says so
+  (from a copy the PS5 browser keeps) and opens by itself once the helper answers. After an
+  update, a banner offers to reload.
+- **Made for the controller.** ✕ selects, ○ steps back, △ opens an item's actions, and the PS5's
+  own pointer works too. Every action also has a button on screen. Three short tips show the
+  first time, Help lists the buttons that work on the current screen, and Controls shows which
+  buttons your PS5 passes on to the page. Dark, Light, OLED and Peach themes, high contrast,
+  the language and full screen are in Settings.
+- **Browse and organise.** A path bar with Go to path, pinned and recent folders, and your
+  drives, with Eject for USB drives and Unmount for game images (refused while a game is
+  running). Sort, filter, show hidden files and select all. Copy, cut and paste, with Replace,
+  Keep both or Skip when a name is taken (and Apply to all); rename one item or many at once
+  with a pattern (a change of letter case alone works too); new folder; delete; Fix permissions.
+- **Look inside files.** Info with folder size; Verify (BLAKE3 and CRC32); Decompress a
+  `.ffpfsc` back to its image, with progress. The viewer shows text (with find), JSON, a
+  summary of a game's `param.json`, hex, and pictures (step through a folder's images); a game
+  folder shows its banner. Search finds files by name in this folder or on all drives (the first
+  search builds an index), and Disk usage shows what takes the space.
+- **Works with the app on your PC.** File System shows the folders pinned on the console
+  ("Pinned on console"), and **Show on console** opens a folder on the TV; **Show on PC** on the
+  console opens it in the PC app. Files being uploaded from your PC show an Uploading badge.
+  These need the 7.1.0 helper; with an older one the app simply doesn't show them.
+- **Only the console can open it by default.** Settings → Allow other devices lets a phone or
+  computer on your network open the page too. There is no password, so anyone on your network
+  can then manage your files; turn it off when you're done. While it's on, text boxes on the
+  console show a "Continue on your phone" code to type there instead.
+- **The tile is yours to remove.** Settings → Show PS5Upload Files on the home screen removes or
+  restores it. The tile is left out of the app's game list (an older engine or Docker image may
+  still list PSUP00001).
+- **Big app databases no longer hide installed games.** The console's app database was read
+  only up to its first 256 entries, and a long list could be cut shorter still, with nothing
+  saying so. On a console with many entries, a game installed by a homebrew installer (no
+  home-screen metadata folder) that sorted past that point was missing from Games. The app now
+  reads the whole database page by page. If the database still can't be read in full, games
+  whose folder and registration are on the console are listed anyway, and the app logs a warning
+  that the list may be incomplete (#473).
+
+---
+
 ## 7.0.34
 
 - **Unity games no longer crash when they run as a folder.** Some game dumps name a file

@@ -885,6 +885,81 @@ test-payload: payload
 		$(PAYLOAD_DIR)/tests/xml_encoding_selftest.c
 	@/tmp/ps5upload-xml-encoding-selftest
 	@echo "✓ UTF-16 SHN/MC4 cheat files convert so their cheats appear"
+	@echo "Running web UI HTTP parser self-test (host build)..."
+	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
+		-o /tmp/ps5upload-webui-http-selftest \
+		$(PAYLOAD_DIR)/tests/webui_http_selftest.c
+	@/tmp/ps5upload-webui-http-selftest
+	@echo "Running webui strings lookup self-test (host build)..."
+	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
+		-o /tmp/ps5upload-webui-strings-selftest \
+		$(PAYLOAD_DIR)/tests/webui_strings_selftest.c $(PAYLOAD_DIR)/src/webui_strings.c
+	@/tmp/ps5upload-webui-strings-selftest
+	@echo "✓ GET /strings/<lang>.json answers only the embedded languages, never a crafted path"
+	@echo "Running webui offline copy lookup self-test (host build)..."
+	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
+		-o /tmp/ps5upload-webui-offline-selftest \
+		$(PAYLOAD_DIR)/tests/webui_offline_selftest.c $(PAYLOAD_DIR)/src/webui_offline.c
+	@/tmp/ps5upload-webui-offline-selftest
+	@echo "✓ GET /sw.js and /cache.appcache answer with their own types; nothing else matches"
+	@echo "Running webui auth self-test (host build)..."
+	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
+		-o /tmp/ps5upload-webui-auth-selftest \
+		$(PAYLOAD_DIR)/tests/webui_auth_selftest.c $(PAYLOAD_DIR)/src/webui_auth.c
+	@/tmp/ps5upload-webui-auth-selftest
+	@echo "Running webui server self-test (host build, ~25 s)..."
+	@cc -O2 -Wall -Wextra -Werror -pthread -I$(PAYLOAD_DIR)/include -I$(PAYLOAD_DIR)/ava1 \
+		-o /tmp/ps5upload-webui-server-selftest \
+		$(PAYLOAD_DIR)/tests/webui_server_selftest.c $(PAYLOAD_DIR)/src/webui_server.c \
+		$(PAYLOAD_DIR)/src/webui_http.c $(PAYLOAD_DIR)/src/webui_auth.c
+	@/tmp/ps5upload-webui-server-selftest
+	@echo "✓ silent, half-sent and flooding web clients never stall the helper"
+	@echo "Running webui codec self-test (host build)..."
+	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include -I$(PAYLOAD_DIR)/ava1 -I$(PAYLOAD_DIR)/ava1/gen \
+		-o /tmp/ps5upload-webui-codec-selftest \
+		$(PAYLOAD_DIR)/tests/webui_codec_selftest.c $(PAYLOAD_DIR)/src/webui_codec.c \
+		$(PAYLOAD_DIR)/ava1/gen/ava1_gen.c $(PAYLOAD_DIR)/ava1/ava1_wire.c
+	@/tmp/ps5upload-webui-codec-selftest
+	@echo "✓ Unicode, quoted and very large folders survive the web UI's JSON both ways"
+	@echo "Running file index name-match self-test (host build)..."
+	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
+		-o /tmp/ps5upload-index-glob-selftest $(PAYLOAD_DIR)/tests/index_glob_selftest.c
+	@/tmp/ps5upload-index-glob-selftest
+	@echo "✓ index name patterns match in linear time, whatever the pattern"
+	@echo "Running file manager prefs self-test (host build)..."
+	@cc -O2 -Wall -Wextra -Werror -pthread -I$(PAYLOAD_DIR)/include -I$(PAYLOAD_DIR)/ava1 -I$(PAYLOAD_DIR)/ava1/gen \
+		-o /tmp/ps5upload-files-prefs-selftest \
+		$(PAYLOAD_DIR)/tests/files_prefs_selftest.c $(PAYLOAD_DIR)/src/files_prefs.c $(PAYLOAD_DIR)/src/webui_codec.c \
+		$(PAYLOAD_DIR)/ava1/gen/ava1_gen.c $(PAYLOAD_DIR)/ava1/ava1_wire.c
+	@/tmp/ps5upload-files-prefs-selftest
+	@echo "✓ pinned/recent folders stay bounded; a garbled prefs file reads as empty; saves are atomic"
+	@echo "Running Show on TV / Show on PC handoff self-test (host build)..."
+	@cc -O2 -Wall -Wextra -Werror -pthread -I$(PAYLOAD_DIR)/include -I$(PAYLOAD_DIR)/ava1 -I$(PAYLOAD_DIR)/ava1/gen \
+		-o /tmp/ps5upload-files-handoff-selftest \
+		$(PAYLOAD_DIR)/tests/files_handoff_selftest.c $(PAYLOAD_DIR)/src/files_handoff.c $(PAYLOAD_DIR)/src/files_prefs.c \
+		$(PAYLOAD_DIR)/src/webui_codec.c $(PAYLOAD_DIR)/ava1/gen/ava1_gen.c $(PAYLOAD_DIR)/ava1/ava1_wire.c
+	@/tmp/ps5upload-files-handoff-selftest
+	@echo "✓ a handoff opens once, expires after two minutes, and the PC reads the same prefs as the console"
+	@echo "Running webui settings + tile self-test (host build)..."
+	@cc -O2 -Wall -Wextra -Werror -DWEBUI_TILE_HOST_TEST -I$(PAYLOAD_DIR)/include -I$(PAYLOAD_DIR)/ava1 -I$(PAYLOAD_DIR)/ava1/gen \
+		-o /tmp/ps5upload-webui-settings-selftest \
+		$(PAYLOAD_DIR)/tests/webui_settings_selftest.c $(PAYLOAD_DIR)/src/webui_settings.c \
+		$(PAYLOAD_DIR)/src/webui_tile.c $(PAYLOAD_DIR)/src/webui_codec.c \
+		$(PAYLOAD_DIR)/ava1/gen/ava1_gen.c $(PAYLOAD_DIR)/ava1/ava1_wire.c
+	@/tmp/ps5upload-webui-settings-selftest
+	@echo "✓ a missing or garbled settings file falls back to defaults; the tile is written only when it differs"
+	@echo "Running webui input log self-test (host build)..."
+	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
+		-o /tmp/ps5upload-webui-inputlog-selftest \
+		$(PAYLOAD_DIR)/tests/webui_inputlog_selftest.c $(PAYLOAD_DIR)/src/webui_inputlog.c
+	@/tmp/ps5upload-webui-inputlog-selftest
+	@echo "✓ the controller input log takes only plain short lines and never grows past its 64 KiB ring"
+	@echo "Running AVA1 in-flight RPC gate self-test (host build)..."
+	@cc -O2 -Wall -Wextra -Werror -pthread -I$(PAYLOAD_DIR)/ava1 \
+		-o /tmp/ps5upload-ava1-rpc-gate-selftest \
+		$(PAYLOAD_DIR)/tests/ava1_rpc_gate_selftest.c
+	@/tmp/ps5upload-ava1-rpc-gate-selftest
+	@echo "✓ the helper's exit waits for web UI calls and refuses new ones"
 	@echo "Running cheat title list self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
 		-o /tmp/ps5upload-cheats-list-selftest \

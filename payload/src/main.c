@@ -31,6 +31,10 @@
 #include "sony_api_lock.h"
 
 #include "proc_identity.h"
+#include "webui_api.h"
+#include "webui_server.h"
+#include "webui_settings.h"
+#include "webui_tile.h"
 /* Sony "debugger" / system-process authid. Setting our process's
  * ucred authid to this value grants the credentials Sony's kernel
  * stubs check before allowing sensor reads / launches / installs
@@ -490,6 +494,7 @@ static void redirect_stdio_to_file(void) {
 
 /* Starts the AVA1 side; only ever reached through takeover_gate_start (no other helper holds the port). */
 static int g_ava1_start_rc = 0;
+
 static void start_ava1_cb(void *ctx) {
     (void)ctx;
     int ava1_rc = ava1_payload_start();
@@ -791,6 +796,25 @@ int main(void) {
     }
     startup_trace("TOAST_DONE");
 
+    /* Console web UI, after AVA1 is up. A bind failure is not fatal: the server's accept thread
+     * retries every 5 s (a takeover's old instance may still hold the port for a moment). The
+     * settings file decides LAN access (a missing or garbled file: loopback only, tile on). The
+     * home-screen tile is registered on its own short-lived thread (Sony calls take seconds); a
+     * failure there is logged, never fatal. */
+    {
+        webui_cfg_t wc;
+        webui_settings_t ws;
+        if (webui_settings_load(WEBUI_SETTINGS_PATH, &ws) != 0)
+            fprintf(stderr, "webui: %s missing or unreadable; using defaults\n", WEBUI_SETTINGS_PATH);
+        webui_api_settings_init(&ws);
+        wc.port = WEBUI_PORT;
+        wc.lan = ws.lan;
+        wc.route = webui_api_route;
+        if (webui_start(&wc) != 0) fprintf(stderr, "webui: server did not start\n");
+        startup_trace("WEBUI_STARTED");
+        if (ws.tile) webui_tile_request(1, WEBUI_PORT);
+    }
+
     /* The AVA1 server runs on its own threads; this thread has nothing left to serve. It waits for
      * node.shutdown or the takeover flag (runtime_request_shutdown), then tears down. */
     runtime_wait_for_shutdown(&state);
@@ -810,6 +834,8 @@ int main(void) {
     /* The AVA1 half: stop accepting, wait for the sessions (2 s) and for any in-flight Sony call
      * (this does NOT return while one runs: only the exit watchdog armed above (8 s, or up to 60 s while a Sony call runs) can end the
      * process then), then stop the data layer so journals are closed and durable jobs resume. */
+    webui_stop(); /* bounded: joins its workers within 2 s, detaches a stuck one */
+
     {
         int sr = ava1_payload_stop(2000, 3000);
         if (sr) fprintf(stderr, "ava1: stop was slow (0x%x): sessions or a Sony call outlived the soft wait\n", sr);
