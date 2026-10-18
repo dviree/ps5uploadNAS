@@ -28,6 +28,7 @@
 #include <sys/sysctl.h>
 
 #include "authid.h"
+#include "config.h"
 #include "register.h"
 #include "sony_api_lock.h"
 #include "proc_list.h"
@@ -1028,6 +1029,15 @@ static int unmount_title_nullfs(const char *title_id) {
     return -1;
 }
 
+int register_remount_nullfs(const char *title_id, const char *src_path,
+                           const char **err_reason_out) {
+    if (!title_id || !src_path || !is_safe_component(title_id)) {
+        if (err_reason_out) *err_reason_out = "register_args_invalid";
+        return -1;
+    }
+    return mount_title_nullfs(title_id, src_path, err_reason_out);
+}
+
 /* -- sqlite-backed snd0info patch + list_registered -------------------- */
 
 /* An earlier build updated snd0info on the app.db row after Sony's
@@ -1107,6 +1117,9 @@ int list_registered_titles_json(char *out_json,
     while ((entry = readdir(dir)) != NULL) {
         const char *tid = entry->d_name;
         if (!looks_like_title_id(tid)) continue;
+        /* The helper's own home-screen tile (webui_tile.c) is not a game: the PC app's library must
+         * not list it (or offer to uninstall it as one). */
+        if (strcmp(tid, WEBUI_TILE_TITLE_ID) == 0) continue;
 
         char lnk[REG_MAX_PATH];
         char lnk_img[REG_MAX_PATH];

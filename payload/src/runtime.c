@@ -31,6 +31,7 @@
 #include <fnmatch.h>
 #include <regex.h>
 #include "config.h"
+#include "webui_api.h"
 #include "runtime.h"
 #include "sandbox_unmount.h"
 #include "instance_verdict.h"
@@ -58,11 +59,13 @@
 #include "sony_api_lock.h"
 #include "net_probe.h"
 #include "net_ports.h"
+#include "files_handoff.h"
 #include "focus_probe.h"
 #include "proc_list.h"
 #include "proc_identity.h"
 #include "smp_meta.h"
 #include "blake3.h"
+#include "index_glob.h"
 #include "mgmt_rpc.h"
 #include "mgmt_fs.h"
 #include "path_policy.h"
@@ -269,6 +272,14 @@
 #define MGMT_FRAME_SAVE_UNMOUNT_ACK 264u
 #define MGMT_FRAME_NET_PORTS 265u
 #define MGMT_FRAME_NET_PORTS_ACK 266u
+#define MGMT_FRAME_FILES_PREFS_GET 267u
+#define MGMT_FRAME_FILES_PREFS_GET_ACK 268u
+#define MGMT_FRAME_FILES_PREFS_SET 269u
+#define MGMT_FRAME_FILES_PREFS_SET_ACK 270u
+#define MGMT_FRAME_FILES_HANDOFF_PUT 271u
+#define MGMT_FRAME_FILES_HANDOFF_PUT_ACK 272u
+#define MGMT_FRAME_FILES_HANDOFF_TAKE 273u
+#define MGMT_FRAME_FILES_HANDOFF_TAKE_ACK 274u
 #define MGMT_FRAME_SDK_SCAN 214u
 #define MGMT_FRAME_SDK_SCAN_ACK 215u
 #define MGMT_FRAME_SDK_PATCH 216u
@@ -3472,6 +3483,15 @@ static int handle_app_unregister(runtime_state_t *state, const char *request_bod
     if (title_id[0] == '\0') {
         return mgmt_reply(MGMT_FRAME_ERROR, "unregister_title_id_missing", 27);
     }
+    if (strcmp(title_id, WEBUI_TILE_TITLE_ID) == 0) {
+        /* The helper's own home-screen tile: a PC removing it means "tile off", as in the page's
+         * Settings. Saved, so the next helper start does not register it again; the tile thread
+         * unregisters it and deletes its folders (webui_tile_remove). */
+        static const char ack[] = "{\"sony_uninstall_rc\":0,\"tile_off\":true}";
+        (void)webui_api_tile_off();
+        pop_notification("PS5Upload tile removed");
+        return mgmt_reply(MGMT_FRAME_APP_UNREGISTER_ACK, ack, (uint64_t)(sizeof ack - 1));
+    }
     unsigned sony_rc = 0u;
     if (unregister_title(title_id, &err, &sony_rc) != 0) {
         const char *reason = err ? err : "unregister_failed";
@@ -6025,39 +6045,6 @@ static void *index_thread_fn(void *arg) {
     return NULL;
 }
 
-/* Tiny glob match: `*` matches any sequence, `?` matches one char.
- * Both are case-insensitive. Recursive — fine for typical patterns
- * with one or two wildcards; bounded by call depth (max 16).
- * Returns 1 on match, 0 on miss. */
-static int glob_match(const char *pat, const char *str, int depth) {
-    if (depth > 16) return 0;
-    while (*pat) {
-        if (*pat == '*') {
-            pat++;
-            if (!*pat) return 1;
-            while (*str) {
-                if (glob_match(pat, str, depth + 1)) return 1;
-                str++;
-            }
-            return 0;
-        }
-        if (*pat == '?') {
-            if (!*str) return 0;
-            pat++;
-            str++;
-            continue;
-        }
-        char a = *pat;
-        char b = *str;
-        if (a >= 'A' && a <= 'Z') a += 32;
-        if (b >= 'A' && b <= 'Z') b += 32;
-        if (a != b) return 0;
-        pat++;
-        str++;
-    }
-    return *str == '\0';
-}
-
 static int handle_index_start(runtime_state_t *state, const char *body, uint64_t body_len) {
     if (!state) return -1;
     pthread_mutex_lock(&g_index_lock);
@@ -6144,8 +6131,10 @@ static int handle_index_status(runtime_state_t *state) {
 
 static int handle_search_index(runtime_state_t *state, const char *body, uint64_t body_len) {
     if (!state) return -1;
-    /* Parse `{"query":"...","size_min":N,"size_max":N,"limit":N}`. */
+    /* Parse `{"query":"...","under":"/dir","size_min":N,"size_max":N,"limit":N}` (under optional). */
     char qbuf[256] = {0};
+    char ubuf[1024] = {0};
+    size_t ulen;
     long long size_min = 0;
     long long size_max = 0;
     int limit = 200;
@@ -6163,6 +6152,21 @@ static int handle_search_index(runtime_state_t *state, const char *body, uint64_
                 if (e && (size_t)(e - p) < sizeof(qbuf)) {
                     memcpy(qbuf, p, (size_t)(e - p));
                     qbuf[e - p] = '\0';
+                }
+            }
+        }
+        /* Optional "under":"/folder" (the console page's This folder; the engine never sends it):
+         * only paths below it count, so the limit applies after the filter. */
+        p = strstr(tmp, "\"under\"");
+        if (p) {
+            p = strchr(p, ':');
+            if (p) p = strchr(p, '"');
+            if (p) {
+                p++;
+                const char *e = strchr(p, '"');
+                if (e && (size_t)(e - p) < sizeof(ubuf)) {
+                    memcpy(ubuf, p, (size_t)(e - p));
+                    ubuf[e - p] = '\0';
                 }
             }
         }
@@ -6184,6 +6188,9 @@ static int handle_search_index(runtime_state_t *state, const char *body, uint64_
     }
     if (limit <= 0 || limit > 5000) limit = 200;
     if (!qbuf[0]) strcpy(qbuf, "*");
+    ulen = strlen(ubuf);
+    while (ulen > 1 && ubuf[ulen - 1] == '/') ubuf[--ulen] = '\0';
+    if (ulen == 1) ulen = 0; /* "/" is everything */
 
     char *resp = malloc(256 * 1024);
     if (!resp) {
@@ -6202,7 +6209,8 @@ static int handle_search_index(runtime_state_t *state, const char *body, uint64_
         if (!path) continue;
         const char *base = strrchr(path, '/');
         base = base ? base + 1 : path;
-        if (!glob_match(qbuf, base, 0)) continue;
+        if (ulen && (strncmp(path, ubuf, ulen) != 0 || (path[ulen] != '/' && path[ulen] != '\0'))) continue;
+        if (!index_glob_match(qbuf, base)) continue;
         long long sz = g_index_entries[i].size;
         if (size_min > 0 && sz < size_min) continue;
         if (size_max > 0 && sz > size_max) continue;
@@ -6991,9 +6999,31 @@ static int handle_shell_exec(runtime_state_t *state, const char *body,
  * The scan survives inside content_db_apps_json as the fallback for a
  * database that will not open at all (locked by the shell, or damaged),
  * which is a genuine runtime condition rather than a permanent one.
+ *
+ * Paged (#473): the request may carry {"offset":N,"limit":M}; the reply
+ * says where the next page starts ("next") and whether one follows
+ * ("more"), see content_db_apps_page_json. An empty request -- what an
+ * older engine sends -- is page one.
  */
-static int handle_appdb_query(runtime_state_t *state) {
+static int handle_appdb_query(runtime_state_t *state, const char *body,
+                              uint64_t body_len) {
     if (!state) return -1;
+
+    uint64_t offset = 0, limit = 0;
+    if (body && body_len > 0) {
+        /* mgmt_json_u64 reads a C string; the body is not terminated. */
+        char req[256];
+        size_t n = body_len < sizeof(req) - 1 ? (size_t)body_len
+                                              : sizeof(req) - 1;
+        memcpy(req, body, n);
+        req[n] = '\0';
+        if (mgmt_json_u64(req, "offset", &offset) < 0 ||
+            mgmt_json_u64(req, "limit", &limit) < 0 || offset > UINT32_MAX ||
+            limit > UINT32_MAX) {
+            const char *err = "{\"err\":\"bad_window\",\"apps\":[]}";
+            return mgmt_reply(MGMT_FRAME_APPDB_QUERY_ACK, err, strlen(err));
+        }
+    }
 
     const size_t cap = 64 * 1024;
     char *resp = (char *)malloc(cap);
@@ -7004,7 +7034,9 @@ static int handle_appdb_query(runtime_state_t *state) {
 
     size_t written = 0;
     int rc;
-    if (content_db_apps_json(resp, cap, &written) != 0 || written == 0) {
+    if (content_db_apps_page_json((unsigned)offset, (unsigned)limit, resp, cap,
+                                  &written) != 0 ||
+        written == 0) {
         const char *err = "{\"err\":\"appdb_unreadable\",\"apps\":[]}";
         rc = mgmt_reply(MGMT_FRAME_APPDB_QUERY_ACK, err, strlen(err));
     } else {
@@ -7807,6 +7839,54 @@ static int handle_net_ports(runtime_state_t *state, const char *body, uint64_t b
     int rc = mgmt_reply(MGMT_FRAME_NET_PORTS_ACK, resp, (uint64_t)n);
     free(resp);
     return rc;
+}
+
+/* files.*: the console file manager's pinned/recent folders and the "Show on TV" / "Show on PC"
+ * handoffs, for the PC app (the console page reaches the same code through its web routes). The
+ * bodies live in files_handoff.c (host-tested); the answer buffer is on the heap. */
+static int files_method_reply(runtime_state_t *state, uint16_t ack, int which, const char *body, uint64_t body_len) {
+    const size_t cap = FILES_PREFS_FILE_MAX + 1;
+    char *resp;
+    int n, rc;
+    if (!state) return -1;
+    resp = malloc(cap);
+    if (!resp) {
+        const char *err = "{\"ok\":false,\"err\":\"out_of_memory\"}";
+        return mgmt_reply(ack, err, strlen(err));
+    }
+    pthread_mutex_lock(&state->state_mtx);
+    state->command_count += 1;
+    pthread_mutex_unlock(&state->state_mtx);
+    switch (which) {
+    case 0: n = files_mgmt_prefs_get(FILES_PREFS_PATH, resp, cap); break;
+    case 1: n = files_mgmt_prefs_set(FILES_PREFS_PATH, body, (size_t)body_len, resp, cap); break;
+    case 2: n = files_mgmt_handoff_put(body, (size_t)body_len, files_handoff_now_ms(), resp, cap); break;
+    default: n = files_mgmt_handoff_take(body, (size_t)body_len, files_handoff_now_ms(), resp, cap); break;
+    }
+    if (n < 0) {
+        const char *err = "{\"ok\":false,\"err\":\"internal\"}";
+        rc = mgmt_reply(ack, err, strlen(err));
+    } else {
+        rc = mgmt_reply(ack, resp, (uint64_t)n);
+    }
+    free(resp);
+    return rc;
+}
+
+static int handle_files_prefs_get(runtime_state_t *state) {
+    return files_method_reply(state, MGMT_FRAME_FILES_PREFS_GET_ACK, 0, "", 0);
+}
+
+static int handle_files_prefs_set(runtime_state_t *state, const char *body, uint64_t body_len) {
+    return files_method_reply(state, MGMT_FRAME_FILES_PREFS_SET_ACK, 1, body, body_len);
+}
+
+static int handle_files_handoff_put(runtime_state_t *state, const char *body, uint64_t body_len) {
+    return files_method_reply(state, MGMT_FRAME_FILES_HANDOFF_PUT_ACK, 2, body, body_len);
+}
+
+static int handle_files_handoff_take(runtime_state_t *state, const char *body, uint64_t body_len) {
+    return files_method_reply(state, MGMT_FRAME_FILES_HANDOFF_TAKE_ACK, 3, body, body_len);
 }
 
 /* ── Network round-trip ack ──────────────────────────────────────────── */
