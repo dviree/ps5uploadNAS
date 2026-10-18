@@ -456,7 +456,15 @@ pub fn scan(
                 .or_else(|| game_id_in(&name))
                 .or_else(|| game_id_in(&it.rel));
             progress.done.fetch_add(1, Ordering::Relaxed);
-            let Some(gid) = gid else { continue };
+            let Some(gid) = gid else {
+                // Nothing names it: say why in the log rather than leave it out silently.
+                let why = pkg
+                    .as_ref()
+                    .and_then(|p| p.error.clone())
+                    .unwrap_or_else(|| "no Title ID in it or its name".into());
+                crate::log_warn!("collection: left out {}: {why}", it.abs);
+                continue;
+            };
             let loc = Location {
                 root: root.clone(),
                 container: it
