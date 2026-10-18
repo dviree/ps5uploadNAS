@@ -256,13 +256,14 @@ pub fn is_bare_file_name(s: &str) -> bool {
         )
 }
 
-/// The first `XXXX12345` Game ID in `s` (four letters, five digits, on word boundaries).
+/// The first `XXXX12345` Game ID in `s` (four letters, five digits, not inside a longer run of
+/// letters and digits). `_` separates, as in `Game _PPSA01234_` and `CUSA00900_00`.
 pub fn game_id_in(s: &str) -> Option<String> {
     let b = s.as_bytes();
     if b.len() < 9 {
         return None;
     }
-    let word = |c: u8| c.is_ascii_alphanumeric() || c == b'_';
+    let word = |c: u8| c.is_ascii_alphanumeric();
     for i in 0..=b.len() - 9 {
         let w = &b[i..i + 9];
         if w[..4].iter().all(u8::is_ascii_alphabetic)
@@ -319,5 +320,13 @@ mod tests {
         assert_eq!(game_id_in("xCUSA00900"), None);
         assert_eq!(game_id_in("CUSA009001"), None);
         assert_eq!(game_id_in("ppsa01234.exfat"), Some("PPSA01234".into()));
+        assert_eq!(
+            game_id_in("Marvels Wolverine _PPSA03671_-lz4"),
+            Some("PPSA03671".into())
+        );
+        assert_eq!(
+            game_id_in("UP9000-CUSA00900_00-BLOODBORNE0000"),
+            Some("CUSA00900".into())
+        );
     }
 }
