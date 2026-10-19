@@ -154,6 +154,19 @@ function Lz4Reports() {
               {tr("lz4compat.refresh", undefined, "Refresh")}
             </Button>
           </div>
+          {data?.updated && (
+            <div className="text-xs text-[var(--color-muted)]">
+              {tr(
+                data.source === "mirror"
+                  ? "lz4compat.updated_mirror"
+                  : "lz4compat.updated_live",
+                { date: data.updated.slice(0, 10) },
+                data.source === "mirror"
+                  ? "Reports as of {date}, from ps5-lz4's copy (the project's site could not be read). Checked daily."
+                  : "Reports from the LZ4 Compression project's site, read {date}. Checked daily.",
+              )}
+            </div>
+          )}
         </div>
       </Card>
 
@@ -180,6 +193,7 @@ function Lz4Reports() {
                 id={id}
                 entry={e}
                 mine={mine.has(id.toUpperCase())}
+                site={data.site}
               />
             ))}
           </ul>
@@ -193,10 +207,12 @@ function ReportRow({
   id,
   entry,
   mine,
+  site,
 }: {
   id: string;
   entry: CompatEntry;
   mine: boolean;
+  site?: string;
 }) {
   const tr = useTr();
   const verdict = compatVerdict(entry);
@@ -272,7 +288,7 @@ function ReportRow({
           size="sm"
           variant="ghost"
           leftIcon={<ExternalLink size={12} />}
-          onClick={() => void openExternalUrl(compatIssueUrl(last.issue!))}
+          onClick={() => void openExternalUrl(compatIssueUrl(last.issue!, site))}
         >
           {tr("lz4compat.open", undefined, "Report")}
         </Button>

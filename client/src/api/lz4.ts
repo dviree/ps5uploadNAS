@@ -89,10 +89,10 @@ export function canBeLz4(s: Lz4State | undefined): boolean {
   return s === "ok" || s === "runtime";
 }
 
-/** Game reports players file on GitHub ("Game report" issues), counted per game into
- *  compat.json by the LZ4 Compression project, which ps5-lz4 and the PS5 app read too. */
+/** Game reports players file as "[Game report]" issues on the LZ4 Compression project's own
+ *  site (it left GitHub on 2026-10-17), counted per game by the engine, as ps5-lz4 does. */
 export const COMPAT_REPO = "theghostonline/PS5-LZ4-Compression";
-const COMPAT_URL = `https://raw.githubusercontent.com/${COMPAT_REPO}/main/compat/compat.json`;
+export const COMPAT_SITE = `https://theghostonline.dev/${COMPAT_REPO}`;
 
 export type CompatStatus = "works" | "issues" | "noStart" | "crash";
 
@@ -121,14 +121,22 @@ export interface CompatEntry {
 
 export interface CompatData {
   updated?: string;
+  /** `live` (the site's issues) or `mirror` (ps5-lz4-nas's copy). */
+  source?: string;
+  /** The project's page on its site. */
+  site?: string;
   games: Record<string, CompatEntry>;
 }
 
-export async function fetchCompat(signal?: AbortSignal): Promise<CompatData> {
-  const r = await fetch(COMPAT_URL, { cache: "no-store", signal });
-  if (!r.ok) throw new Error(`compat.json: HTTP ${r.status}`);
-  const data = (await r.json()) as Partial<CompatData>;
-  return { updated: data.updated, games: data.games ?? {} };
+/** The reports, read by the engine at most once a day (now, with `refresh`). */
+export async function fetchCompat(refresh = false): Promise<CompatData> {
+  const data = await invoke<Partial<CompatData>>("lz4_compat", { refresh });
+  return {
+    updated: data.updated,
+    source: data.source,
+    site: data.site,
+    games: data.games ?? {},
+  };
 }
 
 /** How the reports for one game come out overall: everyone can play it, some can, or nobody
@@ -141,17 +149,34 @@ export function compatVerdict(e: CompatEntry): "good" | "mixed" | "bad" {
   return broken > playing ? "bad" : "mixed";
 }
 
-export function compatIssueUrl(issue: number): string {
-  return `https://github.com/${COMPAT_REPO}/issues/${issue}`;
+export function compatIssueUrl(issue: number, site = COMPAT_SITE): string {
+  return `${site}/issues/${issue}`;
 }
 
-/** A prefilled "Game report" issue for one game, the form the PS5 app and ps5-lz4 open. */
-export function compatReportUrl(titleId: string, name: string): string {
+/** A new "[Game report]" issue for one game, filled in with the report form's sections (the
+ *  same "### Field" headings the engine counts), as ps5-lz4 opens it. */
+export function compatReportUrl(
+  titleId: string,
+  name: string,
+  site = COMPAT_SITE,
+): string {
+  const rows: [string, string][] = [
+    ["Title ID", titleId],
+    ["Game", name.slice(0, 80)],
+    ["How does it run?", ""],
+    ["Game version", ""],
+    ["LZ4 level", ""],
+    ["Packed from", ""],
+    ["Firmware", ""],
+    ["LZ4 Compression version", ""],
+    ["Notes", ""],
+  ];
+  const body = rows
+    .map(([k, v]) => `### ${k}\n\n${v || "_No response_"}`)
+    .join("\n\n");
   const params = new URLSearchParams({
-    template: "compat.yml",
     title: `[Game report] ${name || titleId}`,
-    title_id: titleId,
-    game: name.slice(0, 60),
+    body,
   });
-  return `https://github.com/${COMPAT_REPO}/issues/new?${params.toString()}`;
+  return `${site}/issues/new?${params.toString()}`;
 }

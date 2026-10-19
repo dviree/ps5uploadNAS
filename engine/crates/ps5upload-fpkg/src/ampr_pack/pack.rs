@@ -362,6 +362,31 @@ fn sample_indices(total: u64, samples: u64) -> Vec<u64> {
     v
 }
 
+/// Files the PS5 looks at outside the game process, where the AMPR emulator can't show packed
+/// files, so they stay on disk (as the LZ4 Compression project's packer keeps them): PlayGo's
+/// chunk markers and the Sucker Punch boot files Ghost of Yotei (PPSA26344) needs to get past a
+/// black screen, and the pack tables of contents Remedy's Northlight engine (CONTROL Resonant,
+/// PPSA34547) reads from disk at startup ("no pakfiles found" when packed). Empty files (PlayGo
+/// language placeholders) stay on disk too.
+const KEEP_ON_DISK: &[&str] = &[
+    "cache_ps5/pgc_*_dummy_file",
+    "cache_ps5/playgo.pgm",
+    "cache_ps5/load_menu_catalog.log",
+    "cache_ps5/all_shaders.texmeshman",
+    "cache_ps5/game.sprig.packman",
+    "cache_ps5/game.sprig.texmeshman",
+    "cache_ps5/pulse.sprig.texmeshman",
+    "sounds/scream/_generated/buss_config.bus",
+    "sounds/scream/_generated/distance_model.dml",
+    "sounds/scream/_generated/group_mix.gmx",
+    "*.rmdtoc",
+];
+
+/// Must this file stay on disk, whatever the rules say?
+pub fn keep_on_disk(relative: &str, size: u64) -> bool {
+    size == 0 || glob::matches_any(relative, KEEP_ON_DISK)
+}
+
 /// Should a large file the rule compresses stay loose because LZ4 gains too little on it?
 /// Decided from a deterministic sample of its blocks, before lanes are assigned.
 fn auto_loose(
@@ -539,7 +564,10 @@ fn build_into(
     for e in entries {
         let relative = e.path.trim_start_matches('/').to_string();
         let mut rule = config.select(&relative);
-        if outputs.contains(&relative) || glob::matches_any(&relative, &[&pack_glob]) {
+        if outputs.contains(&relative)
+            || glob::matches_any(&relative, &[&pack_glob])
+            || keep_on_disk(&relative, e.size)
+        {
             rule = Rule::loose(rule.block_shift);
         }
         let mut item = Selected {

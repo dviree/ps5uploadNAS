@@ -407,6 +407,7 @@ function GameRow({
   onFfpfsc: () => void;
 }) {
   const tr = useTr();
+  const site = useLz4Compat((s) => s.data?.site);
   const { game, loc } = row;
   return (
     <li
@@ -457,7 +458,7 @@ function GameRow({
             size="sm"
             variant="ghost"
             onClick={() =>
-              void openExternalUrl(compatReportUrl(game.game_id, game.title))
+              void openExternalUrl(compatReportUrl(game.game_id, game.title, site))
             }
           >
             {tr("lz4mine.report", undefined, "Report how it runs")}

@@ -28,7 +28,7 @@ export function loadLz4Compat(force = false): Promise<void> {
   if (inFlight) return inFlight;
   if (s.data && !force) return Promise.resolve();
   useLz4Compat.setState({ loading: true, error: null });
-  inFlight = fetchCompat()
+  inFlight = fetchCompat(force)
     .then((data) => useLz4Compat.setState({ data, loading: false }))
     .catch((e: unknown) =>
       useLz4Compat.setState({

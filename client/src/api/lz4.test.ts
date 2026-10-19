@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   canBeLz4,
+  compatIssueUrl,
   compatReportUrl,
   compatVerdict,
   ffpfscCells,
@@ -40,12 +41,17 @@ describe("lz4", () => {
     expect(compatVerdict(entry({ crash: 1, reports: 1 }))).toBe("bad");
   });
 
-  it("opens a prefilled game report", () => {
+  it("opens a prefilled game report on the project's site", () => {
     const u = new URL(compatReportUrl("PPSA01289", "Sackboy"));
+    expect(u.host).toBe("theghostonline.dev");
     expect(u.pathname).toBe("/theghostonline/PS5-LZ4-Compression/issues/new");
-    expect(u.searchParams.get("template")).toBe("compat.yml");
-    expect(u.searchParams.get("title_id")).toBe("PPSA01289");
     expect(u.searchParams.get("title")).toBe("[Game report] Sackboy");
+    const body = u.searchParams.get("body") ?? "";
+    expect(body).toContain("### Title ID\n\nPPSA01289");
+    expect(body).toContain("### How does it run?\n\n_No response_");
+    expect(compatIssueUrl(12)).toBe(
+      "https://theghostonline.dev/theghostonline/PS5-LZ4-Compression/issues/12",
+    );
   });
 
   it("finds a game in the .ffpfsc list by Title ID, else by name", () => {

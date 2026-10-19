@@ -15,7 +15,12 @@ pull request or schedule.
 Keep it that way:
 
 - Do not add push, tag, pull_request or schedule triggers to any workflow but
-  `docker-engine.yml`, and do not add new workflows that build anything else.
+  `docker-engine.yml` and `lz4-upstream-check.yml`, and do not add new workflows that build
+  anything else.
+- `lz4-upstream-check.yml` runs daily and builds nothing: it checks the LZ4 Compression
+  project (theghostonline/PS5-LZ4-Compression on theghostonline.dev, which left GitHub on
+  2026-10-17) and opens an `lz4-upstream` issue listing new commits and releases to review and
+  port (packing rules in `ampr_pack`, game fixes; dviree/PS5-LZ4-NAS ports them too).
 - When merging upstream (`phantomptr/ps5upload` main), check every `on:` block in
   `.github/workflows/` afterwards: an upstream change there must not bring those triggers
   back. Resolve such conflicts by keeping this fork's `workflow_dispatch`-only blocks.
