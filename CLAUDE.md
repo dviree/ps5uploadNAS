@@ -26,3 +26,14 @@ Keep it that way:
   back. Resolve such conflicts by keeping this fork's `workflow_dispatch`-only blocks.
 - A commit that only changes workflows or docs can say `[skip ci]` so it does not restart a
   running image build.
+
+## Updating the NAS
+
+The user's NAS runs the image as the container `ps5upload`. Whenever a change
+is pushed to `main`, end the reply with the update command: once the image build is done,
+`sudo /path/to/update.sh` on the NAS (it refuses while an LZ4 build is running,
+an `*.lz4spool` in `/path/to/ps5-lz4`). The script holds the full `docker run` (user
+1000:100, host network, `PS5_ADDR=192.168.1.50`,
+`PS5UPLOAD_ALLOW_IP=192.168.1.0/24,100.64.0.1`, mounts `/games` (roms/ps5, ro), `/pkgs`
+(roms/ps4, ro), `/lz4` (ps5-lz4), `/data`, `/tmp`); when a setting changes, give the user the
+updated script too.
