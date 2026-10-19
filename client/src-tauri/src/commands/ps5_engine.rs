@@ -2383,6 +2383,13 @@ pub async fn ftp_send(
     .await
 }
 
+/// The games the engine is converting to LZ4 game folders right now. GET /api/lz4/building.
+#[tauri::command]
+pub async fn lz4_building() -> Result<JsonValue, String> {
+    let base = engine::url();
+    get_json(&format!("{base}/api/lz4/building")).await
+}
+
 /// The community's LZ4 game reports, read by the engine from the LZ4 Compression project's
 /// site at most once a day (Convert Games' My games and Compatibility). GET /api/lz4/compat.
 #[tauri::command]

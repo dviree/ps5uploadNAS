@@ -58,6 +58,10 @@ installEngineLogBridge();
 // hydration finds a file — that way a fresh install starts writing
 // immediately.
 installUserConfigMirror();
+
+// A browser with no PS5 chosen (a new device, or the page opened over Tailscale) starts with
+// the console the engine was set up for.
+void import("./lib/defaultConsole").then((m) => m.adoptEngineConsole());
 // Fire-and-forget: if the Tauri command isn't registered yet (dev mode
 // first launch before compile), the inner call silently no-ops.
 void hydrateFromUserConfig();

@@ -778,6 +778,9 @@ export async function browserInvoke<T>(
         dest_dir: args["destDir"],
       }, true);
     }
+    case "lz4_building": {
+      return getJson<T>("/api/lz4/building");
+    }
     case "lz4_compat": {
       // The engine reads the reports from the LZ4 Compression project's site.
       return getJson<T>(args["refresh"] ? "/api/lz4/compat?refresh=true" : "/api/lz4/compat");

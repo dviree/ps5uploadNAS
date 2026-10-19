@@ -1205,6 +1205,10 @@ pub(crate) async fn folder_build_handler(
         Some(Err(e)) => return json_err(StatusCode::BAD_REQUEST, e).into_response(),
     };
     let install_runtime = req.ampr_lz4.as_ref().is_some_and(|r| r.install_runtime);
+    // Listed as converting from now until the job ends (or this request goes away first).
+    let building = packs
+        .is_some()
+        .then(|| crate::lz4_api::building_start(&req.source));
     if packs.is_none() && !remote && tokio::fs::metadata(&source).await.is_ok_and(|m| m.is_dir()) {
         return json_err(
             StatusCode::BAD_REQUEST,
@@ -1314,6 +1318,9 @@ pub(crate) async fn folder_build_handler(
     let mode = ps5upload_fpkg::sample::VerifyMode::from_full(req.full_verify, false);
 
     let job_id = Uuid::new_v4();
+    if let Some(b) = &building {
+        b.set_job(&job_id.to_string());
+    }
     let cancel = register_transfer_cancel(job_id);
     let bytes = Arc::new(AtomicU64::new(0));
     let started_at_ms = now_ms();
@@ -1367,6 +1374,7 @@ pub(crate) async fn folder_build_handler(
     let state_for_job = state.clone();
     let ticker = JobTicker(ticker.abort_handle());
     tokio::task::spawn_blocking(move || {
+        let _building = building;
         let mut fail = JobFailOnDropGuard::new(
             state_for_job.jobs.clone(),
             state_for_job.events_tx.clone(),

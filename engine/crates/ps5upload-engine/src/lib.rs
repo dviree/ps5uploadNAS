@@ -10036,6 +10036,10 @@ async fn engine_version() -> impl IntoResponse {
             // (the UnRAR C dep is excluded from the Android build), so the
             // client hides the .rar option when this is false.
             "caps": { "rar": cfg!(not(target_os = "android")) },
+            // The console a self-hosted engine was set up for (`PS5_ADDR`, Docker), so a browser
+            // that has no PS5 chosen yet (a new device, or the page opened at another address
+            // such as over Tailscale) starts with it. Absent when the variable is not set.
+            "ps5_addr": std::env::var("PS5_ADDR").ok().filter(|a| !a.trim().is_empty()),
         })),
     )
 }
@@ -10549,6 +10553,7 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
         .route("/api/lz4/status", post(lz4_api::lz4_status_handler))
         .route("/api/lz4/ffpfsc", get(lz4_api::lz4_ffpfsc_handler))
         .route("/api/lz4/compat", get(lz4_compat::lz4_compat_handler))
+        .route("/api/lz4/building", get(lz4_api::lz4_building_handler))
         .route("/api/ftp/send", post(ftp_send::ftp_send_handler))
         .route("/api/fpkg/build", post(fpkg_api::fpkg_build_handler))
         .route("/api/fpkg/delete", post(fpkg_api::fpkg_delete_handler))
