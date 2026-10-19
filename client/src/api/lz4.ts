@@ -22,7 +22,18 @@ export interface Lz4Status {
 }
 
 
+/** A game the engine is converting to an LZ4 game folder right now (any device started it). */
+export interface Lz4Building {
+  /** The source path as the build was asked for (a My games row's path). */
+  source: string;
+  /** Its job, once reading the source is done (GET /api/jobs/{id}). */
+  job_id: string | null;
+  started_ms: number;
+}
+
 export const lz4 = {
+  building: () =>
+    invoke<{ building: Lz4Building[] }>("lz4_building").then((r) => r.building),
   status: (paths: string[]) =>
     invoke<{ results: Lz4Status[] }>("lz4_status", { paths }).then(
       (r) => r.results,

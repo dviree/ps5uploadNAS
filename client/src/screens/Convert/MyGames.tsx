@@ -36,6 +36,7 @@ import {
   startCollectionScan,
   useCollectionStore,
 } from "../../state/collection";
+import { jobStatus } from "../../api/ps5";
 import { useConnectionStore } from "../../state/connection";
 import { useConvertPrefs } from "../../state/convertPrefs";
 import { parseFtpAddr, sendViaFtp, useFtpSends, type FtpSend } from "../../state/ftpSend";
@@ -98,6 +99,61 @@ async function readStatus(path: string): Promise<void> {
   }
 }
 
+/** What a game being converted to LZ4 is doing: the stage and how far it is. */
+interface Converting {
+  stage: string | null;
+  pct: number | null;
+}
+
+const STAGE_NAMES: Record<string, string> = {
+  pack: "packing LZ4 assets",
+  write: "writing the folder",
+  verify: "reading the folder back",
+};
+
+/** The games the engine is converting to LZ4 right now, whoever started them, polled while My
+ *  games is open; with the progress of each one's job. */
+function useConverting(): Record<string, Converting> {
+  const [map, setMap] = useState<Record<string, Converting>>({});
+  useEffect(() => {
+    let live = true;
+    const tick = async () => {
+      try {
+        const list = await lz4.building();
+        const next: Record<string, Converting> = {};
+        for (const b of list) {
+          let c: Converting = { stage: null, pct: null };
+          if (b.job_id) {
+            try {
+              const s = await jobStatus(b.job_id);
+              const st = s.stage;
+              if (st) {
+                c = {
+                  stage: st.id,
+                  pct: st.total ? Math.floor((st.done / st.total) * 100) : null,
+                };
+              }
+            } catch {
+              // Progress is a nicety; the game is still being converted.
+            }
+          }
+          next[b.source] = c;
+        }
+        if (live) setMap(next);
+      } catch {
+        // An older engine without the list: nothing to show.
+      }
+    };
+    void tick();
+    const id = setInterval(() => void tick(), 3000);
+    return () => {
+      live = false;
+      clearInterval(id);
+    };
+  }, []);
+  return map;
+}
+
 export function MyGames({
   onConvert,
   onFfpfsc,
@@ -120,6 +176,7 @@ export function MyGames({
   const ftpDest = useConvertPrefs((s) => s.ftpDest);
   const setFtp = useConvertPrefs((s) => s.setFtp);
   const connHost = useConnectionStore((c) => parseFtpAddr(c.host?.trim() ?? "")[0]);
+  const converting = useConverting();
   const [statuses, setStatuses] = useState<Record<string, Lz4Status>>(() =>
     Object.fromEntries(known),
   );
@@ -383,6 +440,7 @@ export function MyGames({
                   row={r}
                   state={stateOf(r)}
                   status={statuses[r.loc.absolute_path]}
+                  converting={converting[r.loc.absolute_path] ?? null}
                   compat={compat?.games[r.game.game_id]}
                   ffpfsc={ffpfscFor(r.game)}
                   onConvert={() => onConvert(r.loc.absolute_path)}
@@ -430,8 +488,11 @@ function GameRow({
   onConvert,
   onConvertSend,
   onFfpfsc,
+  converting,
 }: {
   row: Row;
+  /** Set while the engine converts this game to LZ4. */
+  converting: Converting | null;
   state: Lz4State | undefined;
   status: Lz4Status | undefined;
   compat: CompatEntry | undefined;
@@ -467,15 +528,34 @@ function GameRow({
         {ftp && <FtpLine send={ftp} />}
       </div>
       <div className="flex shrink-0 flex-col items-start gap-1">
-        <StateBadge state={state} status={status} />
+        {converting ? (
+          <Badge tone="accent">
+            {converting.stage
+              ? tr(
+                  "lz4mine.converting_stage",
+                  {
+                    stage: tr(
+                      `lz4mine.stage_${converting.stage}`,
+                      undefined,
+                      STAGE_NAMES[converting.stage] ?? converting.stage,
+                    ),
+                    pct: converting.pct ?? 0,
+                  },
+                  "Converting to LZ4: {stage} {pct}%",
+                )
+              : tr("lz4mine.converting", undefined, "Converting to LZ4: reading the game…")}
+          </Badge>
+        ) : (
+          <StateBadge state={state} status={status} />
+        )}
       </div>
       <div className="flex shrink-0 flex-wrap gap-2">
-        {canBeLz4(state) && (
+        {canBeLz4(state) && !converting && (
           <Button size="sm" onClick={onConvert}>
             {tr("lz4mine.convert", undefined, "Convert to LZ4")}
           </Button>
         )}
-        {canBeLz4(state) && ps5 && (
+        {canBeLz4(state) && ps5 && !converting && (
           <Button
             size="sm"
             variant="secondary"

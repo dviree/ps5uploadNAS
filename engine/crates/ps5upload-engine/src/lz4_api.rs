@@ -215,11 +215,92 @@ mod tests {
     }
 
     #[test]
+    fn a_build_is_listed_until_its_guard_goes() {
+        let g = building_start("/games/X.exfat");
+        g.set_job("j1");
+        let listed = |src: &str| {
+            building()
+                .lock()
+                .unwrap()
+                .values()
+                .any(|b| b.source == src && b.job_id.as_deref() == Some("j1"))
+        };
+        assert!(listed("/games/X.exfat"));
+        drop(g);
+        assert!(!listed("/games/X.exfat"));
+    }
+
+    #[test]
     fn a_missing_game_is_an_error() {
         let s = status_of("/no/such/game/anywhere");
         assert_eq!(s.status, "error");
         assert!(s.reason.is_some());
     }
+}
+
+/// The games being converted to LZ4 game folders right now, so My games can say so on any
+/// device: from the moment the build is asked for (reading the source takes minutes for a big
+/// image) until its job ends. Keyed by the source path as the request named it.
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct Building {
+    source: String,
+    /// The build's job, once it has one (GET /api/jobs/{id} for its progress).
+    job_id: Option<String>,
+    started_ms: u64,
+}
+
+fn building() -> &'static Mutex<HashMap<u64, Building>> {
+    static B: OnceLock<Mutex<HashMap<u64, Building>>> = OnceLock::new();
+    B.get_or_init(Default::default)
+}
+
+/// A build's place in the list; dropped (the job ended, the request went away), it is gone.
+pub(crate) struct BuildingGuard(u64);
+
+impl BuildingGuard {
+    pub(crate) fn set_job(&self, job_id: &str) {
+        if let Some(b) = building()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get_mut(&self.0)
+        {
+            b.job_id = Some(job_id.to_string());
+        }
+    }
+}
+
+impl Drop for BuildingGuard {
+    fn drop(&mut self) {
+        building()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&self.0);
+    }
+}
+
+pub(crate) fn building_start(source: &str) -> BuildingGuard {
+    static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    building().lock().unwrap_or_else(|e| e.into_inner()).insert(
+        id,
+        Building {
+            source: source.to_string(),
+            job_id: None,
+            started_ms: crate::now_ms(),
+        },
+    );
+    BuildingGuard(id)
+}
+
+/// GET /api/lz4/building: `{building: [{source, job_id?, started_ms}]}`.
+pub(crate) async fn lz4_building_handler() -> impl IntoResponse {
+    let list: Vec<Building> = building()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .values()
+        .cloned()
+        .collect();
+    Json(serde_json::json!({ "building": list }))
 }
 
 /// The community's .ffpfsc compatibility list, a Google Sheet ps5-lz4 shows too, read as CSV.
