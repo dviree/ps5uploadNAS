@@ -769,6 +769,15 @@ export async function browserInvoke<T>(
       // it answers with the job.
       return postJson<T>("/api/lz4/status", { paths: args["paths"] }, true);
     }
+    case "ftp_send": {
+      // TS caller: { source, addr, port, destDir }
+      return postJson<T>("/api/ftp/send", {
+        source: args["source"],
+        addr: args["addr"],
+        port: args["port"],
+        dest_dir: args["destDir"],
+      }, true);
+    }
     case "lz4_compat": {
       // The engine reads the reports from the LZ4 Compression project's site.
       return getJson<T>(args["refresh"] ? "/api/lz4/compat?refresh=true" : "/api/lz4/compat");

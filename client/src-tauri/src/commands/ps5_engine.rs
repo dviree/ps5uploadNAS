@@ -2366,6 +2366,23 @@ pub async fn lz4_ffpfsc(refresh: Option<bool>) -> Result<JsonValue, String> {
     get_json(&format!("{base}/api/lz4/ffpfsc{fresh}")).await
 }
 
+/// Send a game folder or file to the PS5 through the console's own FTP server (etaHEN,
+/// ftpsrv), as ps5-lz4 does. POST /api/ftp/send; returns `{job_id, dest}`.
+#[tauri::command]
+pub async fn ftp_send(
+    source: String,
+    addr: String,
+    port: Option<u16>,
+    dest_dir: String,
+) -> Result<JsonValue, String> {
+    let base = engine::url();
+    post_json_long(
+        &format!("{base}/api/ftp/send"),
+        &serde_json::json!({ "source": source, "addr": addr, "port": port, "dest_dir": dest_dir }),
+    )
+    .await
+}
+
 /// The community's LZ4 game reports, read by the engine from the LZ4 Compression project's
 /// site at most once a day (Convert Games' My games and Compatibility). GET /api/lz4/compat.
 #[tauri::command]
