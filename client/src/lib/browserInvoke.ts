@@ -765,6 +765,8 @@ export async function browserInvoke<T>(
     case "lz4_status": {
       // TS caller: { paths }
       // A large game image on a NAS disk can take longer than a standard request to read.
+      // The engine reads the whole source (a big game image on a NAS disk: minutes) before
+      // it answers with the job.
       return postJson<T>("/api/lz4/status", { paths: args["paths"] }, true);
     }
     case "lz4_compat": {
@@ -784,7 +786,7 @@ export async function browserInvoke<T>(
         firmware: args["firmware"],
         language: args["language"],
         full_verify: args["fullVerify"] ?? false,
-      });
+      }, true);
     }
     case "ps5_elfldr_health": {
       return getJson<T>(`/api/ps5/elfldr/health?host=${encodeURIComponent(String(args["host"] ?? ""))}`);
@@ -809,17 +811,23 @@ export async function browserInvoke<T>(
       });
     }
     case "fpkg_extract_cleanup": {
+      // The engine reads the whole source (a big game image on a NAS disk: minutes) before
+      // it answers with the job.
       return postJson<T>("/api/fpkg/extract/cleanup", { path: args["path"] });
     }
     case "ffpfsc_compress": {
+      // The engine reads the whole source (a big game image on a NAS disk: minutes) before
+      // it answers with the job.
       return postJson<T>("/api/ffpfsc/compress", {
         source: args["source"],
         output_dir: args["outputDir"],
         level: args["level"],
         full_verify: args["fullVerify"] ?? false,
-      });
+      }, true);
     }
     case "exfat_build": {
+      // The engine reads the whole source (a big game image on a NAS disk: minutes) before
+      // it answers with the job.
       return postJson<T>("/api/exfat/build", {
         source: args["source"],
         output_dir: args["outputDir"],
@@ -828,7 +836,7 @@ export async function browserInvoke<T>(
         ampr_lz4: args["amprLz4"],
         verify_chunk_kib: args["verifyChunkKib"],
         full_verify: args["fullVerify"] ?? false,
-      });
+      }, true);
     }
     case "folder_build": {
       return postJson<T>("/api/folder/build", {
@@ -837,7 +845,7 @@ export async function browserInvoke<T>(
         name: args["name"],
         full_verify: args["fullVerify"] ?? false,
         ampr_lz4: args["amprLz4"],
-      });
+      }, true);
     }
     case "job_status": {
       // TS caller: { jobId } (Tauri 2 camelCases job_id → jobId)
