@@ -123,7 +123,17 @@ pub(crate) async fn lz4_status_handler(
                         return s.clone();
                     }
                 }
+                let started = std::time::Instant::now();
                 let s = status_of(p);
+                let took = started.elapsed();
+                if took.as_secs() >= 10 || s.status == "error" {
+                    crate::log_info!(
+                        "lz4 status: {p}: {} in {:.1}s{}",
+                        s.status,
+                        took.as_secs_f64(),
+                        s.reason.as_deref().map(|r| format!(" ({r})")).unwrap_or_default()
+                    );
+                }
                 if s.status != "error" {
                     cache()
                         .lock()

@@ -64,6 +64,37 @@ interface Row {
 
 /** Statuses by path, kept for the session so switching tabs does not read every game again. */
 const known = new Map<string, Lz4Status>();
+/** Paths being read now, so a list that changes while they are read does not ask again. */
+const reading = new Set<string>();
+/** Games read at once, and how long one may take before it is marked instead of left checking. */
+const PARALLEL = 3;
+const CHECK_TIMEOUT_MS = 5 * 60_000;
+
+async function readStatus(path: string): Promise<void> {
+  reading.add(path);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const results = await Promise.race([
+      lz4.status([path]),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error("the check took too long; try again later")),
+          CHECK_TIMEOUT_MS,
+        );
+      }),
+    ]);
+    for (const s of results) known.set(s.path, s);
+  } catch (e) {
+    known.set(path, {
+      path,
+      status: "error",
+      reason: e instanceof Error ? e.message : String(e),
+    });
+  } finally {
+    clearTimeout(timer);
+    reading.delete(path);
+  }
+}
 
 export function MyGames({
   onConvert,
@@ -112,29 +143,25 @@ export function MyGames({
     [rows],
   );
 
-  // Read each game's LZ4 status one at a time, so the list fills in as it goes: a large image
-  // on a NAS disk can take a while to read, and one that fails is marked, not left checking.
+  // Read the games' LZ4 statuses a few at a time, so the list fills in as it goes: a large
+  // image on a NAS disk can take a while to read, and one that fails or takes too long is
+  // marked, not left checking. A result is shown even when the list changed meanwhile (a
+  // Collection scan updates it), and a game already being read is not asked for again.
   useEffect(() => {
     const todo = rows
       .map((r) => r.loc.absolute_path)
-      .filter((p) => !known.has(p));
+      .filter((p) => !known.has(p) && !reading.has(p));
     if (todo.length === 0) return;
     let live = true;
-    void (async () => {
-      for (const path of todo) {
-        if (!live) return;
-        try {
-          for (const s of await lz4.status([path])) known.set(s.path, s);
-        } catch (e) {
-          known.set(path, {
-            path,
-            status: "error",
-            reason: e instanceof Error ? e.message : String(e),
-          });
-        }
-        if (live) setStatuses(Object.fromEntries(known));
+    const next = () => todo.shift();
+    const worker = async () => {
+      for (let path = next(); path && live; path = next()) {
+        if (known.has(path) || reading.has(path)) continue;
+        await readStatus(path);
+        setStatuses(Object.fromEntries(known));
       }
-    })();
+    };
+    for (let i = 0; i < PARALLEL; i++) void worker();
     return () => {
       live = false;
     };
