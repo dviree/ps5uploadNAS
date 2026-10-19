@@ -433,6 +433,45 @@ describe("fpkg pipeline", () => {
     expect(added).toEqual([]);
   });
 
+  it("sends a finished LZ4 game folder to the PS5 when the run was asked to", async () => {
+    const buildFolder = vi.fn().mockResolvedValue({ job_id: "l1" });
+    const { fpkg } = await import("../api/fpkg");
+    (fpkg as unknown as { buildFolder: unknown }).buildFolder = buildFolder;
+    const { useUploadQueueStore } = await import("./uploadQueue");
+    const added: unknown[] = [];
+    const started: string[] = [];
+    useUploadQueueStore.setState({
+      add: (i: unknown) => void added.push(i),
+      startHost: async (h: string) => void started.push(h),
+    } as never);
+    await useFpkgConversion.getState().buildFolder(
+      "/games/PPSA26344.exfat",
+      "/lz4",
+      { installRuntime: true },
+      { title: "Ghost of Yotei", host: "10.0.0.2", volume: null, subpath: "homebrew", register: true },
+    );
+    jobStatus.mockResolvedValueOnce({ status: "done", dest: "/lz4/PPSA26344-lz4", bytes_sent: 9 });
+    await tick();
+    expect(added).toEqual([
+      expect.objectContaining({
+        sourceKind: "game-folder",
+        sourcePath: "/lz4/PPSA26344-lz4",
+        displayName: "Ghost of Yotei",
+        resolvedDest: "/data/homebrew/PPSA26344-lz4",
+        registerAfterUpload: true,
+      }),
+    ]);
+    expect(started).toEqual(["10.0.0.2"]);
+    expect(useFpkgConversion.getState().pipeline).toMatchObject({ phase: "done", uploadQueued: true });
+    // A plain LZ4 run after it sends nothing.
+    added.length = 0;
+    useFpkgConversion.setState({ pipeline: { phase: "idle" } });
+    await useFpkgConversion.getState().buildFolder("/games/X.exfat", "/lz4", { installRuntime: true });
+    jobStatus.mockResolvedValueOnce({ status: "done", dest: "/lz4/X-lz4", bytes_sent: 9 });
+    await tick();
+    expect(added).toEqual([]);
+  });
+
   it("asks the engine for the chosen image format", async () => {
     const buildImage = vi.fn().mockResolvedValue({ job_id: "i2" });
     const { fpkg } = await import("../api/fpkg");

@@ -9,6 +9,8 @@ import { useConvertPrefs } from "./convertPrefs";
 import { safeGetItem, safeRemoveItem, safeSetItem } from "../lib/safeStorage";
 
 import { imageUploadItem, type ImageUploadPlan } from "../lib/imageUpload";
+import { collectionSendItem, type SendPlan } from "../lib/collectionSend";
+import type { CollectionLocation } from "../api/collection";
 import { useUploadQueueStore } from "./uploadQueue";
 
 import { fpkg, type AmprLz4Options, type FpkgBuildRequest, type ImageFormat } from "../api/fpkg";
@@ -143,7 +145,13 @@ export interface ConversionState {
   ) => Promise<void>;
   /** Unpack a game image or a debug-key package into a plain folder in `outputDir`; with
    *  `lz4`, pack a game folder or image into an LZ4 game folder (`<name>-lz4`) there. */
-  buildFolder: (source: string, outputDir: string | undefined, lz4?: AmprLz4Options) => Promise<void>;
+  buildFolder: (
+    source: string,
+    outputDir: string | undefined,
+    lz4?: AmprLz4Options,
+    /** Once the folder is built and checked, send it to the PS5 (the Upload queue). */
+    thenSend?: FolderSendPlan,
+  ) => Promise<void>;
   /** Put the finished image in the Upload queue. */
   uploadImage: (plan: ImageUploadPlan) => void;
   /** Install the kept package again: after a failed install, or Install again on a result. */
@@ -271,6 +279,22 @@ function fail(stage: PipelineStage, message: string, packagePath: string | null)
 
 /** The Upload plan of the image being built ("send this game folder as an image"). */
 let pendingImageUpload: ImageUploadPlan | null = null;
+
+/** A game folder built by Convert (an LZ4 game folder) that then goes to the PS5. */
+export interface FolderSendPlan extends SendPlan {
+  /** The game's name in the Upload queue. */
+  title: string;
+}
+/** The send plan of the folder being built. */
+let pendingFolderSend: FolderSendPlan | null = null;
+
+/** Puts a finished game folder in the Upload queue and starts that console's queue. */
+function queueFolder(folderPath: string, bytes: number, plan: FolderSendPlan) {
+  const q = useUploadQueueStore.getState();
+  const loc = { type: "folder", absolute_path: folderPath, size_bytes: bytes } as CollectionLocation;
+  const id = q.add(collectionSendItem({ title: plan.title }, loc, plan));
+  void q.startHost(plan.host, { onlyIds: [id] });
+}
 /** The running Convert & install asked for its package to go once the install verified. */
 let deleteAfterInstall = false;
 
@@ -289,6 +313,9 @@ function finish(packagePath: string, packageBytes: number, convertMs: number) {
   const plan = makesImage(p.mode) ? pendingImageUpload : null;
   pendingImageUpload = null;
   if (plan) queueImage(packagePath, packageBytes, plan);
+  const send = p.mode === "folder" ? pendingFolderSend : null;
+  pendingFolderSend = null;
+  if (send) queueFolder(packagePath, packageBytes, send);
   if (p.taskId) useTaskStore.getState().finishTask(p.taskId, "done");
   dropCopy(p);
   const now = Date.now();
@@ -305,7 +332,7 @@ function finish(packagePath: string, packageBytes: number, convertMs: number) {
       stageMs: { ...p.stageMs, [p.stage]: now - p.stageStartedMs },
       deleted: false,
       titleId: p.titleId,
-      uploadQueued: !!plan,
+      uploadQueued: !!plan || !!send,
     },
   });
 }
@@ -780,10 +807,11 @@ export const useFpkgConversion = create<ConversionState>((set, get) => ({
     }
   },
 
-  buildFolder: async (source, outputDir, lz4) => {
+  buildFolder: async (source, outputDir, lz4, thenSend) => {
     if (get().pipeline.phase === "running") return;
     pendingImageUpload = null;
-    beginRun("folder", source, null, lz4 ? "pack" : "write");
+    pendingFolderSend = thenSend ?? null;
+    beginRun("folder", source, thenSend?.host ?? null, lz4 ? "pack" : "write");
     try {
       const { job_id } = await fpkg.buildFolder(
         source,
@@ -857,6 +885,8 @@ interface RememberedRun {
   source: string;
   stage: PipelineStage;
   startedMs: number;
+  /** A folder that goes to the PS5 once built. */
+  send?: FolderSendPlan | null;
 }
 
 useFpkgConversion.subscribe((s) => {
@@ -868,6 +898,7 @@ useFpkgConversion.subscribe((s) => {
       source: p.source,
       stage: p.stage,
       startedMs: p.startedMs,
+      send: p.mode === "folder" ? pendingFolderSend : null,
     };
     safeSetItem(KEY_RUNNING, JSON.stringify(run));
   } else if (p.phase !== "running") {
@@ -892,11 +923,18 @@ export async function resumeRememberedRun(): Promise<void> {
     safeRemoveItem(KEY_RUNNING);
     return;
   }
+  if (snapshot.status === "done" && run.mode === "folder" && run.send && snapshot.dest) {
+    // Built while the page was closed: it still goes to the PS5.
+    safeRemoveItem(KEY_RUNNING);
+    queueFolder(snapshot.dest, snapshot.bytes_sent ?? 0, run.send);
+    return;
+  }
   if (snapshot.status !== "running" || useFpkgConversion.getState().pipeline.phase !== "idle") {
     safeRemoveItem(KEY_RUNNING);
     return;
   }
-  beginRun(run.mode, run.source, null, run.stage);
+  pendingFolderSend = run.mode === "folder" ? (run.send ?? null) : null;
+  beginRun(run.mode, run.source, run.send?.host ?? null, run.stage);
   update({ jobId: run.jobId, startedMs: run.startedMs });
   poll(run.jobId, null);
 }
