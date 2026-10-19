@@ -7,6 +7,7 @@ import {
   ClipboardX,
   Ellipsis,
   ChartBar,
+  FilePlus,
   Filter,
   FilterX,
   FolderPlus,
@@ -18,6 +19,7 @@ import {
   SquareCheck,
   Star,
   TextCursorInput,
+  Upload,
   type LucideIcon,
 } from "lucide-react";
 import { formatBytes } from "../../lib/format";
@@ -85,6 +87,9 @@ import { GameBanner } from "./viewer/GameBanner";
 import { sceSysName } from "./viewer/gameFolder";
 import { SearchDialog } from "./search/SearchDialog";
 import { UsageDialog } from "./usage/UsageDialog";
+import { keepsPermissions } from "./permissions";
+import { createFile, downloadItem, loadOnOtherDevice, TEXT_SAVE_MAX } from "./transfer";
+import { UploadDialog } from "./UploadDialog";
 
 export { upFrom, viewKind };
 
@@ -103,9 +108,14 @@ export type FilesAsk =
   /** Decompress a .ffpfsc next to it. */
   | { kind: "unpack"; name: string }
   | { kind: "mkdir" }
+  /** A new, empty file (then opened in the editor). */
+  | { kind: "newfile" }
+  /** Upload here, from the phone or PC the page is open on. */
+  | { kind: "upload" }
   | { kind: "pick"; op: "copy" | "move"; names: string[] }
   | { kind: "info"; name: string }
-  | { kind: "view"; name: string; type: ViewKind }
+  /** `edit`: straight into the text editor. */
+  | { kind: "view"; name: string; type: ViewKind; edit?: boolean }
   /** Search by name (the helper's index) and Disk usage: Files tools over the folder shown. */
   | { kind: "search" }
   | { kind: "usage" }
@@ -277,6 +287,12 @@ export interface FilesViewProps {
   onPicked: (op: "copy" | "move", names: string[], destDir: string) => void;
   /** Open `dir` in Files with `name` focused (a search result); null name: the folder itself. */
   onReveal?: (dir: string, name: string | null) => void;
+  /** Create an empty file named so in the folder shown (then it opens in the editor). */
+  onNewFile?: (name: string) => void;
+  /** Download an item to this device (a phone or PC: `remote`). */
+  onDownload?: (path: string) => void;
+  /** The page is open on another device: Upload here and Download are offered. */
+  remote?: boolean;
 }
 
 /** "Copying 3 of 40" (item `at` is being sent or is running), or "Stopping…". */
@@ -303,12 +319,15 @@ export function busyText(b: Busy | null): string | null {
  * What the sheet offers for `names` (one entry, or the selection), by type: a
  * folder can be pinned; a file can be verified; a .ffpfsc can be decompressed.
  */
-export function sheetActions(names: string[], entries: Entry[], pinned: boolean | null): SheetAction[] {
+export function sheetActions(names: string[], entries: Entry[], pinned: boolean | null, remote = false): SheetAction[] {
   if (names.length !== 1) return ["clipcopy", "cut", "copy", "move", "bulkrename", "fixperm", "delete"];
   const e = entries.find((x) => x.name === names[0]);
   const out: SheetAction[] = [];
   if (e && e.kind !== "dir" && viewKind(e.name)) out.push("view");
-  out.push("clipcopy", "cut", "copy", "move", "rename", "bulkrename", "mkdir", "info");
+  // Any small file opens in the text editor (a .cfg, .conf, .sh…); a binary one says it cannot.
+  if (e && e.kind === "file" && (e.size ?? 0) <= TEXT_SAVE_MAX) out.push("edit");
+  if (remote && e && (e.kind === "file" || e.kind === "dir")) out.push("download");
+  out.push("clipcopy", "cut", "copy", "move", "rename", "bulkrename", "mkdir", "newfile", "info");
   if (e && e.kind === "dir" && pinned != null) out.push(pinned ? "unpin" : "pin");
   if (e && e.kind === "file") out.push("verify", "hex");
   if (e && e.kind === "file" && isFfpfsc(e.name)) out.push("unpack");
@@ -506,7 +525,7 @@ function askView(p: FilesViewProps) {
       return (
         <ActionsSheet
           title={namesTitle(a.names)}
-          actions={sheetActions(a.names, p.dir.entries, pinnedOf(a.names[0]))}
+          actions={sheetActions(a.names, p.dir.entries, pinnedOf(a.names[0]), !!p.remote)}
           busy={p.busy != null}
           note={busyText(p.busy)}
           onClose={p.onDismiss}
@@ -537,6 +556,12 @@ function askView(p: FilesViewProps) {
                 return p.onAsk({ kind: "unpack", name });
               case "mkdir":
                 return p.onAsk({ kind: "mkdir" });
+              case "newfile":
+                return p.onAsk({ kind: "newfile" });
+              case "edit":
+                return p.onAsk({ kind: "view", name, type: "text", edit: true });
+              case "download":
+                return p.onDownload?.(joinPath(path, name));
               case "info":
                 return p.onAsk({ kind: "info", name });
               case "pin":
@@ -600,6 +625,20 @@ function askView(p: FilesViewProps) {
       return (
         <TextPrompt title={t("cw_files_new_folder")} initial="" onSubmit={p.onMkdir} onCancel={p.onDismiss} />
       );
+    case "newfile":
+      return <TextPrompt title={t("cw_files_new_file")} initial="" onSubmit={(v) => p.onNewFile?.(v)} onCancel={p.onDismiss} />;
+    case "upload": {
+      const v = p.volumes ? volumeOf(path, p.volumes) : null;
+      return (
+        <UploadDialog
+          dir={path}
+          free={v ? v.free_bytes : null}
+          fsNote={v && !keepsPermissions(v.fs_type) ? t("cw_files_perm_not_kept", { fs: v.fs_type }) : null}
+          onDone={() => p.onRetry?.()}
+          onClose={p.onDismiss}
+        />
+      );
+    }
     case "bulkrename":
       return (
         <BulkRenameDialog
@@ -634,7 +673,15 @@ function askView(p: FilesViewProps) {
         />
       );
     case "info":
-      return <InfoDialog dir={path} name={a.name} path={joinPath(path, a.name)} onClose={p.onDismiss} />;
+      return (
+        <InfoDialog
+          dir={path}
+          name={a.name}
+          path={joinPath(path, a.name)}
+          fsType={p.volumes ? (volumeOf(path, p.volumes)?.fs_type ?? null) : null}
+          onClose={p.onDismiss}
+        />
+      );
     case "view":
       return (
         <Viewer
@@ -644,6 +691,8 @@ function askView(p: FilesViewProps) {
           size={p.dir.entries.find((e) => e.name === a.name)?.size}
           images={a.type === "image" ? (p.shown ?? p.dir.entries).filter((e) => e.kind !== "dir" && viewKind(e.name) === "image").map((e) => e.name) : undefined}
           onOpenImage={(name) => p.onAsk({ kind: "view", name, type: "image" })}
+          startEditing={a.edit}
+          onSaved={() => p.onRetry?.()}
           onClose={p.onDismiss}
         />
       );
@@ -865,6 +914,10 @@ export function FilesView(p: FilesViewProps) {
                     action="mkdir"
                     onClick={() => p.onAsk({ kind: "mkdir" })}
                   />
+                  <ToolButton icon={FilePlus} label={t("cw_files_new_file")} action="newfile" onClick={() => p.onAsk({ kind: "newfile" })} />
+                  {p.remote ? (
+                    <ToolButton icon={Upload} label={t("cw_files_up_title")} action="upload" onClick={() => p.onAsk({ kind: "upload" })} />
+                  ) : null}
                   <ToolButton icon={SquareCheck} label={t("cw_select")} action="select" onClick={p.onToggleSelecting} />
                   {p.onReveal ? (
                     <>
@@ -1408,6 +1461,47 @@ export function Files({ ctx }: { ctx: SectionContext }) {
     [path, refresh],
   );
 
+  const onNewFile = useCallback(
+    (name: string) => {
+      setAsk(null);
+      if (path == null) return;
+      createFile(joinPath(path, name)).then(
+        () => {
+          focusName.current = name;
+          refresh();
+          setAsk({ kind: "view", name, type: "text", edit: true });
+        },
+        (e: unknown) => {
+          const text = filesErrorText(e);
+          if (text) setMessage({ tone: "error", text });
+        },
+      );
+    },
+    [path, refresh],
+  );
+
+  const onDownload = useCallback((p: string) => {
+    setAsk(null);
+    downloadItem(p).then(
+      (name) => {
+        if (mounted.current) setMessage({ tone: "info", text: t("cw_files_download_started", { name }) });
+      },
+      (e: unknown) => {
+        const text = filesErrorText(e);
+        if (text && mounted.current) setMessage({ tone: "error", text });
+      },
+    );
+  }, []);
+  // Upload and Download only away from the console (its own browser may use the LAN address too).
+  const [remote, setRemote] = useState(false);
+  useEffect(() => {
+    let live = true;
+    void loadOnOtherDevice().then((r) => live && setRemote(r));
+    return () => {
+      live = false;
+    };
+  }, []);
+
   const onToggleItem = useCallback((name: string) => {
     setSelected((s) => (s.includes(name) ? s.filter((x) => x !== name) : s.concat(name)));
   }, []);
@@ -1687,6 +1781,9 @@ export function Files({ ctx }: { ctx: SectionContext }) {
         onBulkRename={onBulkRename}
         onUnpack={onUnpack}
         onMkdir={onMkdir}
+        onNewFile={onNewFile}
+        onDownload={remote ? onDownload : undefined}
+        remote={remote}
         onPicked={onPicked}
         onReveal={onReveal}
       />

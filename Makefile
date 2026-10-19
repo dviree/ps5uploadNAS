@@ -870,6 +870,11 @@ test-payload: payload
 	@cc -O2 -Wall -Wextra -Werror -o /tmp/ps5upload-app-info-selftest \
 		$(PAYLOAD_DIR)/tests/app_info_selftest.c
 	@/tmp/ps5upload-app-info-selftest
+	@echo "Running uninstall outcome self-test (host build)..."
+	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
+		-o /tmp/ps5upload-unregister-outcome-selftest \
+		$(PAYLOAD_DIR)/tests/unregister_outcome_selftest.c
+	@/tmp/ps5upload-unregister-outcome-selftest
 	@echo "Running metadata title-id normalizer self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -o /tmp/ps5upload-tmdb-id-selftest \
 		$(PAYLOAD_DIR)/tests/tmdb_id_selftest.c
@@ -921,6 +926,12 @@ test-payload: payload
 		$(PAYLOAD_DIR)/ava1/gen/ava1_gen.c $(PAYLOAD_DIR)/ava1/ava1_wire.c
 	@/tmp/ps5upload-webui-codec-selftest
 	@echo "✓ Unicode, quoted and very large folders survive the web UI's JSON both ways"
+	@echo "Running webui file transfer self-test (host build)..."
+	@cc -O2 -Wall -Wextra -Werror -pthread -I$(PAYLOAD_DIR)/include \
+		-o /tmp/ps5upload-webui-files-selftest \
+		$(PAYLOAD_DIR)/tests/webui_files_selftest.c $(PAYLOAD_DIR)/src/webui_files.c
+	@/tmp/ps5upload-webui-files-selftest
+	@echo "✓ text saves and uploads go through a same-folder temp + rename; a cut-off upload leaves no file; folders stream as a valid .tar"
 	@echo "Running file index name-match self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
 		-o /tmp/ps5upload-index-glob-selftest $(PAYLOAD_DIR)/tests/index_glob_selftest.c
@@ -954,6 +965,14 @@ test-payload: payload
 		$(PAYLOAD_DIR)/tests/webui_inputlog_selftest.c $(PAYLOAD_DIR)/src/webui_inputlog.c
 	@/tmp/ps5upload-webui-inputlog-selftest
 	@echo "✓ the controller input log takes only plain short lines and never grows past its 64 KiB ring"
+	@echo "Running webui cheat download store self-test (host build)..."
+	@cc -O2 -Wall -Wextra -Werror -pthread -I$(PAYLOAD_DIR)/include -I$(PAYLOAD_DIR)/ava1 -I$(PAYLOAD_DIR)/ava1/gen \
+		-o /tmp/ps5upload-webui-cheats-store-selftest \
+		$(PAYLOAD_DIR)/tests/webui_cheats_store_selftest.c $(PAYLOAD_DIR)/src/webui_cheats_store.c \
+		$(PAYLOAD_DIR)/src/webui_files.c $(PAYLOAD_DIR)/src/webui_codec.c \
+		$(PAYLOAD_DIR)/ava1/gen/ava1_gen.c $(PAYLOAD_DIR)/ava1/ava1_wire.c
+	@/tmp/ps5upload-webui-cheats-store-selftest
+	@echo "✓ a downloaded cheat is stored only under a plain name with its format's extension, through a same-folder temp + rename"
 	@echo "Running AVA1 in-flight RPC gate self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -pthread -I$(PAYLOAD_DIR)/ava1 \
 		-o /tmp/ps5upload-ava1-rpc-gate-selftest \
@@ -966,6 +985,12 @@ test-payload: payload
 		$(PAYLOAD_DIR)/tests/cheats_list_selftest.c
 	@/tmp/ps5upload-cheats-list-selftest
 	@echo "✓ a large or badly encoded cheat pack lists as valid, bounded JSON"
+	@echo "Running cheat apply-plan self-test (host build)..."
+	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
+		-o /tmp/ps5upload-cheats-plan-selftest \
+		$(PAYLOAD_DIR)/tests/cheats_plan_selftest.c
+	@/tmp/ps5upload-cheats-plan-selftest
+	@echo "✓ a cheat's code caves are written before the jumps into them, and removed after"
 	@echo "Checking per-console isolation..."
 	@./scripts/check-per-console-isolation.sh
 	@echo "✓ one console's data cannot be shown under another's name"
