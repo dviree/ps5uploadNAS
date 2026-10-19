@@ -220,14 +220,13 @@ mod tests {
         let out = pack(&mut tree, &config, &dir.0);
         let m = Manifest::parse(&out.manifest).unwrap();
         assert_eq!(m.files.len(), 5);
-        assert_eq!(out.loose, ["eboot.bin"]);
-        assert_eq!(out.packed.len(), 4);
-        // A 0-byte file is packed with no chunks.
+        // A 0-byte file (a PlayGo placeholder, say) stays on disk.
+        assert_eq!(out.loose, ["d/empty.bin", "eboot.bin"]);
+        assert_eq!(out.packed.len(), 3);
         let empty = (0..5)
             .find(|&i| m.path(i).unwrap() == "/app0/d/empty.bin")
             .unwrap();
-        let e = &m.files[empty];
-        assert!(e.packed() && e.chunk_count == 0 && e.logical_size == 0);
+        assert!(!m.files[empty].packed());
         // Text compresses; noise falls back to raw.
         assert!(out.stats.chunks_lz4 > 0 && out.stats.chunks_raw > 0);
         let noise_at = (0..5)

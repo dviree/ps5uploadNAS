@@ -131,7 +131,10 @@ pub(crate) async fn lz4_status_handler(
                         "lz4 status: {p}: {} in {:.1}s{}",
                         s.status,
                         took.as_secs_f64(),
-                        s.reason.as_deref().map(|r| format!(" ({r})")).unwrap_or_default()
+                        s.reason
+                            .as_deref()
+                            .map(|r| format!(" ({r})"))
+                            .unwrap_or_default()
                     );
                 }
                 if s.status != "error" {

@@ -767,6 +767,10 @@ export async function browserInvoke<T>(
       // A large game image on a NAS disk can take longer than a standard request to read.
       return postJson<T>("/api/lz4/status", { paths: args["paths"] }, true);
     }
+    case "lz4_compat": {
+      // The engine reads the reports from the LZ4 Compression project's site.
+      return getJson<T>(args["refresh"] ? "/api/lz4/compat?refresh=true" : "/api/lz4/compat");
+    }
     case "lz4_ffpfsc": {
       return getJson<T>(args["refresh"] ? "/api/lz4/ffpfsc?refresh=true" : "/api/lz4/ffpfsc");
     }

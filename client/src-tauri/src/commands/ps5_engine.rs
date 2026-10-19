@@ -2366,6 +2366,15 @@ pub async fn lz4_ffpfsc(refresh: Option<bool>) -> Result<JsonValue, String> {
     get_json(&format!("{base}/api/lz4/ffpfsc{fresh}")).await
 }
 
+/// The community's LZ4 game reports, read by the engine from the LZ4 Compression project's
+/// site at most once a day (Convert Games' My games and Compatibility). GET /api/lz4/compat.
+#[tauri::command]
+pub async fn lz4_compat(refresh: Option<bool>) -> Result<JsonValue, String> {
+    let base = engine::url();
+    let fresh = if refresh.unwrap_or(false) { "?refresh=true" } else { "" };
+    get_json(&format!("{base}/api/lz4/compat{fresh}")).await
+}
+
 /// Start converting a game source into an installable FPKG. Returns a job id
 /// to poll with `job_status`; the finished job carries the package's path.
 /// POST /api/fpkg/build.

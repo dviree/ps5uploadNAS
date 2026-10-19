@@ -41,11 +41,37 @@ pub const RUNTIME_SHA256: &str = "69e6c4d5e4f5fb83c9e01815db5861c4c75734acbf4595
 /// Where the game's own module goes when the engine installs the release one.
 pub const RUNTIME_MODULE_ORIG: &str = "fakelib/libSceAmpr.sprx.orig";
 
+/// IOI's Glacier engine keeps its data in `.rpkg` packages in a `runtime/` folder (any case,
+/// with `packagedefinition.txt` or `*.rpkg` in it) and opens them straight from disk, so its
+/// games never run from packs (the LZ4 Compression project's 1.6.2; seen on PPSA11386).
+pub fn is_glacier(tree: &dyn SourceTree) -> bool {
+    tree.files().iter().any(|f| {
+        let path = f.path.trim_start_matches('/').to_ascii_lowercase();
+        path.split_once('/').is_some_and(|(top, name)| {
+            top == "runtime"
+                && !name.contains('/')
+                && (name == "packagedefinition.txt" || name.ends_with(".rpkg"))
+        })
+    })
+}
+
 /// `Some(no_ampr)` when the title does not import libSceAmpr: nothing but `ampr_emu` reads
 /// asset packs. Otherwise whether the `libSceAmpr.sprx` the game ships serves them — an
 /// older `ampr_emu` (0.3) would find every packed file missing. The module is recognised by
 /// its own strings (see [`runtime_support`]).
 pub fn readiness(tree: &mut dyn SourceTree) -> Option<Readiness> {
+    if is_glacier(tree) {
+        return Some(Readiness {
+            runtime_version: None,
+            refusal: Some(
+                "IOI Glacier engine (.rpkg packages in runtime/): it opens them straight from \
+                 disk, so it cannot run from LZ4 packs; keep it unpacked or compress it into a \
+                 .ffpfsc instead"
+                    .into(),
+            ),
+            kind: "no_ampr",
+        });
+    }
     if !crate::source::imports_ampr(tree, "eboot.bin") {
         return Some(Readiness {
             runtime_version: None,
@@ -407,6 +433,76 @@ pub fn prepare<'a>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Files the PS5 or the game reads outside the AMPR emulator stay on disk: Northlight's
+    /// pack tables, Ghost of Yotei's boot files and empty files.
+    #[test]
+    fn files_read_from_disk_stay_loose() {
+        let root = std::env::temp_dir().join(format!(
+            "ampr-keep-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let src = root.join("game");
+        for (p, d) in [
+            ("eboot.bin", vec![1u8; 100]),
+            ("data/a.bin", vec![b'a'; 70_000]),
+            ("data/ep01.rmdtoc", vec![b't'; 70_000]),
+            ("cache_ps5/playgo.pgm", vec![b'p'; 70_000]),
+            ("cache_ps5/pgc_1_dummy_file", vec![b'd'; 70_000]),
+            ("cache_ps5/other.xpps", vec![b'o'; 70_000]),
+            ("sce_sys/empty.txt", Vec::new()),
+        ] {
+            let f = src.join(p);
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(f, d).unwrap();
+        }
+        let mut tree = crate::source::FolderSource::open(&src).unwrap();
+        let config = super::super::default_profile(9, 16);
+        let (overlay, out) = prepare(
+            &mut tree,
+            &config,
+            &root.join("spool"),
+            7,
+            &mut Control::default(),
+        )
+        .unwrap();
+        let names: BTreeSet<String> = overlay.files().iter().map(|f| f.path.clone()).collect();
+        for kept in [
+            "data/ep01.rmdtoc",
+            "cache_ps5/playgo.pgm",
+            "cache_ps5/pgc_1_dummy_file",
+            "sce_sys/empty.txt",
+        ] {
+            assert!(names.contains(kept), "{kept} stays on disk");
+        }
+        for packed in ["data/a.bin", "cache_ps5/other.xpps"] {
+            assert!(!names.contains(packed), "{packed} is packed");
+            assert!(out.packed.iter().any(|p| p == packed));
+        }
+        drop(overlay);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A Glacier game (.rpkg packages in runtime/) is never offered LZ4.
+    #[test]
+    fn a_glacier_game_cannot_be_packed() {
+        let root = std::env::temp_dir().join(format!("ampr-glacier-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("Runtime")).unwrap();
+        std::fs::write(root.join("eboot.bin"), b"libSceAmpr").unwrap();
+        std::fs::write(root.join("Runtime/chunk0.rpkg"), b"r").unwrap();
+        let mut tree = crate::source::FolderSource::open(&root).unwrap();
+        assert!(is_glacier(&tree));
+        let r = readiness(&mut tree).unwrap();
+        assert_eq!(r.kind, "no_ampr");
+        assert!(r.refusal.unwrap().contains("Glacier"));
+        std::fs::remove_file(root.join("Runtime/chunk0.rpkg")).unwrap();
+        let tree = crate::source::FolderSource::open(&root).unwrap();
+        assert!(!is_glacier(&tree));
+        let _ = std::fs::remove_dir_all(&root);
+    }
 
     /// The image holds the loose files and the pack set, not the packed originals; a folder
     /// packing emptied stays (only the innermost is named), and the folder's own empty folders

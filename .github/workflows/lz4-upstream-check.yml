@@ -1,0 +1,69 @@
+# Daily check of the LZ4 Compression project (theghostonline/PS5-LZ4-Compression, on
+# theghostonline.dev since it left GitHub on 2026-10-17), whose packing rules and game fixes
+# this fork's LZ4 converter follows. It builds nothing and changes no code: when the project
+# has new commits or releases, it opens an issue here listing them, so they can be reviewed and
+# ported. The newest commit seen is kept in the issues' titles.
+name: LZ4 upstream check
+
+on:
+  schedule:
+    - cron: '23 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency: lz4-upstream-check
+
+jobs:
+  check:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: New commits and releases on theghostonline.dev
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          API: https://theghostonline.dev/api/v1/repos/theghostonline/PS5-LZ4-Compression
+          WEB: https://theghostonline.dev/theghostonline/PS5-LZ4-Compression
+          LABEL: lz4-upstream
+        run: |
+          set -euo pipefail
+          commits=$(curl -fsS -m 30 "$API/commits?limit=30&stat=false&verification=false&files=false")
+          releases=$(curl -fsS -m 30 "$API/releases?limit=5" || echo '[]')
+          head=$(jq -r '.[0].sha' <<<"$commits")
+          short=${head:0:10}
+          echo "newest commit on the project: $short"
+
+          # The newest commit the last check reported, from the newest issue's title.
+          gh label create "$LABEL" --color 1d76db \
+            --description "Changes in the LZ4 Compression project to review" 2>/dev/null || true
+          last=$(gh issue list --label "$LABEL" --state all --limit 1 --json title \
+            --jq '.[0].title // ""' | grep -oE '[0-9a-f]{10}$' || true)
+          if [ "$last" = "$short" ]; then
+            echo "nothing new since $last" | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          {
+            echo "The LZ4 Compression project has changes since the last check${last:+ (\`$last\`)}."
+            echo "Review them and port what matters to the LZ4 converter"
+            echo "(\`engine/crates/ps5upload-fpkg/src/ampr_pack\`, \`lz4_api.rs\`, \`lz4_compat.rs\`)."
+            echo
+            echo "## Commits"
+            jq -r --arg last "$last" --arg web "$WEB" '
+              (if $last == "" then . else
+                (map(.sha[0:10]) | index($last)) as $i | if $i == null then . else .[0:$i] end
+              end)[]
+              | "- [`\(.sha[0:10])`](\($web)/commit/\(.sha)) \(.commit.author.date[0:10]) \(.commit.message | split("\n")[0])"
+            ' <<<"$commits"
+            echo
+            echo "## Latest releases"
+            jq -r '.[] | "- [\(.tag_name)](\(.html_url)) \(.published_at[0:10]) \(.name // "")"' <<<"$releases"
+            echo
+            echo "Project: $WEB"
+          } > body.md
+          cat body.md >> "$GITHUB_STEP_SUMMARY"
+
+          gh issue create --label "$LABEL" \
+            --title "LZ4 Compression changes up to $short" --body-file body.md
