@@ -706,3 +706,23 @@ fn a_remote_path_goes_to_the_registered_opener() {
     let tree = source::open(Path::new(&url)).unwrap();
     assert_eq!(tree.files().len(), FIXTURE_FILES.len());
 }
+
+/// A quick look at an image reads the root's files and the named top-level directories only.
+#[test]
+fn a_top_level_look_lists_the_root_and_the_named_folders() {
+    use ps5upload_fpkg::source::SourceTree;
+    let tree = ps5upload_fpkg::exfat::ExFatSource::open_top(&fixture(), &["SCE_SYS"]).unwrap();
+    let walked: Vec<&str> = tree.files().iter().map(|f| f.path.as_str()).collect();
+    // sce_sys/about/ is a folder inside a named one: not walked; data/ is not named.
+    assert_eq!(
+        walked,
+        [
+            "eboot.bin",
+            "sce_sys/icon0.dds",
+            "sce_sys/icon0.png",
+            "sce_sys/param.json"
+        ]
+    );
+    let mut tree = tree;
+    assert_eq!(tree.read("sce_sys/icon0.png").unwrap().len(), 74);
+}

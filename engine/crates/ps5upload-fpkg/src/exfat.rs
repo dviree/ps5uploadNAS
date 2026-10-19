@@ -161,6 +161,48 @@ impl ExFat {
         Ok((files, empty))
     }
 
+    /// The files directly in the root and directly in the top-level directories named in
+    /// `dirs` (any case), without walking the rest of the volume: enough to tell what a game is
+    /// (its eboot.bin, its fakelib/, its runtime/) in a few reads, where a full walk of a big
+    /// game with tens of thousands of files reads every directory. Sorted by path.
+    pub fn walk_top(&mut self, dirs: &[&str]) -> Result<Vec<ExFatFile>> {
+        let root = self.root_cluster;
+        let bytes = self.chain_stream(root)?;
+        let heap = u64::from(self.geom.cluster_count) * self.geom.cluster_size;
+        let mut files = Vec::new();
+        let mut wanted = Vec::new();
+        for e in parse_dir(&bytes, "")? {
+            if e.is_dir {
+                if dirs.iter().any(|d| d.eq_ignore_ascii_case(&e.name)) {
+                    wanted.push(e);
+                }
+            } else if e.size <= heap {
+                files.push(ExFatFile {
+                    path: e.name,
+                    size: e.size,
+                    first_cluster: e.first_cluster,
+                    no_fat_chain: e.no_fat_chain,
+                });
+            }
+        }
+        for d in wanted {
+            let bytes = self.read_dir_stream(&d, &d.name)?;
+            let prefix = format!("{}/", d.name);
+            for e in parse_dir(&bytes, &prefix)? {
+                if !e.is_dir && e.size <= heap {
+                    files.push(ExFatFile {
+                        path: format!("{prefix}{}", e.name),
+                        size: e.size,
+                        first_cluster: e.first_cluster,
+                        no_fat_chain: e.no_fat_chain,
+                    });
+                }
+            }
+        }
+        files.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(files)
+    }
+
     /// Up to `len` bytes at `offset` of a walked file.
     pub fn read_file(&mut self, f: &ExFatFile, offset: u64, len: usize) -> Result<Vec<u8>> {
         if offset >= f.size {
@@ -507,6 +549,28 @@ impl ExFatSource {
             files,
             inner,
             empty_dirs,
+        })
+    }
+
+    /// Only the root's files and those directly in the top-level `dirs` (see
+    /// [`ExFat::walk_top`]): a quick look at a game, not a tree to build from.
+    pub fn open_top(path: &Path, dirs: &[&str]) -> Result<Self> {
+        let mut volume = ExFat::open(path)
+            .map_err(|e| crate::Error::Format(format!("{}: {e}", path.display())))?;
+        let inner = volume.walk_top(dirs)?;
+        let files = inner
+            .iter()
+            .map(|f| SourceFile {
+                path: f.path.clone(),
+                size: f.size,
+            })
+            .collect();
+        Ok(Self {
+            label: format!("exfat {} (top level)", path.display()),
+            volume,
+            files,
+            inner,
+            empty_dirs: Vec::new(),
         })
     }
 
