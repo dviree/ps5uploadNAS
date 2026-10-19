@@ -88,8 +88,20 @@ export async function probeHelper(): Promise<boolean> {
   }
 }
 
-/** POST `body` as JSON to `route`; the Response when it is 2xx, else the ApiError. */
-async function post(route: string, body?: object, signal?: AbortSignal, keepalive?: boolean): Promise<Response> {
+/** The ApiError for a reply's status and its {"error":..} body (`http_<status>` without one). */
+function errorOf(status: number, json: unknown): ApiError {
+  const code =
+    json && typeof (json as { error?: unknown }).error === "string" ? (json as { error: string }).error : `http_${status}`;
+  return new ApiError(status, code);
+}
+
+function tokenExpired(): ApiError {
+  for (const fn of Array.from(expiredListeners)) fn();
+  return new ApiError(401, "token");
+}
+
+/** POST `body` (JSON, or raw bytes for a streamed route) to `route`; the Response when it is 2xx, else the ApiError. */
+async function post(route: string, body?: object, signal?: AbortSignal, keepalive?: boolean, raw?: Blob): Promise<Response> {
   const tok = await token();
   let res: Response;
   try {
@@ -97,26 +109,16 @@ async function post(route: string, body?: object, signal?: AbortSignal, keepaliv
       method: "POST",
       credentials: "same-origin",
       cache: "no-store",
-      headers: { "Content-Type": "application/json", [TOKEN_HEADER]: tok },
-      body: JSON.stringify(body ?? {}),
+      headers: { "Content-Type": raw ? "application/octet-stream" : "application/json", [TOKEN_HEADER]: tok },
+      body: raw ?? JSON.stringify(body ?? {}),
       signal,
       ...(keepalive ? { keepalive: true } : {}),
     });
   } catch {
     throw new ApiError(0, "offline");
   }
-  if (res.status === 401) {
-    for (const fn of Array.from(expiredListeners)) fn();
-    throw new ApiError(401, "token");
-  }
-  if (!res.ok) {
-    const json: unknown = await res.json().catch(() => null);
-    const code =
-      json && typeof (json as { error?: unknown }).error === "string"
-        ? (json as { error: string }).error
-        : `http_${res.status}`;
-    throw new ApiError(res.status, code);
-  }
+  if (res.status === 401) throw tokenExpired();
+  if (!res.ok) throw errorOf(res.status, await res.json().catch(() => null));
   return res;
 }
 
@@ -139,4 +141,58 @@ export async function callKeepalive(route: string, body?: object): Promise<void>
 export async function callBlob(route: string, body?: object, signal?: AbortSignal): Promise<Blob> {
   const res = await post(route, body, signal);
   return res.blob();
+}
+
+/** POST raw bytes to a streamed route (/api/fs/save-text) and return the parsed JSON reply. */
+export async function callRaw<T>(route: string, body: Blob): Promise<T> {
+  const res = await post(route, undefined, undefined, false, body);
+  return (await res.json().catch(() => null)) as T;
+}
+
+/**
+ * POST `body` with XMLHttpRequest (fetch reports no upload progress): `onProgress(sent, total)` as the
+ * bytes leave, `signal` aborts it (ApiError 0 "aborted"). The parsed JSON reply.
+ */
+export async function sendWithProgress<T>(
+  route: string,
+  body: Blob,
+  onProgress?: (sent: number, total: number) => void,
+  signal?: AbortSignal,
+): Promise<T> {
+  const tok = await token();
+  return new Promise<T>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    const onAbort = () => xhr.abort();
+    const done = () => signal?.removeEventListener("abort", onAbort);
+    xhr.open("POST", route);
+    xhr.setRequestHeader(TOKEN_HEADER, tok);
+    xhr.setRequestHeader("Content-Type", "application/octet-stream");
+    xhr.upload.onprogress = (e) => onProgress?.(e.loaded, e.lengthComputable ? e.total : body.size);
+    xhr.onload = () => {
+      done();
+      let json: unknown;
+      try {
+        json = JSON.parse(xhr.responseText);
+      } catch {
+        json = null;
+      }
+      if (xhr.status === 401) reject(tokenExpired());
+      else if (xhr.status < 200 || xhr.status >= 300) reject(errorOf(xhr.status, json));
+      else resolve(json as T);
+    };
+    xhr.onerror = () => {
+      done();
+      reject(new ApiError(0, "offline"));
+    };
+    xhr.onabort = () => {
+      done();
+      reject(new ApiError(0, "aborted"));
+    };
+    if (signal?.aborted) {
+      reject(new ApiError(0, "aborted"));
+      return;
+    }
+    signal?.addEventListener("abort", onAbort);
+    xhr.send(body);
+  });
 }

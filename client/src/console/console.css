@@ -972,6 +972,81 @@ button {
 .cw-cheats-empty.is-error .cw-cheats-empty-title {
   color: var(--color-bad);
 }
+.cw-cheats-game-buttons {
+  display: flex;
+  flex: none;
+  margin-left: auto;
+}
+.cw-cheats-empty-buttons {
+  display: flex;
+}
+.cw-cheats-empty-buttons .cw-button + .cw-button {
+  margin-left: 0.7rem;
+}
+
+/* ---- Cheats: Find cheats (a modal list of the repos' files for the running game) ---- */
+.cw-finder {
+  width: 52rem;
+}
+.cw-dialog p.cw-finder-hint {
+  margin: 0 0 0.6rem;
+  font-size: 0.9rem;
+}
+.cw-finder-version {
+  margin-right: 1.2rem;
+  color: var(--color-text);
+  font-weight: 600;
+}
+.cw-finder-list {
+  max-height: 50vh;
+  margin: 0 0 0.8rem;
+  padding: 0.2rem;
+  overflow-y: auto;
+  list-style: none;
+}
+.cw-finder-item + .cw-finder-item {
+  margin-top: 0.4rem;
+}
+.cw-finder-entry {
+  width: 100%;
+  min-width: 0;
+  padding: 0.45rem 0.9rem;
+  text-align: left;
+  border-radius: var(--radius-card);
+  background: var(--color-surface);
+  box-shadow: inset 0 0 0 1px var(--color-border);
+}
+.cw-finder-entry.is-match {
+  box-shadow: inset 0 0 0 1px var(--color-good);
+}
+.cw-finder-entry > svg {
+  flex: none;
+  margin-right: 0.8rem;
+}
+.cw-finder-entry[aria-disabled="true"] {
+  cursor: progress;
+}
+.cw-finder-entry[aria-disabled="true"]:not([aria-busy="true"]) {
+  opacity: 0.6;
+}
+.cw-finder-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+.cw-finder-name {
+  font-weight: 600;
+}
+.cw-finder-meta {
+  overflow: hidden;
+  font-size: 0.8rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cw-finder-entry > .cw-tag {
+  flex: none;
+}
 
 /* ---- rail: Help at the bottom ---- */
 .cw-rail-help {
@@ -1532,4 +1607,68 @@ button {
   background: var(--color-canvas);
   color: var(--color-muted);
   font-size: 1.4rem;
+}
+
+/* A phone over the LAN (PS5Upload Minion opened from another device): nothing pushes the page sideways.
+ * The folder's tools wrap under the path, the rail and rows tighten, long names and the status chip
+ * cut with an ellipsis, and dialogs (the viewer and its editor too) fit the screen. */
+@media (max-width: 40rem) {
+  .cw-brand {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .cw-chip {
+    min-width: 0;
+    max-width: 40vw;
+    margin-left: 0.5rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .cw-rail {
+    width: 4.6rem;
+    padding: 0.5rem 0.25rem;
+  }
+  .cw-rail-item {
+    font-size: 0.72rem;
+  }
+  .cw-content {
+    padding: 0.6rem 0.6rem 1rem;
+  }
+  .cw-toolbar-one {
+    flex-wrap: wrap;
+  }
+  .cw-toolbar-one .cw-pathbar {
+    flex: 1 1 100%;
+    min-width: 0;
+    margin: 0 0 0.3rem;
+  }
+  .cw-tools {
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+  }
+  .cw-crumb-button {
+    max-width: 40vw;
+  }
+  .cw-file-main {
+    padding: 0.5rem 0.6rem;
+  }
+  .cw-file-icon {
+    margin-right: 0.5rem;
+  }
+  .cw-file-meta {
+    min-width: 0;
+    margin-left: 0.5rem;
+  }
+  .cw-dialog {
+    max-width: calc(100vw - 1rem);
+    max-height: calc(100% - 1rem);
+    overflow-y: auto;
+  }
+  .cw-viewer {
+    width: calc(100vw - 1rem);
+    height: calc(100% - 1rem);
+    padding: 0.8rem;
+  }
 }

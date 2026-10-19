@@ -4,6 +4,132 @@ What's new in ps5upload, written for humans.
 
 ---
 
+## 7.1.8
+
+- **Convert reads more Kraken-compressed PS5 packages (#477).** Some packages compressed at the
+  highest Kraken level stopped Convert with "kraken: chunk too short" although they were fine:
+  a small piece at the start of a block was refused. They convert now.
+
+---
+
+## 7.1.7
+
+- **Organize packages works on your servers too.** Folders on a saved SMB, FTP, SFTP or WebDAV
+  server can now be organized like folders on this computer: the same preview, the same
+  Platform › Game ID - Title layout, renames only, nothing overwritten, and every run can be
+  undone. A dropped connection stops the run cleanly and it can still be undone once the server is
+  back. Undo refuses if the saved connection now points at a different server. On WebDAV, folders
+  a run empties are left in place.
+- **WebDAV servers that redirect folder addresses work again.** Opening a folder on such a server
+  (Apache, for example) failed with a sign-in error.
+- **Clearer connection errors.** A very short saved password no longer garbles error messages.
+
+---
+
+## 7.1.6
+
+- **Uploading many files from Files is much faster.** Picking several files now sends them to the
+  PS5 together instead of one at a time: 240 small files went from over 2 minutes to about 5
+  seconds, and 5,000 small files from 44 minutes to under 30 seconds. A pick shows as one task
+  with one Cancel, and a stopped upload resumes where it left off.
+- **Choose what happens when a name is taken.** Instead of one all-or-nothing Overwrite question,
+  each clash offers Skip, Keep both or Replace (Merge for a folder onto a folder), with "do the
+  same for the rest". Keep both is the default, so Enter never overwrites, and names that differ
+  only in upper and lower case count as the same name.
+- **Uninstall tells you whether the game is really gone (#476).** Uninstall used to say
+  "Unregistered" whatever the console answered, and then quietly showed the game again if the
+  console had kept it. The helper now checks that the game has actually left the console. If the
+  PS5 refused, you see an error with its code, and a game that is still installed stays in the
+  list with a note instead of disappearing and coming back.
+- **Organize packages finds packages that sit loose in a collection folder.** A .pkg placed
+  directly in a collection folder (not in a subfolder) was skipped, and with only loose packages
+  Organize said no folder held any. They are now organized into the same Platform › Game ID -
+  Title layout inside that folder.
+- **The server folder browser opens in front.** In Collection → Folders, "Add a folder on …"
+  opened its folder browser behind the dialog.
+
+---
+
+## 7.1.5
+
+- **Uploading many small files no longer gets stuck (#475).** Picking hundreds of files in Files
+  (for example a Switch firmware folder) stopped after about 30 files with "the console is busy"
+  and never recovered. The console now lets go of each finished upload, so every file goes
+  through: a 240-file, 347 MB folder uploaded in about 2 minutes 20 seconds in testing.
+- **PS5Upload Files is now PS5Upload Minion.** Same page and tile, new name; the tile on the
+  home screen picks up the new name the next time the helper starts.
+- **Payload catalog fixes.** websrv's newest release showed an error instead of the release,
+  because its release notes are empty. A payload whose GitHub page has been taken down (such as
+  Ghostpad) now says so plainly and keeps offering the version saved in the app. How long ago a
+  release was saved reads like "saved 3 days ago" instead of a count of seconds.
+
+---
+
+## 7.1.4
+
+- **Cheats no longer crash the console.** Switching a cheat on or off could crash the game or the
+  whole console on newer firmware (seen with Marvel's Wolverine). Cheats are now written straight
+  into the game's memory, the way that works on these firmwares, instead of changing the game's
+  memory protection. A cheat now goes on completely or not at all: if any part can't be written,
+  the parts already written are put back. Cheats can only change the game itself, never the
+  system, and turning one cheat off no longer breaks another that shares code with it. Cheat
+  files too large to read are refused instead of being applied in part.
+- **Find and download cheats on the console.** In PS5Upload Files, Cheats has **Find cheats**:
+  it lists the cheat files for the running game from the same collections the PC app uses,
+  marks the one for your game's version, and downloads it straight to the console, where its
+  cheats show up at once. If the PS5 can't reach GitHub (for example when DNS blocking is on),
+  the page says so.
+- **Save backups are named after the game too.** A backup saved on your computer is now named
+  like `PPSA01234-Game Name-User.zip`.
+
+---
+
+## 7.1.3
+
+- **Payloads: one place for what's on your PS5.** The Payloads screen now has three tabs:
+  Catalog, Send and **On your PS5**. On your PS5 shows a card for each payload that is running
+  or installed on the console, with its status, Open (for payloads with a web page), Update when a
+  newer release is out, and Stop. **Manage** opens that payload's tools in the card:
+  ShadowMount+ mounts, the nanoDNS editor, Payload Manager and HearBridge. Old links to the
+  separate tabs still work.
+- **HearBridge in the catalog and on your PS5.** HearBridge plays the PS5's audio on ordinary
+  Bluetooth headphones or speakers. Its card shows the connected headset, battery, link quality,
+  latency, volume and the game's profile; Manage sets volume and mute, reconnects, switches
+  between saved headsets, scans for new ones, turns night mode on or off, sets latency, and stops
+  it. Pairing, EQ and everything else open in HearBridge's own page.
+- **Processes & ports.** The Processes screen now has a Ports tab next to it, showing which ports
+  are open on the console and what usually listens there (HearBridge and PS5Upload Files
+  included).
+- **PS5Upload Files: permissions, new files and text editing.** Info → Permissions sets read,
+  write and execute for owner, group and others (or the number, like 755), for a folder's
+  contents too; drives that don't keep permissions (exFAT, FAT) say so. Create a new file, and
+  edit text files up to 1 MiB with the on-screen keyboard. Saving never leaves a half-written
+  file, keeps the file's permissions and line endings, and warns when the file changed since
+  you opened it.
+- **PS5Upload Files: upload and download from your phone or computer.** When you open the page
+  from another device (Settings → Allow other devices), Files has **Upload here** to send files
+  and folders to the console and **Download** for a file, or a whole folder as one .tar file.
+  The usual Skip / Replace / Keep both choices apply, a cancelled upload leaves nothing behind,
+  and a stalled connection is let go so the page stays responsive. On a home network this
+  moved about 75 MB/s up and 110 MB/s down.
+
+---
+
+## 7.1.2
+
+- **Save data on a shared PS5 shows whose save is whose.** Each save is labelled with its
+  owner's name instead of a number, and the screen starts on the user who is signed in at the
+  console; "Whose saves" switches to another user or to everyone. Back up all and Restore all
+  act on the saves shown. A backup saved on your computer is named after the game and the user
+  (`PPSA01234-Alice.zip`).
+- **USB backups are kept per user.** Backups to a USB drive on the console now go into a folder
+  per user (`<game>/<name>-<user id>/<date>/`). Before, every user's backups of a game shared one
+  folder, so on a shared console "Restore all from USB" could put one user's latest backup into
+  another user's save. Backups made before this update are still used when only one user on the
+  console has a save of that game.
+
+---
+
 ## 7.1.1
 
 - **The app scrolls again on macOS Big Sur.** On Big Sur's older built-in web engine the app

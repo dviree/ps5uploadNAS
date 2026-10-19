@@ -1160,8 +1160,9 @@ Yes. Save the server under **Connections** (SMB, FTP, FTPS or SFTP), then in **C
 Folders** press **Add a folder on <server>** and pick the folder. It is scanned where it is:
 packages, game folders and covers are read over the network, and nothing is copied to this
 computer. Its games install straight from the server, and **Convert…** reads them in place.
-Move to Trash, Organize, junk clean-up and Copy install link work on this computer's folders
-only. A mounted share also still works as an ordinary folder.
+**Organize packages** works there too, renaming on the server itself; Move to Trash, junk
+clean-up and Copy install link work on this computer's folders only. A mounted share also still
+works as an ordinary folder.
 
 **Q: Does it keep the computer awake or rescan all the time?**
 No. **Look for changes automatically** (in Folders) rescans only while the app is open, never
@@ -1198,6 +1199,13 @@ a second copy of the same release is filed beside it and marked `DUPLICATE`, spl
 (`_0`, `_1`, …) move together, and a package whose kind had to be inferred is marked `_UNSURE`.
 You see every move first and can untick any. Nothing is overwritten or deleted and files are
 only renamed, never copied. Every run can be undone from **Earlier runs** in the same window.
+A folder on a saved server (SMB, FTP, SFTP, WebDAV) is organized on the server: each move is a
+rename there, a package never moves to another server or folder, and a connection that drops
+stops the run where it is, with Undo still putting back whatever moved. On WebDAV a folder the
+run emptied is left in place (empty), and the result lists it: a WebDAV delete of a folder takes
+everything in it, so ps5upload never deletes one there. FTP has no rename that
+refuses a taken name, so there the name is checked first; a file another program writes to that
+exact name in the instant between the check and the rename could be replaced.
 
 **Q: What are the junk files, and is cleaning them safe?**
 A Mac writes a hidden `._` file beside every file it copies to an exFAT drive (each one takes a
@@ -1609,21 +1617,21 @@ For save data specifically, use the Save data screen.
 
 ---
 
-## PS5Upload Files (on the console)
+## PS5Upload Minion (on the console)
 
-**Q: What is PS5Upload Files?**
+**Q: What is PS5Upload Minion?**
 A file manager that runs on the PS5 itself, in the PS5's web browser, for when your PC isn't
 nearby. It has four sections: **Home** (the running game, running tasks and your drives),
 **Files** (browse, copy, move, rename, delete, view, verify, search and more), **Cheats** for the
 running game, and **Settings**. The PS5Upload helper serves it on port 9180.
 
 **Q: How do I open it?**
-Pick the **PS5Upload Files** tile on the PS5 home screen. You can also open
+Pick the **PS5Upload Minion** tile on the PS5 home screen. You can also open
 `http://127.0.0.1:9180/` in the PS5's web browser. Either way the PS5Upload helper must be
 loaded (send it from the app, or from your payload loader), and it must be the 7.1.0 helper or
 newer.
 
-**Q: The tile shows "PS5Upload Files isn't running".**
+**Q: The tile shows "PS5Upload Minion isn't running".**
 The helper isn't loaded, for example after a reboot or rest mode. Load the PS5Upload helper from
 the app on your PC or from your payload loader; the page notices and opens by itself (or press
 **Try again**). It is the browser's saved copy of the page saying the helper didn't answer;
@@ -1646,7 +1654,7 @@ disconnects the other devices; the console keeps access. While it is on, text bo
 console show a QR code ("Continue on your phone") so you can type on your phone instead.
 
 **Q: How do I hide or bring back the tile?**
-In **Settings**, switch off **Show PS5Upload Files on the home screen** to remove the tile, and
+In **Settings**, switch off **Show PS5Upload Minion on the home screen** to remove the tile, and
 switch it on again to bring it back. With the tile hidden you can still open
 `http://127.0.0.1:9180/` in the PS5's browser. The tile (title id `PSUP00001`) is left out of
 the app's game list; an older engine or Docker image may still list it.

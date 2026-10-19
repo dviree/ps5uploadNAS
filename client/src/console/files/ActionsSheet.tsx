@@ -1,5 +1,8 @@
 import {
   Binary,
+  Download,
+  FilePen,
+  FilePlus,
   ClipboardCopy,
   FileArchive,
   FileCheck,
@@ -32,6 +35,9 @@ export type SheetAction =
   | "rename"
   | "bulkrename"
   | "mkdir"
+  | "newfile"
+  | "edit"
+  | "download"
   | "info"
   | "pin"
   | "unpin"
@@ -52,6 +58,9 @@ const ITEMS: Record<SheetAction, { icon: LucideIcon; key: string }> = {
   rename: { icon: PencilLine, key: "cw_files_rename" },
   bulkrename: { icon: Replace, key: "cw_files_bulk_rename" },
   mkdir: { icon: FolderPlus, key: "cw_files_new_folder" },
+  newfile: { icon: FilePlus, key: "cw_files_new_file" },
+  edit: { icon: FilePen, key: "cw_files_edit_as_text" },
+  download: { icon: Download, key: "cw_files_download" },
   info: { icon: Info, key: "cw_files_info" },
   pin: { icon: Star, key: "cw_files_pin" },
   unpin: { icon: StarOff, key: "cw_files_unpin" },

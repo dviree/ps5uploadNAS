@@ -595,6 +595,27 @@ const CATALOGUE: &[CatalogueEntry] = &[
         homepage: "https://github.com/StonedModder/Ghostpad",
     },
     CatalogueEntry {
+        // X-F1REBALL-X/HearBridge-PS5 (GPL-3) — plays the console's audio on ordinary
+        // Bluetooth (A2DP) headphones or speakers through the PS5's own radio, no dongle.
+        // Releases ship one asset, `HearBridge-<version>.elf`, so the hint stops before the
+        // version. Its own web page (pairing, volume, latency, EQ) is on TCP 8090, or the next
+        // free port up to 8095; /data/hearbridge/ holds its state.
+        id: "hearbridge",
+        display_name: "HearBridge",
+        role: "Bluetooth headphones and speakers for PS5 audio",
+        description: "Sends the PS5's game and system audio to ordinary Bluetooth headphones or speakers (A2DP), using the console's own Bluetooth radio, so no dongle is needed. Pair, switch headsets, set volume, latency, EQ and night mode, and keep per-game profiles from its own web page (port 8090), which also adds a HearBridge tile to the home screen. Tested by its author on the original PS5 (CFI-10xx) and the Slim (CFI-2000).",
+        repo_host: "github.com",
+        repo_owner: "X-F1REBALL-X",
+        repo_name: "HearBridge-PS5",
+        asset_name_hint: "HearBridge-",
+        on_console_marker_path: Some("/data/hearbridge/hearbridge.log"),
+        process_name_hint: Some("hearbridge.elf"),
+        ports: &[8090],
+        autoload_priority: 5,
+        autoload_delay_ms: 300,
+        homepage: "https://github.com/X-F1REBALL-X/HearBridge-PS5",
+    },
+    CatalogueEntry {
         // Pharaoh2k/ps5debug-NG — a debugger for jailbroken PS5s (GPL-3). The
         // payload is an installer: it loads the debugger into the console's own
         // SceShellCore process and exits, so there is no process of its own to
@@ -995,6 +1016,13 @@ pub async fn payloads_remove_custom_repo(app: AppHandle, id: String) -> Result<b
 
 /// Subset of GitHub's release JSON we care about. Trailing fields are
 /// dropped silently by serde-derive's default.
+/// A text field GitHub sometimes sends as `null` instead of leaving it out (a release with no
+/// notes has `"body": null`). `#[serde(default)]` alone only covers a missing field, so a null
+/// failed the whole release list ("invalid type: null, expected a string").
+fn null_as_empty<'de, D: serde::Deserializer<'de>>(d: D) -> Result<String, D::Error> {
+    Ok(Option::<String>::deserialize(d)?.unwrap_or_default())
+}
+
 #[derive(Deserialize, Serialize, Clone)]
 struct GithubAsset {
     name: String,
@@ -1005,15 +1033,15 @@ struct GithubAsset {
 #[derive(Deserialize, Serialize, Clone)]
 struct GithubRelease {
     tag_name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_empty")]
     name: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_empty")]
     body: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_empty")]
     published_at: String,
     #[serde(default)]
     assets: Vec<GithubAsset>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_empty")]
     html_url: String,
     /// GitHub/Gitea "this is a pre-release" flag. Surfaced so the UI can
     /// warn that a version may be unstable (payload dev moves fast).
@@ -1849,6 +1877,18 @@ use std::io::Write;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_release_with_null_notes_still_parses() {
+        // websrv v0.35 shipped with `"body": null`, which failed the whole list.
+        let json = r#"[{"tag_name":"v0.35","name":null,"body":null,"published_at":null,
+            "html_url":null,"prerelease":false,"assets":[{"name":"websrv-ps5.elf",
+            "browser_download_url":"https://example/websrv-ps5.elf","size":1,"label":null}]}]"#;
+        let r: Vec<GithubRelease> = serde_json::from_str(json).unwrap();
+        assert_eq!(r[0].tag_name, "v0.35");
+        assert_eq!(r[0].body, "");
+        assert_eq!(r[0].assets[0].name, "websrv-ps5.elf");
+    }
 
     #[test]
     fn catalogue_ids_unique() {
