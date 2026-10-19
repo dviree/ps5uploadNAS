@@ -63,7 +63,19 @@ fn stamp(path: &Path) -> (u64, i64) {
 
 /// One game's status, read through its tree.
 pub(crate) fn status_of(path: &str) -> Lz4Status {
-    let mut tree = match ps5upload_fpkg::source::open(&resolve_engine_path(path)) {
+    let resolved = resolve_engine_path(path);
+    // An .exfat image is only looked at where the check reads (its root, fakelib/, runtime/):
+    // walking every folder of a big game image on a NAS disk can take minutes.
+    let is_exfat = resolved
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("exfat"));
+    let opened = if is_exfat {
+        ps5upload_fpkg::exfat::ExFatSource::open_top(&resolved, &["fakelib", "runtime"])
+            .map(|t| Box::new(t) as Box<dyn ps5upload_fpkg::source::SourceTree>)
+    } else {
+        ps5upload_fpkg::source::open(&resolved)
+    };
+    let mut tree = match opened {
         Ok(t) => t,
         Err(e) => {
             return Lz4Status {
