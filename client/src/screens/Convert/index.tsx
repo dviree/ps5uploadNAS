@@ -6,9 +6,12 @@ import { useSearchParams } from "react-router";
 import { PackagePlus } from "lucide-react";
 
 import { PageHeader, Tabs } from "../../components";
+import { DEFAULT_SEND_SUBPATH } from "../../lib/collectionSend";
+import { useConnectionStore } from "../../state/connection";
 import { useConvertPrefs } from "../../state/convertPrefs";
 import { useFpkgConversion } from "../../state/fpkgConversion";
 import { useTr } from "../../state/lang";
+import { useUploadStore } from "../../state/upload";
 import FpkgConvertScreen from "../FpkgConvert";
 import { Compatibility } from "./Compatibility";
 import { MyGames } from "./MyGames";
@@ -32,11 +35,30 @@ export default function ConvertScreen() {
   /** Pack one game into an LZ4 game folder (`<name>-lz4`) in the LZ4 folder, as ps5-lz4
    *  does, adding ampr_emu 0.4.2.1 when the game's own cannot read the packs; the Convert tab
    *  shows it running. The original is only read. */
-  const convertWithLz4 = (path: string) => {
+  const convertWithLz4 = (path: string, sendTitle?: string) => {
     const { lz4Dir, outputDir } = useConvertPrefs.getState();
+    // "& send to PS5": once built, the LZ4 game folder goes into the Upload queue for the
+    // connected PS5, into the folder ShadowMount+ scans on the drive Upload last used.
+    const c = useConnectionStore.getState();
+    const host = c.payloadStatus === "up" ? (c.host?.trim() ?? "") : "";
+    const send =
+      sendTitle !== undefined && host
+        ? {
+            title: sendTitle,
+            host,
+            volume: useUploadStore.getState().destinationVolume ?? "/data",
+            subpath: DEFAULT_SEND_SUBPATH,
+            register: true,
+          }
+        : undefined;
     void useFpkgConversion
       .getState()
-      .buildFolder(path, lz4Dir.trim() || outputDir.trim() || undefined, { installRuntime: true });
+      .buildFolder(
+        path,
+        lz4Dir.trim() || outputDir.trim() || undefined,
+        { installRuntime: true },
+        send,
+      );
     setTab("convert");
   };
   /** Compress one game into a .ffpfsc image in the output folder under Convert: an image is

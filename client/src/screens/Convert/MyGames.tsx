@@ -36,6 +36,7 @@ import {
   startCollectionScan,
   useCollectionStore,
 } from "../../state/collection";
+import { useConnectionStore } from "../../state/connection";
 import { useConvertPrefs } from "../../state/convertPrefs";
 import { useTr } from "../../state/lang";
 import {
@@ -100,7 +101,8 @@ export function MyGames({
   onConvert,
   onFfpfsc,
 }: {
-  onConvert: (path: string) => void;
+  /** Pack into an LZ4 game folder; with `sendTitle`, then send it to the connected PS5. */
+  onConvert: (path: string, sendTitle?: string) => void;
   /** Compress the game into a .ffpfsc instead (`isFolder`: a game folder, not an image). */
   onFfpfsc: (path: string, isFolder: boolean) => void;
 }) {
@@ -354,6 +356,7 @@ export function MyGames({
                   compat={compat?.games[r.game.game_id]}
                   ffpfsc={ffpfscFor(r.game)}
                   onConvert={() => onConvert(r.loc.absolute_path)}
+                  onConvertSend={() => onConvert(r.loc.absolute_path, r.game.title)}
                   onFfpfsc={() => onFfpfsc(r.loc.absolute_path, r.loc.type === "folder")}
                 />
               ))}
@@ -395,6 +398,7 @@ function GameRow({
   compat,
   ffpfsc,
   onConvert,
+  onConvertSend,
   onFfpfsc,
 }: {
   row: Row;
@@ -404,10 +408,12 @@ function GameRow({
   /** The game's row in the community's .ffpfsc list, in the sheet's column order. */
   ffpfsc: [string, string][] | null;
   onConvert: () => void;
+  onConvertSend: () => void;
   onFfpfsc: () => void;
 }) {
   const tr = useTr();
   const site = useLz4Compat((s) => s.data?.site);
+  const ps5 = useConnectionStore((c) => c.payloadStatus === "up" && !!c.host?.trim());
   const { game, loc } = row;
   return (
     <li
@@ -431,10 +437,24 @@ function GameRow({
       <div className="flex shrink-0 flex-col items-start gap-1">
         <StateBadge state={state} status={status} />
       </div>
-      <div className="flex shrink-0 gap-2">
+      <div className="flex shrink-0 flex-wrap gap-2">
         {canBeLz4(state) && (
           <Button size="sm" onClick={onConvert}>
             {tr("lz4mine.convert", undefined, "Convert to LZ4")}
+          </Button>
+        )}
+        {canBeLz4(state) && ps5 && (
+          <Button
+            size="sm"
+            variant="secondary"
+            onClick={onConvertSend}
+            title={tr(
+              "lz4mine.convert_send_hint",
+              undefined,
+              "Make the LZ4 game folder, then send it to the connected PS5 (into homebrew on the drive Upload last used) through the Upload queue.",
+            )}
+          >
+            {tr("lz4mine.convert_send", undefined, "Convert to LZ4 & send to PS5")}
           </Button>
         )}
         {/* An image or folder can always be compressed instead; an .ffpfs/.ffpfsc is one. */}
