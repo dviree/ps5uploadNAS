@@ -2393,7 +2393,8 @@ pub async fn fpkg_build(
 ) -> Result<JsonValue, String> {
     let base = engine::url();
     let url = format!("{base}/api/fpkg/build");
-    post_json(
+    // The engine reads the whole source before it answers with the job.
+    post_json_long(
         &url,
         &serde_json::json!({
             "source": source,
@@ -2491,7 +2492,8 @@ pub async fn ffpfsc_compress(
 ) -> Result<JsonValue, String> {
     let base = engine::url();
     let url = format!("{base}/api/ffpfsc/compress");
-    post_json(
+    // The engine reads the whole source before it answers with the job.
+    post_json_long(
         &url,
         &serde_json::json!({
             "source": source,
@@ -2518,7 +2520,8 @@ pub async fn exfat_build(
 ) -> Result<JsonValue, String> {
     let base = engine::url();
     let url = format!("{base}/api/exfat/build");
-    post_json(
+    // The engine reads the whole source before it answers with the job.
+    post_json_long(
         &url,
         &serde_json::json!({
             "source": source,
@@ -2544,7 +2547,8 @@ pub async fn folder_build(
 ) -> Result<JsonValue, String> {
     let base = engine::url();
     let url = format!("{base}/api/folder/build");
-    post_json(
+    // The engine reads the whole source before it answers with the job.
+    post_json_long(
         &url,
         &serde_json::json!({
             "source": source,
