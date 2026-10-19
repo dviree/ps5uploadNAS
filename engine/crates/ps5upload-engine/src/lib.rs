@@ -62,6 +62,7 @@ mod link;
 mod local_fs;
 mod log_dedup;
 mod lz4_api;
+mod ftp_send;
 mod lz4_compat;
 mod mgmt_route;
 mod migrate_6;
@@ -10548,6 +10549,7 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
         .route("/api/lz4/status", post(lz4_api::lz4_status_handler))
         .route("/api/lz4/ffpfsc", get(lz4_api::lz4_ffpfsc_handler))
         .route("/api/lz4/compat", get(lz4_compat::lz4_compat_handler))
+        .route("/api/ftp/send", post(ftp_send::ftp_send_handler))
         .route("/api/fpkg/build", post(fpkg_api::fpkg_build_handler))
         .route("/api/fpkg/delete", post(fpkg_api::fpkg_delete_handler))
         .route("/api/fpkg/estimate", post(fpkg_api::fpkg_estimate_handler))

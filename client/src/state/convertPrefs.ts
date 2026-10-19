@@ -17,6 +17,10 @@ const KEY_MAKE = "ps5upload.convert.make";
 const KEY_IMAGE_FORMAT = "ps5upload.convert.image_format";
 const KEY_IMAGE_COMPRESS = "ps5upload.convert.image_compress";
 const KEY_LZ4_DIR = "ps5upload.convert.lz4_dir";
+const KEY_FTP_ADDR = "ps5upload.convert.ftp_addr";
+const KEY_FTP_DEST = "ps5upload.convert.ftp_dest";
+/** Where games sent over FTP go on the PS5 when nothing is set: what ShadowMount+ scans. */
+export const DEFAULT_FTP_DEST = "/data/homebrew";
 /** Where a game converted to LZ4 goes when nothing is set: the LZ4 folder the Docker setup
  *  mounts at /lz4 (as ps5-lz4's output). The desktop app has no such folder, so its LZ4
  *  games go to the output folder like any other. */
@@ -40,6 +44,12 @@ interface ConvertPrefs {
    *  folder. */
   lz4Dir: string;
   setLz4Dir: (dir: string) => void;
+  /** The PS5's FTP server (`host:port`) for Send via FTP; empty: the connected console's
+   *  address on 2121. */
+  ftpAddr: string;
+  /** The folder on the PS5 games sent over FTP go into. */
+  ftpDest: string;
+  setFtp: (addr: string, dest: string) => void;
   compression: FpkgCompression;
   /** A game image's read-back check: KiB per read. */
   verifyChunkKib: number;
@@ -87,6 +97,13 @@ export const useConvertPrefs = create<ConvertPrefs>((set) => ({
   setLz4Dir: (dir) => {
     safeSetItem(KEY_LZ4_DIR, dir);
     set({ lz4Dir: dir });
+  },
+  ftpAddr: safeGetItem(KEY_FTP_ADDR) ?? "",
+  ftpDest: safeGetItem(KEY_FTP_DEST) ?? DEFAULT_FTP_DEST,
+  setFtp: (addr, dest) => {
+    safeSetItem(KEY_FTP_ADDR, addr);
+    safeSetItem(KEY_FTP_DEST, dest);
+    set({ ftpAddr: addr, ftpDest: dest });
   },
   compression: storedLevel(),
   verifyChunkKib: parseVerifyChunkKib(safeGetItem(KEY_VERIFY_CHUNK)),

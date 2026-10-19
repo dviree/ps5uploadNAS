@@ -38,6 +38,7 @@ import {
 } from "../../state/collection";
 import { useConnectionStore } from "../../state/connection";
 import { useConvertPrefs } from "../../state/convertPrefs";
+import { parseFtpAddr, sendViaFtp, useFtpSends, type FtpSend } from "../../state/ftpSend";
 import { useTr } from "../../state/lang";
 import {
   loadFfpfscSheet,
@@ -115,6 +116,10 @@ export function MyGames({
   const sheet = useFfpfscSheet((s) => s.sheet);
   const lz4Dir = useConvertPrefs((s) => s.lz4Dir);
   const setLz4Dir = useConvertPrefs((s) => s.setLz4Dir);
+  const ftpAddrPref = useConvertPrefs((s) => s.ftpAddr);
+  const ftpDest = useConvertPrefs((s) => s.ftpDest);
+  const setFtp = useConvertPrefs((s) => s.setFtp);
+  const connHost = useConnectionStore((c) => parseFtpAddr(c.host?.trim() ?? "")[0]);
   const [statuses, setStatuses] = useState<Record<string, Lz4Status>>(() =>
     Object.fromEntries(known),
   );
@@ -326,6 +331,31 @@ export function MyGames({
             onChange={(e) => setLz4Dir(e.target.value)}
             spellCheck={false}
           />
+          <div className="grid gap-2 sm:grid-cols-2">
+            <Input
+              label={tr("lz4mine.ftp_addr", undefined, "PS5 FTP (Send via FTP)")}
+              hint={tr(
+                "lz4mine.ftp_addr_hint",
+                undefined,
+                "The PS5's FTP server, like 192.168.1.20:2121 (etaHEN or ftpsrv). Empty: the connected PS5 on 2121.",
+              )}
+              placeholder={connHost ? `${connHost}:2121` : "192.168.1.20:2121"}
+              value={ftpAddrPref}
+              onChange={(e) => setFtp(e.target.value, ftpDest)}
+              spellCheck={false}
+            />
+            <Input
+              label={tr("lz4mine.ftp_dest", undefined, "Folder on the PS5")}
+              hint={tr(
+                "lz4mine.ftp_dest_hint",
+                undefined,
+                "Where games sent over FTP go: /data/homebrew, or homebrew on an extended drive (/mnt/ext0/homebrew, /mnt/usb0/homebrew).",
+              )}
+              value={ftpDest}
+              onChange={(e) => setFtp(ftpAddrPref, e.target.value)}
+              spellCheck={false}
+            />
+          </div>
 
           {shown.length === 0 ? (
             <EmptyState
@@ -415,6 +445,7 @@ function GameRow({
   const site = useLz4Compat((s) => s.data?.site);
   const ps5 = useConnectionStore((c) => c.payloadStatus === "up" && !!c.host?.trim());
   const { game, loc } = row;
+  const ftp = useFtpSends((s) => s[loc.absolute_path]);
   return (
     <li
       className="flex flex-wrap items-center gap-3 py-3"
@@ -433,6 +464,7 @@ function GameRow({
         </div>
         <CommunityLine compat={compat} />
         <FfpfscLine cells={ffpfsc} />
+        {ftp && <FtpLine send={ftp} />}
       </div>
       <div className="flex shrink-0 flex-col items-start gap-1">
         <StateBadge state={state} status={status} />
@@ -473,6 +505,19 @@ function GameRow({
               {tr("lz4mine.ffpfsc", undefined, "Convert to .ffpfsc")}
             </Button>
           )}
+        <Button
+          size="sm"
+          variant="ghost"
+          disabled={ftp?.status === "running"}
+          onClick={() => void sendViaFtp(loc.absolute_path)}
+          title={tr(
+            "lz4mine.ftp_send_hint",
+            undefined,
+            "Send this game to the PS5 through its FTP server (etaHEN or ftpsrv), into the folder set above, as ps5-lz4 does. Files already there with the same size are skipped.",
+          )}
+        >
+          {tr("lz4mine.ftp_send", undefined, "Send via FTP")}
+        </Button>
         {state === "packed" && (
           <Button
             size="sm"
@@ -541,6 +586,38 @@ function StateBadge({
         </span>
       );
   }
+}
+
+function FtpLine({ send }: { send: FtpSend }) {
+  const tr = useTr();
+  if (send.status === "failed") {
+    return (
+      <div className="text-xs text-[var(--color-bad)]">
+        {tr("lz4mine.ftp_failed", { error: send.error ?? "" }, "FTP: {error}")}
+      </div>
+    );
+  }
+  if (send.status === "done") {
+    return (
+      <div className="text-xs text-[var(--color-good)]">
+        {tr("lz4mine.ftp_done", { dest: send.dest }, "Sent via FTP to {dest}")}
+      </div>
+    );
+  }
+  const pct = send.total ? Math.floor((send.bytes / send.total) * 100) : 0;
+  return (
+    <div className="text-xs text-[var(--color-muted)]">
+      {tr(
+        "lz4mine.ftp_running",
+        {
+          pct,
+          done: formatCollectionBytes(send.bytes),
+          total: formatCollectionBytes(send.total),
+        },
+        "Sending via FTP: {pct}% ({done} of {total})",
+      )}
+    </div>
+  );
 }
 
 function CommunityLine({ compat }: { compat: CompatEntry | undefined }) {

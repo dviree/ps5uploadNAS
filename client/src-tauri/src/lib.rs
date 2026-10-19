@@ -327,6 +327,7 @@ pub fn run() {
             commands::lz4_status,
             commands::lz4_ffpfsc,
             commands::lz4_compat,
+            commands::ftp_send,
             commands::game_inspect,
             commands::game_inspect_image,
             commands::game_inspect_files,
