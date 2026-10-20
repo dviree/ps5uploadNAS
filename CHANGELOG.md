@@ -4,6 +4,32 @@ What's new in ps5upload, written for humans.
 
 ---
 
+## 7.1.10
+
+- **Keep Rename first in the Files menu.** Properties and permissions remain available just
+  below it, with Delete last. The phone menu now preserves its familiar action order.
+- **Reliable coverage checks.** Transfer speed thresholds run on normal builds; instrumented
+  coverage builds continue to check the transfers without comparing their speed.
+
+---
+
+## 7.1.9
+
+- **File properties and custom permissions (#478).** In Files, open Properties to see a file or
+  folder's size, modification time and permissions, and set the permissions you need. Applying
+  to a whole folder is optional; drives that cannot keep Unix permissions are called out.
+- **Restore a hidden Minion tile (#478).** Settings can show, restore or hide PS5Upload Minion
+  on the PS5 home screen through your paired connection, even when Minion's LAN access is off.
+  Update the helper to use this control.
+- **Import a local JSON cheat.** Cheats can now import a trainer from your device or engine
+  computer. Imports are checked, never replace existing files and leave toggles off. Use the
+  exact title ID and game version; renaming a trainer does not make its patches compatible.
+- **Clearer save backup guidance.** Android shows where backups are saved. Save guidance now
+  explains account and title restrictions, and no longer presents restarting as a verified fix
+  for PS4 restore errors.
+
+---
+
 ## 7.1.8
 
 - **Convert reads more Kraken-compressed PS5 packages (#477).** Some packages compressed at the
