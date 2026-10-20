@@ -1,6 +1,6 @@
 //! POST /api/ftp/send: a game folder or file on this machine sent to the PS5 through the
-//! console's own FTP server (etaHEN / ftpsrv, anonymous, :2121 by default), the way ps5-lz4
-//! sends games, for when the PS5Upload payload is not loaded. Runs as a job (GET
+//! console's own FTP server (etaHEN or another FTP payload, anonymous, :2121 by default),
+//! the way ps5-lz4 sends games, for when the PS5Upload payload is not loaded. Runs as a job (GET
 //! /api/jobs/{id}): folders are made first, then every file is stored; a file already there
 //! with the same size is skipped, so a send that stopped picks up where it was.
 
@@ -20,7 +20,7 @@ use uuid::Uuid;
 use crate::fpkg_api::resolve_engine_path;
 use crate::{json_err, now_ms, register_transfer_cancel, set_job, AppState, JobState};
 
-/// The FTP server etaHEN and ftpsrv start on the PS5.
+/// The port etaHEN and other FTP payloads serve on the PS5.
 const DEFAULT_PORT: u16 = 2121;
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const CHUNK: usize = 1 << 20;
@@ -293,8 +293,8 @@ async fn connect(host: &str, port: u16) -> Result<Ftp, String> {
     match tokio::time::timeout(CONNECT_TIMEOUT, work).await {
         Ok(Ok(f)) => Ok(f),
         Ok(Err(e)) => Err(format!(
-            "the PS5's FTP server at {host}:{port} did not let us in ({e}); is etaHEN's or \
-             ftpsrv's FTP running?"
+            "the PS5's FTP server at {host}:{port} did not let us in ({e}); is the FTP server of etaHEN \
+             (or another FTP payload) running?"
         )),
         Err(_) => Err(format!(
             "the PS5's FTP server at {host}:{port} did not answer; is the PS5 on and its FTP \
