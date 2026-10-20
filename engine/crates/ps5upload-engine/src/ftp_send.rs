@@ -108,8 +108,6 @@ async fn send(
     plan: &Plan,
     cancel: &AtomicBool,
     progress: &mut (dyn FnMut(u64, u64) + Send),
-    // Store every file, even one already there with the same size (a patch).
-    force: bool,
 ) -> Result<(u64, u64), String> {
     let single = plan.files.len() == 1 && plan.files[0].0.is_empty();
     if !single {
@@ -135,7 +133,7 @@ async fn send(
         } else {
             (local.join(rel), format!("{remote}/{rel}"))
         };
-        if !force && ftp.size(&dst).await.is_ok_and(|n| n as u64 == *size) {
+        if ftp.size(&dst).await.is_ok_and(|n| n as u64 == *size) {
             skipped += size;
             progress(sent + skipped, 0);
             continue;
@@ -239,16 +237,7 @@ pub(crate) async fn ftp_send_handler(
                 );
             }
         };
-        let outcome = send(
-            &mut ftp,
-            &local,
-            &remote,
-            &plan,
-            &cancel,
-            &mut progress,
-            false,
-        )
-        .await;
+        let outcome = send(&mut ftp, &local, &remote, &plan, &cancel, &mut progress).await;
         let _ = ftp.quit().await;
         let completed_at_ms = now_ms();
         let elapsed_ms = completed_at_ms.saturating_sub(started_at_ms);
@@ -286,284 +275,6 @@ pub(crate) async fn ftp_send_handler(
         set_job(&jobs, &events_tx, job_id, state);
     });
     (StatusCode::ACCEPTED, Json(answer)).into_response()
-}
-
-#[derive(Deserialize)]
-pub(crate) struct FtpPatchReq {
-    /// The fix or backport: a .zip/.7z/.rar or a folder, as the engine sees it.
-    patch: String,
-    addr: String,
-    #[serde(default)]
-    port: Option<u16>,
-    /// The game's folder on the PS5 (`/mnt/usb0/homebrew/Ghost of Yotei-lz4`).
-    game_dir: String,
-}
-
-/// The folder whose files go into the game: the patch itself, or the one folder an archive
-/// wraps them in (`PPSA26344-app0/eboot.bin`).
-fn patch_root(dir: &Path) -> PathBuf {
-    let mut at = dir.to_path_buf();
-    for _ in 0..3 {
-        let entries: Vec<_> = match std::fs::read_dir(&at) {
-            Ok(r) => r.flatten().collect(),
-            Err(_) => return at,
-        };
-        let game_like = entries.iter().any(|e| {
-            let n = e.file_name().to_string_lossy().to_ascii_lowercase();
-            n == "eboot.bin" || n == "sce_sys" || n == "sce_module" || n == "fakelib"
-        });
-        let dirs: Vec<_> = entries.iter().filter(|e| e.path().is_dir()).collect();
-        let files = entries.iter().filter(|e| e.path().is_file()).count();
-        if game_like || dirs.len() != 1 || files > 0 {
-            return at;
-        }
-        at = dirs[0].path();
-    }
-    at
-}
-
-async fn ftp_read(ftp: &mut Ftp, path: &str) -> Result<Option<Vec<u8>>, String> {
-    if ftp.size(path).await.is_err() {
-        return Ok(None);
-    }
-    let mut stream = ftp
-        .retr_as_stream(path)
-        .await
-        .map_err(|e| format!("{path}: {e}"))?;
-    let mut buf = Vec::new();
-    stream
-        .read_to_end(&mut buf)
-        .await
-        .map_err(|e| format!("{path}: {e}"))?;
-    stream.finish().await.map_err(|e| format!("{path}: {e}"))?;
-    Ok(Some(buf))
-}
-
-async fn ftp_write(ftp: &mut Ftp, path: &str, bytes: &[u8]) -> Result<(), String> {
-    let mut up = ftp
-        .put_with_stream(path)
-        .await
-        .map_err(|e| format!("{path}: {e}"))?;
-    up.write_all(bytes)
-        .await
-        .map_err(|e| format!("{path}: {e}"))?;
-    up.finish().await.map_err(|e| format!("{path}: {e}"))
-}
-
-/// What a patch of a game on the PS5 did, for the job's log and the answer.
-#[derive(Debug, Default, serde::Serialize)]
-struct PatchDone {
-    packed_game: bool,
-    replaced: Vec<String>,
-    unpacked: Vec<String>,
-    added: Vec<String>,
-}
-
-/// Puts the patch's files into the game on the PS5. A packed game's manifest and
-/// `ampr_emu.index` are read from the console, patched ([`ps5upload_fpkg::ampr_pack::patch`])
-/// and written back last; every file and index replaced is kept beside it as
-/// `<name>.before-patch` (the first time only, so the original survives repeated patches).
-async fn patch_game(
-    ftp: &mut Ftp,
-    root: &Path,
-    game_dir: &str,
-    plan: &Plan,
-    cancel: &AtomicBool,
-    progress: &mut (dyn FnMut(u64, u64) + Send),
-) -> Result<PatchDone, String> {
-    use ps5upload_fpkg::ampr_pack::patch;
-    if ftp.cwd(game_dir).await.is_err() {
-        return Err(format!("{game_dir} is not a folder on the PS5"));
-    }
-    let manifest_path = format!("{game_dir}/{}", patch::MANIFEST);
-    let emu_path = format!("{game_dir}/{}", patch::EMU_INDEX);
-    let manifest = ftp_read(ftp, &manifest_path).await?;
-    let emu = ftp_read(ftp, &emu_path).await?;
-    let mut done = PatchDone::default();
-    let indexes = match (&manifest, &emu) {
-        (Some(m), Some(e)) => {
-            let mtime = (now_ms() / 1000) as i64;
-            let p = patch::patch(m, e, &plan.files, mtime).map_err(|e| e.to_string())?;
-            done.packed_game = true;
-            done.replaced = p.replaced.clone();
-            done.unpacked = p.unpacked.clone();
-            done.added = p.added.clone();
-            Some((p.manifest, p.emu_index))
-        }
-        _ => None,
-    };
-    // Keep what is replaced, once.
-    let keep = |path: &str| format!("{path}.before-patch");
-    for (rel, _) in &plan.files {
-        let dst = format!("{game_dir}/{rel}");
-        if ftp.size(&dst).await.is_ok() && ftp.size(keep(&dst)).await.is_err() {
-            ftp.rename(&dst, &keep(&dst))
-                .await
-                .map_err(|e| format!("keeping {dst}: {e}"))?;
-        }
-    }
-    if let (Some(m), Some(e)) = (&manifest, &emu) {
-        for (path, bytes) in [(&manifest_path, m), (&emu_path, e)] {
-            if ftp.size(keep(path)).await.is_err() {
-                ftp_write(ftp, &keep(path), bytes).await?;
-            }
-        }
-    }
-    let sent = send(ftp, root, game_dir, plan, cancel, &mut *progress, true).await?;
-    let _ = sent;
-    if let Some((m, e)) = indexes {
-        ftp_write(ftp, &manifest_path, &m).await?;
-        ftp_write(ftp, &emu_path, &e).await?;
-    }
-    if !done.packed_game {
-        done.replaced = plan.files.iter().map(|(r, _)| r.clone()).collect();
-    }
-    Ok(done)
-}
-
-/// POST /api/ftp/patch: a fix or backport (an archive or a folder) put into a game on the PS5
-/// over its FTP server, LZ4 packed games included. Returns `{job_id}`.
-pub(crate) async fn ftp_patch_handler(
-    State(state): State<AppState>,
-    Json(req): Json<FtpPatchReq>,
-) -> impl IntoResponse {
-    let game_dir = match clean_dest(&req.game_dir) {
-        Ok(d) if d != "/" => d,
-        Ok(_) => {
-            return json_err(StatusCode::BAD_REQUEST, "name the game's folder").into_response()
-        }
-        Err(e) => return json_err(StatusCode::BAD_REQUEST, e).into_response(),
-    };
-    let source = resolve_engine_path(&req.patch);
-    if !source.exists() {
-        return json_err(
-            StatusCode::BAD_REQUEST,
-            format!(
-                "{} is not there (is its folder mounted in the container?)",
-                source.display()
-            ),
-        )
-        .into_response();
-    }
-    // An archive is unpacked into a work folder first.
-    let work = std::env::temp_dir().join(format!("ps5upload-patch-{}", Uuid::new_v4()));
-    let src = source.clone();
-    let w = work.clone();
-    let prepared = tokio::task::spawn_blocking(move || -> Result<(PathBuf, Plan), String> {
-        let root = if src.is_dir() {
-            src
-        } else if ps5upload_core::archive_extract::archive_kind(&src).is_some() {
-            let never = AtomicBool::new(false);
-            ps5upload_core::archive_extract::extract(&src, &w, None, &mut |_, _| {}, &never)
-                .map_err(|e| format!("unpacking {}: {e:#}", src.display()))?;
-            patch_root(&w)
-        } else {
-            return Err(format!(
-                "{} is neither a folder nor a .zip, .7z or .rar",
-                src.display()
-            ));
-        };
-        let p = plan(&root).map_err(|e| format!("{}: {e}", root.display()))?;
-        if p.files.is_empty() {
-            return Err("the patch has no files".into());
-        }
-        Ok((root, p))
-    })
-    .await;
-    let (root, plan) = match prepared {
-        Ok(Ok(x)) => x,
-        Ok(Err(e)) => {
-            let _ = std::fs::remove_dir_all(&work);
-            return json_err(StatusCode::BAD_REQUEST, e).into_response();
-        }
-        Err(e) => {
-            let _ = std::fs::remove_dir_all(&work);
-            return json_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
-        }
-    };
-    let host = console_host(&req.addr);
-    let port = req.port.unwrap_or(DEFAULT_PORT);
-    let mut ftp = match connect(&host, port).await {
-        Ok(f) => f,
-        Err(e) => {
-            let _ = std::fs::remove_dir_all(&work);
-            return json_err(StatusCode::BAD_GATEWAY, e).into_response();
-        }
-    };
-    let total: u64 = plan.files.iter().map(|(_, s)| s).sum();
-    let job_id = Uuid::new_v4();
-    let cancel = register_transfer_cancel(job_id);
-    let started_at_ms = now_ms();
-    set_job(
-        &state.jobs,
-        &state.events_tx,
-        job_id,
-        running(started_at_ms, 0, total),
-    );
-    crate::log_info!(
-        "ftp patch: {} -> {host}:{port}{game_dir} ({} files)",
-        source.display(),
-        plan.files.len()
-    );
-    let jobs = state.jobs.clone();
-    let events_tx = state.events_tx.clone();
-    tokio::spawn(async move {
-        let mut last = Instant::now();
-        let mut progress = |done: u64, _: u64| {
-            if last.elapsed() >= Duration::from_millis(250) {
-                last = Instant::now();
-                set_job(
-                    &jobs,
-                    &events_tx,
-                    job_id,
-                    running(started_at_ms, done, total),
-                );
-            }
-        };
-        let outcome = patch_game(&mut ftp, &root, &game_dir, &plan, &cancel, &mut progress).await;
-        let _ = ftp.quit().await;
-        let _ = std::fs::remove_dir_all(&work);
-        let completed_at_ms = now_ms();
-        let elapsed_ms = completed_at_ms.saturating_sub(started_at_ms);
-        let state = match outcome {
-            Ok(done) => {
-                crate::log_info!(
-                    "ftp patch: done, {game_dir}: {}",
-                    serde_json::to_string(&done).unwrap_or_default()
-                );
-                JobState::Done {
-                    started_at_ms,
-                    completed_at_ms,
-                    elapsed_ms,
-                    tx_id_hex: String::new(),
-                    bytes_sent: total,
-                    dest: game_dir.clone(),
-                    files_sent: plan.files.len() as u64,
-                    skipped_files: 0,
-                    skipped_bytes: 0,
-                    commit_ack: None,
-                }
-            }
-            Err(error) => {
-                crate::log_warn!("ftp patch: {game_dir}: {error}");
-                JobState::Failed {
-                    started_at_ms,
-                    completed_at_ms,
-                    elapsed_ms,
-                    error,
-                    error_reason: None,
-                    error_detail: None,
-                    error_console: None,
-                }
-            }
-        };
-        set_job(&jobs, &events_tx, job_id, state);
-    });
-    (
-        StatusCode::ACCEPTED,
-        Json(serde_json::json!({ "job_id": job_id.to_string(), "dest": req.game_dir })),
-    )
-        .into_response()
 }
 
 async fn connect(host: &str, port: u16) -> Result<Ftp, String> {
@@ -676,7 +387,6 @@ mod live {
             &p,
             &cancel,
             &mut progress,
-            false,
         )
         .await
         .unwrap();
@@ -689,136 +399,11 @@ mod live {
             &p,
             &cancel,
             &mut progress,
-            false,
         )
         .await
         .unwrap();
         assert_eq!((sent, skipped), (0, (3 << 20) + 2));
         let _ = ftp.quit().await;
         let _ = std::fs::remove_dir_all(&root);
-    }
-}
-
-#[cfg(test)]
-mod live_patch {
-    use super::*;
-    use ps5upload_fpkg::ampr_pack::{self, format::Manifest, patch, Control, Reader};
-    use ps5upload_fpkg::source::{FolderSource, SourceTree};
-
-    /// A packed game on a real FTP server (`PS5UPLOAD_FTP_TEST=host:port`, its root in
-    /// `PS5UPLOAD_FTP_ROOT`) patched from a zip that wraps its files in one folder.
-    #[tokio::test]
-    async fn a_packed_game_on_the_console_is_patched_from_a_zip() {
-        let (Ok(addr), Ok(ftp_root)) = (
-            std::env::var("PS5UPLOAD_FTP_TEST"),
-            std::env::var("PS5UPLOAD_FTP_ROOT"),
-        ) else {
-            return;
-        };
-        let (host, port) = addr.rsplit_once(':').unwrap();
-        let game = PathBuf::from(&ftp_root).join("mnt/usb0/homebrew/Ghost-lz4");
-        let _ = std::fs::remove_dir_all(&game);
-        for (p, d) in [
-            ("eboot.bin", vec![1u8; 100]),
-            ("data/a.bin", vec![b'a'; 70_000]),
-            ("psml_package/KPN9_v070.psp", vec![b'k'; 70_000]),
-        ] {
-            let f = game.join(p);
-            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
-            std::fs::write(f, d).unwrap();
-        }
-        let mut tree = FolderSource::open(&game).unwrap();
-        let listing: Vec<(String, u64)> = tree
-            .files()
-            .iter()
-            .map(|f| (f.path.clone(), f.size))
-            .collect();
-        let index = ps5upload_fpkg::ampr_index::build(&listing, 7).unwrap();
-        let entries = ps5upload_fpkg::ampr_index::parse(&index).unwrap();
-        let config = ampr_pack::default_profile(9, 16);
-        let out =
-            ampr_pack::build(&entries, &mut tree, &config, &game, &mut Control::default()).unwrap();
-        out.write_small_files(&game).unwrap();
-        std::fs::write(game.join(patch::EMU_INDEX), &index).unwrap();
-        for p in &out.packed {
-            std::fs::remove_file(game.join(p)).unwrap();
-        }
-
-        // The fix, as a zip with everything under PPSA26344-app0/.
-        let work = std::env::temp_dir().join(format!("live-patch-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&work);
-        std::fs::create_dir_all(&work).unwrap();
-        let zip_path = work.join("BP.zip");
-        {
-            let mut z = zip::ZipWriter::new(std::fs::File::create(&zip_path).unwrap());
-            let o = zip::write::SimpleFileOptions::default();
-            for (p, d) in [
-                ("PPSA26344-app0/eboot.bin", vec![2u8; 300]),
-                (
-                    "PPSA26344-app0/psml_package/KPN9_v070.psp",
-                    vec![b'n'; 1234],
-                ),
-                ("PPSA26344-app0/fakelib/libScePsml.sprx", vec![b's'; 77]),
-            ] {
-                z.start_file(p, o).unwrap();
-                std::io::Write::write_all(&mut z, &d).unwrap();
-            }
-            z.finish().unwrap();
-        }
-        let x = work.join("x");
-        let never = AtomicBool::new(false);
-        ps5upload_core::archive_extract::extract(&zip_path, &x, None, &mut |_, _| {}, &never)
-            .unwrap();
-        let root = patch_root(&x);
-        assert!(root.ends_with("PPSA26344-app0"));
-        let p = plan(&root).unwrap();
-
-        let mut ftp = connect(host, port.parse().unwrap()).await.unwrap();
-        let mut progress = |_: u64, _: u64| {};
-        let done = patch_game(
-            &mut ftp,
-            &root,
-            "/mnt/usb0/homebrew/Ghost-lz4",
-            &p,
-            &never,
-            &mut progress,
-        )
-        .await
-        .unwrap();
-        let _ = ftp.quit().await;
-        assert!(done.packed_game);
-        assert_eq!(done.replaced, ["eboot.bin"]);
-        assert_eq!(done.unpacked, ["psml_package/KPN9_v070.psp"]);
-        assert_eq!(done.added, ["fakelib/libScePsml.sprx"]);
-
-        // On the "console": the new files, the old ones kept, and indexes that agree.
-        assert_eq!(
-            std::fs::read(game.join("eboot.bin")).unwrap(),
-            vec![2u8; 300]
-        );
-        assert_eq!(
-            std::fs::read(game.join("eboot.bin.before-patch")).unwrap(),
-            vec![1u8; 100]
-        );
-        assert_eq!(
-            std::fs::read(game.join("psml_package/KPN9_v070.psp")).unwrap(),
-            vec![b'n'; 1234]
-        );
-        assert!(game.join("ampr_assets.index.before-patch").exists());
-        let m = Manifest::parse(&std::fs::read(game.join(patch::MANIFEST)).unwrap()).unwrap();
-        let e =
-            ps5upload_fpkg::ampr_index::parse(&std::fs::read(game.join(patch::EMU_INDEX)).unwrap())
-                .unwrap();
-        assert_eq!(m.files.len(), e.len());
-        let mut folder = FolderSource::open(&game).unwrap();
-        let reader = Reader::open(&mut folder, patch::MANIFEST).unwrap();
-        let psp = reader.find("psml_package/KPN9_v070.psp").unwrap();
-        assert!(!reader.manifest.files[psp].packed());
-        let a = reader.find("data/a.bin").unwrap();
-        assert_eq!(
-            reader.read_file(a, &mut folder, "").unwrap(),
-            vec![b'a'; 70_000]
-        );
-        let _ = std::fs::remove_dir_all(&work);
     }
 }
