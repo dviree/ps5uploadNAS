@@ -10555,7 +10555,6 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
         .route("/api/lz4/compat", get(lz4_compat::lz4_compat_handler))
         .route("/api/lz4/building", get(lz4_api::lz4_building_handler))
         .route("/api/ftp/send", post(ftp_send::ftp_send_handler))
-        .route("/api/ftp/patch", post(ftp_send::ftp_patch_handler))
         .route("/api/fpkg/build", post(fpkg_api::fpkg_build_handler))
         .route("/api/fpkg/delete", post(fpkg_api::fpkg_delete_handler))
         .route("/api/fpkg/estimate", post(fpkg_api::fpkg_estimate_handler))
