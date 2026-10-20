@@ -35,5 +35,6 @@ is pushed to `main`, end the reply with the update command: once the image build
 an `*.lz4spool` in `/path/to/ps5-lz4`). The script holds the full `docker run` (user
 1000:100, host network, `PS5_ADDR=192.168.1.50`,
 `PS5UPLOAD_ALLOW_IP=192.168.1.0/24,100.64.0.1`, mounts `/games` (roms/ps5, ro), `/pkgs`
-(roms/ps4, ro), `/lz4` (ps5-lz4), `/data`, `/tmp`); when a setting changes, give the user the
+(roms/ps4, ro), `/lz4` (ps5-lz4), `/downloads` (`/path/to/downloads`, ro), `/data`,
+`/tmp`; browse roots `/games,/pkgs,/lz4,/downloads`); when a setting changes, give the user the
 updated script too.
