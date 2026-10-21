@@ -760,7 +760,7 @@ export async function browserInvoke<T>(
       return postJson<T>("/api/fpkg/inspect", {
         source: args["source"],
         output_dir: args["outputDir"],
-      });
+      }, true);
     }
     case "lz4_status": {
       // TS caller: { paths }
@@ -810,7 +810,7 @@ export async function browserInvoke<T>(
       return postJson<T>("/api/fpkg/estimate", {
         source: args["source"],
         output_dir: args["outputDir"],
-      });
+      }, true);
     }
     case "fpkg_delete": {
       return postJson<T>("/api/fpkg/delete", { path: args["path"] });
