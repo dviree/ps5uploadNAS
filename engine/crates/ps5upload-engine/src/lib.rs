@@ -51,6 +51,7 @@ mod fakelibs_api;
 mod folder_build;
 mod fpkg_api;
 mod fpkg_firmware;
+mod ftp_send;
 mod games_api;
 mod hearbridge_api;
 mod helper_mirror;
@@ -63,7 +64,6 @@ mod link;
 mod local_fs;
 mod log_dedup;
 mod lz4_api;
-mod ftp_send;
 mod lz4_compat;
 mod mgmt_route;
 mod migrate_6;
@@ -10972,22 +10972,12 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
     #[cfg(feature = "webui")]
     let app = app.fallback(webui::spa_fallback);
 
-    let app = if let Ok(base) = std::env::var("PS5UPLOAD_BASE_URL") {
-        let base = base.trim_end_matches('/');
-        if !base.is_empty() {
-            // Format Base URL
-            let base = if !base.starts_with('/') {
-                format!("/{}", base)
-            } else {
-                base.to_string()
-            };
-            // Create Axum Router using the base URL as a prefix for all routes.
-            axum::Router::new()
-                .nest(&base, app)
-                .route(&format!("{}/", base), get(ui_handler))
-        } else {
-            app
-        }
+    let base_url = base_url_prefix();
+    let app = if let Some(base) = &base_url {
+        // Create Axum Router using the base URL as a prefix for all routes.
+        axum::Router::new()
+            .nest(base, app)
+            .route(&format!("{}/", base), get(ui_handler))
     } else {
         app
     };
@@ -11009,18 +10999,23 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
         .allow_methods(Any)
         .allow_headers(Any);
 
+    // .pkg install — sessions live in their own state because the
+    // HTTP-host serving handler needs Mutex-guarded session lookup
+    // independent of the main engine state. Merged at this point
+    // so the pkg routes share the same listener + CORS + body limit.
+    // Downloading a link to disk before installing it. Separate state for
+    // the same reason as the install sessions: its progress is polled
+    // independently of everything else the engine is doing.
+    let side = pkg_install::router(pkg_state).merge(remote_download::router(std::sync::Arc::new(
+        remote_download::DownloadRegistry::default(),
+    )));
+    // Behind a base URL the web UI calls these under it too (`/ps5/api/pkg/upload`); the PS5
+    // still fetches `/pkg-host/*` at the root, so they stay there as well.
+    let app = match &base_url {
+        Some(base) => app.merge(side.clone()).nest(base, side),
+        None => app.merge(side),
+    };
     let app = app
-        // .pkg install — sessions live in their own state because the
-        // HTTP-host serving handler needs Mutex-guarded session lookup
-        // independent of the main engine state. Merged at this point
-        // so the pkg routes share the same listener + CORS + body limit.
-        .merge(pkg_install::router(pkg_state))
-        // Downloading a link to disk before installing it. Separate state for
-        // the same reason as the install sessions: its progress is polled
-        // independently of everything else the engine is doing.
-        .merge(remote_download::router(std::sync::Arc::new(
-            remote_download::DownloadRegistry::default(),
-        )))
         // Tauri's renderer performs a few direct fetches to the sidecar for
         // liveness, job polling and streamed resources. Emit CORS headers only
         // for origins accepted by the same narrow trust rule as the guard
@@ -11190,6 +11185,20 @@ fn install_panic_logger() {
 /// scratch` — no shell, no curl, no wget — so without this Docker and Compose
 /// had nothing to run as a HEALTHCHECK. Plain std TCP, no async runtime, so it
 /// works from the same binary in a fresh process.
+/// `PS5UPLOAD_BASE_URL` as a route prefix (`/ps5`), when it names one.
+fn base_url_prefix() -> Option<String> {
+    let base = std::env::var("PS5UPLOAD_BASE_URL").ok()?;
+    let base = base.trim_end_matches('/');
+    if base.is_empty() {
+        return None;
+    }
+    Some(if base.starts_with('/') {
+        base.to_string()
+    } else {
+        format!("/{base}")
+    })
+}
+
 pub fn healthcheck() -> i32 {
     use std::io::{Read, Write};
     let port: u16 = std::env::var("PS5UPLOAD_ENGINE_PORT")
