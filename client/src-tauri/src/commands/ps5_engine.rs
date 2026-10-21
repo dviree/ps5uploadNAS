@@ -2335,12 +2335,13 @@ pub async fn game_inspect_files(token: String) -> Result<JsonValue, String> {
 }
 
 /// What a game source is, before converting it: readiness, size and cost.
+/// Remote image metadata reads may exceed the standard 60-second request limit.
 /// POST /api/fpkg/inspect.
 #[tauri::command]
 pub async fn fpkg_inspect(source: String, output_dir: Option<String>) -> Result<JsonValue, String> {
     let base = engine::url();
     let url = format!("{base}/api/fpkg/inspect");
-    post_json(
+    post_json_long(
         &url,
         &serde_json::json!({ "source": source, "output_dir": output_dir }),
     )
@@ -2461,7 +2462,7 @@ pub async fn fpkg_estimate(
 ) -> Result<JsonValue, String> {
     let base = engine::url();
     let url = format!("{base}/api/fpkg/estimate");
-    post_json(
+    post_json_long(
         &url,
         &serde_json::json!({ "source": source, "output_dir": output_dir }),
     )
