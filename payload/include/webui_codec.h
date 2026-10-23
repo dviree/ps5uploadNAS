@@ -114,6 +114,13 @@ const char *webui_mime_for(const char *path);
 int webui_kv_str(const char *text, size_t n, const char *key, char *out, size_t cap);
 int webui_kv_int(const char *text, size_t n, const char *key, long *out);
 
+/* A HW_TEMPS reply (key=value lines, hw_info.h hw_fan_status_text) as the Fan page's JSON:
+ * {"cpu_c":N,"soc_c":N,"duty_pct":N,"target_c":N,"stock_c":N,"pinned_c":N,"min_c":N,"max_c":N,
+ *  "restores":N,"last_restore_s":N,"guard":"off"|"ok"|"failing","filtered_c":N.N}
+ * with null for a reading the helper reports as missing (temperatures 0, duty / target /
+ * last_restore_s -1, stock 0, filtered -1). The number written, or -1 when it does not fit. */
+int webui_fan_status_json(const char *text, size_t n, char *out, size_t cap);
+
 /* 1 when `tid` is a game's title id: four letters of a game prefix (PPSA, CUSA, PCJS, PLJS, ...:
  * Sony's disc and digital game ranges for every region) and five digits. Homebrew (FAKE..., PLDM...,
  * WKAL...), system apps (NPXS...) and the page's own tile (WEBUI_TILE_TITLE_ID) are not games. */
@@ -159,6 +166,26 @@ const char *webui_cheats_toggle_error(const char *cause, size_t n);
  * a game runs (`game_running` != 0 also when that could not be read). The helper's FS_UNMOUNT forces a busy
  * unmount, so a running game is never asked about: it would lose its image (ruling R20). */
 const char *webui_unmount_refusal(const char *p, int game_running);
+
+/* ---- games and processes (APP_LAUNCH / APP_UNREGISTER / APP_ICON_SET / PROCESS_LIST / PROCESS_KILL) ---- */
+
+/* Why the Games section may not act on `tid`, or NULL: "bad_title_id" (not 4-15 ASCII letters and
+ * digits), "own_tile" (the page's own tile, WEBUI_TILE_TITLE_ID, any case: Settings removes it), and
+ * for a `destructive` action (uninstall, hide) also "system_title" (NPXS...: the console's own apps,
+ * which the PC app never uninstalls on one confirm and never hides). */
+const char *webui_app_refusal(const char *tid, int destructive);
+
+/* From a PROCESS_LIST reply ({"ok":true,"procs":[{"pid":N,..,"title_id":"..","app_id":N,"kind":"app"|
+ * "payload"|"system","is_self":bool},...]}): why the page may not stop `pid`, or NULL. "not_running"
+ * when the pid is not listed (or the reply does not parse), "helper" for the helper's own process,
+ * "system" for anything not a game ("app") or a payload ("payload") and for pid 0/1. The PC app asks
+ * twice before a system kill; the console page, whose browser is itself a system process, never
+ * offers one. */
+const char *webui_proc_kill_refusal(const char *json, size_t n, uint64_t pid);
+
+/* From a PROCESS_LIST reply: 1 when a game ("app") process with title id `tid` runs (when
+ * `other` is set: a game with any OTHER title id), 0 when none, -1 when the reply does not parse. */
+int webui_proc_game_running(const char *json, size_t n, const char *tid, int other);
 
 /* ---- search index (INDEX_START / INDEX_STATUS / INDEX_SEARCH / INDEX_CANCEL, runtime.c) ----
  * The handlers read their bodies with a quote-to-quote scan (no JSON unescaping), so every string the

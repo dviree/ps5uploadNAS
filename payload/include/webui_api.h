@@ -27,13 +27,25 @@
  * /api/settings answers them and /api/settings/set changes them. Call once, before webui_start. */
 void webui_api_settings_init(const webui_settings_t *s);
 
+/* Starts the :9180 server with the saved LAN setting (call after webui_api_settings_init). 0 when
+ * it runs, -1 when it could not start (logged). */
+int webui_api_server_start(void);
+
 /* A paired PC unregistered the tile (APP_UNREGISTER of WEBUI_TILE_TITLE_ID): the same as Settings ->
  * tile off. Saves tile:false to WEBUI_SETTINGS_PATH (so the next start does not register it again)
  * and waits for the tile worker to finish removing it. Returns 0 only after persistence and
  * confirmed Sony removal plus folder cleanup; -1 on any failure. */
 int webui_api_tile_off(void);
 
-/* Paired-helper tile get/set; never changes LAN access. JSON reply length, or -1. */
+/* At helper start, the tile was removed outside the helper (webui_tile_respect_outside_removal):
+ * saves tile:false so the page and the PC show it off. No tile request. */
+void webui_api_tile_forget(void);
+
+/* Paired-helper Minion get/set: {tile?, enabled?}; never changes LAN access. enabled:false turns
+ * PS5Upload Minion off (tile removed and kept removed, :9180 stopped; the tile setting is kept for
+ * when it is turned back on), enabled:true starts the server again at once and restores the tile
+ * when its setting is on. Reply {tile, enabled, tile_busy, tile_failed, tile_result}. JSON reply
+ * length, or -1. */
 int webui_api_tile(const char *body, size_t len, char *out, size_t cap);
 
 int webui_api_route(const webui_req_t *r, const uint8_t *body, size_t body_len, int fd);

@@ -201,6 +201,23 @@ button {
   color: var(--color-muted);
 }
 
+/* A short note at the bottom (e.g. how to leave the page); it reads itself out (role=status). */
+.cw-toast {
+  position: fixed;
+  left: 50%;
+  bottom: 4.5rem;
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: calc(100vw - 2rem);
+  padding: 0.7rem 1.1rem;
+  border-radius: var(--radius-panel);
+  background: var(--color-float);
+  box-shadow: var(--shadow-3);
+  font-size: 1.05rem;
+  text-align: center;
+  z-index: 10;
+}
+
 /* ---- shared buttons ---- */
 .cw-button {
   display: inline-flex;
@@ -746,6 +763,54 @@ button {
 .cw-field-error {
   color: var(--color-bad);
 }
+/* Add / edit a network share: two columns of fields so it fits the TV's 700 px height. */
+.cw-share-dialog {
+  width: 50rem;
+  max-height: calc(100vh - 2rem);
+  overflow-y: auto;
+}
+.cw-share-dialog h2 svg {
+  width: 1.1em;
+  height: 1.1em;
+  vertical-align: -0.15em;
+}
+.cw-share-dialog h2 {
+  margin-bottom: 0.2rem;
+}
+.cw-share-dialog .cw-field {
+  margin-bottom: 0.45rem;
+}
+.cw-share-dialog .cw-input {
+  padding: 0.35rem 0.6rem;
+}
+.cw-share-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  column-gap: 1rem;
+}
+.cw-share-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.6rem;
+}
+.cw-share-row .cw-field {
+  flex: 1;
+  min-width: 0;
+}
+.cw-share-row .cw-button {
+  margin-bottom: 0.8rem;
+}
+.cw-share-found {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  list-style: none;
+  padding: 0;
+  margin: 0 0 0.8rem;
+  max-height: 8rem;
+  overflow-y: auto;
+}
 .cw-info {
   margin: 0 0 1rem;
 }
@@ -762,6 +827,14 @@ button {
   min-width: 0;
   margin: 0;
   word-break: break-all;
+}
+/* A package's preview (files/PkgDialog.tsx): its icon a little larger than a folder banner's. */
+.cw-pkg {
+  max-width: 44rem;
+}
+.cw-pkg .cw-pkg-icon {
+  width: 6rem;
+  height: 6rem;
 }
 .cw-viewer {
   width: calc(100vw - 4rem);
@@ -798,6 +871,39 @@ button {
   white-space: pre-wrap;
   word-break: break-all;
   cursor: default;
+}
+
+/* ---- Fan ---- */
+.cw-fan-readings {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  padding: 0.7rem 1rem;
+  margin-bottom: 0.8rem;
+}
+.cw-fan-reading {
+  min-width: 9rem;
+  margin-right: 1.5rem;
+}
+.cw-fan-value {
+  font-size: 1.6rem;
+  font-variant-numeric: tabular-nums;
+}
+.cw-fan-target {
+  margin-left: auto;
+  text-align: right;
+}
+.cw-fan .cw-fan-choice {
+  min-width: 6.5rem;
+  justify-content: center;
+}
+.cw-fan .cw-quick .cw-button[aria-pressed="true"] {
+  background: var(--color-accent-soft);
+  color: var(--color-text);
+  box-shadow: inset 0 0 0 2px var(--color-accent);
+}
+.cw-fan .cw-button[aria-disabled="true"] {
+  opacity: 0.55;
 }
 
 /* ---- Settings ---- */
@@ -982,6 +1088,158 @@ button {
 }
 .cw-cheats-empty-buttons .cw-button + .cw-button {
   margin-left: 0.7rem;
+}
+
+/* ---- Games ---- */
+.cw-games-search {
+  display: flex;
+  align-items: center;
+  flex: 1;
+  min-width: 10rem;
+  margin: 0 0.6rem 0.4rem 0;
+}
+.cw-games-search svg {
+  flex: none;
+  width: 1.2rem;
+  height: 1.2rem;
+  margin-right: 0.5rem;
+  color: var(--color-muted);
+}
+.cw-games-search .cw-input {
+  flex: 1;
+  min-width: 0;
+  margin-top: 0;
+}
+.cw-games {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(8.5rem, 1fr));
+  grid-gap: 0.6rem;
+  gap: 0.6rem;
+}
+.cw-gcard-item {
+  display: flex;
+}
+.cw-gcard {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  padding: 0.45rem;
+  border-radius: var(--radius-card);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  text-align: left;
+}
+.cw-gcard.is-running {
+  border-color: var(--color-accent);
+}
+.cw-gcover {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  padding-top: 100%;
+  position: relative;
+  border-radius: 0.5rem;
+  background: var(--color-surface-3);
+  overflow: hidden;
+}
+.cw-gcover img,
+.cw-gcover svg {
+  position: absolute;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.cw-gcover svg {
+  top: 30%;
+  left: 30%;
+  width: 40%;
+  height: 40%;
+  color: var(--color-muted);
+}
+.cw-gcover.is-big {
+  flex: none;
+  width: 5rem;
+  padding-top: 5rem;
+  margin-right: 0.9rem;
+}
+.cw-gcard-name {
+  display: block;
+  margin-top: 0.35rem;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cw-gcard-tags {
+  display: block;
+}
+.cw-gcard-tags .cw-tag {
+  margin: 0.25rem 0.3rem 0 0;
+}
+.cw-game-sheet {
+  width: 50rem;
+  max-height: calc(100vh - 2rem);
+  overflow-y: auto;
+}
+.cw-game-sheet-body {
+  display: grid;
+  grid-template-columns: 1.3fr 1fr;
+  grid-gap: 1rem;
+  gap: 1rem;
+}
+.cw-game-sheet .cw-info {
+  margin-bottom: 0.4rem;
+}
+.cw-game-sheet .cw-info > div {
+  padding: 0.15rem 0;
+}
+.cw-game-sheet .cw-info dt {
+  width: 7.5rem;
+}
+.cw-game-sheet-head {
+  display: flex;
+  align-items: center;
+  margin-bottom: 0.6rem;
+}
+.cw-game-sheet-head .cw-sheet-title {
+  margin: 0 0 0.2rem;
+}
+
+/* ---- Processes ---- */
+.cw-procs .cw-task-item {
+  margin-bottom: 0.4rem;
+}
+.cw-proc {
+  display: flex;
+  align-items: center;
+  width: 100%;
+  padding: 0.45rem 0.9rem;
+  border-radius: var(--radius-card);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  text-align: left;
+}
+.cw-proc .cw-task-title,
+.cw-proc .cw-task-sub {
+  display: block;
+}
+.cw-proc.is-fg {
+  border-color: var(--color-accent);
+}
+.cw-proc[aria-disabled="true"] {
+  cursor: default;
+}
+.cw-proc-stop {
+  flex: none;
+  margin-left: 0.8rem;
 }
 
 /* ---- Cheats: Find cheats (a modal list of the repos' files for the running game) ---- */
@@ -1613,6 +1871,9 @@ button {
  * The folder's tools wrap under the path, the rail and rows tighten, long names and the status chip
  * cut with an ellipsis, and dialogs (the viewer and its editor too) fit the screen. */
 @media (max-width: 40rem) {
+  .cw-share-grid {
+    grid-template-columns: 1fr;
+  }
   .cw-brand {
     min-width: 0;
     overflow: hidden;
@@ -1671,4 +1932,123 @@ button {
     height: calc(100% - 1rem);
     padding: 0.8rem;
   }
+}
+
+/* ---- clean up ---- */
+.cw-cleanup-card {
+  display: flex;
+  width: 100%;
+  max-width: 44rem;
+  margin-top: 0.6rem;
+  padding: 0.6rem 0.9rem;
+  text-align: left;
+}
+.cw-cleanup-card svg {
+  flex: none;
+  width: 1.6rem;
+  height: 1.6rem;
+  margin-right: 0.8rem;
+}
+.cw-cleanup-progress,
+.cw-cleanup-result {
+  padding: 0.6rem 0.9rem;
+  margin-bottom: 0.8rem;
+}
+.cw-cleanup-progress .cw-button {
+  margin-left: 0.8rem;
+}
+.cw-cleanup-failed {
+  color: var(--color-bad);
+}
+.cw-cleanup-how,
+.cw-cleanup-hint {
+  font-size: 0.85rem;
+  margin: 0 0 0.5rem;
+}
+.cw-cleanup-group {
+  margin-bottom: 1rem;
+}
+.cw-cleanup-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.cw-cleanup-item {
+  display: flex;
+  margin-bottom: 0.4rem;
+}
+.cw-cleanup-row {
+  flex: 1;
+  min-width: 0;
+  min-height: 3.3rem;
+  padding: 0.35rem 0.9rem;
+  text-align: left;
+  border-radius: var(--radius-card);
+  background: var(--color-surface);
+  box-shadow: inset 0 0 0 1px var(--color-border);
+}
+.cw-cleanup-row[aria-disabled="true"] {
+  opacity: 0.6;
+}
+.cw-cleanup-check {
+  display: inline-flex;
+  flex: none;
+  align-items: center;
+  justify-content: center;
+  width: 1.6rem;
+  height: 1.6rem;
+  margin-right: 0.8rem;
+  border-radius: var(--radius-control);
+  box-shadow: inset 0 0 0 2px var(--color-border);
+}
+/* Ticked is the filled box, never a ring: a ring is what focus looks like. */
+.cw-cleanup-row.is-on .cw-cleanup-check {
+  background: var(--accent-fill);
+  color: var(--color-accent-contrast);
+  box-shadow: none;
+}
+.cw-cleanup-text {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+}
+.cw-cleanup-name,
+.cw-cleanup-desc {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.cw-cleanup-name {
+  font-weight: 600;
+}
+.cw-cleanup-desc {
+  font-size: 0.8rem;
+}
+.cw-cleanup-size {
+  flex: none;
+  margin-left: 0.8rem;
+  font-weight: 600;
+}
+.cw-cleanup-path {
+  word-break: break-all;
+}
+.cw-cleanup-bar {
+  position: -webkit-sticky;
+  position: sticky;
+  bottom: 0;
+  display: flex;
+  align-items: center;
+  padding: 0.6rem 0.9rem;
+  margin-top: 0.6rem;
+  border-radius: var(--radius-card);
+  background: var(--color-surface-2, var(--color-surface));
+  box-shadow: inset 0 0 0 1px var(--color-border);
+}
+.cw-cleanup-bar-text {
+  flex: 1;
+  min-width: 0;
+}
+.cw-cleanup-bar .cw-button {
+  margin-left: 0.6rem;
 }

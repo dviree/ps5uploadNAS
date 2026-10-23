@@ -714,6 +714,67 @@ int webui_kv_int(const char *text, size_t n, const char *key, long *out) {
     return 1;
 }
 
+/* `"key":N` (or null when the value is absent, not an integer, or at most `none`) after a comma. */
+static size_t fan_put_int(char *out, size_t cap, size_t at, const char *text, size_t n, const char *key, long none) {
+    long v = 0;
+    int k;
+    if (at >= cap) return at;
+    if (webui_kv_int(text, n, key, &v) == 1 && v > none) k = snprintf(out + at, cap - at, ",\"%s\":%ld", key + 4, v);
+    else k = snprintf(out + at, cap - at, ",\"%s\":null", key + 4);
+    return k < 0 ? cap : at + (size_t)k;
+}
+
+int webui_fan_status_json(const char *text, size_t n, char *out, size_t cap) {
+    char guard[16], filtered[16];
+    long cpu = 0, soc = 0, pinned = 0, min_c = 45, max_c = 85, restores = 0;
+    size_t at;
+    int k;
+    if (!cap) return -1;
+    if (webui_kv_int(text, n, "cpu_temp", &cpu) != 1 || cpu <= 0) cpu = 0;
+    if (webui_kv_int(text, n, "soc_temp", &soc) != 1 || soc <= 0) soc = 0;
+    if (webui_kv_int(text, n, "fan_pinned_c", &pinned) != 1 || pinned < 0) pinned = 0;
+    (void)webui_kv_int(text, n, "fan_min_c", &min_c);
+    (void)webui_kv_int(text, n, "fan_max_c", &max_c);
+    if (webui_kv_int(text, n, "fan_restores", &restores) != 1 || restores < 0) restores = 0;
+    if (webui_kv_str(text, n, "fan_guard", guard, sizeof guard) != 1 ||
+        (strcmp(guard, "ok") != 0 && strcmp(guard, "failing") != 0))
+        strcpy(guard, "off");
+    k = snprintf(out, cap, "{\"cpu_c\":");
+    at = k < 0 ? cap : (size_t)k;
+    if (at < cap) {
+        k = cpu ? snprintf(out + at, cap - at, "%ld", cpu) : snprintf(out + at, cap - at, "null");
+        at = k < 0 ? cap : at + (size_t)k;
+    }
+    if (at < cap) {
+        k = soc ? snprintf(out + at, cap - at, ",\"soc_c\":%ld", soc) : snprintf(out + at, cap - at, ",\"soc_c\":null");
+        at = k < 0 ? cap : at + (size_t)k;
+    }
+    /* key + 4 drops the "fan_" prefix: fan_duty_pct -> duty_pct */
+    at = fan_put_int(out, cap, at, text, n, "fan_duty_pct", -1);
+    at = fan_put_int(out, cap, at, text, n, "fan_target_c", -1);
+    at = fan_put_int(out, cap, at, text, n, "fan_stock_c", 0);
+    at = fan_put_int(out, cap, at, text, n, "fan_last_restore_s", -1);
+    if (at < cap) {
+        k = snprintf(out + at, cap - at, ",\"pinned_c\":%ld,\"min_c\":%ld,\"max_c\":%ld,\"restores\":%ld,\"guard\":\"%s\"",
+                     pinned, min_c, max_c, restores, guard);
+        at = k < 0 ? cap : at + (size_t)k;
+    }
+    /* one decimal as the helper wrote it ("47.3"); anything else is not passed through */
+    {
+        int ok = webui_kv_str(text, n, "fan_filtered_c", filtered, sizeof filtered) == 1 && filtered[0] >= '1' &&
+                 filtered[0] <= '9';
+        for (size_t i = 0; ok && filtered[i]; i++)
+            if (!((filtered[i] >= '0' && filtered[i] <= '9') || (filtered[i] == '.' && i > 0 && filtered[i + 1])))
+                ok = 0;
+        if (at < cap) {
+            k = ok ? snprintf(out + at, cap - at, ",\"filtered_c\":%s}", filtered)
+                   : snprintf(out + at, cap - at, ",\"filtered_c\":null}");
+            at = k < 0 ? cap : at + (size_t)k;
+        }
+    }
+    return at >= cap ? -1 : (int)at;
+}
+
 int webui_is_game_title_id(const char *tid) {
     /* PS5 (PPSA, and PCSx/PLxS... for older regional ranges), PS4 (CUSA, PCJS/PLJS Japan, PCAS/PLAS
      * Asia, PCKS/PLKS Korea, ECAS/ELAS Asia) and the PS Vita/PS3-era PCSA..PCSH ranges. */
@@ -894,6 +955,101 @@ const char *webui_unmount_refusal(const char *p, int game_running) {
         starts(p, "/mnt/ext") || starts(p, "/dev"))
         return "system_volume";
     return game_running ? "game_running" : NULL;
+}
+
+/* ---- games and processes ---- */
+
+const char *webui_app_refusal(const char *tid, int destructive) {
+    size_t i, n = sizeof WEBUI_TILE_TITLE_ID - 1;
+    int tile;
+    if (!webui_cheats_title_ok(tid)) return "bad_title_id";
+    tile = strlen(tid) == n;
+    for (i = 0; tile && i < n; i++) {
+        char c = tid[i];
+        if (c >= 'a' && c <= 'z') c = (char)(c - 'a' + 'A');
+        if (c != WEBUI_TILE_TITLE_ID[i]) tile = 0;
+    }
+    if (tile) return "own_tile";
+    if (destructive && (tid[0] == 'N' || tid[0] == 'n') && (tid[1] == 'P' || tid[1] == 'p') &&
+        (tid[2] == 'X' || tid[2] == 'x') && (tid[3] == 'S' || tid[3] == 's'))
+        return "system_title";
+    return NULL;
+}
+
+/* Calls fn(element, its length, ctx) for every object in PROCESS_LIST's "procs" array until fn
+ * returns non-zero (that value is returned). 0 when the walk ended, -1 when the reply does not parse. */
+static int each_process(const char *json, size_t n, int (*fn)(const char *el, size_t len, void *ctx), void *ctx) {
+    const char *arr, *q, *e;
+    size_t alen;
+    if (webui_json_array(json, n, "procs", &arr, &alen) != 1) return -1;
+    e = arr + alen;
+    q = arr + 1;
+    for (;;) {
+        const char *el, *end;
+        int rc;
+        q = ws(q, e);
+        if (q >= e) return -1;
+        if (*q == ']') return 0;
+        el = q;
+        end = skip_val(q, e);
+        if (!end) return -1;
+        if (*el == '{') {
+            rc = fn(el, (size_t)(end - el), ctx);
+            if (rc) return rc;
+        }
+        q = ws(end, e);
+        if (q < e && *q == ',') q++;
+    }
+}
+
+struct kill_find {
+    uint64_t pid;
+    const char *why;
+};
+
+static int kill_find_fn(const char *el, size_t len, void *ctx) {
+    struct kill_find *k = (struct kill_find *)ctx;
+    uint64_t pid;
+    char kind[16];
+    int self = 0;
+    if (webui_json_u64(el, len, "pid", &pid) != 1 || pid != k->pid) return 0;
+    if (webui_json_bool(el, len, "is_self", &self) == 1 && self) k->why = "helper";
+    else if (webui_json_str(el, len, "kind", kind, sizeof kind) != 1 ||
+             (strcmp(kind, "app") != 0 && strcmp(kind, "payload") != 0))
+        k->why = "system";
+    else k->why = NULL;
+    return 1;
+}
+
+const char *webui_proc_kill_refusal(const char *json, size_t n, uint64_t pid) {
+    struct kill_find k;
+    if (pid <= 1) return "system";
+    k.pid = pid;
+    k.why = "not_running";
+    if (each_process(json, n, kill_find_fn, &k) != 1) return "not_running";
+    return k.why;
+}
+
+struct game_find {
+    const char *tid;
+    int other;
+};
+
+static int game_find_fn(const char *el, size_t len, void *ctx) {
+    struct game_find *g = (struct game_find *)ctx;
+    char kind[16], tid[32];
+    int same;
+    if (webui_json_str(el, len, "kind", kind, sizeof kind) != 1 || strcmp(kind, "app") != 0) return 0;
+    if (webui_json_str(el, len, "title_id", tid, sizeof tid) != 1 || !tid[0]) return 0;
+    same = strcmp(tid, g->tid) == 0;
+    return g->other ? !same : same;
+}
+
+int webui_proc_game_running(const char *json, size_t n, const char *tid, int other) {
+    struct game_find g;
+    g.tid = tid ? tid : "";
+    g.other = other;
+    return each_process(json, n, game_find_fn, &g);
 }
 
 /* ---- search index ---- */

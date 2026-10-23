@@ -19,6 +19,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "archive_extract.h"
 #include "ava1_data.h"
 #include "ava1_gen.h"
 #include "ava1_glue.h"
@@ -29,17 +30,21 @@
 #include "files_handoff.h"
 #include "files_prefs.h"
 #include "fs_jobs.h"
+#include "hw_info.h"
 #include "path_policy.h"
 #include "proc_identity.h"
 #include "ps5_firmware.h"
+#include "storage_cleanup.h"
 #include "webui_cheats_store.h"
 #include "webui_codec.h"
 #include "webui_files.h"
 #include "webui_inputlog.h"
 #include "webui_offline.h"
+#include "webui_pkg.h"
 #include "webui_page.h"
 #include "webui_server.h"
 #include "webui_settings.h"
+#include "webui_smb.h"
 #include "webui_strings.h"
 #include "webui_tile.h"
 
@@ -47,6 +52,7 @@
 #define API_LIST_JSON (64u * 1024u)  /* one fs.list page as JSON: entries past it page on */
 #define API_JOBS_JSON (16u * 1024u)  /* AVA1_MAX_JOBS (32) entries of ~260 bytes */
 #define API_STATUS_JSON (8u * 6u * 1024u) /* one job status: a result of WEBUI_JOB_RESULT_MAX, escaped */
+#define XPASS_MAX (512u)            /* an archive password, NUL included */
 #define API_PATH (1024u)             /* a path, NUL included (the helper's FS_PATH_MAX) */
 #define API_READ_MAX (1024u * 1024u) /* /api/fs/read's longest answer */
 #define API_LIST_MAX 256u            /* fs.list entries per call (the helper's own ceiling) */
@@ -133,14 +139,24 @@ static int call(uint16_t method, const uint8_t *req, size_t req_len, uint8_t *ou
 
 /* A MgmtText method: `body` (may be empty: the request is then empty, as the engine sends it) in,
  * the reply text out (a pointer into `out`). */
+static int call_text_more(uint16_t method, const char *body, size_t len, uint8_t *out, size_t *out_len,
+                          const uint8_t **text, size_t *text_len, int *more);
+
 static int call_text(uint16_t method, const char *body, size_t len, uint8_t *out, size_t *out_len, const uint8_t **text,
                      size_t *text_len) {
+    return call_text_more(method, body, len, out, out_len, text, text_len, NULL);
+}
+
+/* call_text, and *more (when given) set when a paged method's reply has entries after it. */
+static int call_text_more(uint16_t method, const char *body, size_t len, uint8_t *out, size_t *out_len,
+                          const uint8_t **text, size_t *text_len, int *more) {
     uint8_t *req = NULL;
     size_t req_len = 0;
     ava1_mgmt_text_t m;
     int st;
     *text = NULL;
     *text_len = 0;
+    if (more) *more = 0;
     if (len) {
         ava1_w_t w;
         memset(&m, 0, sizeof m);
@@ -164,6 +180,7 @@ static int call_text(uint16_t method, const char *body, size_t len, uint8_t *out
     }
     *text = m.body;
     *text_len = m.body_len;
+    if (more) *more = m.has_more && m.more;
     return AVA1_STATUS_OK;
 }
 
@@ -779,6 +796,80 @@ static void r_fs_unpack_info(const char *b, size_t n, uint8_t *out, int fd) {
     send_json(fd, 200, j, at);
 }
 
+/* Extract an archive on the console (ARCHIVE_EXTRACT, run by the extractor payload): {"path", "dest",
+ * optional "password", "merge", "replace"}. The job's result: {"path","files","dirs","bytes","skipped",
+ * "unsafe","links"}. */
+static void r_fs_extract(const char *b, size_t n, uint8_t *out, int fd) {
+    char path[API_PATH], dest[API_PATH], password[XPASS_MAX], *tail;
+    size_t at = 0, cap = 3 * API_PATH + 3 * XPASS_MAX + 64;
+    int merge = 0, replace = 0, rc;
+    if (need_path(fd, b, n, "path", path, sizeof path) != 0) return;
+    if (need_path(fd, b, n, "dest", dest, sizeof dest) != 0) return;
+    rc = webui_json_str(b, n, "password", password, sizeof password);
+    if (rc < 0) {
+        send_bad(fd, "bad_password");
+        return;
+    }
+    if (webui_json_bool(b, n, "merge", &merge) < 0 || webui_json_bool(b, n, "replace", &replace) < 0) {
+        send_bad(fd, "bad_merge");
+        return;
+    }
+    tail = malloc(cap);
+    if (!tail) {
+        send_error(fd, 500, "out_of_memory", 13);
+        return;
+    }
+    /* archive_extract.c reads it back with fsj_json_str (\" \\ \uXXXX understood). */
+    at = (size_t)snprintf(tail, cap, ",\"dest\":\"");
+    at += webui_json_escape(tail + at, cap - at, dest, strlen(dest));
+    if (at + 16 < cap) at += (size_t)snprintf(tail + at, cap - at, "\"%s", rc == 1 ? ",\"password\":\"" : "");
+    if (rc == 1 && at < cap) {
+        at += webui_json_escape(tail + at, cap - at, password, strlen(password));
+        if (at + 2 < cap) at += (size_t)snprintf(tail + at, cap - at, "\"");
+    }
+    if (at + 40 < cap)
+        at += (size_t)snprintf(tail + at, cap - at, ",\"merge\":%s,\"replace\":%s", merge ? "true" : "false",
+                               replace ? "true" : "false");
+    else
+        at = cap; /* did not fit */
+    memset(password, 0, sizeof password);
+    if (at >= cap) {
+        memset(tail, 0, cap);
+        free(tail);
+        send_bad(fd, "bad_path");
+        return;
+    }
+    start_path_job(fd, out, AVA1_JOB_OP_ARCHIVE_EXTRACT, path, NULL, tail);
+    memset(tail, 0, cap);
+    free(tail);
+}
+
+/* What an extraction would do, before it starts: {"name","dest","size","volumes","free"|null,"exists",
+ * "kind"}. A source it would refuse answers its cause (403 path, 404 cannot open, 409 not an archive). */
+static void r_fs_extract_info(const char *b, size_t n, uint8_t *out, int fd) {
+    char path[API_PATH];
+    archive_probe_t pr;
+    const char *bad;
+    char *j = (char *)out;
+    size_t at = 0, cap = API_OUT_MAX;
+    if (need_path(fd, b, n, "path", path, sizeof path) != 0) return;
+    bad = archive_extract_probe(path, &pr);
+    if (bad) {
+        int http = strstr(bad, "not_allowed") ? 403 : (strstr(bad, "open_failed") ? 404 : 409);
+        send_error(fd, http, bad, strlen(bad));
+        return;
+    }
+    put_fmt(j, cap, &at, "{");
+    put_str(j, cap, &at, "name", pr.name);
+    put_fmt(j, cap, &at, ",");
+    put_str(j, cap, &at, "dest", pr.dest);
+    put_fmt(j, cap, &at, ",\"size\":%llu,\"volumes\":%u,", (unsigned long long)pr.size, pr.volumes);
+    if (pr.have_free) put_fmt(j, cap, &at, "\"free\":%llu,", (unsigned long long)pr.free);
+    else put_fmt(j, cap, &at, "\"free\":null,");
+    put_fmt(j, cap, &at, "\"exists\":%s,\"kind\":\"%s\"}", pr.exists ? "true" : "false", pr.kind);
+    send_json(fd, 200, j, at);
+}
+
 static int is_mine(const uint8_t id[16], void *ctx) {
     (void)ctx;
     return ava1_jobs_owner_is(id, k_console_id);
@@ -896,6 +987,370 @@ static void r_app_close(const char *b, size_t n, uint8_t *out, int fd) {
     else send_json(fd, 200, (const char *)t, tl);
 }
 
+/* ---- packages and payloads on the console (webui_pkg.c) ---- */
+
+#define API_PKG_JSON 4096u
+
+static void r_pkg_info(const char *b, size_t n, uint8_t *out, int fd) {
+    char path[API_PATH], *json;
+    const char *cause = "internal";
+    int st;
+    (void)out;
+    if (need_path(fd, b, n, "path", path, sizeof path) != 0) return;
+    json = malloc(API_PKG_JSON);
+    if (!json) {
+        send_error(fd, 500, "out_of_memory", 13);
+        return;
+    }
+    st = webui_pkg_info_json(path, json, API_PKG_JSON, &cause);
+    if (st == 200) send_json(fd, 200, json, strlen(json));
+    else send_error(fd, st, cause, strlen(cause));
+    free(json);
+}
+
+static void r_pkg_icon(const char *b, size_t n, uint8_t *out, int fd) {
+    char path[API_PATH];
+    const char *cause = "internal";
+    uint8_t *png = NULL;
+    size_t len = 0;
+    int st;
+    (void)out;
+    if (need_path(fd, b, n, "path", path, sizeof path) != 0) return;
+    st = webui_pkg_icon(path, &png, &len, &cause);
+    if (st == 200) webui_send_ex(fd, 200, "image/png", png, len, "Content-Security-Policy: sandbox\r\n");
+    else send_error(fd, st, cause, strlen(cause));
+    free(png);
+}
+
+/* {"path"[,"replace":true][,"remove_after":true]}: checked here first (a full game already installed
+ * answers 409 pkg_install_already_installed, so the page can ask before Sony removes it), then the
+ * job. remove_after (the Library's copy of a package from a share, in WEBUI_PKG_STAGE_DIR) has the
+ * job remove the package like its own staging copy. */
+static void r_pkg_install(const char *b, size_t n, uint8_t *out, int fd) {
+    char path[API_PATH], tail[48];
+    const char *cause = "internal";
+    int replace = 0, remove_after = 0, st;
+    if (need_path(fd, b, n, "path", path, sizeof path) != 0) return;
+    if (webui_json_bool(b, n, "replace", &replace) < 0) {
+        send_bad(fd, "bad_replace");
+        return;
+    }
+    if (webui_json_bool(b, n, "remove_after", &remove_after) < 0) {
+        send_bad(fd, "bad_remove_after");
+        return;
+    }
+    st = webui_pkg_install_check(path, replace, &cause);
+    if (st != 200) {
+        send_error(fd, st, cause, strlen(cause));
+        return;
+    }
+    snprintf(tail, sizeof tail, "%s%s", replace ? ",\"replace\":true" : "", remove_after ? ",\"remove_after\":1" : "");
+    start_path_job(fd, out, AVA1_JOB_OP_PKG_INSTALL, path, NULL, tail);
+}
+
+static void r_payload_load(const char *b, size_t n, uint8_t *out, int fd) {
+    char path[API_PATH], json[48];
+    const char *cause = "internal";
+    uint64_t sent = 0;
+    int st, k;
+    (void)out;
+    if (need_path(fd, b, n, "path", path, sizeof path) != 0) return;
+    st = webui_payload_load(path, &sent, &cause);
+    if (st != 200) {
+        send_error(fd, st, cause, strlen(cause));
+        return;
+    }
+    k = snprintf(json, sizeof json, "{\"bytes\":%llu}", (unsigned long long)sent);
+    send_json(fd, 200, json, (size_t)k);
+}
+
+
+/* ---- games: the installed titles, through the methods the PC app's Games screen calls ----
+ *
+ * The page builds the installed list the way the engine does (ps5_apps_installed: /user/appmeta, the
+ * app folders, app.db and our registrations), from /api/fs/list and the routes below. Launch, uninstall
+ * and hide go to the same handlers the engine calls (APP_LAUNCH, APP_UNREGISTER, APP_ICON_SET); those
+ * take the Sony API lock themselves (mgmt_table.def MGMT_SONY; launch_title reads the foreground user
+ * under it). The page's own tile is never acted on here (Settings removes it), and the console's own
+ * apps (NPXS) are never uninstalled or hidden. */
+
+#define API_APPS_INFO_MAX 32u              /* titles one /api/apps/info asks about */
+#define API_APPS_INFO_JSON (128u * 1024u) /* 32 appinfo replies of a few hundred bytes, with headroom */
+
+/* A required title id the Games section may act on (webui_app_refusal); else 400 bad_title_id or
+ * 403 own_tile / system_title, and -1. */
+static int need_app(int fd, const char *b, size_t n, char *out, size_t cap, int destructive) {
+    const char *why;
+    if (webui_json_str(b, n, "title_id", out, cap) != 1) out[0] = '\0';
+    why = webui_app_refusal(out, destructive);
+    if (!why) return 0;
+    send_error(fd, strcmp(why, "bad_title_id") == 0 ? 400 : 403, why, strlen(why));
+    return -1;
+}
+
+/* A helper reply that is already the JSON the page reads. */
+static void send_text_reply(int fd, int st, uint8_t *out, size_t ol, const uint8_t *t, size_t tl) {
+    if (st != AVA1_STATUS_OK) send_status_error(fd, st, out, ol);
+    else if (!tl || t[0] != '{') send_error(fd, 500, "bad_reply", 9);
+    else send_json(fd, 200, (const char *)t, tl);
+}
+
+/* {offset?}: one page of app.db's titles (APP_DB_QUERY, paged since #473) as the helper answers it:
+ * {"apps":[{"title_id","app_id","name"}],"next":N,"more":bool,...} or {"err":..,"apps":[]}. */
+static void r_apps_db(const char *b, size_t n, uint8_t *out, int fd) {
+    char req[96];
+    const uint8_t *t;
+    size_t ol, tl;
+    uint64_t offset;
+    int k, st;
+    if (opt_u64(fd, b, n, "offset", 0, UINT32_MAX, &offset) != 0) return;
+    k = snprintf(req, sizeof req, "{\"offset\":%lu,\"limit\":500}", (unsigned long)offset);
+    st = call_text(AVA1_METHOD_APP_DB_QUERY, req, (size_t)k, out, &ol, &t, &tl);
+    send_text_reply(fd, st, out, ol, t, tl);
+}
+
+/* The titles we registered from a folder or an image (APP_LIST): {"more":bool,"reply":{"apps":[..]}}.
+ * `more` is set when the list did not fit one reply (the page then knows it is not whole). */
+static void r_apps_registered(const char *b, size_t n, uint8_t *out, int fd) {
+    const uint8_t *t;
+    size_t ol, tl, head;
+    int st, more = 0;
+    char *json;
+    (void)b;
+    (void)n;
+    st = call_text_more(AVA1_METHOD_APP_LIST, NULL, 0, out, &ol, &t, &tl, &more);
+    if (st != AVA1_STATUS_OK) {
+        send_status_error(fd, st, out, ol);
+        return;
+    }
+    if (!tl || t[0] != '{') {
+        send_error(fd, 500, "bad_reply", 9);
+        return;
+    }
+    json = malloc(tl + 32);
+    if (!json) {
+        send_error(fd, 500, "out_of_memory", 13);
+        return;
+    }
+    head = (size_t)snprintf(json, 32, "{\"more\":%s,\"reply\":", more ? "true" : "false");
+    memcpy(json + head, t, tl);
+    json[head + tl] = '}';
+    send_json(fd, 200, json, head + tl + 1);
+    free(json);
+}
+
+/* The titles whose home-screen icon is hidden (APP_HIDDEN_LIST): {"ok":true,"hidden":[..]}. */
+static void r_apps_hidden(const char *b, size_t n, uint8_t *out, int fd) {
+    const uint8_t *t;
+    size_t ol, tl;
+    int st;
+    (void)b;
+    (void)n;
+    st = call_text(AVA1_METHOD_APP_HIDDEN_LIST, NULL, 0, out, &ol, &t, &tl);
+    send_text_reply(fd, st, out, ol, t, tl);
+}
+
+/* {title_ids:[..]} (at most API_APPS_INFO_MAX): each title's appinfo.db fields the PC app's game page
+ * reads (APP_INFO_QUERY): {"apps":{"<id>":{"ok":true,"rows":[{"key","val"}]..},...}}. A title the
+ * query fails for is left out. */
+static void r_apps_info(const char *b, size_t n, uint8_t *out, int fd) {
+    const char *arr;
+    size_t alen, pos = 0, at = 0;
+    char tid[32], req[160];
+    char *json;
+    unsigned count = 0;
+    int first = 1;
+    if (webui_json_array(b, n, "title_ids", &arr, &alen) != 1) {
+        send_bad(fd, "bad_title_ids");
+        return;
+    }
+    json = malloc(API_APPS_INFO_JSON);
+    if (!json) {
+        send_error(fd, 500, "out_of_memory", 13);
+        return;
+    }
+    put_fmt(json, API_APPS_INFO_JSON, &at, "{\"apps\":{");
+    for (;;) {
+        const uint8_t *t;
+        size_t ol, tl;
+        int rc = webui_json_array_str(arr, alen, &pos, tid, sizeof tid), k, st;
+        if (rc == 0) break;
+        if (rc < 0 || webui_app_refusal(tid, 0) || ++count > API_APPS_INFO_MAX) {
+            free(json);
+            send_bad(fd, "bad_title_ids");
+            return;
+        }
+        k = snprintf(req, sizeof req,
+                     "{\"title_id\":\"%s\",\"keys\":\"CONTENT_VERSION,APP_VER,#_size,#_last_access_time,#_install_time\"}",
+                     tid); /* letters and digits only */
+        st = call_text(AVA1_METHOD_APP_INFO_QUERY, req, (size_t)k, out, &ol, &t, &tl);
+        if (st != AVA1_STATUS_OK || !tl || t[0] != '{') continue;
+        /* the whole reply or nothing: a cut one would not parse */
+        if (at + strlen(tid) + tl + 16 >= API_APPS_INFO_JSON) continue;
+        put_fmt(json, API_APPS_INFO_JSON, &at, "%s\"%s\":", first ? "" : ",", tid);
+        memcpy(json + at, t, tl);
+        at += tl;
+        json[at] = '\0';
+        first = 0;
+    }
+    put_fmt(json, API_APPS_INFO_JSON, &at, "}}");
+    send_json(fd, 200, json, at);
+    free(json);
+}
+
+/* PROCESS_LIST (the PC app's Processes screen): {"ok":true,"procs":[{pid,name,comm,title_id,app_id,memory_mib,
+ * threads,kind,is_self}],...}. In-process sysctl walk, no Sony API. */
+static void r_proc_list(const char *b, size_t n, uint8_t *out, int fd) {
+    const uint8_t *t;
+    size_t ol, tl;
+    int st;
+    (void)b;
+    (void)n;
+    st = call_text(AVA1_METHOD_PROC_PROCESS_LIST, NULL, 0, out, &ol, &t, &tl);
+    send_text_reply(fd, st, out, ol, t, tl);
+}
+
+/* Whether a game with title id `tid` (other != 0: any other game) runs, from PROCESS_LIST. A list that
+ * cannot be read counts as running: a guard never passes on a guess. */
+static int game_running(uint8_t *out, const char *tid, int other) {
+    const uint8_t *t;
+    size_t ol, tl;
+    if (call_text(AVA1_METHOD_PROC_PROCESS_LIST, NULL, 0, out, &ol, &t, &tl) != AVA1_STATUS_OK) return 1;
+    return webui_proc_game_running((const char *)t, tl, tid, other) != 0;
+}
+
+/* {title_id}: APP_LAUNCH as the engine sends it. The ack means Sony took the request, not that the game
+ * is up (the page watches the process list for it). Refused (409 other_game_running) while another game
+ * runs: a launch over a running game closes it and can fail (game-swap on FW 13.60), so the page asks for
+ * a Close first. The same title running is fine: launch_title brings it to the front, once. */
+static void r_apps_launch(const char *b, size_t n, uint8_t *out, int fd) {
+    char tid[32], req[64];
+    const uint8_t *t;
+    size_t ol, tl;
+    int k, st;
+    if (need_app(fd, b, n, tid, sizeof tid, 0) != 0) return;
+    if (game_running(out, tid, 1)) {
+        send_error(fd, 409, "other_game_running", 18);
+        return;
+    }
+    k = snprintf(req, sizeof req, "{\"title_id\":\"%s\"}", tid);
+    st = call_text(AVA1_METHOD_APP_LAUNCH, req, (size_t)k, out, &ol, &t, &tl);
+    if (st != AVA1_STATUS_OK) send_status_error(fd, st, out, ol);
+    else send_json(fd, 200, "{}", 2);
+}
+
+/* {title_id}: APP_UNREGISTER, the PC app's Uninstall. The helper judges the result itself (#476:
+ * unregister_outcome.h): {"sony_uninstall_rc":N,"still_present":false} when the title is gone,
+ * still_present:true when Sony accepted but its folders are still there (a big game takes minutes:
+ * the page keeps checking), an error ("uninstall_refused:0x..", "uninstall_unavailable") otherwise.
+ * Refused (409 game_running) while that game runs. */
+static void r_apps_uninstall(const char *b, size_t n, uint8_t *out, int fd) {
+    char tid[32], req[64];
+    const uint8_t *t;
+    size_t ol, tl;
+    int k, st;
+    if (need_app(fd, b, n, tid, sizeof tid, 1) != 0) return;
+    if (game_running(out, tid, 0)) {
+        send_error(fd, 409, "game_running", 12);
+        return;
+    }
+    k = snprintf(req, sizeof req, "{\"title_id\":\"%s\"}", tid);
+    st = call_text(AVA1_METHOD_APP_UNREGISTER, req, (size_t)k, out, &ol, &t, &tl);
+    send_text_reply(fd, st, out, ol, t, tl);
+}
+
+/* {path}: APP_REGISTER, the PC app's Register of a game folder (the Library offers it after it copied
+ * a folder dump to the console) -> {"title_id","title_name","used_nullfs"}; a refusal is the
+ * helper's register_* token. */
+static void r_apps_register(const char *b, size_t n, uint8_t *out, int fd) {
+    char path[API_PATH], *req;
+    const uint8_t *t;
+    size_t ol, tl, k;
+    int st;
+    if (need_path(fd, b, n, "path", path, sizeof path) != 0) return;
+    req = malloc(2 * API_PATH + 32);
+    if (!req) {
+        send_error(fd, 500, "out_of_memory", 13);
+        return;
+    }
+    k = (size_t)snprintf(req, 2 * API_PATH + 32, "{\"src_path\":\"");
+    k += webui_json_escape(req + k, 2 * API_PATH + 32 - k, path, strlen(path));
+    if (k + 3 > 2 * API_PATH + 32) {
+        free(req);
+        send_bad(fd, "bad_path");
+        return;
+    }
+    memcpy(req + k, "\"}", 3);
+    st = call_text(AVA1_METHOD_APP_REGISTER, req, k + 2, out, &ol, &t, &tl);
+    free(req);
+    send_text_reply(fd, st, out, ol, t, tl);
+}
+
+/* {title_id, hidden}: APP_ICON_SET (#407): only app.db's visible flag changes; the title stays
+ * installed. A refusal ({"ok":false,"err":..}) is 409 with the helper's reason. */
+static void r_apps_icon(const char *b, size_t n, uint8_t *out, int fd) {
+    char tid[32], req[96], err[API_CAUSE_MAX];
+    const uint8_t *t;
+    size_t ol, tl;
+    int hidden, ok = 0, k, st;
+    if (need_app(fd, b, n, tid, sizeof tid, 1) != 0) return;
+    if (webui_json_bool(b, n, "hidden", &hidden) != 1) {
+        send_bad(fd, "bad_hidden");
+        return;
+    }
+    k = snprintf(req, sizeof req, "{\"title_id\":\"%s\",\"hidden\":\"%s\"}", tid, hidden ? "1" : "0");
+    st = call_text(AVA1_METHOD_APP_ICON_SET, req, (size_t)k, out, &ol, &t, &tl);
+    if (st != AVA1_STATUS_OK) {
+        send_status_error(fd, st, out, ol);
+        return;
+    }
+    if (webui_json_bool((const char *)t, tl, "ok", &ok) == 1 && ok) {
+        send_json(fd, 200, hidden ? "{\"hidden\":true}" : "{\"hidden\":false}", hidden ? 15 : 16);
+        return;
+    }
+    if (webui_json_str((const char *)t, tl, "err", err, sizeof err) != 1 || !err[0]) snprintf(err, sizeof err, "icon_failed");
+    send_error(fd, 409, err, strlen(err));
+}
+
+/* {pid}: PROCESS_KILL (SIGKILL), as the PC app's Processes screen sends it, for a game or a payload only
+ * (webui_proc_kill_refusal: never the helper, never a system process, never a pid the list does not
+ * show). 409 kill_failed with the errno text when the kernel says no. */
+static void r_proc_kill(const char *b, size_t n, uint8_t *out, int fd) {
+    char req[48], reason[API_CAUSE_MAX];
+    const uint8_t *t;
+    size_t ol, tl;
+    uint64_t pid;
+    int ok = 0, k, st;
+    const char *why;
+    if (webui_json_u64(b, n, "pid", &pid) != 1 || pid > 0x7fffffffu) {
+        send_bad(fd, "bad_pid");
+        return;
+    }
+    st = call_text(AVA1_METHOD_PROC_PROCESS_LIST, NULL, 0, out, &ol, &t, &tl);
+    if (st != AVA1_STATUS_OK) {
+        send_status_error(fd, st, out, ol);
+        return;
+    }
+    why = webui_proc_kill_refusal((const char *)t, tl, pid);
+    if (why) {
+        send_error(fd, strcmp(why, "not_running") == 0 ? 404 : 403, why, strlen(why));
+        return;
+    }
+    k = snprintf(req, sizeof req, "{\"pid\":%lu}", (unsigned long)pid);
+    st = call_text(AVA1_METHOD_PROC_KILL, req, (size_t)k, out, &ol, &t, &tl);
+    if (st != AVA1_STATUS_OK) {
+        send_status_error(fd, st, out, ol);
+        return;
+    }
+    if (webui_json_bool((const char *)t, tl, "ok", &ok) == 1 && ok) {
+        send_json(fd, 200, "{}", 2);
+        return;
+    }
+    if (webui_json_str((const char *)t, tl, "reason", reason, sizeof reason) != 1 || !reason[0])
+        snprintf(reason, sizeof reason, "kill_failed");
+    send_error(fd, 409, reason, strlen(reason));
+}
+
 /* ---- volumes: eject a USB drive, unmount a mounted image ---- */
 
 /* USB_EJECT {"mount_point":"/mnt/usbN","force":"0"|"1"} as the engine sends it (fs_ops.rs usb_eject). The
@@ -958,6 +1413,67 @@ static void r_volumes_unmount(const char *b, size_t n, uint8_t *out, int fd) {
     st = call_text(AVA1_METHOD_FS_UNMOUNT, req, at, out, &ol, &t, &tl);
     if (st != AVA1_STATUS_OK) send_status_error(fd, st, out, ol);
     else send_json(fd, 200, "{}", 2);
+}
+
+/* ---- the fan (Fan page): read and set it the way the desktop does ---- */
+
+#define API_FAN_JSON 512u /* webui_fan_status_json's object is under 300 bytes */
+
+/* HW_TEMPS "f" (the basic sensors plus the fan duty, the one extended read the page needs) as
+ * webui_fan_status_json's object. */
+static void send_fan_status(uint8_t *out, int fd) {
+    char json[API_FAN_JSON];
+    const uint8_t *t;
+    size_t ol, tl;
+    int st, k;
+    st = call_text(AVA1_METHOD_HW_TEMPS, "f", 1, out, &ol, &t, &tl);
+    if (st != AVA1_STATUS_OK) {
+        send_status_error(fd, st, out, ol);
+        return;
+    }
+    k = webui_fan_status_json((const char *)t, tl, json, sizeof json);
+    if (k < 0) send_error(fd, 500, "bad_fan_reply", 13);
+    else send_json(fd, 200, json, (size_t)k);
+}
+
+static void r_fan(const char *b, size_t n, uint8_t *out, int fd) {
+    (void)b;
+    (void)n;
+    send_fan_status(out, fd);
+}
+
+/* {"target_c":N} (HW_FAN_THRESHOLD_MIN..MAX) or {"stock":true}: HW_FAN_THRESHOLD "N", or "0" for the
+ * console's own setting (hw_fan_restore_stock), as the engine sends it; then the status read after it.
+ * The helper's refusals reach the page as 409 fan_above_stock (higher than the console's own) and
+ * 409 fan_restore_needs_restart (ours is dropped; the console's own value comes back at its next
+ * fan-pattern switch or restart); a write it could not verify as icc_fan_*. */
+static void r_fan_set(const char *b, size_t n, uint8_t *out, int fd) {
+    char req[16], cause[API_CAUSE_MAX + 1];
+    const uint8_t *t;
+    size_t ol, tl;
+    uint64_t c = 0;
+    int stock = 0, k, st;
+    if (webui_json_bool(b, n, "stock", &stock) < 0) {
+        send_bad(fd, "bad_stock");
+        return;
+    }
+    if (!stock && (webui_json_u64(b, n, "target_c", &c) != 1 || c < HW_FAN_THRESHOLD_MIN || c > HW_FAN_THRESHOLD_MAX)) {
+        send_bad(fd, "bad_target_c");
+        return;
+    }
+    k = snprintf(req, sizeof req, "%u", stock ? 0u : (unsigned)c);
+    st = call_text(AVA1_METHOD_HW_FAN_THRESHOLD, req, (size_t)k, out, &ol, &t, &tl);
+    if (st != AVA1_STATUS_OK) {
+        size_t cl = ol < API_CAUSE_MAX ? ol : API_CAUSE_MAX;
+        memcpy(cause, out, cl);
+        cause[cl] = '\0';
+        if (strcmp(cause, "fan_above_stock") == 0 || strcmp(cause, "fan_restore_needs_restart") == 0)
+            send_error(fd, 409, cause, cl);
+        else
+            send_status_error(fd, st, out, ol);
+        return;
+    }
+    send_fan_status(out, fd);
 }
 
 /* ---- file manager prefs (files_prefs.c): pinned folders, recent folders, the last folder ---- */
@@ -1039,14 +1555,53 @@ static void r_files_handoff_put(const char *b, size_t n, uint8_t *out, int fd) {
     else send_json(fd, 200, "{}", 2);
 }
 
+/* ---- console clean-up (storage_cleanup.c): the same calls the PC app makes ---- */
+
+static void send_cleanup(int fd, int len, const uint8_t *out) {
+    char tok[48];
+    int http = 500;
+    if (len <= 0) {
+        send_error(fd, 500, "internal", 8);
+        return;
+    }
+    if (!sc_reply_error((const char *)out, (size_t)len, tok, sizeof tok)) {
+        send_json(fd, 200, (const char *)out, (size_t)len);
+        return;
+    }
+    if (strcmp(tok, "busy") == 0 || strcmp(tok, "install_running") == 0 || strcmp(tok, "scan_not_done") == 0) http = 409;
+    else if (strcmp(tok, "unknown_scan") == 0 || strcmp(tok, "unknown_apply") == 0) http = 404;
+    else if (strcmp(tok, "scan_expired") == 0) http = 410;
+    else if (strcmp(tok, "bad_request") == 0) http = 400;
+    send_error(fd, http, tok, strlen(tok));
+}
+
+static void r_cleanup_scan(const char *b, size_t n, uint8_t *out, int fd) {
+    (void)b;
+    (void)n;
+    send_cleanup(fd, sc_scan_start((char *)out, API_OUT_MAX), out);
+}
+static void r_cleanup_status(const char *b, size_t n, uint8_t *out, int fd) {
+    send_cleanup(fd, sc_scan_status(b, n, (char *)out, API_OUT_MAX), out);
+}
+static void r_cleanup_apply(const char *b, size_t n, uint8_t *out, int fd) {
+    send_cleanup(fd, sc_apply_start(b, n, (char *)out, API_OUT_MAX), out);
+}
+static void r_cleanup_apply_status(const char *b, size_t n, uint8_t *out, int fd) {
+    send_cleanup(fd, sc_apply_status(b, n, (char *)out, API_OUT_MAX), out);
+}
+static void r_cleanup_cancel(const char *b, size_t n, uint8_t *out, int fd) {
+    send_cleanup(fd, sc_cancel(b, n, (char *)out, API_OUT_MAX), out);
+}
+
 /* ---- settings ---- */
 
 /* The live settings. g_set_mu is held across a save, so two /api/settings/set calls never write
  * the file at once and memory always matches what is on disk. */
 static pthread_mutex_t g_set_mu = PTHREAD_MUTEX_INITIALIZER;
-static webui_settings_t g_set = { 0, 1 };
-/* Serializes the LAN rebinds: each one reads the newest `lan` under it, so the last rebind to run
- * applies the last value saved, whatever order the threads ran in. */
+static webui_settings_t g_set = { 0, 1, 1 };
+/* Serializes the LAN rebinds and the server starts/stops for `enabled`: each one reads the newest
+ * setting under it, so the last one to run applies the last value saved, whatever order the
+ * threads ran in. */
 static pthread_mutex_t g_rebind_mu = PTHREAD_MUTEX_INITIALIZER;
 
 void webui_api_settings_init(const webui_settings_t *s) {
@@ -1057,18 +1612,24 @@ void webui_api_settings_init(const webui_settings_t *s) {
 
 /* tile_busy / tile_failed: the tile switch is applied on the tile thread after this reply (Sony calls
  * take seconds), so the page re-reads /api/settings until tile_busy is false and then says so when
- * the last ensure/remove failed (webui_tile_state). */
+ * the last ensure/remove failed (webui_tile_state). tile_result: what the helper last did to the
+ * tile ("added", "removed", "hidden", "failed" or ""; webui_tile_result_name). */
 /* `addr`: with LAN access on, the console's address a phone opens ("Continue on your phone"; the
- * page builds http://<addr>:<port>/ from it); "" when off or there is none. Dotted IPv4 only. */
+ * page builds http://<addr>:<port>/ from it); "" when off or there is none. Dotted IPv4 only.
+ * `enabled`: PS5Upload Minion as a whole (false only in the reply that turns it off: the page
+ * stops right after). */
 static void send_settings(int fd, const webui_settings_t *s) {
-    char json[256], addr[INET_ADDRSTRLEN];
+    char json[320], addr[INET_ADDRSTRLEN];
     int busy, failed, k;
-    webui_tile_state(&busy, &failed);
+    webui_tile_result_t result;
+    webui_tile_state(&busy, &failed, &result);
     if (!s->lan || !webui_lan_addr(addr)) addr[0] = '\0';
     k = snprintf(json, sizeof json,
-                 "{\"lan\":%s,\"tile\":%s,\"tile_busy\":%s,\"tile_failed\":%s,\"version\":\"%s\",\"addr\":\"%s\"}",
-                 s->lan ? "true" : "false", s->tile ? "true" : "false", busy ? "true" : "false",
-                 failed ? "true" : "false", PS5UPLOAD2_VERSION, addr);
+                 "{\"lan\":%s,\"tile\":%s,\"enabled\":%s,\"tile_busy\":%s,\"tile_failed\":%s,"
+                 "\"tile_result\":\"%s\",\"version\":\"%s\",\"addr\":\"%s\"}",
+                 s->lan ? "true" : "false", s->tile ? "true" : "false", s->enabled ? "true" : "false",
+                 busy ? "true" : "false", failed ? "true" : "false", webui_tile_result_name(result),
+                 PS5UPLOAD2_VERSION, addr);
     if (k < 0 || (size_t)k >= sizeof json) {
         send_error(fd, 500, "bad_settings_reply", 18);
         return;
@@ -1117,13 +1678,84 @@ static void spawn_lan_apply(void) {
     if (rc != 0) fprintf(stderr, "webui: cannot start the rebind thread (%d); LAN applies at the next start\n", rc);
 }
 
-/* {lan?, tile?}: saved first (the file is the truth at the next start), then answered with the
- * new settings, then applied: a `lan` change rebinds the listener on a thread of its own, a `tile`
- * change (or tile:true again) registers or removes the tile on the tile thread. A failed save
- * changes nothing. */
+/* Starts the :9180 server with the saved LAN setting (main.c at helper start, and turning Minion
+ * back on). 0 when it runs (or already ran), -1 when it could not start (logged). */
+int webui_api_server_start(void) {
+    webui_cfg_t wc;
+    int lan;
+    if (webui_running()) return 0;
+    pthread_mutex_lock(&g_set_mu);
+    lan = g_set.lan;
+    pthread_mutex_unlock(&g_set_mu);
+    memset(&wc, 0, sizeof wc);
+    wc.port = WEBUI_PORT;
+    wc.lan = lan;
+    wc.route = webui_api_route;
+    wc.stream_for = webui_api_stream_for;
+    wc.stream = webui_api_stream;
+    if (webui_start(&wc) != 0) {
+        if (webui_running()) return 0; /* another start won the race */
+        fprintf(stderr, "webui: server did not start\n");
+        return -1;
+    }
+    return 0;
+}
+
+/* Starts or stops the server for the saved `enabled`. Runs on its own thread, started after the
+ * reply was written: webui_stop joins the web workers (up to 2 s), which must never happen on a
+ * web worker (the page that turned Minion off is answered first) or on an AVA1 thread. */
+static void *server_apply_main(void *arg) {
+    int enabled;
+    (void)arg;
+    proc_name_set_self("ps5upload-web");
+    pthread_mutex_lock(&g_rebind_mu);
+    pthread_mutex_lock(&g_set_mu);
+    enabled = g_set.enabled;
+    pthread_mutex_unlock(&g_set_mu);
+    if (enabled) {
+        if (webui_api_server_start() == 0) fprintf(stderr, "webui: PS5Upload Minion turned on\n");
+    } else if (webui_running()) {
+        webui_stop();
+        fprintf(stderr, "webui: PS5Upload Minion turned off; the page is no longer served\n");
+    }
+    pthread_mutex_unlock(&g_rebind_mu);
+    return NULL;
+}
+
+static void spawn_server_apply(void) {
+    pthread_attr_t attr;
+    pthread_t t;
+    int rc = -1;
+    if (pthread_attr_init(&attr) == 0) {
+        if (pthread_attr_setstacksize(&attr, 256u * 1024u) == 0 &&
+            pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED) == 0)
+            rc = pthread_create(&t, &attr, server_apply_main, NULL);
+        pthread_attr_destroy(&attr);
+    }
+    if (rc != 0) fprintf(stderr, "webui: cannot start the server thread (%d); Minion on/off applies at the next start\n", rc);
+}
+
+/* Caller holds g_set_mu; `s` is saved and set. Asks the tile thread for what the change means:
+ * the tile wanted (Minion on and tile on) and it was not, or `retry` (the caller sent the tile
+ * setting again): add it; not wanted and it was, or `retry`: remove it; Minion just turned off
+ * with the tile already off: sweep what may be left of it (#480). Returns 1 when `enabled`
+ * changed: the caller then calls spawn_server_apply (after its reply). */
+static int apply_locked(const webui_settings_t *old, const webui_settings_t *s, int retry) {
+    int was = webui_settings_tile_wanted(old), want = webui_settings_tile_wanted(s);
+    if (want && (retry || !was)) webui_tile_request(1, WEBUI_PORT);
+    else if (!want && (was || retry)) webui_tile_request(0, WEBUI_PORT);
+    else if (!s->enabled && old->enabled) webui_tile_sweep_request();
+    return s->enabled != old->enabled;
+}
+
+/* {lan?, tile?, enabled?}: saved first (the file is the truth at the next start), then answered
+ * with the new settings, then applied: a `lan` change rebinds the listener on a thread of its own,
+ * a `tile` change (or tile:true again) registers or removes the tile on the tile thread, and
+ * enabled:false (Settings -> Turn off PS5Upload Minion) removes the tile and then stops this
+ * server, after the reply. A failed save changes nothing. */
 static void r_settings_set(const char *b, size_t n, uint8_t *out, int fd) {
     webui_settings_t old, s;
-    int lan, tile, has_lan, has_tile;
+    int lan, tile, enabled, has_lan, has_tile, has_enabled, server;
     (void)out;
     has_lan = webui_json_bool(b, n, "lan", &lan);
     if (has_lan < 0) {
@@ -1135,11 +1767,18 @@ static void r_settings_set(const char *b, size_t n, uint8_t *out, int fd) {
         send_bad(fd, "bad_tile");
         return;
     }
+    has_enabled = webui_json_bool(b, n, "enabled", &enabled);
+    if (has_enabled < 0) {
+        send_bad(fd, "bad_enabled");
+        return;
+    }
     pthread_mutex_lock(&g_set_mu);
     old = s = g_set;
     if (has_lan) s.lan = lan;
     if (has_tile) s.tile = tile;
-    if ((s.lan != old.lan || s.tile != old.tile) && webui_settings_save(WEBUI_SETTINGS_PATH, &s) != 0) {
+    if (has_enabled) s.enabled = enabled;
+    if ((s.lan != old.lan || s.tile != old.tile || s.enabled != old.enabled) &&
+        webui_settings_save(WEBUI_SETTINGS_PATH, &s) != 0) {
         pthread_mutex_unlock(&g_set_mu);
         send_error(fd, 500, "save_failed", 11);
         return;
@@ -1147,38 +1786,58 @@ static void r_settings_set(const char *b, size_t n, uint8_t *out, int fd) {
     g_set = s;
     /* Keep tile requests in saved-setting order, including calls from the paired PC.
      * tile:true also retries a failed ensure; removal runs only on a change. */
-    if (has_tile && (s.tile || s.tile != old.tile)) webui_tile_request(s.tile, WEBUI_PORT);
+    server = apply_locked(&old, &s, has_tile && tile);
     pthread_mutex_unlock(&g_set_mu);
     send_settings(fd, &s); /* written in full (or the deadline passed) before the rebind below runs */
-    if (s.lan != old.lan) spawn_lan_apply();
+    if (server) spawn_server_apply();
+    else if (s.lan != old.lan) spawn_lan_apply();
 }
 
 int webui_api_tile(const char *body, size_t len, char *out, size_t cap) {
-    webui_settings_t s;
-    int tile = 0, busy, failed, n;
+    webui_settings_t old, s;
+    int tile = 0, enabled = 0, busy, failed, n, server = 0;
+    webui_tile_result_t result;
     int has = webui_json_bool(body, len, "tile", &tile);
+    int has_enabled = webui_json_bool(body, len, "enabled", &enabled);
     if (has < 0) return snprintf(out, cap, "{\"ok\":false,\"err\":\"bad_tile\"}");
+    if (has_enabled < 0) return snprintf(out, cap, "{\"ok\":false,\"err\":\"bad_enabled\"}");
     pthread_mutex_lock(&g_set_mu);
-    s = g_set;
-    if (has) {
-        s.tile = tile;
-        if (s.tile != g_set.tile && webui_settings_save(WEBUI_SETTINGS_PATH, &s) != 0) {
+    old = s = g_set;
+    if (has || has_enabled) {
+        if (has) s.tile = tile;
+        if (has_enabled) s.enabled = enabled;
+        if ((s.tile != old.tile || s.enabled != old.enabled) && webui_settings_save(WEBUI_SETTINGS_PATH, &s) != 0) {
             pthread_mutex_unlock(&g_set_mu);
             return snprintf(out, cap, "{\"ok\":false,\"err\":\"save_failed\"}");
         }
         g_set = s;
-        /* Also retries an interrupted registration/removal with an unchanged setting. */
-        webui_tile_request(s.tile, WEBUI_PORT);
+        /* `has` also retries an interrupted registration/removal with an unchanged setting. */
+        server = apply_locked(&old, &s, has);
     }
-    webui_tile_state(&busy, &failed);
-    n = snprintf(out, cap, "{\"tile\":%s,\"tile_busy\":%s,\"tile_failed\":%s}",
-        s.tile ? "true" : "false", busy ? "true" : "false", failed ? "true" : "false");
+    webui_tile_state(&busy, &failed, &result);
+    n = snprintf(out, cap,
+        "{\"tile\":%s,\"enabled\":%s,\"tile_busy\":%s,\"tile_failed\":%s,\"tile_result\":\"%s\"}",
+        s.tile ? "true" : "false", s.enabled ? "true" : "false", busy ? "true" : "false",
+        failed ? "true" : "false", webui_tile_result_name(result));
     pthread_mutex_unlock(&g_set_mu);
+    /* An AVA1 thread: the server start/stop (up to 2 s) runs on its own thread. */
+    if (server) spawn_server_apply();
     return n < 0 || (size_t)n >= cap ? -1 : n;
+}
+
+void webui_api_tile_forget(void) {
+    webui_settings_t s;
+    pthread_mutex_lock(&g_set_mu);
+    s = g_set;
+    s.tile = 0;
+    if (webui_settings_save(WEBUI_SETTINGS_PATH, &s) != 0) fprintf(stderr, "webui: cannot save tile:false\n");
+    g_set = s; /* the tile is off either way */
+    pthread_mutex_unlock(&g_set_mu);
 }
 
 int webui_api_tile_off(void) {
     webui_settings_t s;
+    unsigned gen;
     int rc = 0;
     pthread_mutex_lock(&g_set_mu);
     s = g_set;
@@ -1190,8 +1849,12 @@ int webui_api_tile_off(void) {
         return -1;
     }
     g_set = s;
-    rc = webui_tile_remove_wait(WEBUI_PORT);
+    /* Asked for under g_set_mu (requests stay in saved-setting order), waited for without it: the
+     * page's /api/settings and the PC's tile poll take it, and would otherwise hang behind the Sony
+     * calls (#480). A toggle made meanwhile supersedes this request; the wait reports that as -1. */
+    gen = webui_tile_request(0, WEBUI_PORT);
     pthread_mutex_unlock(&g_set_mu);
+    rc = webui_tile_remove_wait(gen);
     return rc;
 }
 
@@ -2157,6 +2820,8 @@ static const struct {
     { "/api/volumes", r_volumes },
     { "/api/volumes/eject", r_volumes_eject },
     { "/api/volumes/unmount", r_volumes_unmount },
+    { "/api/fan", r_fan },
+    { "/api/fan/set", r_fan_set },
     { "/api/files/prefs", r_files_prefs },
     { "/api/files/prefs/set", r_files_prefs_set },
     { "/api/files/handoff/take", r_files_handoff_take },
@@ -2173,6 +2838,8 @@ static const struct {
     { "/api/fs/crc32", r_fs_crc32 },
     { "/api/fs/unpack", r_fs_unpack },
     { "/api/fs/unpack/info", r_fs_unpack_info },
+    { "/api/fs/extract", r_fs_extract },
+    { "/api/fs/extract/info", r_fs_extract_info },
     { "/api/upload/begin", r_upload_begin },
     { "/api/upload/cancel", r_upload_cancel },
     { "/api/download/begin", r_download_begin },
@@ -2180,6 +2847,19 @@ static const struct {
     { "/api/jobs/status", r_jobs_status },
     { "/api/jobs/cancel", r_jobs_cancel },
     { "/api/app/close", r_app_close },
+    { "/api/apps/db", r_apps_db },
+    { "/api/apps/registered", r_apps_registered },
+    { "/api/apps/hidden", r_apps_hidden },
+    { "/api/apps/info", r_apps_info },
+    { "/api/apps/launch", r_apps_launch },
+    { "/api/apps/uninstall", r_apps_uninstall },
+    { "/api/apps/icon", r_apps_icon },
+    { "/api/proc/list", r_proc_list },
+    { "/api/proc/kill", r_proc_kill },
+    { "/api/pkg/info", r_pkg_info },
+    { "/api/pkg/icon", r_pkg_icon },
+    { "/api/pkg/install", r_pkg_install },
+    { "/api/payload/load", r_payload_load },
     { "/api/settings", r_settings },
     { "/api/settings/set", r_settings_set },
     { "/api/input-log", r_input_log },
@@ -2191,6 +2871,26 @@ static const struct {
     { "/api/index/status", r_index_status },
     { "/api/index/search", r_index_search },
     { "/api/index/cancel", r_index_cancel },
+    /* network shares (webui_smb.h) */
+    { "/api/smb/shares", webui_smb_shares },
+    { "/api/smb/discover", webui_smb_discover },
+    { "/api/smb/save", webui_smb_save },
+    { "/api/smb/remove", webui_smb_remove },
+    { "/api/smb/list", webui_smb_list },
+    { "/api/smb/stat", webui_smb_stat },
+    { "/api/smb/mkdir", webui_smb_mkdir },
+    { "/api/smb/copy", webui_smb_copy },
+    { "/api/smb/delete", webui_smb_delete },
+    { "/api/smb/job", webui_smb_job },
+    { "/api/smb/cancel", webui_smb_cancel },
+    { "/api/smb/jobs", webui_smb_jobs },
+    { "/api/library/scan", webui_library_scan },
+    { "/api/apps/register", r_apps_register },
+    { "/api/cleanup/scan", r_cleanup_scan },
+    { "/api/cleanup/status", r_cleanup_status },
+    { "/api/cleanup/apply", r_cleanup_apply },
+    { "/api/cleanup/apply_status", r_cleanup_apply_status },
+    { "/api/cleanup/cancel", r_cleanup_cancel },
 };
 
 /* The page's own headers: same-origin fetches plus the two GitHub hosts the cheat finder reads

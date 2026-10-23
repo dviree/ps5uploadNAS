@@ -1,8 +1,11 @@
+import { splitPkgBytes } from "../../lib/splitPkgSize";
 import { FileProperties } from "./FileProperties";
 import { consoleAddr, hostOf } from "../../lib/addr";
 import { trStatic } from "../../lib/trStatic";
 import { rememberDestination } from "../../lib/moveTo";
 import { MoveToDialog, type MoveItem } from "./MoveToDialog";
+import { ExtractDialog, type ExtractChoice } from "./ExtractDialog";
+import { extractCause, isExtractableArchive, needsPassword } from "../../lib/archiveName";
 import { SendToConsoleDialog } from "./SendToConsoleDialog";
 import {
   RowActionButtons,
@@ -47,6 +50,7 @@ import {
   X,
   HardDrive,
   Usb,
+  Eject,
   Eye,
   FolderOpen,
   Link2,
@@ -90,6 +94,7 @@ import { useConnectionStore } from "../../state/connection";
 import {
   fsDelete,
   fsUnpack,
+  fsExtract,
   fsMove,
   fsChmod,
   fsMkdir,
@@ -103,6 +108,7 @@ import {
   fetchVolumes,
   generateTxIdHex,
   pathKind,
+  loadConsolePayload,
   type Volume,
 } from "../../api/ps5";
 import { kindsOf, namesPreview, planFsUpload } from "../../state/fsUploadPlan";
@@ -210,6 +216,7 @@ import {
 } from "../../state/roster";
 import { useStaleHostGuard } from "../../lib/staleHostGuard";
 import { labelEngineJob } from "../../lib/bgWork";
+import { canEjectUsb, useUsbEject } from "../../lib/useUsbEject";
 
 function parent(p: string): string {
   if (p === "/" || p === "") return "/";
@@ -240,6 +247,22 @@ const isViewablePackage = (name: string) => /\.f?pkg$/i.test(name);
 
 /** What the package viewer can show: a package, a game image, or a folder named like a game
  *  (a title id, as dumps are). */
+/** Why a console payload load was refused, as a sentence (the engine's code, else its text). */
+export function loadPayloadErrorText(tr: (key: string, vars?: Record<string, string | number>, fallback?: string) => string, e: unknown): string {
+  const msg = e instanceof Error ? e.message : String(e);
+  if (/pkg_install_busy/.test(msg))
+    return tr("fs_load_payload_err_installing", undefined, "A package is being installed on this PS5. Load the payload after it finishes.");
+  if (/payload_is_helper/.test(msg))
+    return tr("fs_load_payload_err_helper", undefined, "This is a ps5upload helper. Use Connection to send or update the helper.");
+  if (/payload_not_elf|payload_not_payload/.test(msg))
+    return tr("fs_load_payload_err_not_elf", undefined, "This file is not an ELF payload.");
+  if (/payload_too_large/.test(msg))
+    return tr("fs_load_payload_err_too_large", undefined, "This file is too large to be a payload (over 64 MiB).");
+  if (/loader_unreachable/.test(msg))
+    return tr("fs_load_payload_err_loader", undefined, "The PS5's payload loader (port 9021) did not answer. Load the ELF loader again, then try again.");
+  return msg;
+}
+
 export function viewableEntry(name: string, isDir: boolean): boolean {
   if (isDir) return /^[A-Z]{4}\d{5}/.test(name);
   return isViewablePackage(name) || /\.(exfat|ffpkg|ffpfsc)$/i.test(name);
@@ -365,6 +388,9 @@ export default function FileSystemScreen() {
   const [installingPkgName, setInstallingPkgName] = useState<string | null>(
     null,
   );
+  const [loadingPayloadName, setLoadingPayloadName] = useState<string | null>(
+    null,
+  );
   // Restore the user's last-browsed path for THIS host. The lazy
   // initializer reads from localStorage once on mount; later host
   // changes (the user typing a new IP into the Connection screen)
@@ -380,6 +406,8 @@ export default function FileSystemScreen() {
   // just hides itself, which is less noisy than yet another red
   // banner for what's a degraded-but-functional state.
   const [volumes, setVolumes] = useState<Volume[] | null>(null);
+  // Bumped after a USB eject so the drive bar lists the drives again.
+  const [volumesEpoch, setVolumesEpoch] = useState(0);
   const [entries, setEntries] = useState<DirEntry[] | null>(null);
   // Path of the most recent listing request — used to drop a stale (slower)
   // response from a folder the user already navigated away from. See refresh.
@@ -488,6 +516,15 @@ export default function FileSystemScreen() {
   // no-op in Tauri webview and falls through to plugin-dialog's
   // ACL-gated confirm command.
   const { confirm: confirmDialog, dialog: confirmDialogNode } = useConfirm();
+  // Eject next to each USB drive, as the console's own Files page has (#496). Browsing inside
+  // the drive that went away returns to /data.
+  const { eject: ejectUsb, ejectingPath, dialog: ejectDialogNode } = useUsbEject({
+    onEjected: (_host, mountPoint) => {
+      setVolumesEpoch((n) => n + 1);
+      setPath((p) => (p === mountPoint || p.startsWith(`${mountPoint}/`) ? "/data" : p));
+    },
+    onError: setError,
+  });
   const { alert: alertDialog, dialog: alertDialogNode } = useAlert();
   const { prompt: promptDialog, dialog: promptDialogNode } = usePrompt();
   const { ask: askConflict, dialog: conflictDialogNode } = useConflictAsk(host);
@@ -651,7 +688,7 @@ export default function FileSystemScreen() {
     return () => {
       cancelled = true;
     };
-  }, [host, payloadStatus]);
+  }, [host, payloadStatus, volumesEpoch]);
 
   // An "Add files" run ended (here, or while another screen was open): list the folder
   // again so what landed shows. The count is per console, so a console switch is not a run.
@@ -798,7 +835,10 @@ export default function FileSystemScreen() {
     if (!ok) return;
     setInstallingPkgName(entry.name);
     try {
-      const r = await installFromConsolePath(fullPath, host);
+      // A split set's lead carries its parts' bytes too, for the queue's total.
+      const r = await installFromConsolePath(fullPath, host, {
+        sizeBytes: splitPkgBytes(entry.name, entry.size, entries ?? []),
+      });
       if (r.ok) {
         pushNotification(
           r.mayNotLaunch ? "warning" : "success",
@@ -827,6 +867,45 @@ export default function FileSystemScreen() {
       }
     } finally {
       setInstallingPkgName(null);
+    }
+  };
+
+  const runLoadPayload = async (entry: DirEntry) => {
+    if (!host) return;
+    const fullPath = joinPath(path, entry.name);
+    const ok = await confirmDialog({
+      title: tr(
+        "fs_load_payload_confirm_title",
+        { name: entry.name },
+        `Load "${entry.name}"?`,
+      ),
+      message: tr(
+        "fs_load_payload_confirm_body",
+        undefined,
+        "This sends the file to your PS5's payload loader (port 9021), which runs it at once. Only load payloads you trust.",
+      ),
+      confirmLabel: tr("fs_load_payload", undefined, "Load payload"),
+    });
+    if (!ok) return;
+    setLoadingPayloadName(entry.name);
+    try {
+      await loadConsolePayload(host, fullPath);
+      pushNotification(
+        "success",
+        tr(
+          "fs_load_payload_done",
+          { name: entry.name },
+          `Sent ${entry.name} to the payload loader`,
+        ),
+      );
+    } catch (e) {
+      pushNotification(
+        "error",
+        tr("fs_load_payload_failed", { name: entry.name }, `Could not load ${entry.name}`),
+        { body: loadPayloadErrorText(tr, e) },
+      );
+    } finally {
+      setLoadingPayloadName(null);
     }
   };
 
@@ -1696,6 +1775,122 @@ export default function FileSystemScreen() {
       // The helper also stops between blocks once the call above ends.
     }
   };
+  // Extracting an archive on the console (the helper's extractor payload): one at a time,
+  // followed by its op id like a decompress. The dialog asks where and how; a password-protected
+  // archive reopens it for the password and runs again with the same choice.
+  const [extractOp, setExtractOp] = useState<{
+    name: string;
+    opId: number;
+    done: number;
+    total: number;
+    stopping: boolean;
+  } | null>(null);
+  const [extractAsk, setExtractAsk] = useState<{
+    entry: DirEntry;
+    dir: string;
+    passwordAsk: "required" | "wrong" | null;
+    choice: ExtractChoice | null;
+  } | null>(null);
+  const extractNameTaken = (n: string) => !!entries?.some((e) => e.name === n);
+  const runExtract = async (entry: DirEntry, dir: string, choice: ExtractChoice) => {
+    if (!host?.trim() || extractOp) return;
+    const src = joinPath(dir, entry.name);
+    const dest = joinPath(dir, choice.folder);
+    const addr = consoleAddr(host);
+    const opId = Math.floor(Math.random() * Number.MAX_SAFE_INTEGER);
+    setExtractOp({ name: entry.name, opId, done: 0, total: 0, stopping: false });
+    const task = beginTask({
+      kind: "fs-extract",
+      origin: "files",
+      label: `Extract ${entry.name}`,
+      consoleId: host.trim(),
+    });
+    let stopped = false;
+    const poller = (async () => {
+      while (!stopped) {
+        try {
+          const snap = await fsOpStatus(addr, opId);
+          if (snap.total_bytes > 0) {
+            setExtractOp((o) =>
+              o && o.opId === opId ? { ...o, done: snap.bytes_copied, total: snap.total_bytes } : o,
+            );
+            task.report({
+              progress: { current: snap.bytes_copied, total: snap.total_bytes, unit: "bytes" },
+            });
+          }
+        } catch {
+          // Not registered yet, or already finished: the extract call below decides.
+        }
+        await new Promise((r) => setTimeout(r, 1000));
+      }
+    })();
+    try {
+      const out = await fsExtract(addr, src, dest, opId, {
+        password: choice.password || undefined,
+        merge: choice.merge,
+        replace: choice.replace,
+      });
+      task.done();
+      const extra = [
+        out.skipped > 0
+          ? tr("fs_extract_done_skipped", { n: out.skipped }, `${out.skipped} files already there were skipped.`)
+          : "",
+        out.unsafe > 0
+          ? tr("fs_extract_done_unsafe", { n: out.unsafe }, `${out.unsafe} entries with unsafe paths were not extracted.`)
+          : "",
+        out.links > 0
+          ? tr("fs_extract_done_links", { n: out.links }, `${out.links} links or special files were not extracted.`)
+          : "",
+      ].filter(Boolean);
+      pushNotification(
+        "success",
+        withConsolePrefix(host, tr("fs_extract_done", { name: entry.name }, `Extracted ${entry.name}`)),
+        {
+          body: [
+            tr("fs_extract_done_body", { n: out.files, path: out.path || dest }, `${out.files} files into ${out.path || dest}`),
+            ...extra,
+          ].join(" "),
+        },
+      );
+      void refresh();
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.includes("cancelled")) {
+        task.done();
+        void refresh();
+      } else if (needsPassword(msg)) {
+        // Not a failure yet: ask for the password and run again with the same choice.
+        task.done();
+        setExtractAsk({
+          entry,
+          dir,
+          passwordAsk: extractCause(msg) === "fs_extract_wrong_password" ? "wrong" : "required",
+          choice,
+        });
+      } else {
+        task.fail(e);
+        pushNotification(
+          "error",
+          withConsolePrefix(host, tr("fs_extract_failed", { name: entry.name }, `Couldn't extract ${entry.name}`)),
+          { body: humanizePs5Error(msg) || msg },
+        );
+        void refresh();
+      }
+    } finally {
+      stopped = true;
+      await poller;
+      setExtractOp(null);
+    }
+  };
+  const stopExtract = async () => {
+    if (!extractOp || !host?.trim()) return;
+    setExtractOp((o) => (o ? { ...o, stopping: true } : o));
+    try {
+      await fsOpCancel(consoleAddr(host), extractOp.opId);
+    } catch {
+      // The helper also stops the extractor once the call above ends.
+    }
+  };
   const runChmod777 = async (list: DirEntry[] = selectedEntries) => {
     if (list.length === 0 || chmodBusy) return;
     setChmodBusy(true);
@@ -2434,6 +2629,8 @@ export default function FileSystemScreen() {
     crc32: (e) => void runCrc32(e),
     verify: (e) => void runVerify(e),
     install: (e) => void runInstallPkg(e),
+    loadPayload: (e) => void runLoadPayload(e),
+    loadingPayloadName,
     remove: (e) => void runDelete(e.name),
   };
   const actionsMenuEntry =
@@ -2564,6 +2761,16 @@ export default function FileSystemScreen() {
                   },
                 ]
               : []),
+            ...(menuEntry.kind === "file" && isExtractableArchive(menuEntry.name)
+              ? [
+                  {
+                    icon: FileArchive,
+                    label: tr("fs_extract_action", undefined, "Extract…"),
+                    run: () => setExtractAsk({ entry: menuEntry, dir: path, passwordAsk: null, choice: null }),
+                    disabled: extractOp !== null || !host?.trim(),
+                  },
+                ]
+              : []),
             {
               icon: Link2,
               label: tr("fs_menu_copy_path", undefined, "Copy path"),
@@ -2626,6 +2833,23 @@ export default function FileSystemScreen() {
         />
       )}
       {confirmDialogNode}
+      {extractAsk && (
+        <ExtractDialog
+          open
+          name={extractAsk.entry.name}
+          dir={extractAsk.dir}
+          exists={extractAsk.dir === path ? extractNameTaken : () => false}
+          passwordAsk={extractAsk.passwordAsk}
+          initial={extractAsk.choice}
+          onCancel={() => setExtractAsk(null)}
+          onConfirm={(choice) => {
+            const ask = extractAsk;
+            setExtractAsk(null);
+            void runExtract(ask.entry, ask.dir, choice);
+          }}
+        />
+      )}
+      {ejectDialogNode}
       {conflictDialogNode}
       {alertDialogNode}
       {promptDialogNode}
@@ -2726,7 +2950,8 @@ export default function FileSystemScreen() {
                 v.path.startsWith("/mnt/usb") || v.path.startsWith("/mnt/ext");
               const active = currentVolumePath === v.path;
               const Icon = external ? Usb : HardDrive;
-              return (
+              const ejectable = canEjectUsb(v.path);
+              const chip = (
                 <button
                   key={v.path}
                   type="button"
@@ -2761,6 +2986,24 @@ export default function FileSystemScreen() {
                     · {formatBytes(v.free_bytes)}
                   </span>
                 </button>
+              );
+              if (!ejectable) return chip;
+              const ejecting = ejectingPath === v.path;
+              return (
+                <span key={v.path} className="inline-flex shrink-0 items-center gap-0.5">
+                  {chip}
+                  <button
+                    type="button"
+                    onClick={() => void ejectUsb(v.path)}
+                    disabled={ejectingPath !== null}
+                    title={tr("volumes_eject_tooltip", undefined, "Unmount the USB drive so it can be unplugged safely.")}
+                    aria-label={`${tr("volumes_eject", undefined, "Eject")} ${v.path}`}
+                    className="chip shrink-0 px-1.5 py-1 sm:py-1.5"
+                    data-eject={v.path}
+                  >
+                    {ejecting ? <Spinner size={12} /> : <Eject size={12} />}
+                  </button>
+                </span>
               );
             })}
             {/* When the current path sits under no known volume, mirror the old
@@ -3135,6 +3378,20 @@ export default function FileSystemScreen() {
             </span>
             <Button variant="secondary" size="sm" disabled={unpackOp.stopping} onClick={() => void stopUnpack()}>
               {tr("fs_unpack_stop", undefined, "Stop")}
+            </Button>
+          </div>
+        )}
+
+        {extractOp && (
+          <div className="mb-3 flex flex-wrap items-center gap-3 rounded-[var(--radius-card)] border border-[var(--color-border)] bg-[var(--color-surface-2)] px-3 py-2 text-sm" data-testid="fs-extract">
+            <Spinner size={14} />
+            <span className="min-w-0 flex-1 truncate">
+              {tr("fs_extract_running", { name: extractOp.name }, `Extracting ${extractOp.name}`)}
+              {extractOp.total > 0 &&
+                ` · ${formatBytes(extractOp.done)} / ${formatBytes(extractOp.total)} (${Math.min(100, Math.floor((extractOp.done / extractOp.total) * 100))}%)`}
+            </span>
+            <Button variant="secondary" size="sm" disabled={extractOp.stopping} onClick={() => void stopExtract()}>
+              {tr("fs_extract_stop", undefined, "Stop")}
             </Button>
           </div>
         )}

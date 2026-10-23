@@ -42,6 +42,10 @@ import { BulkRenameDialog } from "./BulkRenameDialog";
 import { runRenames, type RenameItem, type RenameResult, type RenameRow } from "./bulkRename";
 import { isFfpfsc, opCause, opResult, startOp, watchOp, type OpEnd } from "./opJob";
 import { UnpackDialog, unpackCauseText, unpackErrorText } from "./UnpackDialog";
+import { PkgDialog } from "./PkgDialog";
+import { installBusyText, installMessage, installPhaseText, installStoppable, isPayload, isPkg, loadPayload, payloadErrorText, startInstall } from "./pkg";
+import { ExtractDialog, extractCauseText, extractErrorText, type ExtractStart } from "./ExtractDialog";
+import { isExtractableArchive, toExtractResult } from "../../lib/archiveName";
 import { VerifyDialog } from "./VerifyDialog";
 import {
   copyItems,
@@ -90,6 +94,20 @@ import { UsageDialog } from "./usage/UsageDialog";
 import { keepsPermissions } from "./permissions";
 import { createFile, downloadItem, loadOnOtherDevice, TEXT_SAVE_MAX } from "./transfer";
 import { UploadDialog } from "./UploadDialog";
+import { ShareDialog } from "./ShareDialog";
+import {
+  isSmbPath,
+  listShares,
+  removeShare,
+  SmbJobError,
+  smbCallErrorText,
+  smbErrorText,
+  smbMkdir,
+  smbParts,
+  smbUp,
+  transferItems,
+  type SmbShare,
+} from "./smb";
 
 export { upFrom, viewKind };
 
@@ -107,6 +125,16 @@ export type FilesAsk =
   | { kind: "verify"; name: string }
   /** Decompress a .ffpfsc next to it. */
   | { kind: "unpack"; name: string }
+  /** A .pkg's preview and Install. */
+  | { kind: "pkg"; name: string }
+  /** Install over a game that is installed already (Sony removes it first): asked once more. */
+  | { kind: "reinstall"; name: string; title: string }
+  /** Load a .elf/.bin into the console's payload loader. */
+  | { kind: "payload"; name: string }
+  /** Extract an archive into a folder next to it. */
+  | { kind: "extract"; name: string }
+  /** The archive has a password (`wrong`: the one given was refused): ask, then run `start` again. */
+  | { kind: "extractpw"; name: string; start: ExtractStart; wrong: boolean }
   | { kind: "mkdir" }
   /** A new, empty file (then opened in the editor). */
   | { kind: "newfile" }
@@ -128,7 +156,11 @@ export type FilesAsk =
   /** Sort and view menu. */
   | { kind: "viewmenu" }
   /** The name filter's text box. */
-  | { kind: "filter" };
+  | { kind: "filter" }
+  /** A saved network share's menu, its add / edit dialog (id null: add) and Remove. */
+  | { kind: "share"; id: string }
+  | { kind: "shareedit"; id: string | null }
+  | { kind: "shareremove"; id: string };
 
 /** The copy/move/delete batch running now (one item at a time, see batch.ts). */
 export type Busy = BatchProgress;
@@ -174,6 +206,9 @@ export function pasteMessage(r: PasteResult): Message | null {
 
 /** A failed call as a short line; null for a 401 (the reload banner says it). */
 export function filesErrorText(err: unknown): string | null {
+  // A share copy's job failure is worded for a share whatever its token (no_space, bad_name…).
+  const smb = err instanceof SmbJobError ? smbCallErrorText(err) : smbErrorText(err);
+  if (smb) return smb;
   if (err instanceof ApiError) {
     if (err.status === 403) return t("cw_files_err_denied");
     if (err.status === 404) return t("cw_files_err_missing");
@@ -283,6 +318,12 @@ export interface FilesViewProps {
   onBulkRename?: (rows: RenameRow[]) => void;
   /** Decompress `name` (a .ffpfsc in the folder shown); `outName` = Keep both's name, else the image's own. */
   onUnpack?: (name: string, outName: string | null) => void;
+  /** Install `name` (a .pkg in the folder shown); `replace` over an installed game; `title` names it in the result line. */
+  onInstallPkg?: (name: string, replace: boolean, title: string) => void;
+  /** Send `name` (a .elf/.bin in the folder shown) to the console's payload loader. */
+  onLoadPayload?: (name: string) => void;
+  /** Extract `name` (an archive in the folder shown) as `start` says; `password` once one was asked for. */
+  onExtract?: (name: string, start: ExtractStart, password?: string) => void;
   onMkdir: (name: string) => void;
   onPicked: (op: "copy" | "move", names: string[], destDir: string) => void;
   /** Open `dir` in Files with `name` focused (a search result); null name: the folder itself. */
@@ -293,24 +334,37 @@ export interface FilesViewProps {
   onDownload?: (path: string) => void;
   /** The page is open on another device: Upload here and Download are offered. */
   remote?: boolean;
+  /** Saved network shares (null: not read, or a helper without them). */
+  shares?: SmbShare[] | null;
+  /** A share was added or edited (the dialog closed). */
+  onShareSaved?: (s: SmbShare, added: boolean) => void;
+  onShareRemove?: (id: string) => void;
+}
+
+/** `line` · 45% · 1.2 GB / 2.6 GB, when the batch reports its bytes (a network-share copy, unpack). */
+function withBytes(line: string, b: Busy): string {
+  const total = b.bytesTotal ?? 0;
+  if (total <= 0) return line;
+  const done = Math.min(b.bytesDone ?? 0, total);
+  const pct = Math.min(100, Math.floor((done / total) * 100));
+  return `${line} · ${t("cw_home_percent", { n: pct })} · ${formatBytes(done)} / ${formatBytes(total)}`;
 }
 
 /** "Copying 3 of 40" (item `at` is being sent or is running), or "Stopping…". */
 export function busyText(b: Busy | null): string | null {
   if (!b) return null;
-  if (b.stopping) return t("cw_files_batch_stopping");
+  // A share copy's Stop cancels the item running too (batch.ts cancels), not only the ones after it.
+  if (b.stopping) return t(b.cancels ? "cw_files_smb_stopping" : "cw_files_batch_stopping");
   const at = Math.max(1, b.at);
-  if (b.op === "copy") return t("cw_files_batch_copy", { at, total: b.total });
+  if (b.op === "copy") return withBytes(t("cw_files_batch_copy", { at, total: b.total }), b);
   if (b.op === "move") return t("cw_files_batch_move", { at, total: b.total });
   if (b.op === "chmod") return t("cw_files_fixperm_batch", { at, total: b.total });
   if (b.op === "rename") return t("cw_files_br_batch", { at, total: b.total });
-  if (b.op === "unpack") {
-    const line = t("cw_files_unpack_batch", { name: baseName(b.paths?.[0] ?? "") });
-    const total = b.bytesTotal ?? 0;
-    if (total <= 0) return line;
-    const done = Math.min(b.bytesDone ?? 0, total);
-    const pct = Math.min(100, Math.floor((done / total) * 100));
-    return `${line} · ${t("cw_home_percent", { n: pct })} · ${formatBytes(done)} / ${formatBytes(total)}`;
+  if (b.op === "unpack") return withBytes(t("cw_files_unpack_batch", { name: baseName(b.paths?.[0] ?? "") }), b);
+  if (b.op === "extract") return withBytes(t("cw_files_extract_batch", { name: baseName(b.paths?.[0] ?? "") }), b);
+  if (b.op === "install") {
+    const name = baseName(b.paths?.[0] ?? "");
+    return `${name}: ${installBusyText(installPhaseText(b.phase), b.bytesDone ?? 0, b.bytesTotal ?? 0)}`;
   }
   return t("cw_files_batch_delete", { at, total: b.total });
 }
@@ -323,6 +377,8 @@ export function sheetActions(names: string[], entries: Entry[], pinned: boolean 
   if (names.length !== 1) return ["clipcopy", "cut", "copy", "move", "bulkrename", "fixperm", "delete"];
   const e = entries.find((x) => x.name === names[0]);
   const out: SheetAction[] = [];
+  if (e && e.kind === "file" && isPkg(e.name)) out.push("install");
+  if (e && e.kind === "file" && isPayload(e.name)) out.push("loadpayload");
   if (e && e.kind !== "dir" && viewKind(e.name)) out.push("view");
   // Any small file opens in the text editor (a .cfg, .conf, .sh…); a binary one says it cannot.
   if (e && e.kind === "file" && (e.size ?? 0) <= TEXT_SAVE_MAX) out.push("edit");
@@ -331,9 +387,15 @@ export function sheetActions(names: string[], entries: Entry[], pinned: boolean 
   if (e && e.kind === "dir" && pinned != null) out.push(pinned ? "unpin" : "pin");
   if (e && e.kind === "file") out.push("verify", "hex");
   if (e && e.kind === "file" && isFfpfsc(e.name)) out.push("unpack");
+  if (e && e.kind === "file" && isExtractableArchive(e.name)) out.push("extract");
   if (canShowOnPc()) out.push("showpc");
   out.push("fixperm", "delete");
   return out;
+}
+
+/** On a network share only Copy works: into the clipboard (to paste on the console) or Copy to… a console folder. */
+export function smbSheetActions(): SheetAction[] {
+  return ["clipcopy", "copy"];
 }
 
 /** `names` as bulk rename items, in the order the list shows them (numbering follows it). */
@@ -402,6 +464,27 @@ export function unpackMessage(end: OpEnd | { end: "error"; error: unknown }, sou
   const cause = opCause(end.status);
   const why = unpackCauseText(cause) ?? t("cw_files_unpack_failed_generic", { cause: cause || "?" });
   return { tone: "error", text: t("cw_files_unpack_failed", { reason: why }) };
+}
+
+/** The line a finished extract leaves (`merged`: it wrote into a folder that was already there). */
+export function extractMessage(end: OpEnd | { end: "error"; error: unknown }, merged: boolean): Message | null {
+  if (end.end === "done") {
+    const r = toExtractResult(opResult<unknown>(end.status));
+    const parts = [t("cw_files_extract_done", { n: r.files, name: r.path ? baseName(r.path) : "" })];
+    if (r.skipped > 0) parts.push(t("cw_files_extract_done_skipped", { n: r.skipped }));
+    if (r.unsafe > 0) parts.push(t("cw_files_extract_done_unsafe", { n: r.unsafe }));
+    if (r.links > 0) parts.push(t("cw_files_extract_done_links", { n: r.links }));
+    return { tone: "info", text: parts.join(" ") };
+  }
+  if (end.end === "cancelled") return { tone: "info", text: t(merged ? "cw_files_extract_stopped_merge" : "cw_files_extract_stopped") };
+  if (end.end === "gone") return { tone: "info", text: t("cw_files_op_gone") };
+  if (end.end === "error") {
+    const why = extractErrorText(end.error);
+    return why ? { tone: "error", text: t("cw_files_extract_failed", { reason: why }) } : null;
+  }
+  const cause = opCause(end.status);
+  const why = extractCauseText(cause) ?? t("cw_files_unpack_failed_generic", { cause: cause || "?" });
+  return { tone: "error", text: t("cw_files_extract_failed", { reason: why }) };
 }
 
 /** Go to path's pinned folders: one button each, ✕ opens it. */
@@ -473,6 +556,45 @@ function placeAskView(p: FilesViewProps) {
           onCancel={p.onDismiss}
         />
       );
+    case "share": {
+      const s = p.shares?.find((x) => x.id === a.id);
+      if (!s) return null;
+      return (
+        <ActionsSheet
+          title={s.name}
+          actions={["open", "shareedit", "shareremove"]}
+          busy={false}
+          note={`${s.host}/${s.share}`}
+          onClose={p.onDismiss}
+          onChoose={(act) => {
+            if (act === "open") p.onOpen(s.path);
+            else if (act === "shareedit") p.onAsk({ kind: "shareedit", id: s.id });
+            else if (act === "shareremove") p.onAsk({ kind: "shareremove", id: s.id });
+          }}
+        />
+      );
+    }
+    case "shareedit": {
+      const s = a.id ? (p.shares?.find((x) => x.id === a.id) ?? null) : null;
+      if (a.id && !s) return null;
+      return <ShareDialog share={s} onSaved={(saved) => p.onShareSaved?.(saved, !s)} onCancel={p.onDismiss} />;
+    }
+    case "shareremove": {
+      const s = p.shares?.find((x) => x.id === a.id);
+      if (!s) return null;
+      return (
+        <ConfirmDialog
+          title={t("cw_files_smb_remove_title", { name: s.name })}
+          body={t("cw_files_smb_remove_body")}
+          confirmLabel={t("cw_files_smb_remove")}
+          danger
+          busy={p.askBusy}
+          error={p.askError}
+          onConfirm={() => p.onShareRemove?.(s.id)}
+          onCancel={p.onDismiss}
+        />
+      );
+    }
     case "viewmenu":
       return p.onView ? (
         <ViewMenu view={p.view ?? DEFAULT_VIEW} onChange={p.onView} onClose={p.onDismiss} />
@@ -525,7 +647,7 @@ function askView(p: FilesViewProps) {
       return (
         <ActionsSheet
           title={namesTitle(a.names)}
-          actions={sheetActions(a.names, p.dir.entries, pinnedOf(a.names[0]), !!p.remote)}
+          actions={isSmbPath(path) ? smbSheetActions() : sheetActions(a.names, p.dir.entries, pinnedOf(a.names[0]), !!p.remote)}
           busy={p.busy != null}
           note={busyText(p.busy)}
           onClose={p.onDismiss}
@@ -554,6 +676,12 @@ function askView(p: FilesViewProps) {
                 return p.onAsk({ kind: "view", name, type: "hex" });
               case "unpack":
                 return p.onAsk({ kind: "unpack", name });
+              case "install":
+                return p.onAsk({ kind: "pkg", name });
+              case "loadpayload":
+                return p.onAsk({ kind: "payload", name });
+              case "extract":
+                return p.onAsk({ kind: "extract", name });
               case "mkdir":
                 return p.onAsk({ kind: "mkdir" });
               case "newfile":
@@ -661,13 +789,77 @@ function askView(p: FilesViewProps) {
           onCancel={p.onDismiss}
         />
       );
+    case "pkg":
+      return (
+        <PkgDialog
+          name={a.name}
+          path={joinPath(path, a.name)}
+          busy={p.busy != null}
+          onInstall={(replace, info) =>
+            replace ? p.onAsk({ kind: "reinstall", name: a.name, title: info.title || a.name }) : p.onInstallPkg?.(a.name, false, info.title || a.name)
+          }
+          onClose={p.onDismiss}
+        />
+      );
+    case "reinstall":
+      return (
+        <ConfirmDialog
+          title={t("cw_pkg_reinstall_title", { name: a.title })}
+          body={t("cw_pkg_installed_note")}
+          confirmLabel={t("cw_pkg_reinstall")}
+          danger
+          busy={p.busy != null}
+          onConfirm={() => p.onInstallPkg?.(a.name, true, a.title)}
+          onCancel={p.onDismiss}
+        />
+      );
+    case "payload":
+      return (
+        <ConfirmDialog
+          title={t("cw_payload_title", { name: a.name })}
+          body={t("cw_payload_body")}
+          confirmLabel={t("cw_payload_load")}
+          busy={!!p.askBusy}
+          error={p.askError}
+          onConfirm={() => p.onLoadPayload?.(a.name)}
+          onCancel={p.onDismiss}
+        />
+      );
+    case "extract":
+      return (
+        <ExtractDialog
+          dir={path}
+          name={a.name}
+          path={joinPath(path, a.name)}
+          busy={p.busy != null}
+          onStart={(start) => p.onExtract?.(a.name, start)}
+          onCancel={p.onDismiss}
+        />
+      );
+    case "extractpw":
+      return (
+        <TextPrompt
+          title={t("cw_files_extract_pw_title", { name: a.name })}
+          fieldLabel={t("cw_files_extract_pw_label")}
+          note={
+            <p className={a.wrong ? "cw-field-error" : "cw-dim"} role={a.wrong ? "alert" : undefined}>
+              {t(a.wrong ? "cw_files_extract_pw_wrong" : "cw_files_extract_pw_body")}
+            </p>
+          }
+          initial=""
+          secret
+          check={(v) => (v ? null : t("cw_files_extract_pw_empty"))}
+          onSubmit={(v) => p.onExtract?.(a.name, a.start, v)}
+          onCancel={p.onDismiss}
+        />
+      );
     case "pick":
       return (
         <PathPicker
           title={t(a.op === "copy" ? "cw_files_copy_to" : "cw_files_move_to")}
           subtitle={namesTitle(a.names)}
           volumes={p.volumes ?? []}
-          start={path}
+          start={isSmbPath(path) ? null : path}
           onPick={(d) => p.onPicked(a.op, a.names, d)}
           onCancel={p.onDismiss}
         />
@@ -797,14 +989,16 @@ function ClipBar({ clip, busy, onPaste, onClear }: { clip: Clip; busy: boolean; 
 
 /** Files without state: everything comes in through props (tests call it directly). */
 export function FilesView(p: FilesViewProps) {
-  const vol = p.path != null && p.volumes ? volumeOf(p.path, p.volumes) : null;
+  /** A folder on a network share: only listing, New folder, Select and Copy work there. */
+  const smb = isSmbPath(p.path);
+  const vol = p.path != null && p.volumes && !smb ? volumeOf(p.path, p.volumes) : null;
   const status = busyText(p.busy);
   const shown = p.shown ?? p.dir.entries;
   const view = p.view ?? DEFAULT_VIEW;
   const capped = p.dir.more && p.dir.entries.length >= LOAD_ALL_CAP;
   const st = p.status;
   const pinned = p.path != null && p.prefs ? isPinned(p.prefs, p.path) : false;
-  const sceSys = p.path != null ? sceSysName(p.dir.entries) : null;
+  const sceSys = p.path != null && !smb ? sceSysName(p.dir.entries) : null;
   const loadAllButton = (
     <ToolButton
       icon={ChevronsDown}
@@ -825,7 +1019,7 @@ export function FilesView(p: FilesViewProps) {
       {status ? (
         <div className="cw-msg" role="status">
           {status}
-          {p.onStopBatch && p.busy && !p.busy.stopping && (p.busy.total > 1 || p.busy.op === "unpack") ? (
+          {p.onStopBatch && p.busy && !p.busy.stopping && (p.busy.total > 1 || p.busy.op === "unpack" || (p.busy.op === "install" && installStoppable(p.busy.phase)) || p.busy.cancels || p.busy.op === "extract") ? (
             <button
               type="button"
               className="cw-focusable cw-button cw-msg-action"
@@ -852,11 +1046,14 @@ export function FilesView(p: FilesViewProps) {
           unmountHeld={p.gameRunning ? t("cw_files_unmount_game") : null}
           onPlaceActions={(path) => p.onAsk({ kind: "place", path })}
           onGoTo={p.onGoTo ? () => p.onAsk({ kind: "goto" }) : undefined}
+          shares={p.shares}
+          onShareActions={(id) => p.onAsk({ kind: "share", id })}
+          onAddShare={p.onShareSaved ? () => p.onAsk({ kind: "shareedit", id: null }) : undefined}
         />
       ) : (
         <>
           <div className="cw-toolbar-one">
-            <PathBar key={p.path} path={p.path} volumes={p.volumes ?? []} onOpen={p.onOpen} onUp={p.onUp} />
+            <PathBar key={p.path} path={p.path} volumes={p.volumes ?? []} shares={p.shares} onOpen={p.onOpen} onUp={p.onUp} />
             <div className="cw-tools" role="toolbar" aria-label={t("cw_files_tools")}>
               {p.selecting ? (
                 <>
@@ -890,7 +1087,7 @@ export function FilesView(p: FilesViewProps) {
                 </>
               ) : (
                 <>
-                  {p.prefs && p.onPin && p.onUnpin ? (
+                  {p.prefs && p.onPin && p.onUnpin && !smb ? (
                     <ToolButton
                       icon={Star}
                       label={t(pinned ? "cw_files_pinned_on" : "cw_files_pin")}
@@ -900,7 +1097,7 @@ export function FilesView(p: FilesViewProps) {
                       onClick={() => (pinned ? p.onUnpin?.(p.path as string) : p.onPin?.(p.path as string))}
                     />
                   ) : null}
-                  {p.onGoTo ? (
+                  {p.onGoTo && !smb ? (
                     <ToolButton
                       icon={TextCursorInput}
                       label={t("cw_files_goto")}
@@ -914,12 +1111,14 @@ export function FilesView(p: FilesViewProps) {
                     action="mkdir"
                     onClick={() => p.onAsk({ kind: "mkdir" })}
                   />
-                  <ToolButton icon={FilePlus} label={t("cw_files_new_file")} action="newfile" onClick={() => p.onAsk({ kind: "newfile" })} />
-                  {p.remote ? (
+                  {!smb ? (
+                    <ToolButton icon={FilePlus} label={t("cw_files_new_file")} action="newfile" onClick={() => p.onAsk({ kind: "newfile" })} />
+                  ) : null}
+                  {p.remote && !smb ? (
                     <ToolButton icon={Upload} label={t("cw_files_up_title")} action="upload" onClick={() => p.onAsk({ kind: "upload" })} />
                   ) : null}
                   <ToolButton icon={SquareCheck} label={t("cw_select")} action="select" onClick={p.onToggleSelecting} />
-                  {p.onReveal ? (
+                  {p.onReveal && !smb ? (
                     <>
                       <ToolButton icon={Search} label={t("cw_files_search")} action="search" onClick={() => p.onAsk({ kind: "search" })} />
                       <ToolButton icon={ChartBar} label={t("cw_files_usage")} action="usage" onClick={() => p.onAsk({ kind: "usage" })} />
@@ -1063,6 +1262,25 @@ function useVolumes(path: string | null, tick: number): { volumes: Volume[] | nu
   return { volumes, error };
 }
 
+/** The saved network shares, read on open and each time the drive list shows again (null until read). */
+function useShares(path: string | null, tick: number): SmbShare[] | null {
+  const [shares, setShares] = useState<SmbShare[] | null>(null);
+  const atDrives = path == null;
+  useEffect(() => {
+    let live = true;
+    listShares().then(
+      (v) => {
+        if (live) setShares(v);
+      },
+      () => undefined, // kept as it was: a helper without shares leaves the section hidden
+    );
+    return () => {
+      live = false;
+    };
+  }, [atDrives, tick]);
+  return shares;
+}
+
 /** The element under `root` whose `attr` is exactly `value` (compared as-is: no CSS escaping of names). */
 function byAttr(root: Element, attr: string, value: string): HTMLElement | null {
   const all = root.querySelectorAll<HTMLElement>(`[${attr}]`);
@@ -1077,6 +1295,8 @@ export function Files({ ctx }: { ctx: SectionContext }) {
   const [path, setPath] = useState<string | null>(wanted);
   const [volumesTick, setVolumesTick] = useState(0);
   const { volumes, error: volumesError } = useVolumes(path, volumesTick);
+  const [sharesTick, setSharesTick] = useState(0);
+  const shares = useShares(path, sharesTick);
   const dir = useDir(path);
   const { jobs, uploading } = useJobs();
   const [selecting, setSelecting] = useState(false);
@@ -1178,7 +1398,8 @@ export function Files({ ctx }: { ctx: SectionContext }) {
 
   // A folder that opened is a visit: recent folders and the last location (on the console).
   useEffect(() => {
-    if (path == null || !dir.loaded || dir.error || visited.current === path) return;
+    // A folder on a network share is not a console place: never pinned, recent or restored.
+    if (path == null || isSmbPath(path) || !dir.loaded || dir.error || visited.current === path) return;
     visited.current = path;
     if (restored.current === path) restored.current = null;
     visit(path);
@@ -1186,6 +1407,12 @@ export function Files({ ctx }: { ctx: SectionContext }) {
 
   const goUp = useCallback(() => {
     if (path == null) return;
+    if (isSmbPath(path)) {
+      const up = smbUp(path);
+      // From a share's top back to the drive list, with focus on that share's row.
+      go(up, up == null ? (smbParts(path)?.id ?? "") : baseName(path));
+      return;
+    }
     const up = upFrom(path, volumes ?? []);
     // Focus the folder we came out of (or its drive in the drive list).
     go(up, up == null ? (volumeOf(path, volumes ?? [])?.path ?? "") : baseName(path));
@@ -1201,7 +1428,7 @@ export function Files({ ctx }: { ctx: SectionContext }) {
       focusName.current = null;
       const target =
         (path == null
-          ? byAttr(el, "data-drive", name)
+          ? (byAttr(el, "data-drive", name) ?? byAttr(el, "data-share-open", name))
           : name
             ? (byAttr(el, "data-entry", name)?.querySelector<HTMLElement>("[data-entry-main]") ?? null)
             : null) ??
@@ -1252,6 +1479,9 @@ export function Files({ ctx }: { ctx: SectionContext }) {
     (e: Entry) => {
       if (path == null) return;
       if (e.kind === "dir") return go(joinPath(path, e.name));
+      // A file on a network share is not read here: its menu (Copy) instead.
+      if (isSmbPath(path)) return setAsk({ kind: "sheet", names: [e.name] });
+      if (e.kind === "file" && isPkg(e.name)) return setAsk({ kind: "pkg", name: e.name });
       const type = viewKind(e.name);
       setAsk(type ? { kind: "view", name: e.name, type } : { kind: "sheet", names: [e.name] });
     },
@@ -1308,12 +1538,57 @@ export function Files({ ctx }: { ctx: SectionContext }) {
     [runBatch],
   );
 
+  /**
+   * A copy between a network share and the console (either way): one daemon job per item, its bytes
+   * in the status line, Stop cancels the item running. Conflicts are asked like a paste's.
+   */
+  const runTransfer = useCallback(
+    (items: { path: string; dir: boolean }[], dest: string) => {
+      if (currentBatch() || !items.length) return;
+      setMessage(null);
+      setSelecting(false);
+      setSelected([]);
+      const run = startBatch(
+        "copy",
+        items.length,
+        (ctl) =>
+          transferItems(
+            items,
+            dest,
+            { decide: askConflict, onBytes: ctl.onBytes },
+            { onProgress: ctl.onProgress, stopped: ctl.stopped, waitJob: (id) => waitJob(id, ctl.stopped) },
+          ),
+        items.map((i) => i.path).concat(dest),
+        true,
+      );
+      run?.then(
+        (r) => {
+          if (!mounted.current) return;
+          setMessage(pasteMessage(r));
+          refresh();
+        },
+        () => undefined,
+      );
+    },
+    [refresh],
+  );
+
   const onPicked = useCallback(
     (op: "copy" | "move", names: string[], destDir: string) => {
       setAsk(null);
+      if (isSmbPath(path)) {
+        // Copy to… from a share: a console folder (the picker shows only the console's drives).
+        if (op !== "copy" || isSmbPath(destDir)) return;
+        const kinds = new Map(dir.entries.map((e) => [e.name, e.kind]));
+        runTransfer(
+          names.map((n) => ({ path: joinPath(path, n), dir: kinds.get(n) === "dir" })),
+          destDir,
+        );
+        return;
+      }
       runBatch(op, names, (items, opts) => (op === "copy" ? copyItems : moveItems)(items, destDir, opts), destDir);
     },
-    [runBatch],
+    [runBatch, runTransfer, path, dir.entries],
   );
 
   const onClip = useCallback(
@@ -1336,6 +1611,13 @@ export function Files({ ctx }: { ctx: SectionContext }) {
     if (path == null || !c || currentBatch()) return;
     const dest = path;
     setMessage(null);
+    const fromShare = isSmbPath(c.items[0]?.path);
+    if (fromShare || isSmbPath(dest)) {
+      if (fromShare && isSmbPath(dest)) setMessage({ tone: "info", text: t("cw_files_smb_share_to_share") });
+      else if (c.mode === "cut") setMessage({ tone: "info", text: t("cw_files_smb_copy_only") });
+      else runTransfer(c.items, dest);
+      return;
+    }
     const run = startBatch(
       c.mode === "cut" ? "move" : "copy",
       c.items.length,
@@ -1360,7 +1642,7 @@ export function Files({ ctx }: { ctx: SectionContext }) {
       },
       () => undefined,
     );
-  }, [path, volumes, refresh]);
+  }, [path, volumes, refresh, runTransfer]);
 
   const onRename = useCallback(
     (name: string, newName: string) => {
@@ -1443,11 +1725,131 @@ export function Files({ ctx }: { ctx: SectionContext }) {
     [path, refresh],
   );
 
+  const onInstallPkg = useCallback(
+    (name: string, replace: boolean, title: string) => {
+      if (path == null || currentBatch()) return;
+      const src = joinPath(path, name);
+      setAsk(null);
+      setMessage(null);
+      let end: OpEnd | { end: "error"; error: unknown } = { end: "gone" };
+      // Stop counts only while the package is being copied: once the console's installer has it, it cannot be stopped.
+      let phase: string | null = null;
+      const run = startBatch(
+        "install",
+        1,
+        async (ctl) => {
+          const r: BatchResult = { started: [], moved: [], failed: [], jobFailed: [], skipped: [] };
+          ctl.onProgress(1, 1);
+          try {
+            const job = await startInstall(src, replace);
+            r.started.push(job);
+            end = await watchOp(job, {
+              stopped: () => ctl.stopped() && installStoppable(phase),
+              onStatus: (s) => {
+                phase = s.message;
+                ctl.onPhase(s.message);
+                ctl.onBytes(s.bytes_done, s.bytes_total);
+              },
+            });
+          } catch (error) {
+            end = { end: "error", error };
+          }
+          return r;
+        },
+        [src, path],
+      );
+      run?.then(
+        () => {
+          if (!mounted.current) return;
+          setMessage(installMessage(end, title, filesErrorText));
+          refresh();
+        },
+        () => undefined,
+      );
+    },
+    [path, refresh],
+  );
+
+  /** Load: the dialog stays open (busy) until the helper has sent it; a refusal shows in it. */
+  const onLoadPayload = useCallback(
+    (name: string) => {
+      if (path == null) return;
+      setAskBusy(true);
+      setAskError(null);
+      loadPayload(joinPath(path, name)).then(
+        () => {
+          if (!mounted.current) return;
+          setAskBusy(false);
+          setAsk(null);
+          setMessage({ tone: "info", text: t("cw_payload_done", { name }) });
+        },
+        (e: unknown) => {
+          if (!mounted.current) return;
+          setAskBusy(false);
+          setAskError(payloadErrorText(e, filesErrorText) ?? t("cw_payload_err_send"));
+        },
+      );
+    },
+    [path],
+  );
+
+  const onExtract = useCallback(
+    (name: string, start: ExtractStart, password?: string) => {
+      if (path == null || currentBatch()) return;
+      const src = joinPath(path, name);
+      setAsk(null);
+      setMessage(null);
+      let end: OpEnd | { end: "error"; error: unknown } = { end: "gone" };
+      const body = {
+        path: src,
+        dest: start.dest,
+        ...(password ? { password } : {}),
+        ...(start.merge ? { merge: true } : {}),
+        ...(start.replace ? { replace: true } : {}),
+      };
+      const run = startBatch(
+        "extract",
+        1,
+        async (ctl) => {
+          const r: BatchResult = { started: [], moved: [], failed: [], jobFailed: [], skipped: [] };
+          ctl.onProgress(1, 1);
+          try {
+            const job = await startOp("/api/fs/extract", body);
+            r.started.push(job);
+            end = await watchOp(job, { stopped: ctl.stopped, onStatus: (s) => ctl.onBytes(s.bytes_done, s.bytes_total) });
+          } catch (error) {
+            end = { end: "error", error };
+          }
+          return r;
+        },
+        [src, path],
+      );
+      run?.then(
+        () => {
+          if (!mounted.current) return;
+          const done = end as OpEnd | { end: "error"; error: unknown };
+          const cause = done.end === "failed" ? opCause(done.status) : done.end === "error" && done.error instanceof ApiError ? done.error.code : "";
+          if (cause === "fs_extract_password_required" || cause === "fs_extract_wrong_password") {
+            // Not a failure yet: ask for the password and run the same extract again.
+            setAsk({ kind: "extractpw", name, start, wrong: cause === "fs_extract_wrong_password" });
+            refresh();
+            return;
+          }
+          setMessage(extractMessage(done, start.merge));
+          if (done.end === "done") focusName.current = baseName(start.dest);
+          refresh();
+        },
+        () => undefined,
+      );
+    },
+    [path, refresh],
+  );
+
   const onMkdir = useCallback(
     (name: string) => {
       setAsk(null);
       if (path == null) return;
-      call("/api/fs/mkdir", { path: joinPath(path, name) }).then(
+      (isSmbPath(path) ? smbMkdir(joinPath(path, name)) : call("/api/fs/mkdir", { path: joinPath(path, name) })).then(
         () => {
           focusName.current = name;
           refresh();
@@ -1568,6 +1970,11 @@ export function Files({ ctx }: { ctx: SectionContext }) {
           return true;
         }
         if (a === "actions" && path == null) {
+          const share = active.closest("[data-share]")?.getAttribute("data-share");
+          if (share) {
+            setAsk({ kind: "share", id: share });
+            return true;
+          }
           const place = active.closest("[data-place]")?.getAttribute("data-place");
           if (place) {
             setAsk({ kind: "place", path: place });
@@ -1698,6 +2105,35 @@ export function Files({ ctx }: { ctx: SectionContext }) {
     [go],
   );
 
+  const onShareSaved = useCallback((s: SmbShare, added: boolean) => {
+    setAsk(null);
+    setSharesTick((n) => n + 1);
+    setMessage({ tone: "info", text: t("cw_files_smb_saved", { name: s.name }) });
+    // A new share's row gets focus once the list has it.
+    if (added) focusName.current = s.id;
+  }, []);
+
+  const onShareRemove = useCallback(
+    (id: string) => {
+      const name = shares?.find((x) => x.id === id)?.name ?? id;
+      setAskBusy(true);
+      setAskError(null);
+      removeShare(id).then(
+        () => {
+          setAskBusy(false);
+          setAsk(null);
+          setSharesTick((n) => n + 1);
+          setMessage({ tone: "info", text: t("cw_files_smb_removed", { name }) });
+        },
+        (e: unknown) => {
+          setAskBusy(false);
+          setAskError(filesErrorText(e));
+        },
+      );
+    },
+    [shares],
+  );
+
   /** A search result or a disk usage row: open its folder with it focused. */
   const onReveal = useCallback(
     (dir: string, name: string | null) => {
@@ -1780,12 +2216,18 @@ export function Files({ ctx }: { ctx: SectionContext }) {
         onRename={onRename}
         onBulkRename={onBulkRename}
         onUnpack={onUnpack}
+        onInstallPkg={onInstallPkg}
+        onLoadPayload={onLoadPayload}
+        onExtract={onExtract}
         onMkdir={onMkdir}
         onNewFile={onNewFile}
         onDownload={remote ? onDownload : undefined}
         remote={remote}
         onPicked={onPicked}
         onReveal={onReveal}
+        shares={shares}
+        onShareSaved={onShareSaved}
+        onShareRemove={onShareRemove}
       />
     </div>
   );

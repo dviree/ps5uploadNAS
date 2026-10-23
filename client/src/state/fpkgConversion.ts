@@ -130,7 +130,12 @@ export interface ConversionState {
     },
   ) => Promise<void>;
   /** Compress an .exfat / .ffpkg image into a .ffpfsc. */
-  compress: (source: string, outputDir?: string) => Promise<void>;
+  compress: (
+    source: string,
+    outputDir?: string,
+    /** Once the .ffpfsc is built and checked, put it in the Upload queue. */
+    thenUpload?: ImageUploadPlan,
+  ) => Promise<void>;
   /** Write a game folder as one game image (`format`, .exfat by default); with
    *  `thenCompress`, straight into a .ffpfsc (no uncompressed copy is written). */
   buildImage: (
@@ -142,6 +147,8 @@ export interface ConversionState {
     thenUpload?: ImageUploadPlan,
     /** Pack the game's files into AMPR LZ4 asset packs first (an .exfat image). */
     lz4?: AmprLz4Options,
+    /** An archive's password (RAR); never stored. */
+    password?: string,
   ) => Promise<void>;
   /** Unpack a game image or a debug-key package into a plain folder in `outputDir`; with
    *  `lz4`, pack a game folder or image into an LZ4 game folder (`<name>-lz4`) there. */
@@ -596,6 +603,15 @@ export function isArchiveSource(path: string): boolean {
   return /\.(zip|7z|rar)$/i.test(path.trim());
 }
 
+/** What an image made from an archive is called: the archive's name without its extension
+ *  or `.partN` (`Game.part1.rar` → `Game`). Its unpack folder's name means nothing. */
+export function archiveStem(path: string): string {
+  const name = path.trim().split(/[\\/]/).pop() ?? "";
+  // Trailing dots and spaces are not allowed at the end of a Windows file name, and the engine
+  // would only refuse it after a long unpack.
+  return name.replace(/(\.part\d+)?\.(zip|7z|rar)$/i, "").replace(/[. ]+$/, "");
+}
+
 /** A game image (`.exfat`, `.ffpkg`/`.ufs2`, `.ffpfs`, `.ffpfsc`) or a package (`.pkg`): what
  *  can be unpacked into a plain folder. A package has to be made with the debug key; the
  *  engine says so when it is not. */
@@ -762,17 +778,18 @@ export const useFpkgConversion = create<ConversionState>((set, get) => ({
     }
   },
 
-  compress: async (source, outputDir) => {
+  compress: async (source, outputDir, thenUpload) => {
     if (get().pipeline.phase === "running") return;
+    pendingImageUpload = thenUpload ?? null;
     const fullVerify = useConvertPrefs.getState().fullVerify;
     // Compressing reads the image from this machine's disk, so a server image is copied
     // first (unlike a build, which reads it in place).
     if (isRemotePath(source) || isArchiveSource(source)) {
-      beginRun("ffpfsc", source, null, isRemotePath(source) ? "copy" : "extract");
+      beginRun("ffpfsc", source, thenUpload?.host ?? null, isRemotePath(source) ? "copy" : "extract");
       void prepareThenStart(source, outputDir, (local) => fpkg.compress(local, outputDir, fullVerify), null);
       return;
     }
-    beginRun("ffpfsc", source, null, "compress");
+    beginRun("ffpfsc", source, thenUpload?.host ?? null, "compress");
     try {
       const { job_id } = await fpkg.compress(source, outputDir, fullVerify);
       update({ jobId: job_id });
@@ -782,13 +799,29 @@ export const useFpkgConversion = create<ConversionState>((set, get) => ({
     }
   },
 
-  buildImage: async (source, outputDir, thenCompress, format = "exfat", thenUpload, lz4) => {
+  buildImage: async (source, outputDir, thenCompress, format = "exfat", thenUpload, lz4, password) => {
     if (get().pipeline.phase === "running") return;
     pendingImageUpload = thenUpload ?? null;
+    const { verifyChunkKib, fullVerify, imageLevel } = useConvertPrefs.getState();
     // One engine job: compressing happens as the image is written, so no uncompressed copy
     // is ever on disk.
     // The console it goes to, when it is sent once built: another console's view of this
     // game is not busy with it.
+    if (needsPrep(source)) {
+      // An image is written from a folder or another image, read at random: an archive is
+      // unpacked first (copied here first when it is on a server), as a package build does.
+      beginRun("image", source, thenUpload?.host ?? null, isRemotePath(source) ? "copy" : "extract");
+      const name = archiveStem(source) || undefined;
+      void prepareThenStart(
+        source,
+        outputDir,
+        (local) =>
+          fpkg.buildImage(local, outputDir, format, thenCompress, lz4, verifyChunkKib, fullVerify, name, imageLevel),
+        null,
+        password,
+      );
+      return;
+    }
     beginRun("image", source, thenUpload?.host ?? null, lz4 ? "pack" : "plan");
     try {
       const { job_id } = await fpkg.buildImage(
@@ -797,8 +830,10 @@ export const useFpkgConversion = create<ConversionState>((set, get) => ({
         format,
         thenCompress,
         lz4,
-        useConvertPrefs.getState().verifyChunkKib,
-        useConvertPrefs.getState().fullVerify,
+        verifyChunkKib,
+        fullVerify,
+        undefined,
+        imageLevel,
       );
       update({ jobId: job_id });
       poll(job_id, null);
@@ -818,6 +853,7 @@ export const useFpkgConversion = create<ConversionState>((set, get) => ({
         outputDir,
         undefined,
         useConvertPrefs.getState().fullVerify,
+        undefined,
         lz4,
       );
       update({ jobId: job_id });

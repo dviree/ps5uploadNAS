@@ -19,11 +19,20 @@
  * the guard is up (so they take exactly the path ○ takes), else the back
  * action directly.
  *
- * On the PS5 (opts.onRoot) the guard stays up on the first screen too, and ○
- * there calls onRoot (window.close(): the browser goes back to the PS5's home
- * screen, as Payload Manager does). Escape, Backspace and a gamepad ○ take
- * the same path (requestBack → history.back()), so on the PS5 they too close
- * the browser from Home with nothing open. If the page is still open after that, the
+ * On the PS5 (opts.onRoot) the first screen keeps no guard while the page's
+ * history is a single entry, so ○ there is the browser's own: it leaves the
+ * page for the PS5's home screen. WebKit closes a page it did not open by
+ * script only while its back/forward list holds one entry ("Can't close the
+ * window since it was not opened by JavaScript" otherwise; one pushState, even
+ * popped again, is enough to refuse it for the page's lifetime: measured in
+ * WebKit). The guard used to go up at load, so neither ○ nor window.close()
+ * could leave the page from Home (#480). Once a level has added an entry
+ * (env.length() > 1), the guard does stay up on the first screen and ○ there
+ * calls onRoot (window.close(), which a PS5 browser that allows scripts to
+ * close may honour). Escape, Backspace and a gamepad ○ take the same path:
+ * requestBack → history.back() while the guard is up, and onRoot directly on
+ * the first screen without one (window.close() is allowed then). onRoot runs
+ * once until a level opens again: if the page is still open after it, the
  * guard is left down so the next ○ does what the browser does by itself.
  *
  * WebKit can fire a popstate as the page loads that pops nothing. Such a pop
@@ -51,6 +60,8 @@ export interface HistoryEnv {
   startsOnGuard(): boolean;
   /** History's current entry is the guard (a popstate that popped nothing). Optional. */
   atGuard?(): boolean;
+  /** history.length: the entries back and forward. Without it the history counts as deep. */
+  length?(): number;
 }
 
 export interface BackHistoryOptions {
@@ -85,7 +96,9 @@ export function createBackHistory(env: HistoryEnv, runBack: () => void, opts: Ba
   /** onRoot ran and the page is still here: no guard on the first screen until a level opens. */
   let rootTried = false;
 
-  const wantGuard = () => levels > 0 || (!!opts.onRoot && !rootTried);
+  /** More than one entry: the browser will no longer close the page or leave it on ○ by itself. */
+  const deep = () => (env.length ? env.length() > 1 : true);
+  const wantGuard = () => levels > 0 || (!!opts.onRoot && !rootTried && deep());
   const sync = () => {
     scheduled = false;
     if (wantGuard() && !guard) {
@@ -158,6 +171,12 @@ export function createBackHistory(env: HistoryEnv, runBack: () => void, opts: Ba
         return;
       }
       lastBackAt = env.now();
+      if (levels === 0 && opts.onRoot && !rootTried) {
+        // The first screen with no guard (a single-entry history): leave, as ○ would.
+        rootTried = true;
+        opts.onRoot();
+        return;
+      }
       runBack();
       schedule();
     },
@@ -187,13 +206,28 @@ export function isPs5Browser(ua: string = typeof navigator !== "undefined" ? nav
   return /PlayStation/i.test(ua);
 }
 
-/** Close the browser (PS5: back to the home screen). Never throws. */
+/** Fired on window when ○ on the first screen could not leave the page (the browser refused to close it). */
+export const CLOSE_REFUSED_EVENT = "cw-close-refused";
+/** How long a refused window.close() takes to show: the page is still visible after this. */
+export const CLOSE_CHECK_MS = 600;
+
+/**
+ * Close the browser (PS5: back to the home screen). Never throws. The PS5 browser refuses once
+ * the page has more than one history entry, and a page cannot send the console home by itself:
+ * when the page is still showing a moment later, CLOSE_REFUSED_EVENT tells the user to press
+ * the PS button.
+ */
 function closeWindow(): void {
   try {
     window.close();
   } catch {
     /* not closable: the page stays */
   }
+  setTimeout(() => {
+    if (!window.closed && document.visibilityState === "visible") {
+      window.dispatchEvent(new Event(CLOSE_REFUSED_EVENT));
+    }
+  }, CLOSE_CHECK_MS);
 }
 
 let offInput: (() => void) | null = null;
@@ -216,6 +250,7 @@ export function installBackHistory(runBack: () => void): BackHistory {
       },
       startsOnGuard: isGuardState,
       atGuard: isGuardState,
+      length: () => window.history.length,
     },
     runBack,
     { onRoot: isPs5Browser() ? closeWindow : undefined, graceMs: LOAD_GRACE_MS },

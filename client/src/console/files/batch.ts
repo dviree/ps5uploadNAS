@@ -16,7 +16,7 @@ import { ApiError } from "../api";
 import { fetchJobs, type Job } from "../home/useJobs";
 import type { BatchResult, JobEnd } from "./move";
 
-export type BatchOp = "copy" | "move" | "delete" | "chmod" | "rename" | "unpack";
+export type BatchOp = "copy" | "move" | "delete" | "chmod" | "rename" | "unpack" | "install" | "extract";
 
 /** The batch running now: item `at` (1-based) of `total` is being sent or waited on. */
 export interface BatchProgress {
@@ -30,6 +30,10 @@ export interface BatchProgress {
   /** Bytes written so far of `bytesTotal` (a one-job batch such as unpack reports them). */
   bytesDone?: number;
   bytesTotal?: number;
+  /** A one-job batch's own line (an install's phase: its job message). */
+  phase?: string | null;
+  /** Stop cancels the item running too (a network-share copy), so it is offered for one item as well. */
+  cancels?: boolean;
 }
 
 /** How often a running job is checked. */
@@ -115,6 +119,8 @@ export interface BatchControl {
   onProgress: (at: number, total: number) => void;
   /** Bytes done of total for the running item (shown with a percentage). */
   onBytes: (done: number, total: number) => void;
+  /** The running job's message (an install's phase). */
+  onPhase: (phase: string | null) => void;
   stopped: () => boolean;
 }
 
@@ -127,10 +133,11 @@ export function startBatch<R extends BatchResult = BatchResult>(
   total: number,
   work: (ctl: BatchControl) => Promise<R>,
   paths?: string[],
+  cancels?: boolean,
 ): Promise<R> | null {
   if (progress) return null;
   stopAsked = false;
-  progress = { op, at: 0, total, stopping: false, ...(paths ? { paths } : {}) };
+  progress = { op, at: 0, total, stopping: false, ...(paths ? { paths } : {}), ...(cancels ? { cancels } : {}) };
   emit();
   const ctl: BatchControl = {
     onProgress: (at, n) => {
@@ -142,6 +149,11 @@ export function startBatch<R extends BatchResult = BatchResult>(
       if (!progress) return;
       if (progress.bytesDone === done && progress.bytesTotal === total) return;
       progress = { ...progress, bytesDone: done, bytesTotal: total };
+      emit();
+    },
+    onPhase: (phase) => {
+      if (!progress || progress.phase === phase) return;
+      progress = { ...progress, phase };
       emit();
     },
     stopped: () => stopAsked,

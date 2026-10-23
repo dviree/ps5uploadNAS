@@ -82,7 +82,7 @@ vi.mock("./roster", async (orig) => ({
   useRosterStore: { getState: () => roster },
 }));
 
-import { POLL_MS, resumeRememberedRun, useFpkgConversion } from "./fpkgConversion";
+import { POLL_MS, archiveStem, resumeRememberedRun, useFpkgConversion } from "./fpkgConversion";
 import { commandTask, taskCapabilities } from "./taskControls";
 import { useTaskStore } from "./tasks";
 
@@ -354,7 +354,7 @@ describe("fpkg pipeline", () => {
     });
     await useFpkgConversion.getState().buildImage("/games/PPSA1-app", "/out", false);
     await tick();
-    expect(buildImage).toHaveBeenCalledWith("/games/PPSA1-app", "/out", "exfat", false, undefined, 8192, false);
+    expect(buildImage).toHaveBeenCalledWith("/games/PPSA1-app", "/out", "exfat", false, undefined, 8192, false, undefined, "balanced");
     expect(useFpkgConversion.getState().pipeline).toMatchObject({
       phase: "running",
       mode: "image",
@@ -384,7 +384,7 @@ describe("fpkg pipeline", () => {
     await useFpkgConversion.getState().buildFolder("/games/Game.ffpfsc", "/out");
     expect(useFpkgConversion.getState().pipeline).toMatchObject({ phase: "running", mode: "folder", stage: "write" });
     await tick();
-    expect(buildFolder).toHaveBeenCalledWith("/games/Game.ffpfsc", "/out", undefined, false, undefined);
+    expect(buildFolder).toHaveBeenCalledWith("/games/Game.ffpfsc", "/out", undefined, false, undefined, undefined);
     expect(useFpkgConversion.getState().pipeline).toMatchObject({ stage: "verify", stageDone: 2, stageTotal: 5 });
     jobStatus.mockResolvedValueOnce({ status: "done", dest: "/out/Game", bytes_sent: 9 });
     await tick();
@@ -479,7 +479,7 @@ describe("fpkg pipeline", () => {
     jobStatus.mockResolvedValueOnce({ status: "done", dest: "/out/G.ffpkg", bytes_sent: 9 });
     await useFpkgConversion.getState().buildImage("/games/G", "/out", false, "ffpkg");
     await tick();
-    expect(buildImage).toHaveBeenCalledWith("/games/G", "/out", "ffpkg", false, undefined, 8192, false);
+    expect(buildImage).toHaveBeenCalledWith("/games/G", "/out", "ffpkg", false, undefined, 8192, false, undefined, "balanced");
     expect(useFpkgConversion.getState().pipeline).toMatchObject({
       phase: "done",
       packagePath: "/out/G.ffpkg",
@@ -498,7 +498,7 @@ describe("fpkg pipeline", () => {
     await useFpkgConversion.getState().buildImage("/games/A", "/out", false, "exfat", undefined, lz4);
     expect(useFpkgConversion.getState().pipeline).toMatchObject({ phase: "running", stage: "pack" });
     await tick();
-    expect(buildImage).toHaveBeenCalledWith("/games/A", "/out", "exfat", false, lz4, 8192, false);
+    expect(buildImage).toHaveBeenCalledWith("/games/A", "/out", "exfat", false, lz4, 8192, false, undefined, "balanced");
     expect(useFpkgConversion.getState().pipeline).toMatchObject({
       stage: "pack",
       stageDone: 5,
@@ -521,6 +521,23 @@ describe("fpkg pipeline", () => {
     });
   });
 
+  it("sends the chosen .ffpfsc level with a compressed image", async () => {
+    const buildImage = vi.fn().mockResolvedValue({ job_id: "lv" });
+    jobStatus.mockResolvedValue({ status: "done", dest: "/out/S.ffpfsc", bytes_sent: 1 });
+    const { fpkg } = await import("../api/fpkg");
+    (fpkg as unknown as { buildImage: unknown }).buildImage = buildImage;
+    const { useConvertPrefs } = await import("./convertPrefs");
+    useConvertPrefs.getState().setImageLevel("smallest");
+    try {
+      await useFpkgConversion.getState().buildImage("/games/S", "/out", true, "ffpkg");
+      await tick();
+      expect(buildImage).toHaveBeenCalledWith("/games/S", "/out", "ffpkg", true, undefined, 8192, false, undefined, "smallest");
+    } finally {
+      useConvertPrefs.getState().setImageLevel("balanced");
+      useFpkgConversion.setState({ pipeline: { phase: "idle" } });
+    }
+  });
+
   it("compresses in the same engine job, with no second job or leftover image", async () => {
     const buildImage = vi.fn().mockResolvedValue({ job_id: "i1" });
     const compressJob = vi.fn().mockResolvedValue({ job_id: "c1" });
@@ -535,7 +552,7 @@ describe("fpkg pipeline", () => {
     });
     await useFpkgConversion.getState().buildImage("/games/G", "/out", true, "ffpkg");
     await tick();
-    expect(buildImage).toHaveBeenCalledWith("/games/G", "/out", "ffpkg", true, undefined, 8192, false);
+    expect(buildImage).toHaveBeenCalledWith("/games/G", "/out", "ffpkg", true, undefined, 8192, false, undefined, "balanced");
     expect(useFpkgConversion.getState().pipeline).toMatchObject({
       phase: "running",
       mode: "image",
@@ -817,6 +834,39 @@ describe("fpkg pipeline", () => {
     expect(p.phase === "failed" && p.message).toMatch(/password/i);
     expect(p.phase === "failed" && p.message).not.toMatch(/rar_password/);
     expect(build).not.toHaveBeenCalled();
+  });
+
+  it("unpacks a .rar before making a compressed image of it, named after the archive", async () => {
+    // Discord report: an archive source could not become an image at all.
+    const buildImage = vi.fn().mockResolvedValue({ job_id: "i7" });
+    const { fpkg } = await import("../api/fpkg");
+    (fpkg as unknown as { buildImage: unknown }).buildImage = buildImage;
+    const game = "/out/.ps5upload-extract-x1";
+    jobStatus
+      .mockResolvedValueOnce({ status: "done", dest: game, bytes_sent: 10 })
+      .mockResolvedValueOnce({ status: "done", dest: "/out/My Game.ffpfsc", bytes_sent: 4 });
+    await useFpkgConversion
+      .getState()
+      .buildImage("/dl/My Game.part1.rar", "/out", true, "exfat", undefined, undefined, "pw");
+    expect(useFpkgConversion.getState().pipeline).toMatchObject({ phase: "running", mode: "image", stage: "extract" });
+    expect(extract).toHaveBeenCalledWith("/dl/My Game.part1.rar", "/out", "pw");
+    await tick();
+    expect(buildImage).toHaveBeenCalledWith(game, "/out", "exfat", true, undefined, 8192, false, "My Game", "balanced");
+    await tick();
+    expect(useFpkgConversion.getState().pipeline).toMatchObject({
+      phase: "done",
+      mode: "image",
+      source: "/dl/My Game.part1.rar",
+      packagePath: "/out/My Game.ffpfsc",
+    });
+    expect(cleanupExtract).toHaveBeenCalledWith(game);
+  });
+
+  it("names an archive's image after the archive", () => {
+    expect(archiveStem("/dl/My Game.part01.rar")).toBe("My Game");
+    expect(archiveStem("C:\\dl\\G.v1.02.7z")).toBe("G.v1.02");
+    expect(archiveStem("remote://nas-1/dl/a.ZIP")).toBe("a");
+    expect(archiveStem("/dl/Game..rar")).toBe("Game");
   });
 
   it("copies a server image before compressing it (compression reads local disk)", async () => {

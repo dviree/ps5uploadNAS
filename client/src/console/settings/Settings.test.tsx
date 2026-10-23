@@ -3,7 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import de from "../locales/de.json";
 import { _setStringsLoaderForTests, chooseLanguage, getLanguage, storedLanguage, stringsReady, t } from "../strings";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
-import { lanToggleStep, SettingsView, waitTileApplied, type SettingsViewProps, type WebSettings } from "./Settings";
+import { canTurnOff, lanToggleStep, SettingsView, TurnedOff, tileNote, waitTileApplied, type SettingsViewProps, type WebSettings } from "./Settings";
 
 function elements(node: ReactNode): ReactElement<Record<string, unknown>>[] {
   const out: ReactElement<Record<string, unknown>>[] = [];
@@ -63,6 +63,44 @@ describe("settings", () => {
     expect(idle.onToggleLan).toHaveBeenCalledTimes(1);
   });
 
+  it("turn_off_minion_confirms_first_then_says_how_to_turn_it_back_on", () => {
+    // Older helpers send no `enabled`: no action, nothing to turn off.
+    expect(canTurnOff({ lan: false, tile: true, version: "7.1.0" })).toBe(false);
+    const old = base({ onTurnOff: vi.fn() });
+    expect(elements(SettingsView(old)).some((e) => e.props.setting === "minion-off")).toBe(false);
+
+    const onTurnOff = vi.fn();
+    const props = base({ settings: { lan: false, tile: true, enabled: true, version: "7.1.19" }, onTurnOff });
+    const row = elements(SettingsView(props)).find((e) => e.props.setting === "minion-off");
+    expect(row?.props.label).toBe("Turn off PS5Upload Minion");
+    (row?.props.onClick as () => void)();
+    expect(onTurnOff).toHaveBeenCalledTimes(1);
+
+    // Asking opens a confirm dialog; only confirming turns it off.
+    const onConfirmOff = vi.fn();
+    const asking = base({
+      settings: { lan: false, tile: true, enabled: true, version: "7.1.19" },
+      onTurnOff,
+      askOff: true,
+      onConfirmOff,
+    });
+    const dialog = elements(SettingsView(asking)).find(
+      (e) => e.type === ConfirmDialog && e.props.title === t("cw_settings_minion_off_confirm_title"),
+    );
+    expect(dialog?.props.danger).toBe(true);
+    expect(String(dialog?.props.body)).toContain("Settings → PS5Upload Minion");
+    expect(onConfirmOff).not.toHaveBeenCalled();
+    (dialog?.props.onConfirm as () => void)();
+    expect(onConfirmOff).toHaveBeenCalledTimes(1);
+
+    // Once off, the page says so and how to turn it back on, instead of the settings.
+    const off = elements(SettingsView(base({ turnedOff: true })));
+    expect(off.some((e) => e.type === TurnedOff)).toBe(true);
+    const msg = elements(TurnedOff());
+    expect(msg.some((e) => e.props.children === t("cw_minion_off_title"))).toBe(true);
+    expect(t("cw_settings_minion_off_confirm_body")).toContain("open the PS5Upload app on your PC");
+  });
+
   it("tile_switch_waits_for_the_real_result", async () => {
     const at = (over: Partial<WebSettings>): WebSettings => ({ lan: false, tile: false, version: "7.1.0", ...over });
     const reads = [at({ tile_busy: true }), at({ tile_busy: false, tile_failed: true })];
@@ -81,6 +119,20 @@ describe("settings", () => {
     const last = await waitTileApplied(at({ tile_busy: true }), stuck, sleep, 5000, 1000);
     expect(stuck).toHaveBeenCalledTimes(5);
     expect(last?.tile_busy).toBe(true);
+  });
+
+  it("tile_note_says_when_removal_could_only_hide_the_icon", () => {
+    const at = (over: Partial<WebSettings>): WebSettings => ({ lan: false, tile: false, version: "7.1.18", ...over });
+    // #480: the PS5 kept its record, the helper hid the icon instead: the switch says so.
+    expect(tileNote(at({ tile_result: "hidden" }))).toBe(t("cw_settings_tile_hidden"));
+    const sw = elements(SettingsView(base({ settings: at({ tile_result: "hidden" }) }))).find((e) => e.props.action === "tile");
+    expect(sw?.props.note).toBe(t("cw_settings_tile_hidden"));
+    // Removed for real, still working, failed, turned back on, or an older helper: no note.
+    expect(tileNote(at({ tile_result: "removed" }))).toBeUndefined();
+    expect(tileNote(at({ tile_result: "hidden", tile_busy: true }))).toBeUndefined();
+    expect(tileNote(at({ tile_result: "hidden", tile_failed: true }))).toBeUndefined();
+    expect(tileNote(at({ tile: true, tile_result: "hidden" }))).toBeUndefined();
+    expect(tileNote(at({}))).toBeUndefined();
   });
 
   it("full screen switch shows only where the browser supports it", () => {

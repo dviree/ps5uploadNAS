@@ -320,6 +320,20 @@ export async function browserInvoke<T>(
       return getJson<T>(url);
     }
 
+    case "ps5_disk_usage_start": {
+      const { addr, path } = args as { addr?: string | null; path: string };
+      return postJson<T>("/api/ps5/disk-usage", { addr: addr ?? null, path });
+    }
+
+    case "ps5_disk_usage_status":
+      return getJson<T>(`/api/ps5/disk-usage/${uenc(String(args["id"]))}`);
+
+    case "ps5_disk_usage_cancel":
+      return postJson<T>(
+        `/api/ps5/disk-usage/${uenc(String(args["id"]))}/cancel`,
+        {},
+      );
+
     case "ps5_fs_delete": {
       const { addr, path, op_id } = args["req"] as {
         addr?: string | null;
@@ -769,15 +783,6 @@ export async function browserInvoke<T>(
       // it answers with the job.
       return postJson<T>("/api/lz4/status", { paths: args["paths"] }, true);
     }
-    case "ftp_send": {
-      // TS caller: { source, addr, port, destDir }
-      return postJson<T>("/api/ftp/send", {
-        source: args["source"],
-        addr: args["addr"],
-        port: args["port"],
-        dest_dir: args["destDir"],
-      }, true);
-    }
     case "lz4_building": {
       return getJson<T>("/api/lz4/building");
     }
@@ -805,6 +810,9 @@ export async function browserInvoke<T>(
     }
     case "ps5_elfldr_ensure": {
       return postJson<T>("/api/ps5/elfldr/ensure", { host: args["host"] });
+    }
+    case "ps5_payload_load_console": {
+      return postJson<T>("/api/ps5/payload/load-console", { host: args["host"], path: args["path"] });
     }
     case "fpkg_estimate": {
       return postJson<T>("/api/fpkg/estimate", {
@@ -848,6 +856,9 @@ export async function browserInvoke<T>(
         ampr_lz4: args["amprLz4"],
         verify_chunk_kib: args["verifyChunkKib"],
         full_verify: args["fullVerify"] ?? false,
+        name: args["name"],
+        ffpfsc_level: args["ffpfscLevel"],
+        edits: args["edits"] ?? [],
       }, true);
     }
     case "folder_build": {
@@ -856,8 +867,15 @@ export async function browserInvoke<T>(
         output_dir: args["outputDir"],
         name: args["name"],
         full_verify: args["fullVerify"] ?? false,
+        entry: args["entry"],
         ampr_lz4: args["amprLz4"],
       }, true);
+    }
+    case "image_browse": {
+      return postJson<T>("/api/image/browse", {
+        path: args["path"],
+        dir: args["dir"],
+      });
     }
     case "job_status": {
       // TS caller: { jobId } (Tauri 2 camelCases job_id → jobId)

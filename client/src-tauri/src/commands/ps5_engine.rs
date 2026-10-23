@@ -349,6 +349,28 @@ pub async fn ps5_list_dir(
     get_json(&url).await
 }
 
+/// Starts a recursive size walk of a console folder (Disk usage). The engine answers at
+/// once with the walk's id; `ps5_disk_usage_status` polls it.
+#[tauri::command]
+pub async fn ps5_disk_usage_start(path: String, addr: Option<String>) -> Result<JsonValue, String> {
+    let base = engine::url();
+    let body = serde_json::json!({ "path": path, "addr": addr });
+    post_json(&format!("{base}/api/ps5/disk-usage"), &body).await
+}
+
+#[tauri::command]
+pub async fn ps5_disk_usage_status(id: String) -> Result<JsonValue, String> {
+    let base = engine::url();
+    get_json(&format!("{base}/api/ps5/disk-usage/{}", urlencoding(&id))).await
+}
+
+#[tauri::command]
+pub async fn ps5_disk_usage_cancel(id: String) -> Result<JsonValue, String> {
+    let base = engine::url();
+    let url = format!("{base}/api/ps5/disk-usage/{}/cancel", urlencoding(&id));
+    post_json(&url, &serde_json::json!({})).await
+}
+
 // ── Transfer jobs ───────────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
@@ -1036,6 +1058,18 @@ pub async fn local_image_detach(device: String) -> Result<JsonValue, String> {
 pub async fn local_image_status() -> Result<JsonValue, String> {
     let base = engine::url();
     get_json(&format!("{base}/api/local/image/status")).await
+}
+
+/// One folder of a game image or debug package on this computer (#479): its entries, sizes,
+/// and what kind of image it is.
+#[tauri::command]
+pub async fn image_browse(path: String, dir: Option<String>) -> Result<JsonValue, String> {
+    let base = engine::url();
+    post_json(
+        &format!("{base}/api/image/browse"),
+        &serde_json::json!({ "path": path, "dir": dir }),
+    )
+    .await
 }
 
 #[tauri::command]
@@ -2224,8 +2258,8 @@ pub async fn ps5_hw_drive_sensors(addr: Option<String>) -> Result<JsonValue, Str
 }
 
 /// Write the PS5 fan-turbo threshold. `threshold_c` is clamped on the
-/// engine side (returns 400 BAD_REQUEST if out of the safe [45, 80]
-/// range) before ever reaching the payload, so the UI gets a clear
+/// engine side (returns 400 BAD_REQUEST if out of the safe [45, 85]
+/// range; 0 asks for the console's own setting back) before ever reaching the payload, so the UI gets a clear
 /// error rather than a silent clamp.
 #[tauri::command]
 pub async fn ps5_hw_set_fan_threshold(
@@ -2373,23 +2407,6 @@ pub async fn lz4_ffpfsc(refresh: Option<bool>) -> Result<JsonValue, String> {
     get_json(&format!("{base}/api/lz4/ffpfsc{fresh}")).await
 }
 
-/// Send a game folder or file to the PS5 through the console's own FTP server (etaHEN,
-/// ftpsrv), as ps5-lz4 does. POST /api/ftp/send; returns `{job_id, dest}`.
-#[tauri::command]
-pub async fn ftp_send(
-    source: String,
-    addr: String,
-    port: Option<u16>,
-    dest_dir: String,
-) -> Result<JsonValue, String> {
-    let base = engine::url();
-    post_json_long(
-        &format!("{base}/api/ftp/send"),
-        &serde_json::json!({ "source": source, "addr": addr, "port": port, "dest_dir": dest_dir }),
-    )
-    .await
-}
-
 /// The games the engine is converting to LZ4 game folders right now. GET /api/lz4/building.
 #[tauri::command]
 pub async fn lz4_building() -> Result<JsonValue, String> {
@@ -2458,6 +2475,14 @@ pub async fn ps5_elfldr_ensure(host: String) -> Result<JsonValue, String> {
     let base = engine::url();
     let url = format!("{base}/api/ps5/elfldr/ensure");
     post_json(&url, &serde_json::json!({ "host": host })).await
+}
+
+/// Send a payload already on the console to its loader. POST /api/ps5/payload/load-console.
+#[tauri::command]
+pub async fn ps5_payload_load_console(host: String, path: String) -> Result<JsonValue, String> {
+    let base = engine::url();
+    let url = format!("{base}/api/ps5/payload/load-console");
+    post_json(&url, &serde_json::json!({ "host": host, "path": path })).await
 }
 
 /// Package size and time at each compression level for a game. POST /api/fpkg/estimate.
@@ -2538,6 +2563,7 @@ pub async fn ffpfsc_compress(
 
 /// Write a game folder as one `.exfat` image for ShadowMountPlus; runs as an engine job.
 #[tauri::command]
+#[allow(clippy::too_many_arguments)]
 pub async fn exfat_build(
     source: String,
     output_dir: Option<String>,
@@ -2548,6 +2574,12 @@ pub async fn exfat_build(
     // The read-back check's chunk in KiB; the engine's default when absent.
     verify_chunk_kib: Option<u32>,
     full_verify: Option<bool>,
+    // What to call the image instead of the source's name (a game unpacked from an archive).
+    name: Option<String>,
+    // How hard a .ffpfsc is compressed: fast, balanced or smallest; the engine's default when absent.
+    ffpfsc_level: Option<String>,
+    // An edited copy of the image `source`: [{op: "delete"|"put", path, from?}], passed through.
+    edits: Option<JsonValue>,
 ) -> Result<JsonValue, String> {
     let base = engine::url();
     let url = format!("{base}/api/exfat/build");
@@ -2562,6 +2594,9 @@ pub async fn exfat_build(
             "ampr_lz4": ampr_lz4,
             "verify_chunk_kib": verify_chunk_kib,
             "full_verify": full_verify.unwrap_or(false),
+            "name": name,
+            "ffpfsc_level": ffpfsc_level,
+            "edits": edits.unwrap_or_else(|| serde_json::json!([])),
         }),
     )
     .await
@@ -2574,6 +2609,8 @@ pub async fn folder_build(
     output_dir: Option<String>,
     name: Option<String>,
     full_verify: Option<bool>,
+    // Only this file or folder of the image (the image browser's Save).
+    entry: Option<String>,
     ampr_lz4: Option<JsonValue>,
 ) -> Result<JsonValue, String> {
     let base = engine::url();
@@ -2586,6 +2623,7 @@ pub async fn folder_build(
             "output_dir": output_dir,
             "name": name,
             "full_verify": full_verify.unwrap_or(false),
+            "entry": entry,
             "ampr_lz4": ampr_lz4,
         }),
     )

@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { fetchConsoleStat, importLocalCheat, minionTile } from "./consoleFiles";
+import { fetchConsoleStat, importLocalCheat, minionSet, minionTile } from "./consoleFiles";
 vi.mock("../state/engine", () => ({ getEngineUrl: () => "http://engine" }));
 afterEach(() => vi.unstubAllGlobals());
 function reply(body: object, status = 200) {
@@ -30,6 +30,43 @@ describe("paired console controls", () => {
     expect(JSON.parse(fetcher.mock.calls[1][1].body)).not.toHaveProperty(
       "tile",
     );
+  });
+  it("passes the helper's tile result through when it sends one", async () => {
+    reply({
+      supported: true,
+      tile: false,
+      tile_busy: false,
+      tile_failed: false,
+      tile_result: "hidden",
+    });
+    expect(await minionTile("h", false)).toMatchObject({
+      tile: false,
+      tile_result: "hidden",
+    });
+    reply({ supported: true, tile: false, tile_busy: false, tile_failed: false });
+    expect(await minionTile("h")).not.toHaveProperty("tile_result");
+  });
+  it("turns Minion off and on and reports whether the helper can", async () => {
+    const fetcher = reply({
+      supported: true,
+      tile: true,
+      enabled: false,
+      tile_busy: true,
+      tile_failed: false,
+      tile_result: "",
+    });
+    expect(await minionSet("10.0.0.2", { enabled: false })).toMatchObject({
+      enabled: false,
+      tile: true,
+      tile_busy: true,
+    });
+    expect(JSON.parse(fetcher.mock.calls[0][1].body)).toEqual({
+      addr: "10.0.0.2",
+      enabled: false,
+    });
+    // A helper without the switch sends no `enabled`: the screen then keeps only the tile buttons.
+    reply({ supported: true, tile: true, tile_busy: false, tile_failed: false });
+    expect(await minionSet("h")).not.toHaveProperty("enabled");
   });
   it("feature detects old helpers and rejects malformed settings", async () => {
     reply({ supported: false });
