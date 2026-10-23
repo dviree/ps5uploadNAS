@@ -21,6 +21,8 @@ Keep it that way:
   project (theghostonline/PS5-LZ4-Compression on theghostonline.dev, which left GitHub on
   2026-10-17) and opens an `lz4-upstream` issue listing new commits and releases to review and
   port (packing rules in `ampr_pack`, game fixes; dviree/PS5-LZ4-NAS ports them too).
+- `lz4-upstream-diff.yml` (by hand, builds nothing) prints the LZ4 Compression project's
+  source diff between two release tags into its log, to review a new release from here.
 - When merging upstream (`phantomptr/ps5upload` main), check every `on:` block in
   `.github/workflows/` afterwards: an upstream change there must not bring those triggers
   back. Resolve such conflicts by keeping this fork's `workflow_dispatch`-only blocks.
