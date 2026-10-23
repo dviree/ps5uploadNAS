@@ -1,0 +1,35 @@
+# By hand only, builds nothing: prints what changed in the LZ4 Compression project
+# (theghostonline.dev) between two of its releases, so a new release's packing rules and game
+# fixes can be reviewed and ported (see lz4-upstream-check.yml, which opens the issue).
+name: LZ4 upstream diff
+
+on:
+  workflow_dispatch:
+    inputs:
+      from:
+        description: "Older release tag (e.g. v1.6.2)"
+        required: true
+      to:
+        description: "Newer release tag (e.g. v1.6.3)"
+        required: true
+
+permissions:
+  contents: read
+
+jobs:
+  diff:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Diff of the source between the two releases
+        env:
+          FROM: ${{ inputs.from }}
+          TO: ${{ inputs.to }}
+        run: |
+          set -euo pipefail
+          git clone -q --filter=blob:none https://theghostonline.dev/theghostonline/PS5-LZ4-Compression.git up
+          cd up
+          git log --format='%h %ad %s' --date=short "$FROM..$TO"
+          echo "=== files"
+          git diff --stat "$FROM" "$TO"
+          echo "=== diff (no assets or third_party)"
+          git diff "$FROM" "$TO" -- . ':(exclude)assets' ':(exclude)assets-app' ':(exclude)third_party' ':(exclude)*.png' ':(exclude)*.jpg'
