@@ -91,13 +91,61 @@ pub(crate) struct Compat {
     pub games: BTreeMap<String, Entry>,
 }
 
-fn status_of(answer: &str) -> Option<&'static str> {
-    match answer.to_ascii_lowercase().as_str() {
+/// "How does it run?" as `works`, `issues`, `noStart` or `crash`, as the project's 1.6.3 reads it:
+/// the form's answers and their short labels, then free text from reports filed on the web page
+/// ("can't start", "Works well, runs better than exFAT"), then the title's ": Works" suffix the
+/// app's own report links add.
+fn status_of(answer: &str, title: &str) -> Option<&'static str> {
+    let s = answer
+        .to_lowercase()
+        .replace(['\u{2018}', '\u{2019}'], "'")
+        .trim()
+        .to_string();
+    let exact = match s.as_str() {
         "works" => Some("works"),
         "works with issues" => Some("issues"),
-        "won't start (black screen or crash on launch)" => Some("noStart"),
+        "won't start (black screen or crash on launch)" | "won't start" => Some("noStart"),
         "crashes in game" => Some("crash"),
         _ => None,
+    };
+    if exact.is_some() {
+        return exact;
+    }
+    let words: Vec<&str> = s
+        .split(|c: char| !c.is_alphanumeric() && c != '\'')
+        .filter(|w| !w.is_empty())
+        .collect();
+    let starts = ["start", "boot", "load", "launch"];
+    let stopped = [
+        "won't", "wont", "can't", "cant", "cannot", "doesn't", "doesnt", "didn't", "didnt", "not",
+    ];
+    let no_start = words
+        .windows(2)
+        .any(|w| stopped.contains(&w[0]) && starts.contains(&w[1]))
+        || s.contains("black screen")
+        || s.contains("freez")
+        || s.contains("stuck");
+    if s.contains("works with issues") {
+        Some("issues")
+    } else if matches!(words.first(), Some(&"work") | Some(&"works")) {
+        Some("works")
+    } else if no_start {
+        Some("noStart")
+    } else if s.contains("crash") {
+        Some("crash")
+    } else if ["stutter", "issue", "glitch", "lag"]
+        .iter()
+        .any(|k| s.contains(k))
+    {
+        Some("issues")
+    } else if words
+        .iter()
+        .any(|w| matches!(*w, "works" | "runs" | "playable" | "fine"))
+    {
+        Some("works")
+    } else {
+        let (_, suffix) = title.rsplit_once(':')?;
+        status_of(suffix, "")
     }
 }
 
@@ -205,7 +253,7 @@ pub(crate) fn aggregate(issues: &[Value]) -> BTreeMap<String, Entry> {
         let f = sections(body);
         let get = |k: &str, n: usize| clean(f.get(k).map(String::as_str).unwrap_or_default(), n);
         let tid = get("titleId", 16).to_ascii_uppercase();
-        let Some(status) = status_of(&get("status", 80)) else {
+        let Some(status) = status_of(&get("status", 80), title) else {
             continue;
         };
         if !is_title_id(&tid) {
@@ -381,6 +429,24 @@ mod tests {
                  ### Game version\n\n02.002.000\n\n### LZ4 level\n\n_No response_\n"
             ),
         })
+    }
+
+    #[test]
+    fn free_text_answers_and_the_title_suffix_are_read() {
+        assert_eq!(status_of("Works", ""), Some("works"));
+        assert_eq!(status_of("can\u{2019}t start", ""), Some("noStart"));
+        assert_eq!(
+            status_of("Works well, runs better than exFAT", ""),
+            Some("works")
+        );
+        assert_eq!(status_of("black screen after logo", ""), Some("noStart"));
+        assert_eq!(status_of("crashes at the second boss", ""), Some("crash"));
+        assert_eq!(status_of("some stutter in cities", ""), Some("issues"));
+        assert_eq!(
+            status_of("", "[Game report] Ghost of Yotei: Works with issues"),
+            Some("issues")
+        );
+        assert_eq!(status_of("no idea", "[Game report] Ghost of Yotei"), None);
     }
 
     #[test]
