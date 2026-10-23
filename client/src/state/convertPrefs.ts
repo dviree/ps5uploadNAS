@@ -1,6 +1,6 @@
 import { create } from "zustand";
 
-import type { FpkgCompression, ImageFormat } from "../api/fpkg";
+import type { FfpfscLevel, FpkgCompression, ImageFormat } from "../api/fpkg";
 import { safeGetItem, safeSetItem } from "../lib/safeStorage";
 import { isTauriEnv } from "../lib/tauriEnv";
 
@@ -17,14 +17,12 @@ const KEY_MAKE = "ps5upload.convert.make";
 const KEY_IMAGE_FORMAT = "ps5upload.convert.image_format";
 const KEY_IMAGE_COMPRESS = "ps5upload.convert.image_compress";
 const KEY_LZ4_DIR = "ps5upload.convert.lz4_dir";
-const KEY_FTP_ADDR = "ps5upload.convert.ftp_addr";
-const KEY_FTP_DEST = "ps5upload.convert.ftp_dest";
-/** Where games sent over FTP go on the PS5 when nothing is set: what ShadowMount+ scans. */
-export const DEFAULT_FTP_DEST = "/data/homebrew";
 /** Where a game converted to LZ4 goes when nothing is set: the LZ4 folder the Docker setup
  *  mounts at /lz4 (as ps5-lz4's output). The desktop app has no such folder, so its LZ4
  *  games go to the output folder like any other. */
 export const DEFAULT_LZ4_DIR = "/lz4";
+const KEY_IMAGE_LEVEL = "ps5upload.convert.image_level";
+const IMAGE_LEVELS: readonly FfpfscLevel[] = ["fast", "balanced", "smallest"];
 const IMAGE_FORMATS: readonly ImageFormat[] = ["ffpkg", "exfat", "ffpfs"];
 const LEVELS: readonly FpkgCompression[] = ["fast", "balanced", "smallest"];
 /** How much of a file a game image's read-back check reads per call, in KiB. The engine
@@ -44,12 +42,6 @@ interface ConvertPrefs {
    *  folder. */
   lz4Dir: string;
   setLz4Dir: (dir: string) => void;
-  /** The PS5's FTP server (`host:port`) for Send via FTP; empty: the connected console's
-   *  address on 2121. */
-  ftpAddr: string;
-  /** The folder on the PS5 games sent over FTP go into. */
-  ftpDest: string;
-  setFtp: (addr: string, dest: string) => void;
   compression: FpkgCompression;
   /** A game image's read-back check: KiB per read. */
   verifyChunkKib: number;
@@ -61,7 +53,10 @@ interface ConvertPrefs {
   make: MakeKind;
   imageFormat: ImageFormat;
   imageCompress: boolean;
+  /** How hard a compressed image (.ffpfsc) is compressed. */
+  imageLevel: FfpfscLevel;
   setMake: (m: MakeKind) => void;
+  setImageLevel: (level: FfpfscLevel) => void;
   setImageChoice: (format: ImageFormat, compress: boolean) => void;
   setOutputDir: (dir: string) => void;
   setCompression: (c: FpkgCompression) => void;
@@ -87,6 +82,10 @@ export function parseMake(v: string | null): MakeKind {
   return v === "image" || v === "folder" ? v : "pkg";
 }
 
+export function parseImageLevel(v: string | null): FfpfscLevel {
+  return IMAGE_LEVELS.includes(v as FfpfscLevel) ? (v as FfpfscLevel) : "balanced";
+}
+
 export function parseImageFormat(v: string | null): ImageFormat {
   return IMAGE_FORMATS.includes(v as ImageFormat) ? (v as ImageFormat) : "ffpkg";
 }
@@ -98,19 +97,18 @@ export const useConvertPrefs = create<ConvertPrefs>((set) => ({
     safeSetItem(KEY_LZ4_DIR, dir);
     set({ lz4Dir: dir });
   },
-  ftpAddr: safeGetItem(KEY_FTP_ADDR) ?? "",
-  ftpDest: safeGetItem(KEY_FTP_DEST) ?? DEFAULT_FTP_DEST,
-  setFtp: (addr, dest) => {
-    safeSetItem(KEY_FTP_ADDR, addr);
-    safeSetItem(KEY_FTP_DEST, dest);
-    set({ ftpAddr: addr, ftpDest: dest });
-  },
   compression: storedLevel(),
   verifyChunkKib: parseVerifyChunkKib(safeGetItem(KEY_VERIFY_CHUNK)),
   fullVerify: parseFullVerify(safeGetItem(KEY_FULL_VERIFY)),
   make: parseMake(safeGetItem(KEY_MAKE)),
   imageFormat: parseImageFormat(safeGetItem(KEY_IMAGE_FORMAT)),
   imageCompress: safeGetItem(KEY_IMAGE_COMPRESS) === "1",
+  imageLevel: parseImageLevel(safeGetItem(KEY_IMAGE_LEVEL)),
+  setImageLevel: (level) => {
+    const v = IMAGE_LEVELS.includes(level) ? level : "balanced";
+    safeSetItem(KEY_IMAGE_LEVEL, v);
+    set({ imageLevel: v });
+  },
   setMake: (m) => {
     safeSetItem(KEY_MAKE, m);
     set({ make: m });

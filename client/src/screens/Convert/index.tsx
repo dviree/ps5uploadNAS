@@ -6,12 +6,15 @@ import { useSearchParams } from "react-router";
 import { PackagePlus } from "lucide-react";
 
 import { PageHeader, Tabs } from "../../components";
-import { DEFAULT_SEND_SUBPATH } from "../../lib/collectionSend";
+import type { CollectionGame, CollectionLocation } from "../../api/collection";
+import { DEFAULT_SEND_SUBPATH, collectionSendItem } from "../../lib/collectionSend";
+import { DEFAULT_IMAGE_SUBPATH } from "../../lib/imageUpload";
 import { useConnectionStore } from "../../state/connection";
 import { useConvertPrefs } from "../../state/convertPrefs";
 import { useFpkgConversion } from "../../state/fpkgConversion";
 import { useTr } from "../../state/lang";
 import { useUploadStore } from "../../state/upload";
+import { useUploadQueueStore } from "../../state/uploadQueue";
 import FpkgConvertScreen from "../FpkgConvert";
 import { Compatibility } from "./Compatibility";
 import { MyGames } from "./MyGames";
@@ -35,6 +38,12 @@ export default function ConvertScreen() {
   /** Pack one game into an LZ4 game folder (`<name>-lz4`) in the LZ4 folder, as ps5-lz4
    *  does, adding ampr_emu 0.4.2.1 when the game's own cannot read the packs; the Convert tab
    *  shows it running. The original is only read. */
+  /** The connected PS5 and the drive Upload last used, for "& send to PS5". */
+  const sendTarget = () => {
+    const c = useConnectionStore.getState();
+    const host = c.payloadStatus === "up" ? (c.host?.trim() ?? "") : "";
+    return host ? { host, volume: useUploadStore.getState().destinationVolume ?? "/data" } : null;
+  };
   const convertWithLz4 = (path: string, sendTitle?: string) => {
     const { lz4Dir, outputDir } = useConvertPrefs.getState();
     // "& send to PS5": once built, the LZ4 game folder goes into the Upload queue for the
@@ -64,12 +73,35 @@ export default function ConvertScreen() {
   /** Compress one game into a .ffpfsc image in the output folder under Convert: an image is
    *  compressed as it is, a game folder written as a compressed image. The original is only
    *  read. */
-  const convertToFfpfsc = (path: string, isFolder: boolean) => {
+  const convertToFfpfsc = (path: string, isFolder: boolean, send = false) => {
     // Not next to the source (the default for an image): the library is mounted read-only.
     const out = useConvertPrefs.getState().outputDir.trim() || "~/Downloads/fpkgs";
     const run = useFpkgConversion.getState();
-    void (isFolder ? run.buildImage(path, out, true, "exfat") : run.compress(path, out));
+    // "& send to PS5": the finished .ffpfsc goes into the Upload queue, like an LZ4 folder.
+    const to = send ? sendTarget() : null;
+    const thenUpload = to
+      ? { host: to.host, volume: to.volume, subpath: DEFAULT_IMAGE_SUBPATH, deleteAfter: false }
+      : undefined;
+    void (isFolder
+      ? run.buildImage(path, out, true, "exfat", thenUpload)
+      : run.compress(path, out, thenUpload));
     setTab("convert");
+  };
+  /** Send a game as it is (a folder, an LZ4 game folder or an image) to the connected PS5
+   *  through the Upload queue, as Send to PS5 on a game page does. */
+  const sendToPs5 = (game: CollectionGame, loc: CollectionLocation) => {
+    const to = sendTarget();
+    if (!to) return;
+    const q = useUploadQueueStore.getState();
+    const id = q.add(
+      collectionSendItem(game, loc, {
+        host: to.host,
+        volume: to.volume,
+        subpath: DEFAULT_SEND_SUBPATH,
+        register: true,
+      }),
+    );
+    void q.startHost(to.host, { onlyIds: [id] });
   };
 
   const tabs = (
@@ -112,7 +144,7 @@ export default function ConvertScreen() {
         right={tabs}
       />
       {tab === "mine" ? (
-        <MyGames onConvert={convertWithLz4} onFfpfsc={convertToFfpfsc} />
+        <MyGames onConvert={convertWithLz4} onFfpfsc={convertToFfpfsc} onSend={sendToPs5} />
       ) : (
         <Compatibility />
       )}

@@ -187,11 +187,15 @@ fn zip_folder(src_dir: &Path, inner_root: &str, dest_zip: &Path) -> Result<()> {
     // Distinct file vs. directory modes. Unix dirs need the execute bit
     // to be traversable — using 0o644 for both (as we did originally)
     // produces `drw-r--r--` entries that reject `cd` after extraction.
+    // zip 9 marks entries written on Windows as DOS-made, and readers then ignore these modes;
+    // pin Unix so a backup made on Windows keeps them too.
     let file_opts = SimpleFileOptions::default()
         .compression_method(CompressionMethod::Deflated)
+        .system(zip::System::Unix)
         .unix_permissions(0o644);
     let dir_opts = SimpleFileOptions::default()
         .compression_method(CompressionMethod::Stored)
+        .system(zip::System::Unix)
         .unix_permissions(0o755);
 
     let mut buf = vec![0u8; 64 * 1024];
@@ -706,7 +710,7 @@ fn unzip_strict(
     let mut root_dirs: BTreeSet<String> = BTreeSet::new();
     for i in 0..archive.len() {
         let entry = archive.by_index(i).context("read zip entry")?;
-        let name = entry.name().to_string();
+        let name = entry.name().context("read zip entry name")?.into_owned();
         if is_finder_noise(&name) {
             continue;
         }
@@ -743,7 +747,7 @@ fn unzip_strict(
     let mut count = 0u32;
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).context("read zip entry")?;
-        let name = entry.name().to_string();
+        let name = entry.name().context("read zip entry name")?.into_owned();
         if is_finder_noise(&name) {
             continue;
         }
@@ -955,7 +959,7 @@ mod tests {
         let mut out = BTreeMap::new();
         for i in 0..a.len() {
             let e = a.by_index(i).unwrap();
-            out.insert(e.name().to_string(), (e.is_dir(), e.size()));
+            out.insert(e.name().unwrap().into_owned(), (e.is_dir(), e.size()));
         }
         out
     }
@@ -1589,7 +1593,7 @@ mod tests {
                 assert!(
                     mode & 0o111 != 0,
                     "directory `{}` has no execute bit (mode {:o})",
-                    entry.name(),
+                    entry.name().unwrap(),
                     mode
                 );
                 assert_eq!(mode, 0o755, "directory mode should be 0o755");

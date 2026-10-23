@@ -95,6 +95,10 @@ typedef int (*app_install_all_fn_t)(void *);
  * NULL from dlsym and made uninstall a no-op. Correct export
  * takes 3 args (we pass NULL for the trailing two). */
 typedef int (*app_uninstall_fn_t)(const char *, int *, int *);
+/* sceAppInstUtilAppUnInstallPat(title_id): removes a title's installed update (/user/patch/<id>)
+ * and puts the game back on its base version, like Settings > Storage does. Same installer
+ * subsystem as AppUnInstall (PKG Manager's leftovers.c and Itemzflow call it this way). */
+typedef int (*app_uninstall_pat_fn_t)(const char *);
 typedef int (*app_inst_util_initialize_fn_t)(void);
 /* PS5 layout: second param is `char *argv`, third is a caller-
  * owned LncAppParam block (first 4 bytes = struct size). */
@@ -122,6 +126,7 @@ typedef struct {
     app_install_title_dir_fn_t    app_install_title_dir;
     app_install_all_fn_t          app_install_all;  /* FW 13.x fallback; may be NULL */
     app_uninstall_fn_t            app_uninstall;   /* may be NULL */
+    app_uninstall_pat_fn_t        app_uninstall_pat; /* may be NULL (console clean-up) */
     app_inst_util_initialize_fn_t app_inst_util_initialize;  /* may be NULL */
     /* Lnc + SystemService -- launch (triple-strategy) */
     launch_app_fn_t          launch_app;
@@ -271,6 +276,14 @@ static void register_module_init_impl(void) {
         };
         g_reg.app_uninstall = (app_uninstall_fn_t)
             reg_dlsym_first(uninstall_names, "app-uninstall");
+    }
+    {
+        static const char *const uninstall_pat_names[] = {
+            "sceAppInstUtilAppUnInstallPat",
+            NULL,
+        };
+        g_reg.app_uninstall_pat = (app_uninstall_pat_fn_t)
+            reg_dlsym_first(uninstall_pat_names, "app-uninstall-pat");
     }
     g_reg.app_inst_util_initialize = (app_inst_util_initialize_fn_t)
         reg_dlsym_default("sceAppInstUtilInitialize");
@@ -1443,20 +1456,8 @@ static void remove_our_appmeta(const char *title_id) {
 }
 
 /* Whether app.db has a row for `title_id`: 1 / 0, or -1 when app.db could not be read. */
-static int appdb_has_title(const char *title_id) {
-    enum { MAX_ROWS = 2048 };
-    content_db_app_t *rows = calloc(MAX_ROWS, sizeof(*rows));
-    if (!rows) return -1;
-    int n = content_db_apps(rows, MAX_ROWS, NULL);
-    int found = n < 0 ? -1 : 0;
-    for (int i = 0; i < n; i++) {
-        if (strcmp(rows[i].title_id, title_id) == 0) {
-            found = 1;
-            break;
-        }
-    }
-    free(rows);
-    return found;
+int register_appdb_has_title(const char *title_id) {
+    return content_db_has_title(title_id);
 }
 
 /* Whether the PC app's installed list would still show `title_id` (see unregister_presence_t). */
@@ -1470,7 +1471,7 @@ static int title_still_present(const char *title_id) {
         if (path_exists(path)) p.app_dir = 1;
     }
     if (!p.appmeta_dir && p.app_dir) {
-        int row = appdb_has_title(title_id);
+        int row = register_appdb_has_title(title_id);
         p.appdb_known = row >= 0;
         p.appdb_row = row > 0;
     }
@@ -1620,6 +1621,42 @@ int unregister_title(const char *title_id, const char **err_reason_out,
                 title_id, (unsigned)out->sony_rc);
     }
     return 0;
+}
+
+int uninstall_patch_available(void) {
+    register_module_init();
+    return g_reg.app_uninstall_pat != NULL;
+}
+
+/* Removes the installed update of `title_id` through Sony (console clean-up). Same window as the
+ * uninstall in unregister_title: sony_api_lock, then kernel_rw_lock around a ShellCore authid swap
+ * (the installer's gate), the call, the verified restore and the post-call grace. Sony's removal is
+ * asynchronous like every install: rc 0 means accepted, and the caller watches /user/patch/<id>. */
+int uninstall_patch(const char *title_id, uint32_t *rc_out) {
+    register_module_init();
+    if (rc_out) *rc_out = 0;
+    if (!title_id || !is_safe_component(title_id)) return -1;
+    if (!g_reg.app_uninstall_pat) return -2;
+    pid_t mypid = getpid();
+    pthread_mutex_lock(&sony_api_lock);
+    if (g_reg.app_inst_util_initialize) (void)g_reg.app_inst_util_initialize();
+    pthread_mutex_lock(&kernel_rw_lock);
+    uint64_t saved = kernel_get_ucred_authid(mypid);
+    if (saved != 0) (void)kernel_set_ucred_authid(mypid, PS5_SHELLCORE_AUTHID);
+    fprintf(stderr, "[register] -> sceAppInstUtilAppUnInstallPat(%s)\n", title_id);
+    int rc = g_reg.app_uninstall_pat(title_id);
+    if (saved != 0) {
+        for (int attempt = 0; attempt < 3; attempt++) {
+            (void)kernel_set_ucred_authid(mypid, saved);
+            if (kernel_get_ucred_authid(mypid) == saved) break;
+        }
+    }
+    pthread_mutex_unlock(&kernel_rw_lock);
+    usleep(SONY_API_POST_SLEEP_US);
+    pthread_mutex_unlock(&sony_api_lock);
+    fprintf(stderr, "[register] sceAppInstUtilAppUnInstallPat(%s) rc=0x%08X\n", title_id, (unsigned)rc);
+    if (rc_out) *rc_out = (uint32_t)rc;
+    return rc == 0 ? 0 : -3;
 }
 
 /* Opens the PS5's built-in web browser (NPXS20001) via
@@ -1778,6 +1815,52 @@ static int launch_via_system_service(const char *title_id, int fg_user) {
  * treats `err < 0` as the sole error case. */
 static inline int launch_sys_ok(int rc) { return rc >= 0; }
 
+/* A foreground user id we can launch for. 0 and -1 (0xFFFFFFFF) both mean
+ * "nobody signed in" to Sony's user service. */
+static inline int fg_user_is_real(int u) {
+    return u > 0 && (uint32_t)u != 0xFFFFFFFFu;
+}
+
+/* One serialized sceUserServiceGetForegroundUser read; -1 on failure (on a
+ * non-zero return the out-param is undefined, so it is never trusted). */
+static int launch_read_fg_user(void) {
+    int fg_user = -1;
+    if (!g_reg.user_service_get_foreground_user) return -1;
+    pthread_mutex_lock(&sony_api_lock);
+    int probe = -1;
+    if (g_reg.user_service_get_foreground_user(&probe) == 0) fg_user = probe;
+    usleep(SONY_API_POST_SLEEP_US);
+    pthread_mutex_unlock(&sony_api_lock);
+    return fg_user;
+}
+
+/* Right after boot (and for a moment after sign-in) the user service reports
+ * no foreground user even though one is about to exist. Before concluding
+ * "nobody is signed in", ask again a few times. Each read takes and releases
+ * sony_api_lock on its own; the sleeps happen with the lock released so other
+ * Sony callers are not starved. Bounded: ~4 s worst case, only on the
+ * no-user path. */
+#define LAUNCH_FG_USER_POLLS    8
+#define LAUNCH_FG_USER_POLL_US  500000u
+
+static int launch_wait_for_fg_user(const char *title_id) {
+    int fg_user = -1;
+    for (int i = 0; i < LAUNCH_FG_USER_POLLS; i++) {
+        usleep(LAUNCH_FG_USER_POLL_US);
+        fg_user = launch_read_fg_user();
+        if (fg_user_is_real(fg_user)) {
+            fprintf(stderr,
+                    "[payload2] launch %s: foreground user=%d after %d re-ask(s)\n",
+                    title_id, fg_user, i + 1);
+            return fg_user;
+        }
+    }
+    fprintf(stderr,
+            "[payload2] launch %s: still no foreground user after %d re-asks "
+            "(last=%d)\n", title_id, LAUNCH_FG_USER_POLLS, fg_user);
+    return fg_user;
+}
+
 int launch_title(const char *title_id, const char **err_reason_out,
                  char *reason_buf, size_t reason_cap) {
     register_module_init();
@@ -1847,10 +1930,10 @@ int launch_title(const char *title_id, const char **err_reason_out,
     pthread_mutex_unlock(&sony_api_lock);
     fprintf(stderr, "[payload2] launch %s: foreground user=%d\n",
             title_id, fg_user);
-    /* fg_user may still be 0 if no profile is currently selected on
-     * the console. Sony's launcher would reject; but that's a real
-     * "user must pick a profile" case, not a transient race — let
-     * the launch attempt produce a clean error instead of looping. */
+    /* fg_user may still be 0/-1 if nobody is signed in, or right after
+     * boot before the user service settles. The no-user gate below (after
+     * the already-running branch) re-asks briefly and then refuses to use
+     * the ShellUI route, returning launch_no_user instead. */
 
     /* Primary path: route the call through SceShellUI via ptrace.
      * Sony's launcher accepts the call when getpid() inside the
@@ -1929,6 +2012,42 @@ int launch_title(const char *title_id, const char **err_reason_out,
          * for. Focus is best-effort — reporting failure here would be wrong
          * and would tempt the UI into another launch. */
         return 0;
+    }
+
+    /* No signed-in user known? Re-ask briefly first (boot settles), and if
+     * there is still nobody, NEVER take the ShellUI ptrace route below.
+     *
+     * Measured on FW 13.60 (Pro, twice in one week): "foreground user=-1",
+     * the in-process launcher refused with 0x80940005, the ladder fell
+     * through to shellui_rpc_launch_app, and SceShellUI crashed/restarted.
+     * With nobody signed in there is nothing a launch can succeed for anyway,
+     * so the only safe thing is one in-process attempt (no ptrace) and, if
+     * the console refuses it, a clear "sign in first" error. */
+    /* Without the user-service symbol we cannot tell "nobody signed in" from
+     * "can't ask": keep the old ladder rather than refusing every launch. */
+    const int can_ask = g_reg.user_service_get_foreground_user != NULL;
+    if (can_ask && !fg_user_is_real(fg_user)) {
+        fg_user = launch_wait_for_fg_user(title_id);
+    }
+    if (can_ask && !fg_user_is_real(fg_user)) {
+        int rc_nu = launch_via_system_service(title_id, fg_user);
+        if (launch_sys_ok(rc_nu)) return 0;
+        /* A non-zero rc does not always mean the launch failed (see
+         * launch_took_effect); check before calling it a failure. */
+        if (rc_nu != -1 && launch_took_effect(title_id)) return 0;
+        fprintf(stderr,
+                "[payload2] launch %s: no signed-in user (fg=%d), in-process "
+                "launch rc=0x%x — not using the ShellUI route; asking the user "
+                "to sign in\n",
+                title_id, fg_user, (unsigned)rc_nu);
+        if (reason_buf && reason_cap > 0) {
+            snprintf(reason_buf, reason_cap, "launch_no_user: rc=0x%08x",
+                     (unsigned int)rc_nu);
+            if (err_reason_out) *err_reason_out = reason_buf;
+        } else if (err_reason_out) {
+            *err_reason_out = "launch_no_user";
+        }
+        return -1;
     }
 
     /* PRIMARY: in-process sceSystemServiceLaunchApp, no ptrace. Only fall

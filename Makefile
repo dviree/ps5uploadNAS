@@ -862,6 +862,8 @@ test-payload: payload
 		}; \
 	done
 	@echo "✓ Main payload and PS5Upload installer are PS5 ELFs with gzip resources"
+	@echo "Running the archive extractor's tests (host build)..."
+	@$(MAKE) -C $(PAYLOAD_DIR)/extractor host-test
 	@echo "Running play-time launch/resume self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -o /tmp/ps5upload-activity-selftest \
 		$(PAYLOAD_DIR)/tests/activity_launch_selftest.c
@@ -884,6 +886,12 @@ test-payload: payload
 		-o /tmp/ps5upload-net-ports-selftest \
 		$(PAYLOAD_DIR)/tests/net_ports_selftest.c
 	@/tmp/ps5upload-net-ports-selftest
+	@echo "Running fan servo self-test (host build)..."
+	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
+		-o /tmp/ps5upload-fan-servo-selftest \
+		$(PAYLOAD_DIR)/tests/fan_servo_selftest.c
+	@/tmp/ps5upload-fan-servo-selftest
+	@echo "✓ fan target writes keep the rest of the profile; the guard writes only after a reset and gives up after 5 failures"
 	@echo "Running cheat XML UTF-16 normalizer self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
 		-o /tmp/ps5upload-xml-encoding-selftest \
@@ -901,6 +909,12 @@ test-payload: payload
 		$(PAYLOAD_DIR)/tests/webui_strings_selftest.c $(PAYLOAD_DIR)/src/webui_strings.c
 	@/tmp/ps5upload-webui-strings-selftest
 	@echo "✓ GET /strings/<lang>.json answers only the embedded languages, never a crafted path"
+	@echo "Running console package reader self-test (host build)..."
+	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
+		-o /tmp/ps5upload-pkg-info-selftest \
+		$(PAYLOAD_DIR)/tests/pkg_info_selftest.c
+	@/tmp/ps5upload-pkg-info-selftest
+	@echo "✓ the console page's package preview reads PS4/PS5 headers and refuses out-of-range offsets"
 	@echo "Running webui offline copy lookup self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
 		-o /tmp/ps5upload-webui-offline-selftest \
@@ -932,6 +946,33 @@ test-payload: payload
 		$(PAYLOAD_DIR)/tests/webui_files_selftest.c $(PAYLOAD_DIR)/src/webui_files.c
 	@/tmp/ps5upload-webui-files-selftest
 	@echo "✓ text saves and uploads go through a same-folder temp + rename; a cut-off upload leaves no file; folders stream as a valid .tar"
+	@echo "Running SMB daemon path/address/JSON self-test (host build)..."
+	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/smb -I$(PAYLOAD_DIR)/include \
+		-o /tmp/ps5upload-smbd-path-selftest $(PAYLOAD_DIR)/tests/smbd_path_selftest.c \
+		$(PAYLOAD_DIR)/smb/smbd_path.c $(PAYLOAD_DIR)/smb/smbd_json.c
+	@/tmp/ps5upload-smbd-path-selftest
+	@echo "✓ share paths, server addresses and non-ASCII names parse; bad ones are refused"
+	@echo "Running SMB daemon copy state-machine self-test (host build)..."
+	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/smb -I$(PAYLOAD_DIR)/include \
+		-o /tmp/ps5upload-smbd-copy-selftest $(PAYLOAD_DIR)/tests/smbd_copy_selftest.c \
+		$(PAYLOAD_DIR)/smb/smbd_copy.c $(PAYLOAD_DIR)/smb/smbd_path.c $(PAYLOAD_DIR)/smb/smbd_localfs.c
+	@/tmp/ps5upload-smbd-copy-selftest
+	@echo "✓ share copies go through a part file, survive a dropped server, cancel and refuse cleanly"
+	@echo "Running game library scan self-test (host build)..."
+	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/smb -I$(PAYLOAD_DIR)/include \
+		-o /tmp/ps5upload-smbd-library-selftest $(PAYLOAD_DIR)/tests/smbd_library_selftest.c \
+		$(PAYLOAD_DIR)/smb/smbd_library.c $(PAYLOAD_DIR)/smb/smbd_localfs.c $(PAYLOAD_DIR)/smb/smbd_path.c \
+		$(PAYLOAD_DIR)/smb/smbd_json.c $(PAYLOAD_DIR)/src/pkg_info.c
+	@/tmp/ps5upload-smbd-library-selftest
+	@echo "✓ the library scan finds packages, folder dumps and images with their covers, stays inside its limits and never walks a dump"
+	@echo "Running console page network-share routes self-test (host build)..."
+	@cc -O2 -Wall -Wextra -Werror -pthread -I$(PAYLOAD_DIR)/include -I$(PAYLOAD_DIR)/smb \
+		-I$(PAYLOAD_DIR)/ava1 -I$(PAYLOAD_DIR)/ava1/gen -I$(PAYLOAD_DIR)/third_party/monocypher \
+		-o /tmp/ps5upload-webui-smb-selftest $(PAYLOAD_DIR)/tests/webui_smb_selftest.c \
+		$(PAYLOAD_DIR)/src/webui_smb.c $(PAYLOAD_DIR)/src/smb_shares.c $(PAYLOAD_DIR)/smb/smbd_json.c \
+		$(PAYLOAD_DIR)/smb/smbd_path.c $(PAYLOAD_DIR)/third_party/monocypher/monocypher.c
+	@/tmp/ps5upload-webui-smb-selftest
+	@echo "✓ saved shares keep passwords out of the page and the file; copies obey the helper's path policy"
 	@echo "Running file index name-match self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
 		-o /tmp/ps5upload-index-glob-selftest $(PAYLOAD_DIR)/tests/index_glob_selftest.c
@@ -991,6 +1032,12 @@ test-payload: payload
 		$(PAYLOAD_DIR)/tests/cheats_plan_selftest.c
 	@/tmp/ps5upload-cheats-plan-selftest
 	@echo "✓ a cheat's code caves are written before the jumps into them, and removed after"
+	@echo "Running console clean-up rules self-test (host build)..."
+	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
+		-o /tmp/ps5upload-cleanup-rules-selftest \
+		$(PAYLOAD_DIR)/tests/cleanup_rules_selftest.c
+	@/tmp/ps5upload-cleanup-rules-selftest
+	@echo "✓ clean-up removes only its categories' paths: never the package library, saves, installed games or another drive's system folders"
 	@echo "Checking per-console isolation..."
 	@./scripts/check-per-console-isolation.sh
 	@echo "✓ one console's data cannot be shown under another's name"

@@ -15,6 +15,7 @@ import { getEngineUrl } from "../state/engine";
 // Logging wrapper: every command leaves a trace breadcrumb + logs failures at
 // warn. See lib/invokeLogged.ts. (Channel still comes straight from core.)
 import { isTauriEnv } from "../lib/tauriEnv";
+import { toExtractResult, type ExtractResult } from "../lib/archiveName";
 import { invoke } from "../lib/invokeLogged";
 import { randomHexId } from "../lib/randomId";
 import { noteJobWatched } from "../lib/watchedJobIds";
@@ -485,6 +486,17 @@ export async function sendPayload(
     throw new Error(resp.error ?? resp.status ?? "payload_send failed");
   }
   return { viaPayloadManager: sentViaPayloadManager(resp?.status) };
+}
+
+/**
+ * Send a payload that is already on the console (`path`, a .elf/.bin) to its
+ * loader on :9021: the engine reads it back through the helper and sends it
+ * under the same loader lock an install uses. Refused while an install runs on
+ * that console (`pkg_install_busy`), for a non-ELF (`payload_not_elf`) and for a
+ * ps5upload helper image (`payload_is_helper`).
+ */
+export async function loadConsolePayload(host: string, path: string): Promise<{ bytes: number }> {
+  return invoke<{ bytes: number }>("ps5_payload_load_console", { host, path });
 }
 
 /** Whether payload_send's status says the loader port was dead and the file
@@ -1191,6 +1203,39 @@ export async function fsUnpack(
   return { path: body.path ?? "", size: body.size ?? 0 };
 }
 
+/** Options of {@link fsExtract}. `merge`: write into `dest` although it exists (files already
+ *  there are skipped unless `replace`). */
+export interface FsExtractOptions {
+  password?: string;
+  merge?: boolean;
+  replace?: boolean;
+}
+
+/** Extract an archive on the console (.zip, .7z, .rar, tar.*, the first volume of a split one)
+ *  into the folder `dest` there, by the helper's extractor payload. Follow it with
+ *  `fsOpStatus(addr, opId)` and stop it with `fsOpCancel`. Throws "cancelled" when stopped,
+ *  else the helper's cause (`fs_extract_password_required`, `fs_extract_no_space: ...`, ...). */
+export async function fsExtract(
+  transferAddr: string,
+  path: string,
+  dest: string,
+  opId: number,
+  opts: FsExtractOptions = {},
+): Promise<ExtractResult> {
+  const body: Record<string, unknown> = { addr: toMgmtAddr(transferAddr), path, dest, op_id: opId };
+  if (opts.password) body.password = opts.password;
+  if (opts.merge) body.merge = true;
+  if (opts.replace) body.replace = true;
+  const res = await fetch(`${getEngineUrl()}/api/ps5/fs/extract`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const out = (await res.json().catch(() => ({}))) as Record<string, unknown> & { error?: string };
+  if (!res.ok) throw new Error(typeof out.error === "string" ? out.error : `HTTP ${res.status}`);
+  return toExtractResult(out);
+}
+
 export interface FsDirEntry {
   name: string;
   kind: "file" | "dir" | "unknown";
@@ -1643,7 +1688,8 @@ export interface HwTemps {
   product_shape: number;
   /** User-pinned fan threshold in °C. `0` = no custom threshold (firmware
    *  default). A positive value means a permanent fan speed is active and
-   *  auto-reapplied every 15s. Always present (even on basic read). */
+   *  put back within about 2 s whenever the system resets it. Always present
+   *  (even on basic read). */
   fan_pinned_c: number;
   /** The temperature the fan controller is working to now, read back from the console
    *  (°C). `-1` = not reported (an older helper) or unreadable. */
@@ -1651,6 +1697,17 @@ export interface HwTemps {
   /** The console's own value, as it was before ps5upload first changed it (°C). `0` =
    *  never seen. 91 on FW 13.60. */
   fan_stock_c?: number;
+  /** Targets the helper put back after the system reset them (a game starting or closing),
+   *  this helper session. Absent from an older helper. */
+  fan_restores?: number;
+  /** Seconds since the last of those; `-1` = never. */
+  fan_last_restore_s?: number;
+  /** The guard keeping the pinned target: "off" (nothing pinned), "ok", or "failing" (its writes
+   *  kept failing, so the console's own control is in charge until the next set). "" from an
+   *  older helper. */
+  fan_guard?: "off" | "ok" | "failing" | "";
+  /** The fan controller's filtered temperature (°C, one decimal), null when unreadable. */
+  fan_filtered_c?: number | null;
 }
 
 export interface HwPower {
@@ -3031,14 +3088,12 @@ export async function fsReadPreview(
 export const FAN_THRESHOLD_MIN_C = 45;
 /** Not a temperature: asks the helper to give the fan back to the console. */
 export const FAN_RESTORE_CONSOLE = 0;
-export const FAN_THRESHOLD_MAX_C = 80;
+export const FAN_THRESHOLD_MAX_C = 85;
 
-/** Set the PS5's fan-turbo threshold in °C. `/dev/icc_fan` ioctl —
- *  the canonical fan-threshold mechanism on PS5. Persists until the
- *  PS5 reboots — there is no read-back, so we can't verify the current
- *  setting, only write new ones. Since 2.13.0 the payload's background
- *  watcher re-applies the threshold every 15s to defeat the firmware
- *  reset on app/game launch — see `payload/src/hw_info.c` (fan watcher). */
+/** Set the PS5's fan target in °C (`/dev/icc_fan`), or `FAN_RESTORE_CONSOLE`
+ *  for the console's own setting. The helper writes it, reads it back, keeps
+ *  it across restarts, and puts it back within about 2 s when a game start
+ *  resets it — see `payload/src/hw_info.c` (fan guard). */
 export async function setFanThreshold(
   transferAddr: string,
   thresholdC: number,
@@ -5068,6 +5123,42 @@ export async function localImageDetach(device: string): Promise<void> {
 
 export async function localImageStatus(): Promise<LocalImageStatus> {
   return invoke("local_image_status");
+}
+
+/** ── Looking inside a game image on this computer (#479) ──────────────
+ *
+ *  Every image kind ps5upload reads (.exfat, .ffpkg, .ffpfs, .ffpfsc and a
+ *  debug-key .pkg) is listed by the engine's own readers, one folder at a
+ *  time, on every OS and in the browser build. Nothing is mounted. */
+export interface ImageBrowseEntry {
+  name: string;
+  is_dir: boolean;
+  /** A file's size; a folder's is the sum of every file under it. */
+  size: number;
+  /** Files under a folder (1 for a file). */
+  files: number;
+}
+
+export interface ImageBrowseListing {
+  /** The filesystem inside (a .ffpfsc's inner one). */
+  filesystem: "exfat" | "ufs2" | "pfs" | "pkg";
+  /** A .ffpfsc: the image is in a compressed container. */
+  compressed: boolean;
+  /** An edited copy can be written (every kind but a package). */
+  editable: boolean;
+  /** The folder listed, "" at the root. */
+  dir: string;
+  entries: ImageBrowseEntry[];
+  total_files: number;
+  total_bytes: number;
+  label: string;
+}
+
+export async function imageBrowse(
+  path: string,
+  dir = "",
+): Promise<ImageBrowseListing> {
+  return invoke("image_browse", { path, dir });
 }
 
 export interface ActivityResetResult {

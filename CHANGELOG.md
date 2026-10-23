@@ -4,7 +4,166 @@ What's new in ps5upload, written for humans.
 
 ---
 
-## 7.1.12
+## 7.1.19
+
+Update the helper for everything below.
+
+- **Files on a disc download now (#497).** Downloading a file from a data DVD or Blu-ray in the drive
+  (/mnt/disc) failed with "not allowed". It works now; the disc stays read-only.
+- **Bring up automatically (#479, desktop).** A new switch on Connection's Quick bring-up (and in
+  Settings → Console) lets the app connect a saved PS5 by itself: when the console's loader
+  (elfldr) is up and the helper isn't running, it runs your bring-up playlist, sends the helper
+  and runs your auto-loader, with no clicks. Once each time the console starts, about 90 seconds
+  after the loader appears so the console's own autoloader finishes first; after rest mode only
+  the helper is sent again. Off by default.
+- **Stream several packages at once everywhere (#479).** Picking a game, its update and DLC
+  together now also works from a saved server, on Android and from "From this device" in the
+  browser, and they are queued base game first, then the update, then DLC.
+- **Queue icons show right away (#479).** An install that starts as soon as you add it now shows
+  the game's icon and name while it runs, not only after it finishes.
+- **Look inside any game image on your computer (#479).** Edit image on this computer now opens
+  every kind ps5upload reads (.exfat, .ffpkg, .ffpfs, .ffpfsc and debug .pkg) without mounting it,
+  on Windows too and in the browser version. Browse folders with their sizes and save any file or
+  folder to the computer (checked against the image). For images (not packages) you can also add,
+  replace or delete files and write an edited copy next to the original; the copy is read back
+  and checked, and the image you opened is never changed.
+- **Game Library on the PS5 (#498).** PS5Upload Minion has a new Library section: press Scan and it
+  looks through your network shares (NAS or PC) and this PS5's drives for games — .pkg files,
+  game folders and disk images — and shows them as a cover grid with title, version, type and the
+  system software they need. From the TV, install a package (from a share it is copied to the PS5
+  first and the copy removed after), or copy a game folder or image to a drive's homebrew folder and
+  add the folder to the home screen. Results are kept on the PS5 so the grid opens at once; scans
+  stop at a size limit so a huge share cannot hang them. On the PC, the Servers screen has a new
+  "Shares on the PS5" card to add, edit and remove the shares Minion uses, or copy a server you
+  already saved.
+- **Sort screenshots and clips (#499).** Both tabs in Screenshots & clips can be sorted by date
+  (newest or oldest first) or size. Thanks @tanner02.
+- **Dependencies updated**, including the zip library (8 → 9); zip entries whose names can't be
+  decoded are now read with a best-effort name instead of stopping the archive.
+
+## 7.1.18
+
+Update the helper for everything below.
+
+- **Clean up: get space back on the PS5.** A new Clean up screen (desktop, browser and PS5Upload
+  Minion) finds what takes space for no reason: updates of games that are gone, leftover .pkg files
+  on any drive (your package library is skipped), PS5Upload's own temp files, download files of
+  removed games and leftovers of removed games. Updates of games you still have are listed too,
+  unticked, with a warning that the game goes back to its base version. You see sizes and a total
+  first, nothing is removed without a confirm, and saves are never touched.
+- **Fan control is safer and holds better.** The helper now changes only the target temperature in
+  the fan settings (it used to overwrite the rest with zeros), checks it took, and puts your target
+  back within about 2 seconds when the system resets it (it was up to 15). Targets go from 45 to
+  85 °C and never above the console's own. The fan speed shown was about 4× too high; it's right now.
+- **Minion: new Games page.** Start, close, hide or uninstall your games from the TV, with each
+  game's version, size and where it's stored.
+- **Minion: new Fan page.** Temperatures, fan speed, and the fan target as big buttons (Console
+  default, 85, 80, 75, 70, 65 °C) or one degree at a time.
+- **Minion: new Processes page.** See what's running and stop a game or payload. System processes
+  can't be stopped from here.
+- **Minion: install a .pkg from Files.** Pick a package on internal storage or USB to see its icon,
+  title, version and type, then install it. USB packages are copied to internal storage first and
+  the copy is removed afterwards.
+- **Minion: load a payload from Files.** Send an .elf or .bin on the console to the payload loader,
+  after a confirm.
+- **Extract archives on the PS5.** .zip, .7z, .rar (including multi-part) and .tar archives on the
+  console can be extracted into a folder there, from Minion Files and from File system on the
+  desktop. Password-protected .zip and .7z work; password-protected .rar can't be extracted on the
+  console.
+- **Minion: network shares.** Add an SMB share in Minion Files, browse it like a drive, and copy
+  files and folders between it and the PS5, without the desktop app.
+- **Load payload from File system.** The desktop's File system can send an .elf or .bin on the
+  console to the payload loader too.
+- **The PS5Upload tile no longer turns into a grey ghost (#480).** ShadowMount+ took the tile over
+  and unmounted it a few seconds after it was added; the helper now keeps it. Removing the tile
+  checks for longer, a grey tile left behind by an older helper is cleaned up when the helper
+  starts, and the result says whether the tile was removed or could only be hidden.
+- **Turn PS5Upload Minion off completely.** Settings → PS5Upload Minion has an On/Off switch, and
+  Minion's own Settings has "Turn off PS5Upload Minion". Off removes the home-screen tile (no grey
+  icon left behind) and stops the page on the console, and it stays off after restarts. The PC app
+  keeps working, and you can turn Minion back on from it any time.
+- **Minion: Circle on Home.** When the PS5 browser won't let the page close itself, a note says to
+  press the PS button to go back to the home screen.
+- **HyperHEN's built-in ShadowMount+ counts everywhere.** 7.1.10 taught Installed games about it;
+  the setup wizard no longer sends a second ShadowMount+ on top of it, a refused launch no longer
+  says ShadowMount+ is missing, and the Payloads "On your PS5" card shows it running.
+- **"elfldr is stuck" now names the other cause.** A jailbreak's own payload listener on port 9021
+  looks the same from the app: the message now says to send elfldr-ps5.elf through it first
+  (Payloads → elfldr), then the helper.
+
+---
+
+## 7.1.17
+
+- **Disk usage counts everything inside a folder (#495).** A folder's size now includes all its
+  subfolders, so /data and the folders in it show what they really take up. Disk usage counts
+  folders as it goes, with a Stop button, and opening a subfolder afterwards is instant. Links,
+  the system's own folders and other drives mounted inside are left out so nothing is counted
+  twice.
+- **Eject USB drives from File system (#496).** USB drives in File system's drive bar now have
+  an Eject button, like the PS5's own Files page. It works like Eject on Volumes: if the PS5 is
+  still holding the drive, it asks before ejecting anyway. Ejecting the drive you're browsing
+  takes you back to /data.
+
+---
+
+## 7.1.16
+
+- **Pin the screens you use most.** Hover a screen in the sidebar and press the pin, or use the
+  pin on its row in More, or "Pin …" in the command palette (Cmd/Ctrl+K). Pinned screens appear
+  in a Pinned group near the top, in the order you pinned them; drag them in the sidebar, or use
+  Edit in More, to reorder. Up to 12. Nothing changes until you pin something.
+- **The install queue shows each game's icon and whether it fits.** Queued packages,
+  game folders and images now show the game's own icon before they install. The queue header
+  shows how much is waiting to install and how much space is free on the PS5 drive it installs
+  to, and warns "May not fit" when it clearly won't. It's an estimate only; each install still
+  checks the PS5's space itself.
+- **.ffpfsc images build faster and come out smaller (#479).** Convert's compressed .ffpfsc now
+  has three levels: Fast, Balanced (the default) and Smallest. On an 18 GB test game, Balanced
+  took about a third less time than before and came out 2–3% smaller; how much smaller depends on
+  how much the game's files can compress. Smallest takes several times as long for a little more.
+  A Smallest image was built, launched and played on a PS5 (FW 13.60, ShadowMount+).
+
+---
+
+## 7.1.15
+
+- **Launching with nobody signed in no longer restarts the PS5's home screen.** Pressing Play
+  while no user was signed in (for example right after a reboot) could crash and restart the
+  PS5's home screen. The helper now waits a moment for a user, and if there still isn't one it
+  says "Sign in on the PS5 first, then press Play again" instead. Update the helper for this fix.
+- **LZ4 images compress what each game engine can read that way.** Unity games compress only
+  their streamed assets and resource files and keep their startup files as normal files; games
+  from engines PS5Upload doesn't recognise compress only their large files (16 MB and up).
+  Unreal games keep 7.1.14's rule, and a measured or custom profile still decides everything.
+  A Unity game built this way launched and played on a PS5 (FW 13.60).
+
+---
+
+## 7.1.14
+
+- **Convert reads more Kraken-compressed PS5 packages (#493).** Some packages stopped Convert
+  with "kraken: chunk too short": Sony stores long runs of zeros as a tiny chunk of a kind the
+  converter didn't read. Those chunks decode now. If a package still fails, the error names the
+  block's sizes so we can tell what it is.
+- **LZ4 images of Unreal Engine games launch.** Converting an Unreal Engine game to an LZ4 image
+  packed its project file, which the game can't read from there, so it quit at start. Unreal
+  games now compress only their big data files and keep everything else as normal files.
+- **Game images from archives.** "Make compressed image" was always greyed out for a .rar, .7z
+  or .zip source, and the queue only said "Skipped: 1". Convert now unpacks the archive first
+  and names the image after it; anything skipped says why.
+- **Removing the PS5Upload Minion tile leaves no grey icon (#480).** Removal now checks the
+  console's home screen data and only deletes the tile's files once its icon is really gone,
+  retrying and, as a last resort, hiding the icon. A tile you delete on the PS5 itself no longer
+  comes back when the helper restarts. Update the helper for this fix.
+- **○ on the first screen leaves PS5Upload Minion.** Pressing ○ on Home right after opening the
+  page now returns to the PS5 home screen.
+- **Builds use patched Node.** The app is built with Node releases that include the October 2026
+  security fixes. No released app or image contains Node.
+
+---
+
+## 7.1.13
 
 - **SMB collection moves.** Close metadata readers before moving inspected game folders, and
   wait for pending closes before renames and directory removal. Denied SMB operations no longer
@@ -16,11 +175,14 @@ What's new in ps5upload, written for humans.
   them to the engine, and review them before sending to the PS5. Send a selected ELF payload
   through the engine to a running loader after an explicit Send action. Archive intake remains
   available in the native app.
-- **Reverse proxy hosting (#490).** Docker healthchecks respect the configured URL path prefix.
+- **Reverse proxy hosting (#490).** Docker healthchecks, package uploads, and remote downloads
+  respect the configured URL path prefix; console package downloads remain at the root.
   New setup instructions cover dedicated hostnames, subpaths, proxy limits, allowlists, and the
   direct connection the PS5 needs for package downloads.
 - **Queue sizes.** Show known sizes on individual pending rows and label unknown sizes clearly.
   These are estimates, not a promise that the destination has enough free space.
+
+Version 7.1.12 was stopped during release validation; these changes ship in 7.1.13.
 
 ## 7.1.11
 

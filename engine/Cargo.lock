@@ -147,7 +147,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "ava1"
-version = "7.1.12"
+version = "7.1.19"
 dependencies = [
  "ava1-chaos",
  "blake2 0.11.0",
@@ -165,14 +165,14 @@ dependencies = [
 
 [[package]]
 name = "ava1-chaos"
-version = "7.1.12"
+version = "7.1.19"
 dependencies = [
  "tokio",
 ]
 
 [[package]]
 name = "ava1-ctest"
-version = "7.1.12"
+version = "7.1.19"
 dependencies = [
  "anyhow",
  "ava1",
@@ -188,7 +188,7 @@ dependencies = [
 
 [[package]]
 name = "ava1-gen"
-version = "7.1.12"
+version = "7.1.19"
 dependencies = [
  "serde",
  "toml",
@@ -405,9 +405,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.8.0"
+version = "1.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6651c9ed80effdc7db0ff72512157f901af5e3549e341e24b1dd4887d836d838"
+checksum = "877bf67ac8e52449eb2f9e98a344ea163beb70dd1f9eebe3cc5357dcfeaee4df"
 dependencies = [
  "find-msvc-tools",
  "shlex",
@@ -964,9 +964,9 @@ checksum = "64cd1e32ddd350061ae6edb1b082d7c54915b5c672c389143b9a63403a109f24"
 
 [[package]]
 name = "find-msvc-tools"
-version = "0.1.14"
+version = "0.1.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "aedcfb3409746eddb02b9e19ebda1c3394f759a152e48ee875a0844d1b955484"
+checksum = "1c66915cc5391097de7a2b0b972e8505aa33c0df401fd3a6811dbdb32881ba48"
 
 [[package]]
 name = "flate2"
@@ -1470,9 +1470,27 @@ checksum = "34b357333733e8260735ba5894eb928c02ecc69c78715f01a8019e7fa7f2db4c"
 
 [[package]]
 name = "libc"
-version = "0.2.190"
+version = "0.2.191"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ce5d3ddc6d3fa000eb1536d85e147bfe31aacaba692ed6a876f95cb7c855be78"
+checksum = "65cd87c9a6d60536580b316ad985726104730a5151c99845f2490428ef91240a"
+
+[[package]]
+name = "libdeflate-sys"
+version = "1.26.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d7870e5fbd2766179a937c725fb11f4ca0ef025d982beb61bd3ce755425bd19c"
+dependencies = [
+ "cc",
+]
+
+[[package]]
+name = "libdeflater"
+version = "1.26.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0cbb8285d2e2bd4b8d4155840ae81929354b4ba0d7b3c272c84761ffa2141e1f"
+dependencies = [
+ "libdeflate-sys",
+]
 
 [[package]]
 name = "lock_api"
@@ -2042,7 +2060,7 @@ dependencies = [
 
 [[package]]
 name = "ps5-dump-forge-pfs"
-version = "7.1.12"
+version = "7.1.19"
 dependencies = [
  "flate2",
  "ps5-dump-forge-ufs2",
@@ -2051,7 +2069,7 @@ dependencies = [
 
 [[package]]
 name = "ps5-dump-forge-ufs2"
-version = "7.1.12"
+version = "7.1.19"
 dependencies = [
  "ps5upload-fpkg",
  "ps5upload-pkg",
@@ -2060,7 +2078,7 @@ dependencies = [
 
 [[package]]
 name = "ps5upload-ava1"
-version = "7.1.12"
+version = "7.1.19"
 dependencies = [
  "anyhow",
  "ava1",
@@ -2081,7 +2099,7 @@ dependencies = [
 
 [[package]]
 name = "ps5upload-core"
-version = "7.1.12"
+version = "7.1.19"
 dependencies = [
  "aes 0.9.3",
  "anyhow",
@@ -2103,7 +2121,7 @@ dependencies = [
 
 [[package]]
 name = "ps5upload-engine"
-version = "7.1.12"
+version = "7.1.19"
 dependencies = [
  "aes-gcm 0.11.1",
  "anyhow",
@@ -2145,7 +2163,7 @@ dependencies = [
 
 [[package]]
 name = "ps5upload-fpkg"
-version = "7.1.12"
+version = "7.1.19"
 dependencies = [
  "aes 0.9.3",
  "blake3",
@@ -2154,6 +2172,7 @@ dependencies = [
  "getrandom 0.4.3",
  "hmac",
  "libc",
+ "libdeflater",
  "lz4_flex 0.14.0",
  "num-bigint",
  "ps5upload-pkg",
@@ -2167,7 +2186,7 @@ dependencies = [
 
 [[package]]
 name = "ps5upload-lab"
-version = "7.1.12"
+version = "7.1.19"
 dependencies = [
  "anyhow",
  "ava1",
@@ -2185,7 +2204,7 @@ dependencies = [
 
 [[package]]
 name = "ps5upload-pkg"
-version = "7.1.12"
+version = "7.1.19"
 dependencies = [
  "aes 0.9.3",
  "blake3",
@@ -2197,7 +2216,7 @@ dependencies = [
 
 [[package]]
 name = "ps5upload-tests"
-version = "7.1.12"
+version = "7.1.19"
 dependencies = [
  "anyhow",
  "ava1",
@@ -2515,9 +2534,9 @@ dependencies = [
 
 [[package]]
 name = "rustls"
-version = "0.23.45"
+version = "0.23.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d41d731c7d2f962d1ccc364cec258de3c0e93b38c2fb3ba97ac74513048d634"
+checksum = "48e13bd8c0e9365c43cfa5c9e8f9ad49d3c8444926c9aac819e0e4dc503c8fdf"
 dependencies = [
  "log",
  "once_cell",
@@ -2969,9 +2988,9 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "suppaftp"
-version = "12.2.0"
+version = "12.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a560e9f42cc5bd4a92295eca3c7140d51eb685d688087f547f27e6426fbe97da"
+checksum = "2b58fcf921745cca6f0127c9f822069947da8c6dbeff52e9004750bcc448171f"
 dependencies = [
  "async-trait",
  "chrono",
@@ -3040,9 +3059,9 @@ checksum = "fd3ca314f692efd6c868f8408f53fe444634a845f96c028b97d35f6a1f79f0ee"
 
 [[package]]
 name = "tokio"
-version = "1.53.2"
+version = "1.54.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "e95f91fcc7a621e8b030f6aa23c71fe9838ae2fb4d8118b75602a328f5144044"
+checksum = "b52fd3255258d26fac7264ab5a76b53c13367136dc011d3d6ad4f8ed070396a3"
 dependencies = [
  "bytes",
  "libc",
@@ -3265,9 +3284,9 @@ checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
 
 [[package]]
 name = "unicode-normalization"
-version = "0.1.25"
+version = "0.1.26"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5fd4f6878c9cb28d874b009da9e8d183b5abc80117c40bbd187a1fde336be6e8"
+checksum = "75cd3fb03d5288b3ba9a1ee103ac7e9cbb59f0b03d64f8ddfcc04dd42758a85d"
 dependencies = [
  "tinyvec",
 ]
@@ -3748,14 +3767,15 @@ checksum = "e13084392c5e4bc371903e2935a5eaeed24905a7511356b883835e18a78f6879"
 
 [[package]]
 name = "zip"
-version = "8.6.0"
+version = "9.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2d04a6b5381502aa6087c94c669499eb1602eb9c5e8198e534de571f7154809b"
+checksum = "6e04976da629d3b04204ba8105b396a193af8ad2583b2c79bfb3ab8af580a11e"
 dependencies = [
  "crc32fast",
  "flate2",
  "indexmap",
  "memchr",
+ "nix",
  "typed-path",
  "zopfli",
 ]

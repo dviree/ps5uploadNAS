@@ -127,8 +127,16 @@ ones (`ava1-ctest/tests/mgmt*.rs`, `ps5upload-ava1/tests/mgmt*.rs`). Methods 119
 | FilesPrefsSet 269 | 149 `files.prefs_set` | `MgmtText` {op: pin / unpin / visit, path} | `src/runtime.c` `handle_files_prefs_set` (`src/files_handoff.c`, `src/files_prefs.c`) | `ps5upload-core/src/console_files.rs` | one change under the prefs lock, answers the new prefs; a full list or a bad path is an error |
 | FilesHandoffPut 271 | 150 `files.handoff_put` | `MgmtText` {to: console / pc, path} | `src/runtime.c` `handle_files_handoff_put` (`src/files_handoff.c`) | `ps5upload-core/src/console_files.rs` | Show on TV / Show on PC: one slot per direction in helper memory, replaced by the next put, gone after two minutes |
 | FilesHandoffTake 273 | 151 `files.handoff_take` | `MgmtText` {for: console / pc} -> {path, age_ms} or {} | `src/runtime.c` `handle_files_handoff_take` (`src/files_handoff.c`) | `ps5upload-core/src/console_files.rs` | takes (and clears) that direction's handoff |
-| MinionTile 275 | 152 `minion.tile` | `MgmtText` {tile?: bool} -> {tile, tile_busy, tile_failed} | `src/runtime.c` `handle_minion_tile` (`src/webui_api.c`) | `ps5upload-core/src/console_files.rs` | paired tile visibility; preserves LAN access; older helpers return unknown method |
+| MinionTile 275 | 152 `minion.tile` | `MgmtText` {tile?: bool, enabled?: bool} -> {tile, enabled, tile_busy, tile_failed, tile_result} | `src/runtime.c` `handle_minion_tile` (`src/webui_api.c`) | `ps5upload-core/src/console_files.rs` | paired tile visibility; `enabled:false` turns Minion off (tile removed and kept removed, :9180 stopped), `enabled:true` back on; preserves LAN access; older helpers return unknown method, or omit `enabled` |
 | UsbEject 259 | 144 `usb.eject` | `MgmtText` | `src/runtime.c` `handle_usb_eject` | `ps5upload-core/src/fs_ops.rs` | unmounts `/mnt/usbN` so the drive can be pulled; plain unmount, or `force` (after a sync) since the shell's own services keep the drive open (EBUSY on FW 13.60) |
+| CleanupScan 290 | 160 `cleanup.scan` | `MgmtText` {} -> {scan_id} | `src/runtime.c` `handle_cleanup_scan` (`src/storage_cleanup.c`) | `ps5upload-core/src/cleanup.rs` | starts the console clean-up scan on its own thread |
+| CleanupStatus 292 | 161 `cleanup.status` | `MgmtText` {scan_id} -> {state, phase, items[], reserve_bytes, ...} | `src/runtime.c` `handle_cleanup_status` | `ps5upload-core/src/cleanup.rs` | items only once the scan is done; at most 400 |
+| CleanupApply 294 | 162 `cleanup.apply` | `MgmtText` {scan_id, item_ids[]} -> {apply_id} | `src/runtime.c` `handle_cleanup_apply` | `ps5upload-core/src/cleanup.rs` | re-checks each item; updates go through sceAppInstUtilAppUnInstallPat under sony_api_lock |
+| CleanupApplyStatus 296 | 163 `cleanup.apply_status` | `MgmtText` {apply_id} -> {state, done[], skipped[], failed[], freed_bytes} | `src/runtime.c` `handle_cleanup_apply_status` | `ps5upload-core/src/cleanup.rs` |  |
+| CleanupCancel 298 | 164 `cleanup.cancel` | `MgmtText` {id} -> {} | `src/runtime.c` `handle_cleanup_cancel` | `ps5upload-core/src/cleanup.rs` | a scan stops at once, an apply after its current item |
+| SmbSharesList 310 | 170 `smb.shares_list` | `MgmtText` {} -> {ok, shares[], max} | `src/runtime.c` `handle_smb_shares_list` (`src/webui_smb.c`) | `ps5upload-core/src/console_shares.rs` | the shares the console page (Files, Library) uses; never a password (has_password) |
+| SmbSharesSave 312 | 171 `smb.shares_save` | `MgmtText` {id?, name, server, share, user, password?, domain, start_path} -> {ok, share, dialect} | `src/runtime.c` `handle_smb_shares_save` | `ps5upload-core/src/console_shares.rs` | signs in through the SMB daemon first; no password with an id keeps the saved one |
+| SmbSharesRemove 314 | 172 `smb.shares_remove` | `MgmtText` {id} -> {ok} | `src/runtime.c` `handle_smb_shares_remove` | `ps5upload-core/src/console_shares.rs` |  |
 | — | 21 `job.list` | empty -> `JobListResult` | `ava1/ava1_data.c` (the data plane) | none | `ava1-ctest/tests/job_run.rs` `repeat_job_run_is_idempotent`, `at_most_eight_operations_run_at_once_and_an_unknown_op_is_refused` (listing); no engine caller yet |
 | — | 34 `fs.stat` | `FsPath` -> `FsStat` | native `src/mgmt_fs.c` `mgmt_run_fs_stat` | none | host-tested |
 | — | 44 `fs.freespace` | `FsPath` -> `FsFreeSpace{usable, free, total, reserve, dev}`: the room an upload may fill on the drive holding the path (nearest existing ancestor): free less the working margin (1/64th, at most 1 GiB), never the memory admit budget or the hidden allocator pool; the engine's up-front space check (review 015 #02) | native `src/mgmt_fs.c` `mgmt_run_fs_freespace` | `ps5upload-core/src/volumes.rs` `free_space` (`ps5upload-ava1/src/space.rs`) | `ava1-ctest/tests/mgmt_fs.rs` `fs_freespace_is_the_post_reserve_figure_of_the_drive_holding_the_path`; engine `ps5upload-ava1/tests/mgmt.rs` |
@@ -161,6 +169,13 @@ detect truncation (SPEC §7.3): a buffer smaller than the answer is `ERR_INTERNA
 | app.icon_set | <= 1 KiB | fits |
 | app.hidden_list | 16 KiB | fits |
 | usb.eject | <= 0.3 KiB | fits |
+| cleanup.scan | <= 0.1 KiB | fits |
+| cleanup.status | 224 KiB (400 items) | fits |
+| cleanup.apply | <= 0.1 KiB | fits |
+| cleanup.apply_status | 224 KiB | fits |
+| cleanup.cancel | <= 0.1 KiB | fits |
+| smb.shares_list | <= 64 KiB (16 shares) | fits |
+| smb.shares_save, smb.shares_remove | <= 4 KiB | fits |
 | files.prefs_get, files.prefs_set | 64 KiB (`FILES_PREFS_FILE_MAX`) | fits |
 | files.handoff_put, files.handoff_take | <= 6.2 KiB (`FILES_HANDOFF_OUT_MAX`) | fits |
 | app.db_query | 64 KiB | fits |

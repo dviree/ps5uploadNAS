@@ -5,6 +5,7 @@ import {
   FilePlus,
   ClipboardCopy,
   FileArchive,
+  PackageOpen,
   FileCheck,
   Replace,
   Copy,
@@ -13,7 +14,9 @@ import {
   FolderOpen,
   FolderPlus,
   Info,
+  PackagePlus,
   PencilLine,
+  Rocket,
   Scissors,
   ShieldCheck,
   Star,
@@ -44,9 +47,15 @@ export type SheetAction =
   | "verify"
   | "hex"
   | "unpack"
+  | "install"
+  | "loadpayload"
+  | "extract"
   | "showpc"
   | "fixperm"
-  | "delete";
+  | "delete"
+  /** A saved network share's menu (the drive list). */
+  | "shareedit"
+  | "shareremove";
 
 const ITEMS: Record<SheetAction, { icon: LucideIcon; key: string }> = {
   open: { icon: FolderOpen, key: "cw_files_open" },
@@ -67,13 +76,18 @@ const ITEMS: Record<SheetAction, { icon: LucideIcon; key: string }> = {
   verify: { icon: FileCheck, key: "cw_files_verify" },
   hex: { icon: Binary, key: "cw_files_vw_as_hex" },
   unpack: { icon: FileArchive, key: "cw_files_unpack" },
+  install: { icon: PackagePlus, key: "cw_pkg_install" },
+  loadpayload: { icon: Rocket, key: "cw_payload_load" },
+  extract: { icon: PackageOpen, key: "cw_files_extract" },
   showpc: SHOW_ON_PC_ITEM,
   fixperm: { icon: ShieldCheck, key: "cw_files_fixperm" },
   delete: { icon: Trash2, key: "cw_files_delete" },
+  shareedit: { icon: PencilLine, key: "cw_files_smb_edit" },
+  shareremove: { icon: Trash2, key: "cw_files_smb_remove" },
 };
 
 /** The ones a running copy/move/delete request holds back (one batch at a time). */
-const HELD: ReadonlySet<SheetAction> = new Set(["copy", "move", "bulkrename", "unpack", "fixperm", "delete"]);
+const HELD: ReadonlySet<SheetAction> = new Set(["copy", "move", "bulkrename", "unpack", "install", "extract", "fixperm", "delete"]);
 
 /** More actions than this go in two columns. */
 export const SHEET_ONE_COLUMN = 8;
@@ -119,7 +133,7 @@ export function ActionsSheet({
             <button
               key={a}
               type="button"
-              className={`cw-focusable cw-sheet-item${a === "delete" ? " is-danger" : ""}`}
+              className={`cw-focusable cw-sheet-item${a === "delete" || a === "shareremove" ? " is-danger" : ""}`}
               data-sheet={a}
               data-nav-default={i === 0 ? "" : undefined}
               disabled={busy && HELD.has(a)}

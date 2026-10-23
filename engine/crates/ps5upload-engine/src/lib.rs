@@ -30,6 +30,9 @@
 //!   POST /api/ps5/cleanup             → recursively remove a path under PS5 allowlist
 //!   GET  /api/ps5/volumes             → list storage volumes detected by the payload
 //!   GET  /api/ps5/list-dir?path=...   → list immediate children of a directory on PS5
+//!   POST /api/ps5/disk-usage          → start a recursive size walk (see `disk_usage`)
+//!   POST /api/ps5/cleanup/scan        → console clean-up scan / apply (see `console_cleanup_api`)
+//!   GET  /api/ps5/console-shares      → the console's own saved network shares (see `console_shares_api`)
 
 mod activity;
 mod ampr_trace;
@@ -40,10 +43,14 @@ mod c2c_api;
 mod collection;
 mod collection_api;
 mod collection_tidy_api;
+mod console_cleanup_api;
 mod console_files_api;
+mod console_payload;
 mod console_read;
+mod console_shares_api;
 mod console_snapshot;
 mod convert_source;
+mod disk_usage;
 mod elfldr_guard;
 mod engine_log;
 mod event_journal;
@@ -51,12 +58,12 @@ mod fakelibs_api;
 mod folder_build;
 mod fpkg_api;
 mod fpkg_firmware;
-mod ftp_send;
 mod games_api;
 mod hearbridge_api;
 mod helper_mirror;
 mod helper_stop;
 mod icon_cache;
+mod image_browse;
 mod image_build;
 mod inspect;
 mod install;
@@ -2452,6 +2459,96 @@ async fn ps5_fs_unpack(
         }
         Err(e) => {
             crate::log_warn!("fs_unpack failed: {path_for_log}: {e:#}");
+            json_err(StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct FsExtractReq {
+    addr: Option<String>,
+    path: String,
+    dest: String,
+    #[serde(default)]
+    password: Option<String>,
+    #[serde(default)]
+    merge: bool,
+    #[serde(default)]
+    replace: bool,
+    #[serde(default)]
+    op_id: u64,
+}
+
+/// POST /api/ps5/fs/extract `{addr, path, dest, password?, merge?, replace?, op_id}` — extract an
+/// archive on the console into `dest` there (the helper's extractor payload does the decoding).
+/// Progress and cancel go through `op-status`/`op-cancel` with the same `op_id`. 200 `{ok, path,
+/// files, dirs, bytes, skipped, unsafe, links}`; 409 when cancelled; 502 with the helper's cause
+/// otherwise (`fs_extract_password_required`, `fs_extract_no_space: ...`, ...). The password is
+/// never logged.
+async fn ps5_fs_extract(
+    State(_state): State<AppState>,
+    Json(req): Json<FsExtractReq>,
+) -> impl IntoResponse {
+    let Some(addr) = required_console_addr(req.addr) else {
+        return missing_console_addr();
+    };
+    let op_id = req.op_id;
+    let x = ps5upload_core::fs_ops::ExtractRequest {
+        path: req.path,
+        dest: req.dest,
+        password: req.password.filter(|p| !p.is_empty()),
+        merge: req.merge,
+        replace: req.replace,
+    };
+    let started = std::time::Instant::now();
+    crate::log_info!(
+        "fs_extract: addr={addr} path={} dest={} merge={} replace={} password={} op_id={op_id}",
+        x.path,
+        x.dest,
+        x.merge,
+        x.replace,
+        x.password.is_some()
+    );
+    let path_for_log = x.path.clone();
+    // A large solid archive decodes for a long time; the job is followed, not timed out.
+    let deadline = std::time::Duration::from_secs(12 * 60 * 60);
+    match tokio::task::spawn_blocking(move || {
+        // Marks the console busy for the job: a helper stop is refused meanwhile.
+        let _busy = helper_stop::enter(&addr);
+        ps5upload_core::fs_ops::archive_extract(&addr, &x, op_id, deadline)
+    })
+    .await
+    .map_err(anyhow::Error::from)
+    .and_then(|r| r)
+    {
+        Ok(done) => {
+            crate::log_info!(
+                "fs_extract ok: {path_for_log} -> {} ({} files, {} bytes, {} skipped, {} unsafe, {} links) in {} ms",
+                done.path,
+                done.files,
+                done.bytes,
+                done.skipped,
+                done.unsafe_entries,
+                done.links,
+                started.elapsed().as_millis()
+            );
+            Json(serde_json::json!({
+                "ok": true,
+                "path": done.path,
+                "files": done.files,
+                "dirs": done.dirs,
+                "bytes": done.bytes,
+                "skipped": done.skipped,
+                "unsafe": done.unsafe_entries,
+                "links": done.links,
+            }))
+            .into_response()
+        }
+        Err(e) if e.to_string() == "cancelled" => {
+            json_err(StatusCode::CONFLICT, "cancelled").into_response()
+        }
+        Err(e) => {
+            crate::log_warn!("fs_extract failed: {path_for_log}: {e:#}");
             json_err(StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response()
         }
     }
@@ -10480,7 +10577,7 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
 
     // The Collection's automatic refresh (a no-op until a folder is added).
     collection_api::spawn_auto_refresh();
-    // Install sessions live in their own state (served by pkg_install::router below); the helper
+    // Install sessions live in their own state (served by pkg_install::api_router below); the helper
     // log mirror also reads it, to stay off a console while an install runs.
     let pkg_state = std::sync::Arc::new(pkg_install::PkgInstallState::restored());
     // Copies each connected console's helper log into the event journal.
@@ -10498,6 +10595,7 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
 
     let activity_installs = pkg_state.clone();
     let helper_stop_installs = pkg_state.clone();
+    let cleanup_installs = pkg_state.clone();
     let app = Router::new()
         .route("/", get(ui_handler))
         .route(
@@ -10526,6 +10624,37 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
         .route("/api/ps5/pkg/scan-external", get(ps5_pkg_scan_external))
         .route("/api/ps5/pkg/metadata", get(ps5_pkg_metadata))
         .route("/api/ps5/list-dir", get(ps5_list_dir))
+        .route("/api/ps5/disk-usage", post(disk_usage::start))
+        .route("/api/ps5/disk-usage/{id}", get(disk_usage::status))
+        .route("/api/ps5/disk-usage/{id}/cancel", post(disk_usage::cancel))
+        .route("/api/ps5/cleanup/scan", post(console_cleanup_api::scan))
+        .route(
+            "/api/ps5/cleanup/scan/{id}",
+            get(console_cleanup_api::scan_status),
+        )
+        .route(
+            "/api/ps5/cleanup/scan/{id}/apply",
+            post(
+                move |axum::extract::Path(id): axum::extract::Path<u32>,
+                      Json(req): Json<console_cleanup_api::ApplyBody>| {
+                    console_cleanup_api::apply(cleanup_installs.clone(), id, req)
+                },
+            ),
+        )
+        .route(
+            "/api/ps5/cleanup/apply/{id}",
+            get(console_cleanup_api::apply_status),
+        )
+        .route("/api/ps5/cleanup/cancel", post(console_cleanup_api::cancel))
+        .route("/api/ps5/console-shares", get(console_shares_api::list))
+        .route(
+            "/api/ps5/console-shares/save",
+            post(console_shares_api::save),
+        )
+        .route(
+            "/api/ps5/console-shares/remove",
+            post(console_shares_api::remove),
+        )
         .route("/api/ava1/identity", get(ava1_api::identity_handler))
         .route("/api/ava1/pairing", get(ava1_api::pairing_handler))
         .route(
@@ -10566,7 +10695,6 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
         .route("/api/lz4/ffpfsc", get(lz4_api::lz4_ffpfsc_handler))
         .route("/api/lz4/compat", get(lz4_compat::lz4_compat_handler))
         .route("/api/lz4/building", get(lz4_api::lz4_building_handler))
-        .route("/api/ftp/send", post(ftp_send::ftp_send_handler))
         .route("/api/fpkg/build", post(fpkg_api::fpkg_build_handler))
         .route("/api/fpkg/delete", post(fpkg_api::fpkg_delete_handler))
         .route("/api/fpkg/estimate", post(fpkg_api::fpkg_estimate_handler))
@@ -10581,6 +10709,10 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
         )
         .route("/api/exfat/build", post(fpkg_api::exfat_build_handler))
         .route("/api/folder/build", post(fpkg_api::folder_build_handler))
+        .route(
+            "/api/image/browse",
+            post(image_browse::image_browse_handler),
+        )
         .route(
             "/api/collection/settings",
             get(collection_api::get_settings).put(collection_api::put_settings),
@@ -10656,6 +10788,7 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
         .route("/api/ps5/fs/delete", post(ps5_fs_delete))
         .route("/api/ps5/fs/move", post(ps5_fs_move))
         .route("/api/ps5/fs/unpack", post(ps5_fs_unpack))
+        .route("/api/ps5/fs/extract", post(ps5_fs_extract))
         .route("/api/ps5/fs/copy", post(ps5_fs_copy))
         .route("/api/ps5/fs/op-status", get(ps5_fs_op_status))
         .route("/api/ps5/fs/op-cancel", post(ps5_fs_op_cancel))
@@ -10965,6 +11098,14 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
         .route("/api/debug/crash", get(debug_crash))
         .with_state(state);
 
+    // All browser APIs must be merged before nesting under the URL prefix.
+    // Package-host URLs stay at the root because the console fetches them directly.
+    let app = app
+        .merge(pkg_install::api_router(pkg_state.clone()))
+        .merge(remote_download::router(std::sync::Arc::new(
+            remote_download::DownloadRegistry::default(),
+        )));
+
     // SPA fallback: serve the embedded React bundle for every path that doesn't
     // match an explicit /api/* route above.  Only compiled when the `webui`
     // feature is on (Docker / self-hosted image); the regular build keeps the
@@ -10972,12 +11113,22 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
     #[cfg(feature = "webui")]
     let app = app.fallback(webui::spa_fallback);
 
-    let base_url = base_url_prefix();
-    let app = if let Some(base) = &base_url {
-        // Create Axum Router using the base URL as a prefix for all routes.
-        axum::Router::new()
-            .nest(base, app)
-            .route(&format!("{}/", base), get(ui_handler))
+    let app = if let Ok(base) = std::env::var("PS5UPLOAD_BASE_URL") {
+        let base = base.trim_end_matches('/');
+        if !base.is_empty() {
+            // Format Base URL
+            let base = if !base.starts_with('/') {
+                format!("/{}", base)
+            } else {
+                base.to_string()
+            };
+            // Create Axum Router using the base URL as a prefix for all routes.
+            axum::Router::new()
+                .nest(&base, app)
+                .route(&format!("{}/", base), get(ui_handler))
+        } else {
+            app
+        }
     } else {
         app
     };
@@ -10999,23 +11150,8 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
         .allow_methods(Any)
         .allow_headers(Any);
 
-    // .pkg install — sessions live in their own state because the
-    // HTTP-host serving handler needs Mutex-guarded session lookup
-    // independent of the main engine state. Merged at this point
-    // so the pkg routes share the same listener + CORS + body limit.
-    // Downloading a link to disk before installing it. Separate state for
-    // the same reason as the install sessions: its progress is polled
-    // independently of everything else the engine is doing.
-    let side = pkg_install::router(pkg_state).merge(remote_download::router(std::sync::Arc::new(
-        remote_download::DownloadRegistry::default(),
-    )));
-    // Behind a base URL the web UI calls these under it too (`/ps5/api/pkg/upload`); the PS5
-    // still fetches `/pkg-host/*` at the root, so they stay there as well.
-    let app = match &base_url {
-        Some(base) => app.merge(side.clone()).nest(base, side),
-        None => app.merge(side),
-    };
     let app = app
+        .merge(pkg_install::host_router(pkg_state))
         // Tauri's renderer performs a few direct fetches to the sidecar for
         // liveness, job polling and streamed resources. Emit CORS headers only
         // for origins accepted by the same narrow trust rule as the guard
@@ -11185,20 +11321,6 @@ fn install_panic_logger() {
 /// scratch` — no shell, no curl, no wget — so without this Docker and Compose
 /// had nothing to run as a HEALTHCHECK. Plain std TCP, no async runtime, so it
 /// works from the same binary in a fresh process.
-/// `PS5UPLOAD_BASE_URL` as a route prefix (`/ps5`), when it names one.
-fn base_url_prefix() -> Option<String> {
-    let base = std::env::var("PS5UPLOAD_BASE_URL").ok()?;
-    let base = base.trim_end_matches('/');
-    if base.is_empty() {
-        return None;
-    }
-    Some(if base.starts_with('/') {
-        base.to_string()
-    } else {
-        format!("/{base}")
-    })
-}
-
 pub fn healthcheck() -> i32 {
     use std::io::{Read, Write};
     let port: u16 = std::env::var("PS5UPLOAD_ENGINE_PORT")

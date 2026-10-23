@@ -37,7 +37,10 @@ pub mod pack;
 pub mod profile_gen;
 pub mod read;
 
-pub use config::{default_profile, Config};
+pub use config::{
+    default_profile, default_profile_for, default_profile_name, large_files_profile, unity_profile,
+    unreal_profile, Config, GameEngine, LARGE_FILE_MIN,
+};
 pub use pack::{build, Control, Output};
 pub use read::Reader;
 

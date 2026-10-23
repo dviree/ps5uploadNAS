@@ -1,8 +1,13 @@
 import type { ReactNode } from "react";
-import { Folder, House, Settings, Sparkles, type LucideIcon } from "lucide-react";
+import { Activity, Eraser, Fan as FanIcon, Folder, Gamepad2, House, LibraryBig, Settings, Sparkles, type LucideIcon } from "lucide-react";
+import { Cleanup } from "./cleanup/Cleanup";
 import { Cheats } from "./cheats/Cheats";
+import { Fan } from "./fan/Fan";
 import { Files } from "./files/Files";
+import { Games } from "./games/Games";
 import { Home } from "./home/Home";
+import { Library } from "./library/Library";
+import { Processes } from "./processes/Processes";
 import { Settings as SettingsSection } from "./settings/Settings";
 import type { ConsoleStatus } from "./shell/TopBar";
 
@@ -39,7 +44,7 @@ export interface Section {
   acceptsParams?: boolean;
 }
 
-// Registry: Home, Files, Cheats (the running game's), Settings. Files opens at ctx.params.path
+// Registry: Home, Games (installed titles), Library (games on shares and drives, #498), Files, Cheats (the running game's), Fan, Processes, Clean up, Settings. Files opens at ctx.params.path
 // (acceptsParams), so Home's drive cards open it at a drive.
 export const SECTIONS: Section[] = [
   {
@@ -47,6 +52,18 @@ export const SECTIONS: Section[] = [
     icon: House,
     labelKey: "cw_nav_home",
     render: (ctx) => <Home ctx={ctx} />,
+  },
+  {
+    id: "games",
+    icon: Gamepad2,
+    labelKey: "cw_games_title",
+    render: (ctx) => <Games ctx={ctx} />,
+  },
+  {
+    id: "library",
+    icon: LibraryBig,
+    labelKey: "cw_lib_title",
+    render: () => <Library />,
   },
   {
     id: "files",
@@ -60,6 +77,24 @@ export const SECTIONS: Section[] = [
     icon: Sparkles,
     labelKey: "cw_cheats_title",
     render: () => <Cheats />,
+  },
+  {
+    id: "fan",
+    icon: FanIcon,
+    labelKey: "cw_fan_title",
+    render: () => <Fan />,
+  },
+  {
+    id: "processes",
+    icon: Activity,
+    labelKey: "cw_procs_title",
+    render: (ctx) => <Processes ctx={ctx} />,
+  },
+  {
+    id: "cleanup",
+    icon: Eraser,
+    labelKey: "cw_cleanup_title",
+    render: (ctx) => <Cleanup ctx={ctx} />,
   },
   {
     id: "settings",

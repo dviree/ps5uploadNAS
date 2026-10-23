@@ -32,6 +32,7 @@
 #include <regex.h>
 #include "config.h"
 #include "webui_api.h"
+#include "webui_smb.h"
 #include "runtime.h"
 #include "sandbox_unmount.h"
 #include "instance_verdict.h"
@@ -73,6 +74,7 @@
 #include "ava1_stop.h"
 #include "ava1_glue.h"
 #include "ownership_record.h"
+#include "storage_cleanup.h"
 
 /* Capacity policy mirrored by ps5upload-core::volumes. Keep a small working
  * margin -- 1 GiB, scaled down for small volumes -- out of every filesystem
@@ -282,6 +284,24 @@
 #define MGMT_FRAME_FILES_HANDOFF_TAKE_ACK 274u
 #define MGMT_FRAME_MINION_TILE 275u
 #define MGMT_FRAME_MINION_TILE_ACK 276u
+/* console clean-up (storage_cleanup.c) */
+#define MGMT_FRAME_CLEANUP_SCAN 290u
+#define MGMT_FRAME_CLEANUP_SCAN_ACK 291u
+#define MGMT_FRAME_CLEANUP_STATUS 292u
+#define MGMT_FRAME_CLEANUP_STATUS_ACK 293u
+#define MGMT_FRAME_CLEANUP_APPLY 294u
+#define MGMT_FRAME_CLEANUP_APPLY_ACK 295u
+#define MGMT_FRAME_CLEANUP_APPLY_STATUS 296u
+#define MGMT_FRAME_CLEANUP_APPLY_STATUS_ACK 297u
+#define MGMT_FRAME_CLEANUP_CANCEL 298u
+#define MGMT_FRAME_CLEANUP_CANCEL_ACK 299u
+/* the console's saved network shares, from the PC (webui_smb.c) */
+#define MGMT_FRAME_SMB_SHARES_LIST 310u
+#define MGMT_FRAME_SMB_SHARES_LIST_ACK 311u
+#define MGMT_FRAME_SMB_SHARES_SAVE 312u
+#define MGMT_FRAME_SMB_SHARES_SAVE_ACK 313u
+#define MGMT_FRAME_SMB_SHARES_REMOVE 314u
+#define MGMT_FRAME_SMB_SHARES_REMOVE_ACK 315u
 #define MGMT_FRAME_SDK_SCAN 214u
 #define MGMT_FRAME_SDK_SCAN_ACK 215u
 #define MGMT_FRAME_SDK_PATCH 216u
@@ -2073,6 +2093,19 @@ static int is_profile_avatar_read_path(const char *p) {
     size_t n = strlen(p);
     return (n >= 11 && strcmp(p + n - 11, "/avatar.png") == 0) ||
            (n >= 12 && strcmp(p + n - 12, "/picture.png") == 0);
+}
+
+/* READ-ONLY exception for an inserted data disc (#497): the File System browser lists /mnt/disc, so
+ * downloading a file burnt to a DVD/BD must work too. Not in is_path_allowed, so writes, deletes and
+ * moves stay refused even though the optical mount would fail them anyway. */
+static int is_disc_lexical(const char *p) {
+    return (strcmp(p, "/mnt/disc") == 0 || strncmp(p, "/mnt/disc/", 10) == 0) && !path_has_dotdot_component(p);
+}
+static int is_disc_read_path(const char *p) {
+    if (!is_disc_lexical(p)) return 0;
+    /* A UDF disc can carry symlinks: the canonical form must stay on the disc too. */
+    char resolved[PATH_MAX];
+    return realpath(p, resolved) == NULL || is_disc_lexical(resolved);
 }
 
 /* Validate a path for unsafe read mode. This relaxes the writable-root
@@ -7904,6 +7937,79 @@ static int handle_minion_tile(runtime_state_t *state, const char *body, uint64_t
     return mgmt_reply(MGMT_FRAME_MINION_TILE_ACK, reply, (uint64_t)n);
 }
 
+/* ── Console clean-up (storage_cleanup.c) ───────────────────────────────
+ * Each call only starts, reads or stops the scan/apply thread and answers at once; a refusal is
+ * {"ok":false,"err":..}, which the dispatcher turns into an AVA1 error with that token. */
+typedef int (*cleanup_call_fn)(const char *body, size_t n, char *out, size_t cap);
+
+static int cleanup_reply(runtime_state_t *state, uint16_t ack, cleanup_call_fn fn, const char *body,
+                         uint64_t body_len) {
+    if (!state || body_len > 64u * 1024u) return mgmt_reply(MGMT_FRAME_ERROR, "bad_request", 11);
+    char *out = malloc(SC_STATUS_MAX);
+    if (!out) return mgmt_reply(MGMT_FRAME_ERROR, "out_of_memory", 13);
+    int n = fn(body ? body : "", (size_t)body_len, out, SC_STATUS_MAX);
+    int rc = mgmt_reply(ack, out, (uint64_t)(n > 0 ? n : 0));
+    free(out);
+    return rc;
+}
+
+static int cleanup_scan_call(const char *body, size_t n, char *out, size_t cap) {
+    (void)body;
+    (void)n;
+    return sc_scan_start(out, cap);
+}
+
+static int handle_cleanup_scan(runtime_state_t *state, const char *body, uint64_t body_len) {
+    return cleanup_reply(state, MGMT_FRAME_CLEANUP_SCAN_ACK, cleanup_scan_call, body, body_len);
+}
+static int handle_cleanup_status(runtime_state_t *state, const char *body, uint64_t body_len) {
+    return cleanup_reply(state, MGMT_FRAME_CLEANUP_STATUS_ACK, sc_scan_status, body, body_len);
+}
+/* MGMT_SONY: the apply thread removes installed updates through uninstall_patch (register.c), which
+ * takes sony_api_lock itself. */
+static int handle_cleanup_apply(runtime_state_t *state, const char *body, uint64_t body_len) {
+    return cleanup_reply(state, MGMT_FRAME_CLEANUP_APPLY_ACK, sc_apply_start, body, body_len);
+}
+static int handle_cleanup_apply_status(runtime_state_t *state, const char *body, uint64_t body_len) {
+    return cleanup_reply(state, MGMT_FRAME_CLEANUP_APPLY_STATUS_ACK, sc_apply_status, body, body_len);
+}
+static int handle_cleanup_cancel(runtime_state_t *state, const char *body, uint64_t body_len) {
+    return cleanup_reply(state, MGMT_FRAME_CLEANUP_CANCEL_ACK, sc_cancel, body, body_len);
+}
+
+/* ── The console's saved network shares, from the PC (webui_smb.c, #498) ─────
+ * The same shares the console page's Files and Library read (smb_shares.c); a save signs in through
+ * the SMB daemon first, like the page's. A refusal is {"ok":false,"err":..}. */
+#define SMB_PC_OUT_MAX (64u * 1024u)
+
+static int smb_shares_list_call(const char *body, size_t n, char *out, size_t cap) {
+    (void)body;
+    (void)n;
+    return webui_smb_pc_list(out, cap);
+}
+
+static int smb_pc_reply(runtime_state_t *state, uint16_t ack, cleanup_call_fn fn, const char *body, uint64_t body_len) {
+    char *out;
+    int n, rc;
+    if (!state || body_len > 16u * 1024u) return mgmt_reply(MGMT_FRAME_ERROR, "bad_request", 11);
+    out = malloc(SMB_PC_OUT_MAX);
+    if (!out) return mgmt_reply(MGMT_FRAME_ERROR, "out_of_memory", 13);
+    n = fn(body ? body : "", (size_t)body_len, out, SMB_PC_OUT_MAX);
+    rc = mgmt_reply(ack, out, (uint64_t)(n > 0 ? n : 0));
+    free(out);
+    return rc;
+}
+
+static int handle_smb_shares_list(runtime_state_t *state, const char *body, uint64_t body_len) {
+    return smb_pc_reply(state, MGMT_FRAME_SMB_SHARES_LIST_ACK, smb_shares_list_call, body, body_len);
+}
+static int handle_smb_shares_save(runtime_state_t *state, const char *body, uint64_t body_len) {
+    return smb_pc_reply(state, MGMT_FRAME_SMB_SHARES_SAVE_ACK, webui_smb_pc_save, body, body_len);
+}
+static int handle_smb_shares_remove(runtime_state_t *state, const char *body, uint64_t body_len) {
+    return smb_pc_reply(state, MGMT_FRAME_SMB_SHARES_REMOVE_ACK, webui_smb_pc_remove, body, body_len);
+}
+
 /* ── Network round-trip ack ──────────────────────────────────────────── */
 
 /* The "speed test" is observed entirely on the client side. The
@@ -8779,7 +8885,7 @@ __thread volatile unsigned int g_inflight_frame_type = 0;
 static runtime_state_t *g_mgmt_fs_state;
 
 static int mgmt_fs_read_allowed(const char *path, int unsafe_read) {
-    return is_path_allowed(path) || is_profile_avatar_read_path(path) ||
+    return is_path_allowed(path) || is_profile_avatar_read_path(path) || is_disc_read_path(path) ||
            (unsafe_read && is_safe_unsafe_read_path(path));
 }
 

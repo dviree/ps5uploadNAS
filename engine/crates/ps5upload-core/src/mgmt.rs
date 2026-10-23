@@ -169,6 +169,14 @@ methods! {
     (FILES_HANDOFF_PUT, 150, "FILES_HANDOFF_PUT"),
     (FILES_HANDOFF_TAKE, 151, "FILES_HANDOFF_TAKE"),
     (MINION_TILE, 152, "MINION_TILE"),
+    (CLEANUP_SCAN, 160, "CLEANUP_SCAN"),
+    (CLEANUP_STATUS, 161, "CLEANUP_STATUS"),
+    (CLEANUP_APPLY, 162, "CLEANUP_APPLY"),
+    (CLEANUP_APPLY_STATUS, 163, "CLEANUP_APPLY_STATUS"),
+    (CLEANUP_CANCEL, 164, "CLEANUP_CANCEL"),
+    (SMB_SHARES_LIST, 170, "SMB_SHARES_LIST"),
+    (SMB_SHARES_SAVE, 171, "SMB_SHARES_SAVE"),
+    (SMB_SHARES_REMOVE, 172, "SMB_SHARES_REMOVE"),
 }
 
 /// A management call the payload refused.
@@ -336,6 +344,7 @@ job_ops! {
     (CLEANUP, 8, "CLEANUP", "cleanup"),
     (SDK_SCAN, 9, "SDK_SCAN", "sdk_scan"),
     (FFPFSC_UNPACK, 10, "FFPFSC_UNPACK", "fs_unpack"),
+    (ARCHIVE_EXTRACT, 12, "ARCHIVE_EXTRACT", "fs_extract"),
 }
 
 /// How one long operation is run and followed.

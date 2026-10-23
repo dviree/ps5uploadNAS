@@ -43,7 +43,10 @@
  *   src/shell_builtin.c   1  guard  `mv` (mv_same_dev, lstat of the source)
  *   src/webui_settings.c  1  dir    webui.json: tmp -> final
  *   src/webui_inputlog.c  1  dir    webui-input.log ring rewrite: tmp -> final
- *   src/webui_tile.c      1  dir    tile folder files: tmp -> final
+ *   src/webui_tile.c      3  dir    tile folder files: tmp -> final; mount.lnk <-> ps5upload.lnk in
+ *                                   /user/app/PSUP00001 (kept from ShadowMount+, #480)
+ *   src/smb_client.c      1  dir    SMB daemon key: <key>.tmp -> key
+ *   src/smb_shares.c      1  dir    saved shares: <file>.tmp -> file
  *   src/files_prefs.c     1  dir    files-prefs.json: tmp -> final
  *   src/webui_files.c     2  dir    text save and upload: .ps5u-<hex>.part beside the target -> target
  *                                   (the device is compared too, same_device_as, failing closed)
@@ -53,6 +56,8 @@
  *   ava1/ava1_journal.c   1  dir    journal: tmp -> final
  *   ava1/ava1_store.c     1  dir    key and trust stores: tmp -> final
  *   ava1/ava1_recv.c      2  dir    outboard renames inside the job folder
+ *   (the extractor payload, not counted by the test: extractor/src/xsink.c 1 dir, an extracted file's
+ *   .ps5u-x-<pid>-<n>.part beside it -> its name; extractor/src/xreq.c 1 dir, status.json.tmp -> status.json)
  *
  * `XDEV_UNKNOWN` is deliberately a third value rather than being folded
  * into "safe", and it is FAIL CLOSED: a caller proceeds to rename() only on
