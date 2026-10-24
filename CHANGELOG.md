@@ -4,6 +4,230 @@ What's new in ps5upload, written for humans.
 
 ---
 
+## 7.3.0
+
+- **Convert from Collection.** Every game in Collection has a menu with Convert…, and the game
+  page has a Convert… button. It picks the best copy you have (a folder first, then an image,
+  then an archive) and opens Convert with it filled in.
+- **Cheats from the game page.** When a game has no cheats on the PS5 yet, its Cheats tab now
+  has a button that opens Cheats with that game already selected, ready to download.
+- **More from each game in Collection.** The ⋯ menu on a game now also installs a newer update
+  or missing DLC the PS5 lacks, opens its cheats, backports it when it is installed, and
+  checks its copies. Cards show when the cheat repositories have cheats for a game, how long it
+  has been played, and when it asks for newer firmware than the PS5 has.
+- **Select several games.** Select in Collection picks games, then sends them to one or more
+  PS5s at once (each gets only what it lacks), queues them in Convert, or checks their copies.
+- **Check a copy.** A game's page can check any copy end to end: a debug package against its own
+  digests, an archive's checksums, every file of a folder or image. It finds a copy that is
+  damaged or cut short before you send it.
+- **Save space.** The new "Could be smaller" filter lists big PS5 game folders and plain images,
+  and queues them all in Convert as compressed images (.ffpfsc).
+- New filters and sort: Has cheats, Needs newer firmware, and Recently played.
+- **Ready to play knows your Collection.** Installed games show "In Collection", or the newer
+  update this computer has, and the ⋯ menu installs it or missing DLC. A game the PS5 runs from
+  a folder or image can be copied into the Collection.
+- **Game files: Convert, Make it smaller, Copy to Collection.** A game folder or image on the
+  PS5 can be converted where it is (a compressed image replaces it and frees the difference),
+  or downloaded into the Collection. A folder of a game the PS5 also has installed is marked
+  "Also installed".
+- **Game page: what to do next.** A line at the top says where the game is (copies here, how
+  many PS5s have it) and offers the one useful step: install the newer update, send it, add
+  missing DLC, or make the copy smaller. Its builds in Convert are listed, with Install.
+
+## 7.2.0
+
+- **PS5Upload on iPhone.** Every release now includes an iPhone app (`PS5Upload-7.2.0-ios-unsigned.ipa`):
+  the same app as on Android, with the engine built in. It is not on the App Store, so you install
+  it yourself with AltStore or Sideloadly and an Apple ID (a free one works, no jailbreak). The
+  FAQ walks through both. Put games in the app's folder with the Files app, keep the app open
+  while it sends, and tell us how it goes: it is new and has had little testing on real iPhones.
+- **Text size on the console page (#505).** PS5Upload Minion's Settings has a Text size row
+  (75% to 130%), kept per screen so the TV and a computer browser can each have their own.
+  Update the helper for this one.
+- **Converting a big game shows its progress from the start.** On a very large game the
+  "Check source" step could sit for many minutes with nothing moving; it now shows how far it is,
+  and Stop works there too.
+
+## 7.1.20
+
+- **Covers stay while the helper is down.** When the helper was not running (or the console was in
+  rest mode), every cover asked for in that moment was remembered as "no artwork" for 15 minutes.
+  Only a real "not there" answer from the console is remembered now.
+- **Stopping a folder upload early works.** Cancelling while a big folder was still being counted
+  used to be ignored, and the whole folder uploaded anyway. The cancel is kept and the upload ends
+  as cancelled.
+- **Big libraries list in full.** A console with more than 256 titles (or app folders) had the rest
+  cut off, and the game pages then showed them as not installed. Every page is read now; the
+  Collection's console view also no longer reports every game as not installed when a folder
+  listing fails or is cut short.
+- **Folder uploads report what was skipped.** A folder upload with "skip existing" showed 0 skipped
+  files and the full file count as sent; it now reports what the console already had, like a
+  single-file upload.
+- **Measure how it plays: a failed start cleans up.** If copying the libraries or writing the debug
+  emulator failed halfway, the half-made fakelib2 folder could not be removed by Stop; it is marked
+  from the start and removed on failure now.
+- **Time sync refuses an empty target.** Syncing the clock without NTP and without a time no longer
+  sets the console to 1970; it is refused.
+- **Profile activate refuses a malformed id.** An account id that cannot be read is an error now,
+  instead of being silently replaced by the one derived from the slot.
+- **Unreadable files in a selection are skipped, not fatal.** Uploading a selection of files where
+  one could not be read used to fail the whole job on that file; it is left out (as the log already
+  said) and the rest uploads. A selection with no readable file is refused up front.
+- **Web UI: unknown API paths answer 404.** They used to return the app page with status 200.
+- **Backport scan and Collection scan end on a crash.** A scan whose worker crashed stayed "running"
+  forever (and the backport scan's status call failed every time after); it now ends with an error.
+- **IPv6 consoles: the "no loader" message is right.** The port 9021 probe did not work for an
+  IPv6 address, so a missing helper was blamed on the loader.
+- **Bug reports hide Windows user names (desktop).** With "Remove personal details" on, a path
+  like `C:\Users\<name>` inside the report's JSON files (where backslashes are doubled) was left
+  as it was. It is now shortened to `~` like every other home folder. The engine log in a report
+  is also capped at its last 4 MB, so a report cannot take minutes on a very long session.
+- **The app no longer kills an engine you run yourself (desktop).** At start-up, an engine of the
+  same version already answering on the app's port (one you started by hand, or in Docker) is used
+  as it is; only an engine of a different version is replaced. The engine's log file now also
+  rotates during a long session instead of growing without bound.
+- **Settings → Engine URL can come back to the built-in engine (desktop).** Switching from a
+  remote engine back to the default local address used to be ignored until the app restarted.
+- **Reset all app data removes everything (desktop).** The upload queue, payload playlists, the
+  downloaded-payload cache and custom payload repos were left behind, and the engine could write
+  its connections back after the wipe. The engine is now stopped for the wipe and started again.
+- **Sending a payload to a console by host name.** The name is looked up before the 3-second
+  connection timeout starts, so a slow DNS answer no longer makes the send fail.
+- **Sending a payload labels the right files.** A cached catalogue payload was reported as a
+  ps5upload helper because the app's own data folder has "ps5upload" in its name.
+- **Save backups: a failed backup no longer costs an old one.** Older automatic backups are
+  removed only after the new one has been written.
+- **A failed bug report leaves no half-written zip behind.**
+- **USB autoloader gets this version's helper.** Right after an app update, "Prepare USB stick"
+  could copy the previous version's helper if the Connection screen had not yet extracted the new
+  one.
+- **Custom payload repos: a corrected asset name is kept.** Re-adding a repo you already added
+  now updates its name and asset hint instead of returning the old entry, and an asset hint that
+  looks like a path is no longer used as a file name.
+- **Restart engine starts the background activity watch.** When the engine failed at launch and
+  was then restarted from Settings, finished jobs were not announced until the app restarted.
+- **A busy moment no longer restarts a queued upload.** If the app missed one progress check
+  (engine busy, a network blip), the queue re-sent the helper to the PS5, which cut off the upload
+  that was still going. It now keeps checking and only steps in after several misses in a row.
+- **Queue buttons act on the console you are looking at.** With two PS5s, Clear all, Retry failed,
+  Start and Stop on Install Package's queue used to act on every console's queue; they now act on
+  that console only. Clear all asks first and says how many items it removes.
+- **Install Package uploads leave the rest of the queue alone.** Adding a package there started
+  every waiting upload on that console too, including ones you had not pressed Start on.
+- **Cancelling an upload waits before the next one starts**, so the next item no longer starts on
+  the console while the cancelled one is still stopping.
+- **Edit image on this computer is on Windows and in the browser version.** Looking inside an image
+  (as 7.1.19 said) now really works there; opening an image as a drive stays macOS and Linux only.
+- **Quick bring-up waits for its playlist.** If the bring-up playlist was already running, or you
+  stopped it, bring-up sent the helper anyway and said it was done. It now waits for the playlist,
+  or reports that it was stopped.
+- **The browser version** no longer shows desktop-only actions that could only fail (CRC32, Verify
+  in Files; Heal home-screen metadata in Games; Send ShadowMount+, which now points to Payloads),
+  loads game icons and Collection covers behind a reverse proxy with a base path, and no longer
+  waits 30 seconds on a helper send the engine refused.
+- **Smaller fixes.** "Play session recorded" no longer shows when collecting the session failed; a
+  failed clean-up on Volumes says why instead of the row just coming back; screenshot thumbnails
+  no longer turn into broken images after switching consoles; a console's shares no longer show up
+  under another console's card; adding a game to the home screen while ShadowMount+ runs no longer
+  registers it a second time when handing it to ShadowMount+ fails; the command palette's Games
+  heading is translated.
+- **Docker `:latest` means a tested release.** The engine images on GHCR are tagged `:latest` and
+  `:<major.minor>` only when a release is promoted from pre-release to release on GitHub; a new
+  tag publishes `:<version>` alone. `docker pull ...:latest` no longer gets a build nobody has run
+  on a console (the same rule as the app's stable update channel).
+- **Docker instructions you can paste.** The website's `docker run` line and `make docker-engine-run`
+  now set `PS5_ADDR` and `PS5UPLOAD_ALLOW_IP`; without them every request from another machine
+  was refused with "403 loopback only".
+- **Convert no longer loses files from some .7z archives.** A 7z whose solid block has folders or
+  empty files between its files (upload already refuses these) was unpacked short and reported as
+  done; Convert now refuses it the same way, and any unpack that ends short of the archive's
+  listing is an error, not a success.
+- **Zip entry names are checked the same way before and during an upload.** An archive made by
+  Windows PowerShell's Compress-Archive (backslash paths) previewed as 0 files and then uploaded
+  flat files with backslashes in their names; the preview now says which entry is the problem and
+  the upload refuses it. Names like `./x` or `a//b` that previewed fine no longer fail the upload.
+  Names in old code-page zips show correctly in the preview.
+- **Long transfers survive repeated "console busy" answers.** A multi-hour upload, download or
+  console-to-console copy that reconnected several times could fail with "the console stayed
+  busy" even though every reconnect had been working; that budget now resets after each attempt
+  that made progress.
+- **Stop on a console job that has not started yet is honoured,** instead of the job running
+  anyway (or being started again after the console forgot it).
+- **Console-to-console sends no longer fall back to the relay while the receiver settles** many
+  small files after the last byte arrived.
+- **Extract all from a .ffpkg works for files over 4 GiB** and no longer holds each file in memory;
+  a .ffpkg with a sparse region reads back at its full length.
+- **Game images from a folder:** a dangling link or a file name with a backslash (or not valid
+  UTF-8) is reported by name before the build starts; reads from network or FUSE mounts no longer
+  fail with a spurious "ended at N of M bytes"; two paths that differ only by letter case are
+  refused together up front. In .exfat images a full-to-the-byte root folder no longer reads into
+  its neighbour, and a file's unwritten tail reads as zeros at its full length.
+- **Health check remedies** no longer contain runs of spaces mid-sentence.
+- **Restart on a queue row keeps the queue going.** After restarting the item that was uploading,
+  the console's other waiting items stayed waiting with nothing running; they now follow as they
+  would have.
+- **An upload rides out an engine that stops answering for a while.** A few seconds of failed
+  progress reads used to count the transfer as lost and re-send the helper, which ended the
+  transfer that was still running. The queue now keeps asking for two minutes, and then re-sends
+  the helper only if it no longer answers.
+- **Files uploads never run the same file twice.** When progress reads failed, the retry started a
+  second upload of the same file beside the first; it now waits for the first one instead.
+- **The web UI recovers an upload that found no helper listening** by having the engine send the
+  helper, as the desktop app does, instead of failing the row.
+- **Reset all data always brings the engine back,** even when removing a file fails, and no longer
+  logs the planned restart as the engine having crashed.
+- **A re-downloaded payload replaces the old copy** instead of sitting beside it, where the old one
+  could be the one sent.
+
+Update the helper for everything below.
+
+- **Built on PS5 Payload SDK v0.45.** The SDK now knows firmware 14.00 and 14.10, so the helper can
+  start there too. Not tested on 14.x yet; tested on 5.10, 9.60 and 13.60.
+- **Disc downloads really work now (#497).** 7.1.19 let the file browser open files on a data disc
+  in the drive, but a download of the same file was still refused with "not allowed". Downloads
+  (and checksums) now follow the same rule as the browser.
+- **Closing an opened save can't damage it any more.** If writing your edits back failed part-way,
+  the real save could be left cut short while the app reported success. The edits are now written
+  to a temporary file first and swapped in only once complete; if that fails the original save is
+  untouched, the app says so, and the edited copy is kept so closing again retries.
+- **"Delete user" with "wipe saves" now removes that user's saves**, and only after the account
+  was actually deleted (before, it looked in the wrong folder and removed nothing).
+- **Backups only take folders the app may manage.** A snapshot of a system path or of the app's
+  own pairing and network-share secrets is refused.
+- **Network shares (console page):**
+  - A share saved without a start folder now scans its whole share for games instead of finding
+    nothing; a share that drops or times out during a scan keeps the previous results instead of
+    replacing them with a partial list; a start folder that no longer exists is reported.
+  - A failed or cancelled copy now shows why it stopped (for example "not enough space") instead
+    of "disconnected" after half a minute.
+  - Files and folders whose names contain `: * ? " < > |` (common on Linux and macOS NAS boxes,
+    e.g. "God of War: Ragnarok") can be browsed, copied and installed.
+  - Replacing a file on a share keeps the old version until the new one is in place, so a failed
+    rename no longer leaves neither.
+  - Removing a share also removes its cached game list and covers.
+  - A key-file read error no longer silently resets the key that protects saved share passwords,
+    and those secrets can no longer be read through the file browser or downloads.
+  - A folder with more than 65,536 entries lists up to 100,000 and says the list is cut short.
+  - Library: pressing Install, Copy or Scan twice quickly no longer starts the same job twice, and a
+    scan whose share connection was lost says so instead of quietly keeping the old list.
+- **Cheats:** a cheat in an XML (SHN) file without a description no longer shows the next
+  cheat's description, and one without a name no longer takes the next cheat's name.
+- **Clean up (console page):** leaving the section no longer leaves its scan running in the helper,
+  and coming back while a removal (or the PC app's clean-up) is still running waits for it instead
+  of showing an empty "busy" list. Stop right after a new scan started stops that scan, not the one
+  before it.
+- **Library (console page):** a scan, copy or install goes on when you leave the section and is
+  shown again, with its outcome, when you come back; Stop works while a package from a share is
+  being copied for an install and disappears once the console's installer has it; a share's last
+  scan that cannot be read is said so instead of "Nothing scanned yet".
+- **Console page:** "Show on TV" from the PC opens the folder again even when Files was last opened
+  at that same folder and you browsed elsewhere since.
+- **Console page:** "Find shares" while editing a saved share uses the saved password when the box
+  is left empty.
+- **Console page:** the share dialog's buttons, "continue on your phone" and the upload picker are
+  spaced on the console's older browser engines too; the Home tasks and drives stop polling while
+  the page is in the background.
+
 ## 7.1.19
 
 Update the helper for everything below.

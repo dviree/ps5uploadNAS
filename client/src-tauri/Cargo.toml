@@ -1,6 +1,6 @@
 [package]
 name = "ps5upload-desktop"
-version = "7.1.19"
+version = "7.3.0"
 description = "The all-in-one PS5 companion app."
 edition = "2021"
 rust-version = "1.77"
@@ -147,6 +147,18 @@ jni = "0.21"
 [features]
 # Default: build Tauri-native (no custom features yet)
 default = []
+
+# Dev builds only (`make run-client`, `cargo test`, CI's clippy/test): the
+# release profile below is untouched. Mirrors engine/Cargo.toml — line tables
+# are enough for a backtrace, and dependencies (tauri, wry, tokio, the image
+# crates) carry no debug info at all, which is most of what the linker chews
+# through on every rebuild. Dependencies stay unoptimized on purpose; see the
+# engine's note on why optimized deps broke timing-sensitive tests.
+[profile.dev]
+debug = "line-tables-only"
+
+[profile.dev.package."*"]
+debug = false
 
 [profile.release]
 # Smaller binary + slightly faster; Tauri recommends these.

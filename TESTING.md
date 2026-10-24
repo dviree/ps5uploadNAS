@@ -20,8 +20,9 @@ npm run validate      # or: make quality
 Runs, and fails on any of: version drift against `VERSION`; script syntax
 (Node, Bash, Python, and PowerShell when `pwsh` is present); the script
 inventory audit; `git whitespace` (`git diff --check`); **engine fmt**,
-**engine clippy** (`-D warnings`) and **engine tests**; **desktop cargo
-check**, **desktop clippy** and **desktop tests**; **client typecheck**,
+**engine clippy** (`-D warnings`) and **engine tests**; **desktop clippy**
+(`--all-targets`, which type-checks everything a `cargo check` would) and
+**desktop tests**; **client typecheck**,
 **client lint**, **client tests** and **client vite build**; and **i18n
 coverage**.
 
@@ -62,7 +63,7 @@ Each self-test lives in `payload/tests/*_selftest.c` (hardware guards, ptrace re
 AVA1 C itself is tested by `ava1-ctest`, which compiles it on the host and checks it against the
 Rust side (see the full gate below).
 
-The SDK version is pinned in `scripts/ps5-sdk.env` (currently **v0.44**)
+The SDK version is pinned in `scripts/ps5-sdk.env` (currently **v0.45**)
 and verified by checksum. Local installers and CI read the same file.
 
 To move to a newer SDK release, run `make update-sdk` (or
@@ -177,12 +178,30 @@ Windows/Linux targets, so CI is the source of truth there.
 make android-deps      # verify SDK / JDK 17 / NDK / rustup target
 make android-build     # debug APK, no device needed
 make android-deploy    # build + install on connected devices
-make run-android       # run on a device with live reload
+make run-android       # run on the emulator (or a plugged-in phone) with live reload
 ```
+
+`make run-android` boots a Pixel 10 Pro XL emulator with its window when no device is attached
+(`PS5UPLOAD_AVD_DEVICE=pixel_9_pro` picks another profile; each gets its own AVD) and shuts it
+down when the run ends, if it booted it.
 
 Android links the engine **in-process** rather than spawning a sidecar,
 so engine startup failures surface differently — check the in-app log.
 `.rar` is desktop-only (the UnRAR C dependency is excluded).
+
+## iPhone
+
+```sh
+make run-ios           # run in the iPhone Simulator with live reload (macOS + Xcode)
+make ios-build         # unsigned .ipa for a real iPhone (sideload it, see the FAQ)
+```
+
+`make run-ios` uses a booted iPhone simulator, or boots the newest Pro Max the installed iOS
+runtimes support (`PS5UPLOAD_IOS_SIM="iPhone 17 Pro"` picks another), and shuts it down at the
+end if it booted it. Xcode needs its iOS platform once: `xcodebuild -downloadPlatform iOS`.
+The simulator shows how the app looks and works and can reach a PS5 on this Mac's network; the
+limits of a real iPhone (background suspension, the local-network prompt) only show on one. As on
+Android the engine runs in-process; unlike Android, `.rar` works.
 
 ## Self-hosted engine
 
@@ -203,8 +222,8 @@ npm run i18n:report       # same, always prints the per-language summary
 ```
 
 `client/src/i18n/locales/en.ts` is the source of truth. A new `tr()` key
-must exist there or the gate fails. Then either translate it into the 18
-locales or add it to `scripts/i18n-known-missing.json` as a deliberate,
+must exist there or the gate fails. Then either translate it into the 20
+other locales (21 locale files in all) or add it to `scripts/i18n-known-missing.json` as a deliberate,
 scoped deferral.
 
 **Do not run `i18n:bootstrap`.** It rewrites the allowlist to the current

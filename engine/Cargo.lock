@@ -147,7 +147,7 @@ checksum = "f2032f911046de80f0a198e0901378627c33f59ea0ac00e363d481118bd70a53"
 
 [[package]]
 name = "ava1"
-version = "7.1.19"
+version = "7.3.0"
 dependencies = [
  "ava1-chaos",
  "blake2 0.11.0",
@@ -165,14 +165,14 @@ dependencies = [
 
 [[package]]
 name = "ava1-chaos"
-version = "7.1.19"
+version = "7.3.0"
 dependencies = [
  "tokio",
 ]
 
 [[package]]
 name = "ava1-ctest"
-version = "7.1.19"
+version = "7.3.0"
 dependencies = [
  "anyhow",
  "ava1",
@@ -188,7 +188,7 @@ dependencies = [
 
 [[package]]
 name = "ava1-gen"
-version = "7.1.19"
+version = "7.3.0"
 dependencies = [
  "serde",
  "toml",
@@ -698,9 +698,9 @@ dependencies = [
 
 [[package]]
 name = "ctutils"
-version = "0.4.2"
+version = "0.4.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7d5515a3834141de9eafb9717ad39eea8247b5674e6066c404e8c4b365d2a29e"
+checksum = "38d28fb6aa7dd680b3ffd1a3e64e115c177bdba63c0ae7f9cd48129ff05c4fa0"
 dependencies = [
  "cmov",
  "subtle",
@@ -2060,7 +2060,7 @@ dependencies = [
 
 [[package]]
 name = "ps5-dump-forge-pfs"
-version = "7.1.19"
+version = "7.3.0"
 dependencies = [
  "flate2",
  "ps5-dump-forge-ufs2",
@@ -2069,7 +2069,7 @@ dependencies = [
 
 [[package]]
 name = "ps5-dump-forge-ufs2"
-version = "7.1.19"
+version = "7.3.0"
 dependencies = [
  "ps5upload-fpkg",
  "ps5upload-pkg",
@@ -2078,7 +2078,7 @@ dependencies = [
 
 [[package]]
 name = "ps5upload-ava1"
-version = "7.1.19"
+version = "7.3.0"
 dependencies = [
  "anyhow",
  "ava1",
@@ -2099,7 +2099,7 @@ dependencies = [
 
 [[package]]
 name = "ps5upload-core"
-version = "7.1.19"
+version = "7.3.0"
 dependencies = [
  "aes 0.9.3",
  "anyhow",
@@ -2121,7 +2121,7 @@ dependencies = [
 
 [[package]]
 name = "ps5upload-engine"
-version = "7.1.19"
+version = "7.3.0"
 dependencies = [
  "aes-gcm 0.11.1",
  "anyhow",
@@ -2163,7 +2163,7 @@ dependencies = [
 
 [[package]]
 name = "ps5upload-fpkg"
-version = "7.1.19"
+version = "7.3.0"
 dependencies = [
  "aes 0.9.3",
  "blake3",
@@ -2186,7 +2186,7 @@ dependencies = [
 
 [[package]]
 name = "ps5upload-lab"
-version = "7.1.19"
+version = "7.3.0"
 dependencies = [
  "anyhow",
  "ava1",
@@ -2204,7 +2204,7 @@ dependencies = [
 
 [[package]]
 name = "ps5upload-pkg"
-version = "7.1.19"
+version = "7.3.0"
 dependencies = [
  "aes 0.9.3",
  "blake3",
@@ -2216,7 +2216,7 @@ dependencies = [
 
 [[package]]
 name = "ps5upload-tests"
-version = "7.1.19"
+version = "7.3.0"
 dependencies = [
  "anyhow",
  "ava1",
@@ -2558,9 +2558,9 @@ dependencies = [
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.15"
+version = "0.103.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f3c3cf1d8b1e7d4927e2d154c3fcb02979afb9939629c62cd9048d4f07b60ac2"
+checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"
 dependencies = [
  "ring",
  "rustls-pki-types",
@@ -3479,9 +3479,9 @@ dependencies = [
 
 [[package]]
 name = "webpki-roots"
-version = "1.0.9"
+version = "1.0.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "7dcd9d09a39985f5344844e66b0c530a33843579125f23e21e9f0f220850f22a"
+checksum = "f5f280bbb2b287bc8e7de7e3852945a0ff50d1bbcb5ed42b6c7a568c546df171"
 dependencies = [
  "rustls-pki-types",
 ]

@@ -1,4 +1,8 @@
-import { Link } from "react-router";
+import { Link, useNavigate } from "react-router";
+import {
+  copyToCollection,
+  openConsoleCopyInConvert,
+} from "../../lib/collectionActions";
 import { gamePath } from "../../lib/gamePage";
 import { useMakeWay } from "../../lib/useMakeWay";
 import { useTrackedPlay, type TrackedPlay } from "../../lib/trackedPlay";
@@ -42,6 +46,8 @@ import {
   Play,
   Unplug,
   Download,
+  HardDriveDownload,
+  Shrink,
   FolderInput,
   Search,
   X,
@@ -126,6 +132,7 @@ import { formatBytes } from "../../lib/format";
 import { mgmtAddr, transferAddr } from "../../lib/addr";
 import { useImageRetry } from "../../lib/useImageRetry";
 import { useStaleHostGuard } from "../../lib/staleHostGuard";
+import { isTauriEnv } from "../../lib/tauriEnv";
 import { createLimiter } from "../../lib/limitConcurrency";
 import { deleteWithRetry } from "../../lib/deleteWithRetry";
 import { filterLibraryEntries } from "../../lib/libraryFilter";
@@ -292,6 +299,11 @@ export default function LibraryScreen() {
       //      basename is the only link back to the row.
       // Both go into one map; images look themselves up under both keys.
       const registeredBySource = new Map<string, RegisteredTitle>();
+      const pkgInstalled = new Set(
+        registered.titles
+          .filter((t) => t.origin === "pkg")
+          .map((t) => t.titleId.toUpperCase()),
+      );
       for (const t of registered.titles) {
         // Only "registered" titles carry a source path; a plain .pkg install
         // has none and would collide on the empty-string key.
@@ -338,7 +350,7 @@ export default function LibraryScreen() {
       // after mounting" fix) — the same logic that used to live inline here.
       useLibraryStore
         .getState()
-        .setData(host, result, next, writable, registeredBySource);
+        .setData(host, result, next, writable, registeredBySource, pkgInstalled);
     } catch (e) {
       if (isStale()) return;
       setError(e instanceof Error ? e.message : String(e));
@@ -923,6 +935,14 @@ function LibraryRowImpl({
   onChanged: () => void;
 }) {
   const tr = useTr();
+  const navigate = useNavigate();
+  // A game folder of a game the console also has installed from a package: a second copy.
+  const alsoInstalled = useLibraryStore(
+    (s) =>
+      entry.kind === "game" &&
+      !!entry.titleId &&
+      libraryForHost(s, host).pkgInstalled.has(entry.titleId.toUpperCase()),
+  );
   const Icon = entry.kind === "game" ? Gamepad2 : FileArchive;
   const runningTitleIds = useRunningTitleIds(host);
   const isTitleRunning =
@@ -2079,17 +2099,29 @@ function LibraryRowImpl({
       // the hand-off exists to avoid.
       const mgmt = mgmtAddr(host);
       let handedToSmp = false;
-      try {
-        if (smpRunning) {
-          const r = await smpManualInstall(mgmt, entry.path);
-          handedToSmp = true;
-          setMountNote(
-            smpHandoffNote(entry.name, { added: r.added, chosePath: false }),
+      if (smpRunning) {
+        // smpManualInstall only appends to SMP's manual.lst through the
+        // helper; it never asks SMP anything. A throw is that write failing
+        // (or timing out after it landed), not "SMP is gone": registering
+        // here as well would race SMP for /user/app + app.db, so say what
+        // happened and stop. The user can try again.
+        let r: { added: boolean };
+        try {
+          r = await smpManualInstall(mgmt, entry.path);
+        } catch (e) {
+          const wrapped = new Error(
+            `Couldn't hand this game to ShadowMount+, which is running and adds games itself, so ps5upload did not register it too. Try again. (${
+              e instanceof Error ? e.message : String(e)
+            })`,
           );
-          onChanged();
+          (wrapped as Error & { cause?: unknown }).cause = e;
+          throw wrapped;
         }
-      } catch {
-        handedToSmp = false; // SMP unreachable → register it ourselves
+        handedToSmp = true;
+        setMountNote(
+          smpHandoffNote(entry.name, { added: r.added, chosePath: false }),
+        );
+        onChanged();
       }
       if (!handedToSmp) {
         const res = await appRegister(consoleAddr(host), entry.path, {
@@ -2353,6 +2385,18 @@ function LibraryRowImpl({
               </span>
             </div>
           )}
+          {alsoInstalled && (
+            <div
+              className="mt-1 ml-1 inline-flex items-center gap-1 rounded-full border border-[var(--color-warn)] px-1.5 py-0.5 text-xs font-medium text-[var(--color-warn)]"
+              title={tr(
+                "library_badge_also_installed_hint",
+                undefined,
+                "This PS5 also has this game installed from a package, so this folder is a second copy. Delete it, or copy it to your Collection first, to free the space.",
+              )}
+            >
+              {tr("library_badge_also_installed", undefined, "Also installed")}
+            </div>
+          )}
         </div>
         <div className="ml-auto flex shrink-0 flex-wrap items-center gap-1">
           {entry.kind === "image" ? (
@@ -2594,22 +2638,24 @@ function LibraryRowImpl({
                     "Remove the XMB tile. Source files on disk are not touched.",
                   ),
                 });
-                items.push({
-                  label: tr(
-                    "library_heal_metadata",
-                    undefined,
-                    "Heal home-screen metadata",
-                  ),
-                  icon: <Sparkles size={12} />,
-                  onSelect: runHealAppmeta,
-                  disabled: busy !== null,
-                  loading: busy === "heal",
-                  title: tr(
-                    "library_heal_metadata_tooltip",
-                    undefined,
-                    "Copies missing icon0.png / param.json / snd0.at9 from this game's sce_sys/ to /user/appmeta/<title_id>/. Idempotent — files already present are left alone. Use when the home-screen tile is blank or the menu music is missing.",
-                  ),
-                });
+                // heal_appmeta is a desktop-only command (no engine route).
+                if (isTauriEnv())
+                  items.push({
+                    label: tr(
+                      "library_heal_metadata",
+                      undefined,
+                      "Heal home-screen metadata",
+                    ),
+                    icon: <Sparkles size={12} />,
+                    onSelect: runHealAppmeta,
+                    disabled: busy !== null,
+                    loading: busy === "heal",
+                    title: tr(
+                      "library_heal_metadata_tooltip",
+                      undefined,
+                      "Copies missing icon0.png / param.json / snd0.at9 from this game's sce_sys/ to /user/appmeta/<title_id>/. Idempotent — files already present are left alone. Use when the home-screen tile is blank or the menu music is missing.",
+                    ),
+                  });
                 items.push({
                   label: tr(
                     "library_backup_to_folder",
@@ -2646,6 +2692,69 @@ function LibraryRowImpl({
                 ),
               });
             }
+            // Convert reads a console copy in place and puts what it makes in its place.
+            if (entry.imageFormat !== "ffpfs") {
+              items.push({
+                label: tr("collection.convert", undefined, "Convert…"),
+                icon: <PackageOpen size={12} />,
+                onSelect: () => openConsoleCopyInConvert(navigate, host, entry.path),
+                title: tr(
+                  "library_convert_hint",
+                  undefined,
+                  "Open it in Convert: an installable package or another game image, made from it here on the PS5.",
+                ),
+              });
+            }
+            if (
+              entry.kind === "game" ||
+              entry.imageFormat === "exfat" ||
+              entry.imageFormat === "ffpkg"
+            ) {
+              items.push({
+                label: tr("collection.shrink", undefined, "Make it smaller…"),
+                icon: <Shrink size={12} />,
+                onSelect: () =>
+                  openConsoleCopyInConvert(navigate, host, entry.path, { compress: true }),
+                title: tr(
+                  "library_shrink_hint",
+                  undefined,
+                  "Open it in Convert set to a compressed game image (.ffpfsc), which replaces this copy on the PS5 and frees the difference. How much depends on the game.",
+                ),
+              });
+            }
+            items.push({
+              label: tr("installed_copy_to_collection", undefined, "Copy to Collection"),
+              icon: <HardDriveDownload size={12} />,
+              title: tr(
+                "library_copy_to_collection_hint",
+                undefined,
+                "Download it into your Collection on this computer; it shows there once it is done.",
+              ),
+              onSelect: () =>
+                void copyToCollection({
+                  host,
+                  path: entry.path,
+                  kind: entry.kind === "image" ? "file" : "folder",
+                  label: entry.name,
+                  doneTitle: tr(
+                    "collection.copied_title",
+                    { title: entry.name },
+                    "{title} is in your Collection",
+                  ),
+                  failedTitle: tr("collection.copy_failed", undefined, "Copy to Collection failed"),
+                }).then((ok) => {
+                  if (!ok)
+                    pushNotification(
+                      "warning",
+                      tr(
+                        "collection.no_local_root",
+                        undefined,
+                        "Add a folder on this computer to the Collection first.",
+                      ),
+                      { link: "/collection" },
+                    );
+                }),
+            });
             items.push({
               label: tr("library_download", undefined, "Download"),
               icon: <Download size={12} />,

@@ -196,19 +196,55 @@ fn config_base_dir(app: &AppHandle) -> Result<PathBuf, String> {
 ///     the engine's cached cover art under `cache/icons/`, and any legacy
 ///     `*.ini` / profile files — the whole dir is exclusively
 ///     ours, so it's removed wholesale and recreated empty.
-///   - app_data caches (resume_txids.json, send_payload_history.json, the
-///     payloads/ cache) — removed surgically so we never touch the WebView's
-///     own storage that can also live under app_data_dir.
+///   - app_data stores (resume_txids.json, send_payload_history.json,
+///     upload_queue.json, payload_playlists.json) — removed surgically so we
+///     never touch the WebView's own storage that can also live under
+///     app_data_dir.
+///   - the downloaded-payload cache and the user's custom repos under
+///     app_local_data_dir/payloads.
 ///
-/// The renderer owns clearing its localStorage + reloading the window; this
-/// command only touches the filesystem. Returns a count of items removed.
+/// The engine sidecar keeps its connections and identity in memory and writes
+/// them back under the config base dir, so it is stopped before the wipe and
+/// started again afterwards (a remote engine is left alone). The renderer owns
+/// clearing its localStorage + reloading the window; this command only touches
+/// the filesystem. Returns a count of items removed.
 #[tauri::command]
 pub async fn app_data_reset(app: AppHandle) -> Result<usize, String> {
+    // 0. Stop the sidecar so it cannot recreate what is removed below.
+    crate::engine::stop().await;
+
+    // 1-3. A failed step is returned only after the restart below: an early
+    //      return left the app with no engine until it was relaunched.
+    let wiped = wipe_app_data(&app);
+
+    // 4. Bring the sidecar back so the reloaded window finds an engine. A
+    //    failure here is logged, not returned: the data is gone, and the
+    //    renderer's status polling reports an unreachable engine on its own.
+    match crate::engine::start(&app).await {
+        Ok(url) => {
+            use tauri::Emitter;
+            let _ = app.emit("ps5upload-engine-ready", &url);
+        }
+        Err(e) => {
+            // Not eprintln!: it panics when the parent's stderr is gone.
+            use std::io::Write;
+            let _ = writeln!(
+                std::io::stderr(),
+                "[tauri] engine restart after data reset failed: {e:#}"
+            );
+        }
+    }
+
+    wiped
+}
+
+/// Steps 1-3 of [`app_data_reset`]: the filesystem wipe, with the engine stopped.
+fn wipe_app_data(app: &AppHandle) -> Result<usize, String> {
     let mut removed = 0usize;
 
     // 1. Config base dir — remove wholesale, then recreate empty so later
     //    writes don't fail on a missing parent.
-    if let Ok(base) = config_base_dir(&app) {
+    if let Ok(base) = config_base_dir(app) {
         if base.exists() {
             std::fs::remove_dir_all(&base).map_err(|e| format!("remove {base:?}: {e}"))?;
             removed += 1;
@@ -216,21 +252,34 @@ pub async fn app_data_reset(app: AppHandle) -> Result<usize, String> {
         let _ = std::fs::create_dir_all(&base);
     }
 
-    // 2. app_data caches — surgical (NOT the whole app_data_dir).
+    // 2. app_data stores — surgical (NOT the whole app_data_dir).
+    let mut targets: Vec<std::path::PathBuf> = Vec::new();
     if let Ok(data) = app.path().app_data_dir() {
-        for entry in ["resume_txids.json", "send_payload_history.json", "payloads"] {
-            let p = data.join(entry);
-            if !p.exists() {
-                continue;
-            }
-            let r = if p.is_dir() {
-                std::fs::remove_dir_all(&p)
-            } else {
-                std::fs::remove_file(&p)
-            };
-            r.map_err(|e| format!("remove {p:?}: {e}"))?;
-            removed += 1;
+        for entry in [
+            "resume_txids.json",
+            "send_payload_history.json",
+            "upload_queue.json",
+            "payload_playlists.json",
+            "payloads",
+        ] {
+            targets.push(data.join(entry));
         }
+    }
+    // 3. The payload cache and custom repos (app_local_data_dir/payloads).
+    if let Ok(local) = app.path().app_local_data_dir() {
+        targets.push(local.join("payloads"));
+    }
+    for p in targets {
+        if !p.exists() {
+            continue;
+        }
+        let r = if p.is_dir() {
+            std::fs::remove_dir_all(&p)
+        } else {
+            std::fs::remove_file(&p)
+        };
+        r.map_err(|e| format!("remove {p:?}: {e}"))?;
+        removed += 1;
     }
 
     Ok(removed)

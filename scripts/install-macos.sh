@@ -9,7 +9,7 @@
 #     (the Makefile discovers Homebrew's current LLVM prefix automatically)
 #   - Rust toolchain (rustup, stable, default profile)
 #   - Repository-pinned PS5 Payload SDK → $PS5_PAYLOAD_SDK
-#     (currently v0.44; default $HOME/ps5-payload-sdk)
+#     (currently v0.45; default $HOME/ps5-payload-sdk)
 #
 # After it finishes the script prints the env exports you need to add to ~/.zshrc
 # (or ~/.bash_profile) so `make build` and `make run-client` work in any new shell.
@@ -108,7 +108,9 @@ PS5_SDK_INSTALL_DIR="$SDK_DIR" "$REPO_ROOT/scripts/install-ps5-sdk.sh"
 # ─── 6. client npm deps ────────────────────────────────────────────────────────
 if [ -d "$REPO_ROOT/client" ]; then
   log "Installing client npm dependencies"
-  (cd "$REPO_ROOT/client" && npm install --no-audit --no-fund)
+  # `npm ci`, never `npm install`: see NPM_INSTALL in the root Makefile (npm 10
+  # strips the lockfile's libc fields that the Alpine web UI image relies on).
+  (cd "$REPO_ROOT/client" && npm ci --no-audit --no-fund)
   ok "client/node_modules ready"
 fi
 

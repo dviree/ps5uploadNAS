@@ -5,8 +5,10 @@ import {
   useEffect,
   useMemo,
   useState,
+  useRef,
 } from "react";
 import { invoke } from "../../lib/invokeLogged";
+import { isTauriEnv } from "../../lib/tauriEnv";
 import { filterInstalledTitles } from "../../lib/installedFilter";
 import {
   Gamepad2,
@@ -29,7 +31,7 @@ import {
   EyeOff,
 } from "lucide-react";
 
-import { Link, useNavigate } from "react-router";
+import { Link, useLocation, useNavigate } from "react-router";
 import { gamePath } from "../../lib/gamePage";
 import { openInFileSystem } from "../../state/fsNavigation";
 import { useConnectionStore } from "../../state/connection";
@@ -91,6 +93,11 @@ import { transferScreenBusy } from "../../lib/ps5Transfers";
 import { useStaleHostGuard } from "../../lib/staleHostGuard";
 import { isBackportEligible } from "../../lib/backport";
 import { BackportPanel } from "./BackportPanel";
+import {
+  CollectionTag,
+  useCollectionForConsole,
+  useCollectionItems,
+} from "./collectionLink";
 import { hiddenIcons, setIconHidden } from "../../api/hiddenIcons";
 import { EMPTY_CORPUS, loadFakelibCorpus, type FakelibCorpus } from "../../state/fakelibCorpus";
 
@@ -365,6 +372,7 @@ export const AppCard = memo(function AppCard({
   const tr = useTr();
   const lang = useLangStore((s) => s.lang);
   const navigate = useNavigate();
+  const collectionItems = useCollectionItems(host, title);
   const canPlay = !title.system;
   // On-console folder this title lives in — only folder/disc kinds carry a
   // source path (pkg-installed/system titles don't), so the open-folder
@@ -382,6 +390,11 @@ export const AppCard = memo(function AppCard({
             <span className="absolute left-2 top-2">
               <PlatformTag platform={platformOf(title)} />
             </span>
+            {!title.system && (
+              <span className="absolute bottom-2 left-2">
+                <CollectionTag host={host} titleId={title.titleId} />
+              </span>
+            )}
             {discNeedsSmp ? (
               <span className="absolute right-2 top-2">
                 <CoverTag
@@ -603,6 +616,7 @@ export const AppCard = memo(function AppCard({
             ariaLabel={tr("installed_more_actions", undefined, "More actions")}
             buttonTitle={tr("installed_more_actions", undefined, "More actions")}
             items={[
+              ...collectionItems,
               ...(backportEligible
                 ? [
                     {
@@ -714,6 +728,9 @@ function Section({
 
 
 export default function InstalledAppsScreen() {
+  const collectionHost = useConnectionStore((s) => s.host?.trim() ?? "");
+  const collectionUp = useConnectionStore((s) => s.payloadStatus === "up");
+  useCollectionForConsole(collectionHost, collectionUp);
   const tr = useTr();
   const host = useConnectionStore((s) => s.host);
   // Kernel R/W = a jailbroken entry point (kstuff) is active. Without it,
@@ -724,6 +741,19 @@ export default function InstalledAppsScreen() {
   const [titles, setTitles] = useState<InstalledTitle[] | null>(null);
   const [sdkState, setSdkState] = useState<SdkScanResponse>({ titles: [] });
   const [backportTitle, setBackportTitle] = useState<InstalledTitle | null>(null);
+  // A game handed over for backporting (the Collection's "Backport…"): its panel opens once
+  // the list has it.
+  const handedBackport = (useLocation().state as { backportTitleId?: string } | null)
+    ?.backportTitleId;
+  const backportOpened = useRef<string | null>(null);
+  useEffect(() => {
+    if (!handedBackport || !titles || backportOpened.current === handedBackport) return;
+    const t = titles.find((x) => x.titleId.toUpperCase() === handedBackport.toUpperCase());
+    if (t) {
+      backportOpened.current = handedBackport;
+      setBackportTitle(t);
+    }
+  }, [handedBackport, titles]);
   /* The corpus is built by the user from games they own — we cannot ship Sony
    * libraries — so an empty one is the ordinary state for a new user, and the
    * panel offers the two ways to fill it rather than reporting a failure.
@@ -1523,19 +1553,32 @@ export default function InstalledAppsScreen() {
             )}
             action={
               <div className="flex flex-wrap items-center gap-2">
-                <Button
-                  variant="primary"
-                  size="sm"
-                  disabled={smpSending}
-                  onClick={() => void handleSendSmp()}
-                >
-                  {smpSending ? (
-                    <Spinner size={14} />
-                  ) : (
-                    <Download size={14} />
-                  )}
-                  {tr("installed_smp_send", undefined, "Send ShadowMount+")}
-                </Button>
+                {/* payloads_local_path / payload_send are desktop-only commands:
+                    the browser build sends payloads from the Payloads screen
+                    (the engine holds the files there). */}
+                {isTauriEnv() ? (
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    disabled={smpSending}
+                    onClick={() => void handleSendSmp()}
+                  >
+                    {smpSending ? (
+                      <Spinner size={14} />
+                    ) : (
+                      <Download size={14} />
+                    )}
+                    {tr("installed_smp_send", undefined, "Send ShadowMount+")}
+                  </Button>
+                ) : (
+                  <Link to="/payloads" className="text-xs text-[var(--color-accent)] underline">
+                    {tr(
+                      "installed_smp_send_browser",
+                      undefined,
+                      "Send it from Payloads → On your PS5.",
+                    )}
+                  </Link>
+                )}
                 {smpMsg ? (
                   <span className="text-xs text-[var(--color-muted)]">
                     {smpMsg}

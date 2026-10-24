@@ -1162,6 +1162,7 @@ export function FilesView(p: FilesViewProps) {
                     statusText(st),
                     p.selecting && view.filter ? t("cw_files_filter_on") : null,
                     capped ? t("cw_files_capped", { n: p.dir.entries.length }) : null,
+                    p.dir.truncated ? t("cw_files_list_truncated") : null,
                     vol ? t("cw_files_free", { free: formatBytes(vol.free_bytes) }) : null,
                   ]
                     .filter(Boolean)
@@ -1291,7 +1292,6 @@ function byAttr(root: Element, attr: string, value: string): HTMLElement | null 
 /** The Files section: drives → folders, with the actions sheet, select, copy/move, viewer. */
 export function Files({ ctx }: { ctx: SectionContext }) {
   const wanted = ctx.params?.path ?? null;
-  const wantedFocus = ctx.params?.focus ?? "";
   const [path, setPath] = useState<string | null>(wanted);
   const [volumesTick, setVolumesTick] = useState(0);
   const { volumes, error: volumesError } = useVolumes(path, volumesTick);
@@ -1365,10 +1365,13 @@ export function Files({ ctx }: { ctx: SectionContext }) {
   }, []);
 
   // Home's Browse USB (or any openSection) opens a path: like any folder change,
-  // the selection is cleared and focus goes to its first row.
+  // the selection is cleared and focus goes to its first row. Keyed on the params
+  // object, not its strings: the PC's "Show on TV" of the folder Files was
+  // already opened at must open it again after the user browsed elsewhere.
+  const params = ctx.params;
   useEffect(() => {
-    if (wanted != null) go(wanted, wantedFocus);
-  }, [wanted, wantedFocus, go]);
+    if (params?.path != null) go(params.path, params.focus ?? "");
+  }, [params, go]);
   // Opened by the PC ("Show on TV"): say so, or that the folder is gone.
   useHandoffNotice(ctx.params, setMessage);
   const uploadingHere = useMemo(() => uploadingNames(path, uploading), [path, uploading]);

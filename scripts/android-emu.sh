@@ -2,7 +2,7 @@
 #
 # Android emulator lifecycle for testing the app without a physical device.
 #
-# Subcommands: create | start | ensure | stop | status | test
+# Subcommands: create | start | ensure | stop | status | grant [--wait] | test
 #
 #   ensure  reuses a running (or still-booting) emulator or attached device,
 #           and boots one only when there is none. With PS5UPLOAD_EMU_WINDOW=1
@@ -22,8 +22,8 @@
 # its window, so the app can be seen and used (make run-android does this;
 # make run-android-background and make emu-test stay headless).
 #
-# Performance: software rendering (PS5UPLOAD_EMU_GPU=host opts into the Mac's
-# GPU, which is faster but froze Android 16 in testing). 4 GB RAM
+# Performance: the Mac's GPU on macOS (PS5UPLOAD_EMU_GPU=swiftshader_indirect for software
+# rendering, the default elsewhere). 4 GB RAM
 # (PS5UPLOAD_EMU_MEMORY_MB) and half the host's cores up to 6
 # (PS5UPLOAD_EMU_CORES) — the AVD's own 2 GB / 4 cores made Android 16 crawl.
 #
@@ -40,7 +40,11 @@ EMULATOR="$SDK/emulator/emulator"
 ADB="$SDK/platform-tools/adb"
 AVDMANAGER="$SDK/cmdline-tools/latest/bin/avdmanager"
 
-AVD_NAME="${PS5UPLOAD_AVD:-ps5upload-test}"
+# The phone the emulator imitates (any `avdmanager list device -c` id). Each device gets its own
+# AVD, so switching never rebuilds one in place. pixel_10_pro_xl needs command-line tools 23+;
+# an older SDK falls back to the newest Pixel Pro XL it knows (see device_profile).
+AVD_DEVICE="${PS5UPLOAD_AVD_DEVICE:-pixel_10_pro_xl}"
+AVD_NAME="${PS5UPLOAD_AVD:-ps5upload-$AVD_DEVICE}"
 APP_ID="com.phantomptr.ps5upload"
 # Boot can be slow on a cold AVD; well past that and something is wrong, so
 # fail loudly rather than hang a CI job or a developer's terminal forever.
@@ -135,13 +139,51 @@ wait_booted() {
 
 # Raise the emulator's window. Best effort: macOS via AppleScript, Linux via
 # wmctrl when it is installed; elsewhere the window simply stays where it is.
+# A test emulator, so no "isn't responding" dialogs: with software rendering the first boot of a
+# big-screen profile (Pixel 10 Pro XL, 1344x2992) is slow enough that the launcher misses its
+# input deadline, and the dialog sat over the home screen. Hide those dialogs (a developer
+# setting, it keeps working) and go home, which also restarts a launcher the dialog closed.
+settle_after_boot() {
+  "$ADB" -s "$1" shell settings put global hide_error_dialogs 1 >/dev/null 2>&1 || true
+  "$ADB" -s "$1" shell input keyevent KEYCODE_HOME >/dev/null 2>&1 || true
+}
+
 bring_to_front() {
   case "$(uname -s)" in
     Darwin)
-      osascript -e 'tell application "System Events" to set frontmost of (first process whose unix id is '"$(pgrep -f "qemu-system.*-avd $AVD_NAME" | head -1)"') to true' >/dev/null 2>&1 || true ;;
+      # macOS registers the emulator's binary as its "app", so `open -a <that binary>`
+      # activates the running emulator (it does not start a second one) with no extra
+      # permission. Scripted activation (System Events, NSRunningApplication) is refused or
+      # needs Accessibility permission, which left the window behind everything else.
+      local pid bin; pid="$(pgrep -f "qemu-system.*-avd $AVD_NAME" | head -1)"
+      [ -n "$pid" ] || return 0
+      bin="$(ps -o comm= -p "$pid" 2>/dev/null)"
+      [ -x "$bin" ] || return 0
+      # Twice: right after boot the first request can land before the window is ready. macOS
+      # may still keep the window behind an app you are typing in (focus-steal protection).
+      open -a "$bin" >/dev/null 2>&1 || true
+      sleep 1
+      open -a "$bin" >/dev/null 2>&1 || true
+      say "  The emulator window is open (its Dock icon is qemu-system-aarch64)." >&2 ;;
     Linux)
       command -v wmctrl >/dev/null 2>&1 && wmctrl -a "Android Emulator" >/dev/null 2>&1 || true ;;
   esac
+}
+
+# The requested device profile, or (on command-line tools that predate it) the newest Pixel
+# Pro XL this SDK knows, with a note on how to get the requested one.
+device_profile() {
+  local known; known="$("$AVDMANAGER" list device -c 2>/dev/null)"
+  if printf '%s\n' "$known" | grep -qx "$AVD_DEVICE"; then
+    printf '%s\n' "$AVD_DEVICE"
+    return
+  fi
+  local fallback
+  fallback="$(printf '%s\n' "$known" | grep -E '^pixel_[0-9]+_pro_xl$' | sort -t_ -k2,2n | tail -n1)"
+  [ -n "$fallback" ] || fallback="pixel_6"
+  say "  $AVD_DEVICE is not known to these command-line tools; using $fallback. Update them for it:" >&2
+  say "    $SDK/cmdline-tools/latest/bin/sdkmanager 'cmdline-tools;latest'" >&2
+  printf '%s\n' "$fallback"
 }
 
 cmd_create() {
@@ -153,10 +195,11 @@ cmd_create() {
   local img
   img="$(pick_image)" || die "no arm64-v8a system image installed. Install one:
   $SDK/cmdline-tools/latest/bin/sdkmanager 'system-images;android-36.1;google_apis;arm64-v8a'"
-  say "Creating AVD '$AVD_NAME' from $img ..."
-  # `-d pixel_6` gives a sane screen size; without a device profile the AVD
-  # defaults to a shape that makes screenshots hard to read.
-  printf 'no\n' | "$AVDMANAGER" create avd -n "$AVD_NAME" -k "$img" -d pixel_6 --force >/dev/null \
+  local device; device="$(device_profile)"
+  say "Creating AVD '$AVD_NAME' ($device) from $img ..."
+  # A device profile gives the real phone's screen; without one the AVD defaults to a shape
+  # that makes screenshots hard to read.
+  printf 'no\n' | "$AVDMANAGER" create avd -n "$AVD_NAME" -k "$img" -d "$device" --force >/dev/null \
     || die "avdmanager could not create the AVD"
   say "✓ Created AVD '$AVD_NAME'"
 }
@@ -180,11 +223,15 @@ cmd_start() {
   fi
   "$EMULATOR" -list-avds 2>/dev/null | grep -qx "$AVD_NAME" || cmd_create
 
-  # Software rendering by default, windowed or not. The host GPU (-gpu host)
-  # is faster but froze the Android 16 image within minutes on an M1 Max —
-  # the emulator itself warns its guest GL layer is unstable above API 35 —
-  # so it is opt-in: PS5UPLOAD_EMU_GPU=host.
-  local gpu="${PS5UPLOAD_EMU_GPU:-swiftshader_indirect}"
+  # The Mac's GPU by default on macOS: measured 2026-10-24 on emulator 36.5.11 with the
+  # android-36.1 arm64 image (Pixel 10 Pro XL), cold boot 20 s instead of 80, median frame
+  # 26 ms instead of 97, and 12 rounds of monkey stress over ~8 minutes with no freeze. (An
+  # older emulator froze the Android 16 image within minutes on host GPU, which is why software
+  # rendering used to be the default.) Elsewhere, and if it ever misbehaves again, software
+  # rendering: PS5UPLOAD_EMU_GPU=swiftshader_indirect.
+  local default_gpu=swiftshader_indirect
+  [ "$(uname -s)" = Darwin ] && default_gpu=host
+  local gpu="${PS5UPLOAD_EMU_GPU:-$default_gpu}"
   local window_flags=(-no-window -gpu "$gpu")
   if [ "${PS5UPLOAD_EMU_WINDOW:-0}" = "1" ]; then
     window_flags=(-gpu "$gpu")
@@ -223,6 +270,7 @@ cmd_start() {
       if [ "$booted" = "1" ]; then
         trap - INT TERM
         say "✓ Emulator booted ($serial) after ${waited}s"
+        settle_after_boot "$serial"
         return 0
       fi
     fi
@@ -303,6 +351,32 @@ cmd_status() {
 # here had three separate faults hiding behind a `make run-android` that
 # printed nothing and exited 0; the screenshot was the only thing that told
 # the truth. An exit code is not evidence that the app came up.
+# Pre-grant every runtime permission the app asks for, so a run on the test emulator never
+# stops at a prompt: notifications, local network (Android 17) / nearby Wi-Fi, legacy storage,
+# and all-files access (an app-op, granted in Settings on a phone). Emulators only: a phone you
+# plugged in keeps asking, as it would for a user. With --wait it first waits (up to 10 min)
+# for the app to be installed, since run-android installs it part-way through.
+cmd_grant() {
+  need_tools
+  local serial; serial="$(emu_serial)"
+  [ -n "$serial" ] || { say "No emulator running; nothing to grant" >&2; return 0; }
+  if [ "${1:-}" = "--wait" ]; then
+    local waited=0
+    until "$ADB" -s "$serial" shell pm path "$APP_ID" 2>/dev/null | grep -q '^package:'; do
+      [ "$waited" -lt 600 ] || { say "$APP_ID was not installed within 10 min; no permissions granted" >&2; return 0; }
+      sleep 3; waited=$((waited + 3))
+    done
+  fi
+  local p granted=""
+  for p in POST_NOTIFICATIONS ACCESS_LOCAL_NETWORK NEARBY_WIFI_DEVICES READ_EXTERNAL_STORAGE WRITE_EXTERNAL_STORAGE; do
+    # A permission this Android version does not have, or the app does not declare, is skipped.
+    "$ADB" -s "$serial" shell pm grant "$APP_ID" "android.permission.$p" >/dev/null 2>&1 && granted="$granted $p"
+  done
+  "$ADB" -s "$serial" shell appops set --uid "$APP_ID" MANAGE_EXTERNAL_STORAGE allow >/dev/null 2>&1 \
+    && granted="$granted all-files-access"
+  say "✓ Granted on $serial:${granted:- nothing}" >&2
+}
+
 cmd_test() {
   need_tools
   local apk="client/src-tauri/gen/android/app/build/outputs/apk/universal/debug/app-universal-debug.apk"
@@ -336,14 +410,8 @@ cmd_test() {
       cat "$out/install.log"; die "install failed — see $out/install.log"
     fi
   fi
+  cmd_grant
   say "✓ Installed"
-
-  # Pre-grant the runtime permissions the app asks for on first run. Without
-  # this the very first screencap is a system permission dialog covering the
-  # UI, which is exactly the frame we need to be able to read.
-  for perm in android.permission.POST_NOTIFICATIONS; do
-    "$ADB" -s "$serial" shell pm grant "$APP_ID" "$perm" >/dev/null 2>&1 || true
-  done
 
   "$ADB" -s "$serial" logcat -c >/dev/null 2>&1
 
@@ -395,7 +463,10 @@ case "${1:-}" in
   create) cmd_create ;;
   start)  cmd_start ;;
   ensure) cmd_ensure ;;
-  stop)   cmd_stop ;;
+  # Waits for the process to exit: a start right after a bare `emu kill` found the old one
+  # still shutting down, "reused" it, and then lost it.
+  stop)   stop_and_wait ;;
+  grant)  shift; cmd_grant "$@" ;;
   status) cmd_status ;;
   test)   cmd_test ;;
   *) die "usage: $0 {create|start|ensure|stop|status|test}" ;;

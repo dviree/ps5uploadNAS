@@ -30,7 +30,7 @@ export PS5_PAYLOAD_SDK
 PS5_SDK_TAG := $(shell sed -n 's/^PS5_SDK_TAG=//p' scripts/ps5-sdk.env 2>/dev/null)
 
 # On macOS the payload SDK's `prospero-clang` wrapper resolves `ld.lld`
-# and `clang` through `prospero-llvm-config`. SDK v0.44 supports LLVM 16–23.
+# and `clang` through `prospero-llvm-config`. SDK v0.45 supports LLVM 16–23.
 # Homebrew exposes the current major as `llvm` (not `llvm@23`), so discover
 # its real prefix and retain versioned fallbacks for older installations.
 # Linux/WSL picks up `llvm-config-<N>` from apt naturally.
@@ -104,7 +104,7 @@ ADB ?= $(ANDROID_HOME)/platform-tools/adb
 .PHONY: run-engine run-client dev start _check-tauri-system-deps
 .PHONY: install-engine uninstall-engine
 .PHONY: dist dist-win dist-win-arm dist-mac dist-mac-x64 dist-linux dist-linux-arm
-.PHONY: android-deps android-init android-build android-deploy _android-install-if-device run-android run-android-background
+.PHONY: ios-init ios-build run-ios android-deps android-init android-build android-deploy _android-install-if-device run-android run-android-background
 .PHONY: emu-create emu-start emu-stop emu-status emu-test
 .PHONY: send-payload gen-fixtures sweep validate validate-xl
 .PHONY: sync-version sync-version-check
@@ -178,6 +178,8 @@ help:
 	@echo "  make android-deploy   - Build APK + install/update it on connected device(s)"
 	@echo "  make android-build    - Build a debug APK (no device needed)"
 	@echo "  make android-init     - One-time: scaffold src-tauri/gen/android"
+	@echo "  make ios-build        - Build an unsigned iPhone .ipa for sideloading (macOS + Xcode)"
+	@echo "  make run-ios          - Run the app in the iPhone Simulator with live reload (macOS + Xcode)"
 	@echo "  make android-deps     - Check the Android toolchain is ready"
 	@echo "  make emu-test         - Build + run the app on a headless emulator, with a screenshot"
 	@echo "  make emu-start        - Boot the test emulator (headless); emu-stop to shut it down"
@@ -701,6 +703,47 @@ android-build: android-deps payload setup-client
 	@apk=$$(find "$(ANDROID_GEN_DIR)/app/build/outputs/apk" -name 'app-*-debug.apk' -print -quit 2>/dev/null); \
 		echo "✓ APK built: $${apk:-under $(ANDROID_GEN_DIR)/app/build/outputs/apk}"
 
+# iPhone: an unsigned .ipa for sideloading (AltStore, Sideloadly), as the release
+# builds it. macOS with Xcode only; Xcode needs its iOS platform once
+# (`xcodebuild -downloadPlatform iOS`).
+IOS_GEN_DIR := $(CLIENT_DIR)/src-tauri/gen/apple
+
+ios-init: setup-client
+	@echo "Scaffolding iOS project (tauri ios init)..."
+	@cd $(CLIENT_DIR) && npx tauri ios init --ci
+	@bash scripts/release/ios-postinit-patch.sh
+
+ios-build: payload setup-client
+	@test -d $(IOS_GEN_DIR) || $(MAKE) ios-init
+	@bash scripts/release/ios-postinit-patch.sh
+	@echo "Building unsigned iPhone IPA (arm64)..."
+	@cd $(CLIENT_DIR) && npx tauri ios build --ci --target aarch64 --no-sign
+	@python3 scripts/release/verify-ios-ipa.py output/PS5Upload-ios-unsigned.ipa
+
+# iPhone Simulator: see the app on a simulated iPhone, with live reload, like run-android.
+# Reuses a booted iPhone simulator or boots one (scripts/ios-sim.sh), pre-grants the app's
+# privacy permissions, and on Ctrl-C stops the dev server and shuts down only a simulator it booted. PS5UPLOAD_IOS_SIM="iPhone 17 Pro" picks the device. Needs Xcode's iOS platform once:
+# `xcodebuild -downloadPlatform iOS`. For a real iPhone, build the .ipa (make ios-build).
+IOS_VITE_PORT ?= 1440
+IOS_SIM_RUST_TARGET := $(if $(filter arm64,$(shell uname -m)),aarch64-apple-ios-sim,x86_64-apple-ios)
+
+run-ios: payload setup-client
+	@command -v xcodebuild >/dev/null 2>&1 || { echo "ERROR: run-ios needs macOS with Xcode"; exit 1; }
+	@rustup target list --installed 2>/dev/null | grep -qx '$(IOS_SIM_RUST_TARGET)' || rustup target add $(IOS_SIM_RUST_TARGET)
+	@test -d $(IOS_GEN_DIR) || $(MAKE) ios-init
+	@bash scripts/release/ios-postinit-patch.sh
+	@out=$$(bash $(CURDIR)/scripts/ios-sim.sh ensure) || exit 1; \
+	state=$$(printf '%s' "$$out" | cut -f1); name=$$(printf '%s' "$$out" | cut -f2); udid=$$(printf '%s' "$$out" | cut -f3); \
+	if [ "$$state" = "booted" ]; then \
+		trap 'trap - EXIT INT TERM; echo ""; echo "Shutting down the simulator this run booted..."; PS5UPLOAD_IOS_SIM_UDID='"$$udid"' bash $(CURDIR)/scripts/ios-sim.sh stop' EXIT INT TERM; \
+	else \
+		echo "  (leaving the running simulator up)"; \
+	fi; \
+	PS5UPLOAD_IOS_SIM_UDID="$$udid" bash $(CURDIR)/scripts/ios-sim.sh grant; \
+	echo "Launching on $$name (tauri ios dev)..."; \
+	cd $(CLIENT_DIR) && PS5UPLOAD_VITE_PORT=$(IOS_VITE_PORT) npx tauri ios dev "$$name" \
+		--config '{"build":{"devUrl":"http://localhost:$(IOS_VITE_PORT)"}}'
+
 # Boots the headless test emulator when nothing is attached, and shuts down
 # ONLY an emulator this invocation booted -- a phone you plugged in, or an
 # emulator you already had running, is left alone. The trap covers Ctrl-C,
@@ -715,14 +758,20 @@ ANDROID_VITE_PORT ?= 1430
 
 run-android: EMU_WINDOW := 1
 run-android-background: EMU_WINDOW := 0
+# Ctrl-C ends it cleanly: the dev server and the permission helper stop, any Gradle or Kotlin
+# daemon this run started is stopped (by PID; daemons that were already running, such as Android
+# Studio's, are left alone), and the emulator is shut down only when this run booted it.
+GRADLE_DAEMON_RE := org.gradle.launcher.daemon.bootstrap.GradleDaemon|KotlinCompileDaemon
 run-android run-android-background: android-deps payload setup-client
 	@test -d $(ANDROID_GEN_DIR) || $(MAKE) android-init
+	@bash scripts/release/android-postinit-patch.sh >/dev/null
 	@state=$$(PS5UPLOAD_EMU_WINDOW=$(EMU_WINDOW) bash $(CURDIR)/scripts/android-emu.sh ensure) || exit 1; \
-	if [ "$$state" = "booted" ]; then \
-		trap 'trap - EXIT INT TERM; echo ""; echo "Shutting down the emulator this run booted..."; bash $(CURDIR)/scripts/android-emu.sh stop' EXIT INT TERM; \
-	else \
-		echo "  (leaving the existing device/emulator running)"; \
-	fi; \
+	grant=""; daemons_before=" $$(pgrep -f '$(GRADLE_DAEMON_RE)' | tr '\n' ' ') "; \
+	trap 'trap - EXIT INT TERM; [ -n "$$grant" ] && kill $$grant 2>/dev/null; \
+		for p in $$(pgrep -f "$(GRADLE_DAEMON_RE)"); do case "'"$$daemons_before"'" in *" $$p "*) ;; *) kill $$p 2>/dev/null;; esac; done; \
+		if [ "'"$$state"'" = booted ]; then echo ""; echo "Shutting down the emulator this run booted..."; bash $(CURDIR)/scripts/android-emu.sh stop; fi' EXIT INT TERM; \
+	[ "$$state" = booted ] || echo "  (leaving the existing device/emulator running)"; \
+	bash $(CURDIR)/scripts/android-emu.sh grant --wait & grant=$$!; \
 	echo "Launching on the attached Android device/emulator (tauri android dev)..."; \
 	cd $(CLIENT_DIR) && PS5UPLOAD_VITE_PORT=$(ANDROID_VITE_PORT) $(ANDROID_ENV) npx tauri android dev \
 		--config '{"build":{"devUrl":"http://localhost:$(ANDROID_VITE_PORT)"}}'
@@ -730,8 +779,9 @@ run-android run-android-background: android-deps payload setup-client
 #──────────────────────────────────────────────────────────────────────────────
 # Docker — self-hosted engine image. Mirrors what .github/workflows/
 # docker-engine.yml publishes to ghcr.io/<owner>/ps5upload-engine on each
-# release tag (multi-arch there; single-arch host build here). `engine/` is the
-# build context; the Dockerfile is a scratch image wrapping the static binary.
+# release tag (multi-arch there; single-arch host build here). The REPO ROOT is
+# the build context (the Dockerfile copies payload/ and third_party/ too); the
+# Dockerfile is a scratch image wrapping the static binary.
 #
 # SECURITY: the engine API is unauthenticated. Bind to a LAN interface and set
 # PS5UPLOAD_ALLOW_IP only on a trusted network — never expose it to the
@@ -740,6 +790,17 @@ run-android run-android-background: android-deps payload setup-client
 
 DOCKER ?= docker
 DOCKER_ENGINE_IMAGE ?= ps5upload-engine
+# Who may reach the engine through the published port. With `-p` the container
+# sees Docker's bridge gateway, not loopback, so without this every request got
+# "403 loopback only" (engine/Dockerfile header). 172.17.0.1 is the default
+# bridge on Linux, 192.168.65.x the VM gateway on Docker Desktop; override with
+# your LAN range (DOCKER_ALLOW_IP=192.168.1.0/24) to use it from other machines.
+DOCKER_ALLOW_IP ?= 172.16.0.0/12,192.168.65.0/24
+# This host's LAN IP, which the PS5 fetches package bytes from during a stream
+# install. Required on Docker Desktop (macOS/Windows), where the container's
+# own guess is a NAT address the PS5 cannot reach; on Linux prefer
+# `docker run --network host` (engine/compose.yaml) and leave it empty.
+DOCKER_PKG_HOST_IP ?=
 
 docker-engine:
 	@command -v $(DOCKER) >/dev/null 2>&1 || { echo "ERROR: docker not found on PATH."; exit 1; }
@@ -748,10 +809,14 @@ docker-engine:
 	@echo "✓ Built image $(DOCKER_ENGINE_IMAGE) — run with: make docker-engine-run"
 
 # Run the locally-built engine image. Binds the published port and points it at
-# the PS5 (AVA1, port 9120). Override PS5_HOST / the bind address as needed.
+# the PS5 (AVA1, port 9120). Override PS5_HOST, DOCKER_ALLOW_IP and
+# DOCKER_PKG_HOST_IP as needed.
 docker-engine-run: docker-engine
-	@echo "Running $(DOCKER_ENGINE_IMAGE) — engine on :19113, PS5 at $(PS5_HOST) ..."
-	@$(DOCKER) run --rm -p 19113:19113 -e PS5_ADDR=$(PS5_HOST) $(DOCKER_ENGINE_IMAGE)
+	@echo "Running $(DOCKER_ENGINE_IMAGE) — engine on :19113, PS5 at $(PS5_HOST), allowed from $(DOCKER_ALLOW_IP) ..."
+	@$(DOCKER) run --rm -p 19113:19113 -e PS5_ADDR=$(PS5_HOST) \
+		-e PS5UPLOAD_ALLOW_IP=$(DOCKER_ALLOW_IP) \
+		$(if $(DOCKER_PKG_HOST_IP),-e PS5UPLOAD_PKG_HOST_IP=$(DOCKER_PKG_HOST_IP),) \
+		$(DOCKER_ENGINE_IMAGE)
 
 #──────────────────────────────────────────────────────────────────────────────
 # Testing
@@ -810,9 +875,20 @@ test-root:
 
 test-engine: setup-engine
 	@echo "Running Rust engine tests..."
-	@cd $(ENGINE_DIR) && $(CARGO) test --workspace --exclude ava1-ctest
-	@# The C interop tests share one C server and must run serially (as in CI).
-	@cd $(ENGINE_DIR) && $(CARGO) test -p ava1-ctest -- --test-threads=1
+	@# With cargo-nextest installed this runs the same tests the way scripts/validate-repo.mjs
+	@# does (and CI, except for the C interop suite): test binaries side by side (most sit in
+	@# network sleeps), each test in its own process, so the C interop tests' one server per
+	@# process holds without --test-threads=1; engine/.config/nextest.toml serializes the
+	@# timing-sensitive binaries.
+	@# nextest skips doctests, so they run separately. Without nextest: cargo test, serially.
+	@if $(CARGO) nextest --version >/dev/null 2>&1; then \
+		cd $(ENGINE_DIR) && $(CARGO) nextest run --workspace --exclude ava1-ctest && \
+		$(CARGO) test --workspace --exclude ava1-ctest --doc && \
+		$(CARGO) nextest run -p ava1-ctest; \
+	else \
+		cd $(ENGINE_DIR) && $(CARGO) test --workspace --exclude ava1-ctest && \
+		$(CARGO) test -p ava1-ctest -- --test-threads=1; \
+	fi
 	@echo "✓ Engine tests passed"
 	@# Android cross-compile check. The engine cfg's some code out on
 	@# Android (RAR, which needs the UnRAR C++ dep), so a call site added
@@ -836,7 +912,8 @@ test-engine-coverage:
 
 test-desktop: setup-engine
 	@echo "Checking Tauri Rust shell..."
-	@cd $(CLIENT_DIR)/src-tauri && $(CARGO) check --all-targets
+	@# No separate `cargo check --all-targets`: clippy --all-targets type-checks the same code
+	@# (CI and scripts/validate-repo.mjs dropped it for the same reason).
 	@cd $(CLIENT_DIR)/src-tauri && $(CARGO) clippy --all-targets -- -D warnings
 	@cd $(CLIENT_DIR)/src-tauri && $(CARGO) test
 	@echo "✓ Desktop Rust checks passed"
