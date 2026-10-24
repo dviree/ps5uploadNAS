@@ -11,8 +11,8 @@
 <p align="center">
   <a href="https://github.com/phantomptr/ps5upload/releases"><img alt="release" src="https://img.shields.io/github/v/release/phantomptr/ps5upload?display_name=tag&sort=semver&color=blue" /></a>
   <a href="LICENSE"><img alt="license" src="https://img.shields.io/badge/license-GPL--3-green" /></a>
-  <img alt="platforms" src="https://img.shields.io/badge/platforms-macOS_·_Linux_·_Windows_·_Android_·_Web-lightgrey" />
-  <img alt="firmware" src="https://img.shields.io/badge/PS5_firmware-1.00_–_13.60_supported_•_5.10,_9.60_&_13.60_tested-brightgreen" />
+  <img alt="platforms" src="https://img.shields.io/badge/platforms-macOS_·_Linux_·_Windows_·_Android_·_iPhone_·_Web-lightgrey" />
+  <img alt="firmware" src="https://img.shields.io/badge/PS5_firmware-1.00_–_14.10_supported_•_5.10,_9.60_&_13.60_tested-brightgreen" />
   <a href="https://discord.gg/fzK3xddtrM"><img alt="discord" src="https://img.shields.io/badge/discord-join-5865F2" /></a>
 </p>
 
@@ -41,7 +41,11 @@
   and playlists, and backport tools.
 - **Power.** Rest mode, reboot, shut down, and wake over the network (optionally straight
   into your signed-in user).
-- **Runs everywhere:** macOS, Windows, Linux, Android, or any browser through the self-hosted
+- **PS5Upload Minion.** A page the helper serves to the PS5's own browser (a tile on the home
+  screen, port 9180), made for the controller: games, a library scanned from your network shares
+  and drives, files (SMB shares, archive extraction, package install, payload loading), cheats,
+  fan, processes, clean-up and settings, with no PC nearby.
+- **Runs everywhere:** macOS, Windows, Linux, Android, iPhone (sideloaded), or any browser through the self-hosted
   Docker web UI ([compose file](engine/compose.yaml), see
   [Self-hosted engine and web UI](#self-hosted-engine-and-web-ui)). 21 languages.
 
@@ -63,12 +67,13 @@ Pre-built downloads land on the
 | Platform | File | How to install |
 |---|---|---|
 | macOS (Apple Silicon / Intel) | `PS5Upload-<ver>-mac-{arm64,x64}.dmg` | Open the `.dmg`, drag PS5Upload into Applications. See **First launch on macOS** below — Gatekeeper blocks downloaded apps the first time. |
-| Windows (x64 / ARM64) | `PS5Upload-<ver>-win-{x64,arm64}.zip` | Unzip, double-click `PS5Upload.exe` — portable, no installer. See **First launch on Windows** — SmartScreen warns on first run. |
+| Windows (x64 / ARM64) | `PS5Upload-<ver>-win-{x64,arm64}-setup.exe` or `PS5Upload-<ver>-win-{x64,arm64}.zip` | Run the `-setup.exe` installer (it updates itself later), or unzip the `.zip` and double-click `PS5Upload.exe` — portable, no installer. See **First launch on Windows** — SmartScreen warns on first run. |
 | Linux — Debian / Ubuntu (x64 / ARM64) | `PS5Upload-<ver>-linux-{x64,arm64}.deb` | `sudo apt install ./PS5Upload-<ver>-linux-<arch>.deb` — installs a normal app with a menu entry; pulls in the WebKitGTK deps automatically. |
 | Linux — Fedora / RHEL / Bazzite (x64 / ARM64) | `PS5Upload-<ver>-linux-{x64,arm64}.rpm` | `sudo dnf install ./PS5Upload-<ver>-linux-<arch>.rpm` (Bazzite/Silverblue: `rpm-ostree install`; to update, `rpm-ostree uninstall ps5-upload --install ./<new>.rpm` and reboot, which Settings → Updates shows ready to copy) — menu entry + auto deps. |
 | Linux — any distro (x64 / ARM64) | `PS5Upload-<ver>-linux-{x64,arm64}.zip` | Universal fallback (no install). Unzip, then `chmod +x PS5Upload.sh PS5Upload.AppImage` and run **`./PS5Upload.sh`** (the wrapper — handles the FUSE-less and WebKit white-screen cases for you). Running `./PS5Upload.AppImage` directly also works if your system has libfuse2 and a happy WebKitGTK. |
 | Linux — NixOS (x64 / ARM64) | no release artifact | Packaged in [NUR](https://github.com/GriefNorth/nur-packages) as `ps5upload` — see **NixOS** below. |
 | Android | `PS5Upload-<ver>-android.apk` | Enable "install unknown apps" for your browser/file manager, then open the `.apk`. Same interface, mobile-friendly; connects to and manages your PS5 over Wi-Fi. On Android 17, allow local network access ("nearby devices") when asked. |
+| iPhone | `PS5Upload-<ver>-ios-unsigned.ipa` | Sideload with AltStore or Sideloadly and an Apple ID (a free one works; it is re-signed every 7 days). Turn on Developer Mode and trust your Apple ID on the iPhone; see the FAQ. Copy games into the app's folder with the Files app. |
 
 ### NixOS
 
@@ -202,11 +207,11 @@ make run-client    # launch the Tauri dev app
   (`libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `librsvg2-dev`,
   `libayatana-appindicator3-dev`, `libxdo-dev`, `libssl-dev`,
   `build-essential`), Node.js 22 LTS via NodeSource (only if missing),
-  Rust via rustup, and checksum-verified PS5 Payload SDK v0.44 →
+  Rust via rustup, and checksum-verified PS5 Payload SDK v0.45 →
   `~/ps5-payload-sdk`.
 - **`make install-macos`** — macOS: Xcode CLT, Homebrew, `node`, current
   `llvm` (LLVM 23 at this release), Rust via rustup, and checksum-verified
-  PS5 Payload SDK v0.44.
+  PS5 Payload SDK v0.45.
 - **`make install-windows`** — Windows 11: Node.js LTS, Rust, VS 2022 Build
   Tools (C++ workload), WebView2 Runtime, 7-Zip, and PS5 Payload SDK
   via `winget`. Run from an elevated PowerShell (or any shell with
@@ -259,7 +264,7 @@ All workflows go through the root `Makefile` (`make help`).
 |---|---|
 | `make build` | Payload + engine + client |
 | `make run-client` | Tauri dev app |
-| `make run-engine` | Engine on `localhost:19113` |
+| `make run-engine` | Engine on port 19113 (binds all interfaces; answers loopback, `PS5UPLOAD_ALLOW_IP` and the PS5-facing `/pkg-host/` only) |
 | `make test-engine` | Rust tests, no PS5 needed |
 | `make test-payload` | Console C code compiled and run on the host |
 | `npm run validate` | Full non-hardware gate |
@@ -269,7 +274,7 @@ See [`TESTING.md`](TESTING.md) for the full workflow, and [`CONTRIBUTING.md`](CO
 
 ## Tech stack
 
-- **Payload**: C (FreeBSD 11), prospero-clang, PS5 Payload SDK v0.44
+- **Payload**: C (FreeBSD 11), prospero-clang, PS5 Payload SDK v0.45
 - **Engine**: Rust, tokio + axum
 - **Client**: Tauri 2, React, TypeScript, Zustand, Tailwind CSS v4, Vite
 - **Protocol**: AVA1 (Noise XX handshake, ChaCha20-Poly1305, BLAKE3 verification)
@@ -278,9 +283,11 @@ See [`TESTING.md`](TESTING.md) for the full workflow, and [`CONTRIBUTING.md`](CO
 
 - **Desktop:** macOS, Linux and Windows, x64 and arm64.
 - **Android:** the `.apk` from Releases.
+- **iPhone:** the unsigned `.ipa` from Releases, sideloaded with AltStore or Sideloadly (see the
+  FAQ). New and not yet widely tested.
 - **Web UI:** the self-hosted Docker image, in any browser on your LAN (see below).
-- **PS5 firmware:** 1.00 through 13.60 on every model; one payload binary for all. Tested on
-  5.10, 9.60 and 13.60. In practice the limit is your jailbreak's ELF loader on port 9021.
+- **PS5 firmware:** 1.00 through 14.10 on every model; one payload binary for all. Tested on
+  5.10, 9.60 and 13.60 (14.00 and 14.10 are new in SDK v0.45 and not tested yet). In practice the limit is your jailbreak's ELF loader on port 9021.
 
 Fake package install needs live kernel patches (kstuff / fpkg-enable) on the console; where
 they are missing the app says so instead of reporting a false success.
@@ -291,9 +298,12 @@ Run the engine on a NAS or server and use it from a browser, or point the deskto
 with **Settings → Engine URL**.
 
 - Images: `ghcr.io/phantomptr/ps5upload-engine-webui` (full web UI) and
-  `ghcr.io/phantomptr/ps5upload-engine` (engine only), tagged `:latest` or `:<version>`.
+  `ghcr.io/phantomptr/ps5upload-engine` (engine only). Every release tag pushes `:<version>`;
+  `:latest` and `:<major.minor>` move only when a pre-release is promoted to a release.
 - Start from [`engine/compose.yaml`](engine/compose.yaml). It uses host networking (stream
-  installs need the PS5 to reach the engine). Set `PS5_ADDR` and `PS5UPLOAD_ALLOW_IP`.
+  installs need the PS5 to reach the engine). `PS5_ADDR` (the console) and `PS5UPLOAD_ALLOW_IP`
+  (who may use the page) are required for a web UI used from other devices on the LAN; without
+  the allowlist every browser but the host's own gets a `403`.
 - Open `http://<host>:19113`. The file picker browses the engine's disk; mount your games
   folder into the container and set `PS5UPLOAD_BROWSE_ROOTS`.
 - Map `/data` to a host folder (on Unraid, `/mnt/user/appdata/ps5upload`): it holds the pairing

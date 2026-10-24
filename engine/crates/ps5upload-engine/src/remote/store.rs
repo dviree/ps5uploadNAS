@@ -189,15 +189,23 @@ impl Store {
             .ok_or_else(|| anyhow::anyhow!("no connection {id}"))?;
         conn.id = id.to_string();
         // A changed server or protocol invalidates the accepted host key.
-        if slot.0.host != conn.host || slot.0.port != conn.port || slot.0.protocol != conn.protocol
-        {
+        let moved = slot.0.host != conn.host
+            || slot.0.port != conn.port
+            || slot.0.protocol != conn.protocol;
+        // The saved password belongs to the old machine and must not be sent to a different
+        // one; a port fix or a host spelt in another case is still the same machine.
+        let other_machine = !slot.0.host.trim().eq_ignore_ascii_case(conn.host.trim())
+            || slot.0.protocol != conn.protocol;
+        if moved {
             conn.host_key = None;
         } else if conn.host_key.is_none() {
             conn.host_key = slot.0.host_key.clone();
         }
         slot.0 = conn.clone();
-        if let Some(s) = secret {
-            slot.1 = s;
+        match secret {
+            Some(s) => slot.1 = s,
+            None if other_machine => slot.1 = Secret::None,
+            None => {}
         }
         let v = view(&slot.0, &slot.1);
         self.save(&st)?;

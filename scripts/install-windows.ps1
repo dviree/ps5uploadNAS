@@ -8,7 +8,7 @@
 #   - Visual Studio 2022 Build Tools w/ C++ workload (MSVC + Windows SDK)
 #   - 7zip (used to extract the PS5 SDK zip in CI-clean way)
 #   - Microsoft Edge WebView2 Runtime (preinstalled on Win11; verified)
-#   - Repository-pinned PS5 Payload SDK (currently v0.44)
+#   - Repository-pinned PS5 Payload SDK (currently v0.45)
 #     → $env:USERPROFILE\ps5-payload-sdk
 #
 # Run from an elevated PowerShell:
@@ -219,8 +219,10 @@ if (Test-Path $clientDir) {
   Log "Installing client npm dependencies"
   Push-Location $clientDir
   try {
-    & npm install --no-audit --no-fund
-    if ($LASTEXITCODE -ne 0) { Die "npm install failed" }
+    # `npm ci`, never `npm install`: see NPM_INSTALL in the root Makefile (npm 10
+    # strips the lockfile's libc fields that the Alpine web UI image relies on).
+    & npm ci --no-audit --no-fund
+    if ($LASTEXITCODE -ne 0) { Die "npm ci failed" }
     Ok "client/node_modules ready"
   } finally {
     Pop-Location

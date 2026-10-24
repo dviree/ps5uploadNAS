@@ -210,6 +210,9 @@ pub struct Config {
     pub auto_loose_sample_bytes: u64,
     pub auto_loose_min_savings_ratio: f64,
     pub auto_loose_max_raw_ratio: f64,
+    /// Keep the files the game reads straight from disk (and empty files) loose, whatever
+    /// the rules say (`pack::KEEP_ON_DISK`). Off only to compare with packers that predate it.
+    pub keep_files_on_disk: bool,
     /// By name; `default` always exists.
     pub groups: BTreeMap<String, Group>,
     pub rules: Vec<Rule>,
@@ -243,6 +246,7 @@ impl Default for Config {
             self_contained: false,
             required_packed: Vec::new(),
             auto_loose_large_files: true,
+            keep_files_on_disk: true,
             auto_loose_hot_files: false,
             auto_loose_min_file_size: 64 << 20,
             auto_loose_sample_blocks: 32,
@@ -626,6 +630,7 @@ impl Config {
         c.self_contained = as_bool(pack, "self_contained", false)?;
         c.required_packed = as_strings(pack, "required_packed")?.unwrap_or_default();
         c.auto_loose_large_files = as_bool(pack, "auto_loose_large_files", true)?;
+        c.keep_files_on_disk = as_bool(pack, "keep_files_on_disk", true)?;
         c.auto_loose_hot_files = as_bool(pack, "auto_loose_hot_files", false)?;
         c.auto_loose_min_file_size = as_size(pack, "auto_loose_min_file_size", 64 << 20)?;
         let samples = as_int(pack, "auto_loose_sample_blocks", 32)?;

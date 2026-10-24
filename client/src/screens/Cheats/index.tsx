@@ -1,5 +1,7 @@
 import { LocalCheatImport } from "./LocalCheatImport";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { useLocation } from "react-router";
+import { cachedCheatIndex, loadCheatIndex } from "../../lib/cheatIndex";
 import { Gamepad2, Globe, Power, RefreshCw, RotateCcw, WandSparkles, Zap } from "lucide-react";
 import {
   PageHeader,
@@ -20,7 +22,6 @@ import {
   cheatsEngineSet,
   cheatsList,
   cheatsReload,
-  cheatsReposSearch,
   cheatsStatus,
   type AppInfoDetails,
   type CheatRepoEntry,
@@ -42,13 +43,6 @@ import {
 import { useToast } from "../../state/toasts";
 import { reapplyToast } from "./reapplyToast";
 
-/** The cheat collection's index, for the session.
- *
- *  ~11k lines across the repos, served from the engine's cache in well under
- *  a second — and it changes about as often as somebody publishes a cheat,
- *  so fetching it once is enough. Having all of it up front is what lets the
- *  list say which games have cheats before anyone searches. */
-let indexCache: CheatRepoEntry[] | null = null;
 /** Game details by host + title id, for the session: a version doesn't
  *  change while you browse, and each is a round trip to the console. */
 const detailsCache = new Map<string, AppInfoDetails | null>();
@@ -63,11 +57,14 @@ export default function CheatsScreen() {
   const [installed, setInstalled] = useState<InstalledTitle[]>([]);
   const [downloaded, setDownloaded] = useState<CheatTitle[]>([]);
   const [status, setStatus] = useState<CheatsStatusResponse | null>(null);
-  const [index, setIndex] = useState<CheatRepoEntry[]>(indexCache ?? []);
+  const [index, setIndex] = useState<CheatRepoEntry[]>(cachedCheatIndex() ?? []);
   const [indexError, setIndexError] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  // A game handed over by its page ("Find cheats for this game") opens selected.
+  const handedState = useLocation().state as { titleId?: string } | null;
+  const handedTitleId = handedState?.titleId?.toUpperCase() ?? null;
+  const [selectedId, setSelectedId] = useState<string | null>(handedTitleId);
   const [filters, setFilters] = useState<CheatListFilters>(EMPTY_CHEAT_FILTERS);
   const { toast } = useToast();
   const [showBrowser, setShowBrowser] = useState(false);
@@ -98,12 +95,12 @@ export default function CheatsScreen() {
   }, [refresh]);
 
   useEffect(() => {
-    if (indexCache) return;
+    // Having all of the index up front is what lets the list say which games have cheats
+    // before anyone searches.
+    if (cachedCheatIndex()) return;
     void (async () => {
       try {
-        const r = await cheatsReposSearch("");
-        indexCache = r.entries ?? [];
-        setIndex(indexCache);
+        setIndex(await loadCheatIndex());
       } catch {
         // Offline or a repo is down: the list still shows your games and
         // the cheats already on the console, just not what else exists.

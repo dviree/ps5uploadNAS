@@ -1505,7 +1505,7 @@ static int cleanup_path_allowed(const char *path) {
 static int remove_recursive_path_inner(const char *path,
                                         uint64_t *removed_files,
                                         uint64_t *removed_dirs,
-                                        int depth) {
+                                        int depth, dev_t root_dev) {
     struct stat st;
     DIR *dir = NULL;
     struct dirent *ent = NULL;
@@ -1518,6 +1518,12 @@ static int remove_recursive_path_inner(const char *path,
     }
     if (lstat(path, &st) != 0) {
         if (errno == ENOENT) return 0;
+        return -1;
+    }
+    /* Never cross into another device than the root's (fsj_rm_rf's rule): a drive or image
+     * mounted inside the tree is left alone, not emptied. */
+    if (depth > 0 && st.st_dev != root_dev) {
+        fprintf(stderr, "[payload2] remove_recursive: %s is another mount, skipped\n", path);
         return -1;
     }
     if (!S_ISDIR(st.st_mode)) {
@@ -1535,7 +1541,7 @@ static int remove_recursive_path_inner(const char *path,
             return -1; /* path too long — refuse to truncate and leak state */
         }
         if (remove_recursive_path_inner(child, removed_files, removed_dirs,
-                                        depth + 1) != 0) {
+                                        depth + 1, root_dev) != 0) {
             closedir(dir);
             return -1;
         }
@@ -1549,12 +1555,18 @@ static int remove_recursive_path_inner(const char *path,
 static int remove_recursive_path(const char *path,
                                   uint64_t *removed_files,
                                   uint64_t *removed_dirs) {
-    return remove_recursive_path_inner(path, removed_files, removed_dirs, 0);
+    struct stat st;
+    if (!path) return -1;
+    if (lstat(path, &st) != 0) return errno == ENOENT ? 0 : -1;
+    return remove_recursive_path_inner(path, removed_files, removed_dirs, 0, st.st_dev);
 }
 
 static int handle_cleanup(runtime_state_t *state, const char *request_body, uint64_t body_len) {
     char path[512];
-    char resp[256];
+    /* Room for the escaped path (path_esc, 1024) plus the counters: the reply used to be 256
+     * bytes while `len` was snprintf's would-be length, so a long path made mgmt_reply send
+     * stack past the buffer. */
+    char resp[1280];
     uint64_t removed_files = 0;
     uint64_t removed_dirs = 0;
     int rc;
@@ -1591,6 +1603,7 @@ static int handle_cleanup(runtime_state_t *state, const char *request_body, uint
                        (unsigned long long)removed_dirs);
     }
     if (len < 0) return -1;
+    if ((size_t)len >= sizeof(resp)) return mgmt_reply(MGMT_FRAME_ERROR, "cleanup_io_error", 16);
     return mgmt_reply(MGMT_FRAME_CLEANUP_ACK, resp, (uint64_t)len);
 }
 
@@ -2105,7 +2118,10 @@ static int is_disc_read_path(const char *p) {
     if (!is_disc_lexical(p)) return 0;
     /* A UDF disc can carry symlinks: the canonical form must stay on the disc too. */
     char resolved[PATH_MAX];
-    return realpath(p, resolved) == NULL || is_disc_lexical(resolved);
+    /* Only a path that does not exist (yet) passes unresolved; a dangling or looping link, or one
+     * that cannot be resolved for another reason, is refused. */
+    if (realpath(p, resolved) == NULL) return errno == ENOENT;
+    return is_disc_lexical(resolved);
 }
 
 /* Validate a path for unsafe read mode. This relaxes the writable-root
@@ -4928,17 +4944,6 @@ static int handle_user_delete(runtime_state_t *state, const char *body) {
     int rc = -1;
     const char *err_msg = "";
     if (uid > 0) {
-        /* Optional: wipe savedata before deleting the user account so
-         * Sony's cleanup doesn't leave orphaned sealed saves. */
-        if (wipe_saves) {
-            char sd_path[512];
-            snprintf(sd_path, sizeof(sd_path),
-                     "/user/home/%d/savedata", uid);
-            remove_recursive_path(sd_path, NULL, NULL);
-            snprintf(sd_path, sizeof(sd_path),
-                     "/user/home/%d/savedata_prospero", uid);
-            remove_recursive_path(sd_path, NULL, NULL);
-        }
         pthread_mutex_lock(&sony_api_lock);
         sceUserServiceInitialize(NULL); /* a Sony call: inside the lock (final review: console) */
         int del_rc = sceUserServiceDestroyUser(uid);
@@ -4946,6 +4951,19 @@ static int handle_user_delete(runtime_state_t *state, const char *body) {
         pthread_mutex_unlock(&sony_api_lock);
         if (del_rc == 0) {
             rc = 0;
+            /* Optional: wipe the saves Sony's cleanup leaves behind. Only after the account is
+             * gone (a failed delete must not cost the user their saves), and at the home
+             * directory's real name: user dirs are the id in 8 hex digits ("/user/home/179a0cd8",
+             * as handle_list_saves and handle_profile_info read them), not decimal. */
+            if (wipe_saves) {
+                char sd_path[512];
+                snprintf(sd_path, sizeof(sd_path),
+                         "/user/home/%08x/savedata", (unsigned)uid);
+                remove_recursive_path(sd_path, NULL, NULL);
+                snprintf(sd_path, sizeof(sd_path),
+                         "/user/home/%08x/savedata_prospero", (unsigned)uid);
+                remove_recursive_path(sd_path, NULL, NULL);
+            }
         } else {
             err_msg = "sceUserServiceDestroyUser failed";
         }
@@ -4977,19 +4995,27 @@ static int handle_backup_snapshot(runtime_state_t *state, const char *body) {
     uint64_t bytes = 0;
     const char *err = "";
     int rc = -1;
-    if (tag[0] && path[0]) {
+    if (!tag[0] || !path[0]) {
+        err = "missing tag or path";
+    } else if (!is_path_allowed(path) || path_tree_op_refused(path)) {
+        /* The same rule the restore applies to a manifest's targets (backup.c) and every other
+         * tree walk uses: the writable roots only, never the trust store or an ancestor of it.
+         * Without it a snapshot copied any readable path (the AVA1 identity and peers included)
+         * into the backups folder, where fs.read may look. */
+        err = "path not allowed";
+    } else {
         rc = backup_snapshot(tag, path, &ts, &files, &bytes);
         if (rc == BACKUP_CANCELLED)
             return mgmt_reply(MGMT_FRAME_ERROR, "backup_cancelled", 16);
         if (rc != 0) err = "snapshot failed (source not found or empty)";
-    } else {
-        err = "missing tag or path";
     }
+    char tesc[160];
+    json_escape_into(tag, tesc, sizeof(tesc));
     char resp[512];
     int len = snprintf(resp, sizeof(resp),
         "{\"ok\":%s,\"tag\":\"%s\",\"timestamp\":%lld,\"files\":%d,"
         "\"bytes\":%llu,\"err\":\"%s\"}",
-        rc == 0 ? "true" : "false", tag, (long long)ts, files,
+        rc == 0 ? "true" : "false", tesc, (long long)ts, files,
         (unsigned long long)bytes, err);
     pthread_mutex_lock(&state->state_mtx);
     state->command_count += 1;
@@ -5032,10 +5058,12 @@ static int handle_backup_restore(runtime_state_t *state, const char *body) {
     } else {
         err = "missing tag or timestamp";
     }
-    char resp[256];
+    char tesc[160];
+    json_escape_into(tag, tesc, sizeof(tesc));
+    char resp[512];
     int len = snprintf(resp, sizeof(resp),
         "{\"ok\":%s,\"tag\":\"%s\",\"restored\":%d,\"err\":\"%s\"}",
-        rc == 0 ? "true" : "false", tag, restored, err);
+        rc == 0 ? "true" : "false", tesc, restored, err);
     pthread_mutex_lock(&state->state_mtx);
     state->command_count += 1;
     pthread_mutex_unlock(&state->state_mtx);
@@ -5055,10 +5083,12 @@ static int handle_backup_delete(runtime_state_t *state, const char *body) {
     } else {
         err = "missing tag or timestamp";
     }
-    char resp[192];
+    char tesc[160];
+    json_escape_into(tag, tesc, sizeof(tesc));
+    char resp[512];
     int len = snprintf(resp, sizeof(resp),
         "{\"ok\":%s,\"tag\":\"%s\",\"timestamp\":%lld,\"err\":\"%s\"}",
-        rc == 0 ? "true" : "false", tag, (long long)ts, err);
+        rc == 0 ? "true" : "false", tesc, (long long)ts, err);
     pthread_mutex_lock(&state->state_mtx);
     state->command_count += 1;
     pthread_mutex_unlock(&state->state_mtx);
@@ -5165,10 +5195,12 @@ static int handle_fan_curve_set(runtime_state_t *state, const char *body) {
     if (!state) return -1;
     char err[256] = {0};
     int rc = fan_curve_set(body, err, sizeof(err));
-    char resp[384];
+    char eesc[600];
+    json_escape_into(err, eesc, sizeof(eesc)); /* the message may quote the caller's input */
+    char resp[700];
     int len = snprintf(resp, sizeof(resp),
         "{\"ok\":%s,\"err\":\"%s\"}",
-        rc == 0 ? "true" : "false", err);
+        rc == 0 ? "true" : "false", eesc);
     pthread_mutex_lock(&state->state_mtx);
     state->command_count += 1;
     pthread_mutex_unlock(&state->state_mtx);
@@ -5310,10 +5342,12 @@ static int handle_cheats_toggle(runtime_state_t *state, const char *body) {
     char resp[512];
     int len;
     if (rc == 0) {
+        char tid_esc[CHEATS_TITLE_ID_LEN * 6 + 1];
+        json_escape_into(title_id, tid_esc, sizeof(tid_esc));
         len = snprintf(resp, sizeof(resp),
                        "{\"ok\":true,\"title_id\":\"%s\",\"index\":%d,"
                        "\"on\":%s}",
-                       title_id, mod_index, turn_on ? "true" : "false");
+                       tid_esc, mod_index, turn_on ? "true" : "false");
     } else {
         char err_esc[300];
         size_t ei = 0;
@@ -6778,7 +6812,9 @@ static int handle_peripheral_control(runtime_state_t *state, const char *body,
  * surface (FS_DELETE, FS_CHMOD, etc.) already trusts an
  * authenticated LAN caller; this is the same trust boundary.
  *
- * We cap stdout+stderr at 256 KB and timeout at 30s. */
+ * There is no timeout: the built-ins run to completion on the request thread (the payload
+ * cannot fork, so there is no child to kill). A built-in's output is capped at 256 KB
+ * (shell_builtin.c), and the reply itself at 32 KiB ("truncated":true past that). */
 /* ── Built-in shell command interpreter ─────────────────────────────
  *
  * PS5 doesn't ship a shell binary (no /bin/sh, no /system/bin/sh,
@@ -6913,7 +6949,6 @@ static int handle_shell_exec(runtime_state_t *state, const char *body,
     char cwd[1024] = "/";
     char fallback_cwd[1024] = "/";
     char session_id[96] = "";
-    int timeout_secs = 30;
     if (body && body_len > 0 && body_len < 4096) {
         char tmp[4100];
         memcpy(tmp, body, (size_t)body_len);
@@ -6925,14 +6960,7 @@ static int handle_shell_exec(runtime_state_t *state, const char *body,
         }
         (void)shell_json_string_field(tmp, body_len, "session_id",
                                       session_id, sizeof(session_id));
-        const char *p = strstr(tmp, "\"timeout_secs\"");
-        if (p) {
-            p = strchr(p, ':');
-            if (p) {
-                int n = atoi(p + 1);
-                if (n > 0 && n < 600) timeout_secs = n;
-            }
-        }
+        /* "timeout_secs" is accepted and ignored: nothing here can stop a running built-in. */
     }
     shell_session_get(session_id, fallback_cwd, cwd, sizeof(cwd));
     if (cmd[0] == '\0') {
@@ -7004,7 +7032,6 @@ static int handle_shell_exec(runtime_state_t *state, const char *body,
         builtin_rc = shell_run_in_cwd(cwd, cmd, &builtin_out, &builtin_exit);
 
         if (builtin_rc == 0) {
-            (void)timeout_secs;
             int rc_b = shell_send_json_result(state, builtin_exit,
                                               builtin_out ? builtin_out : "",
                                               cwd,
@@ -7016,7 +7043,6 @@ static int handle_shell_exec(runtime_state_t *state, const char *body,
         free(builtin_out);
     }
 
-    (void)timeout_secs;
     char msg[512];
     snprintf(msg, sizeof(msg),
              "%s: command not found. PS5Upload shell only supports built-ins; type 'help'.\n",
@@ -7291,6 +7317,10 @@ static int g_save_is_ps4 = 0;
  * save was only looked at, and the real image is left as it was. */
 static time_t g_save_copy_mtime;
 static off_t g_save_copy_size;
+/* The copy is no longer mounted but its write-back failed: a retry must not ask Sony to unmount
+ * again (an unmount of nothing can fail with any errno, which would read as "still in use"). */
+static int g_save_unmounted = 0;
+static int g_save_wb_failures = 0;
 
 static int save_copy_file(const char *src, const char *dst) {
     int sfd = open(src, O_RDONLY);
@@ -7343,17 +7373,55 @@ static int save_unseal_key(const char *image, const char *key_path, int is_ps4,
     return 0;
 }
 
-static int save_do_unmount(int *written_back) {
-    *written_back = 0;
-    if (!g_save_mounted) return 0;
-    SceFsUmountSaveDataOpt uopt;
-    memset(&uopt, 0, sizeof uopt);
-    sceFsInitUmountSaveDataOpt(&uopt);
-    int rc = sceFsUmountSaveData(&uopt, SAVE_MOUNT_POINT, 0, 0);
-    sync();
-    if (rc < 0 && errno != EINVAL && errno != ENOENT) {
-        /* Still mounted: do not touch the real save. */
+/* The edited copy over the real image, without a moment where the real image is incomplete:
+ * written to a sibling temp (same folder, so the rename never crosses a device), fsynced, then
+ * renamed into place. A failure leaves the real image as it was and removes only the temp. */
+static int save_write_back(const char *copy, const char *image) {
+    char tmp[1100];
+    struct stat ist;
+    if (snprintf(tmp, sizeof tmp, "%s.ps5up-tmp", image) >= (int)sizeof tmp) return -1;
+    if (save_copy_file(copy, tmp) != 0) {
+        unlink(tmp);
         return -1;
+    }
+    if (stat(image, &ist) == 0) chmod(tmp, ist.st_mode & 07777);
+    if (rename(tmp, image) != 0) {
+        unlink(tmp);
+        return -1;
+    }
+    return 0;
+}
+
+static void save_clear_state(void) {
+    g_save_mounted = 0;
+    g_save_unmounted = 0;
+    g_save_wb_failures = 0;
+    g_save_image[0] = g_save_copy[0] = g_save_copy_key[0] = 0;
+}
+
+/* 0 unmounted (and written back when the copy changed), -1 still mounted (nothing touched),
+ * -2 unmounted but the write-back failed: the state and the edited copy are kept so a retry
+ * (or the next unmount) writes it back; the real image is untouched.
+ * -3 the write-back failed a second time: the save is closed so the person is not stuck, and
+ * the edited copy is kept beside the others as `<copy>.unsaved` (its path in `kept`). */
+static int save_do_unmount(int *written_back, char *kept, size_t kept_sz) {
+    *written_back = 0;
+    if (kept_sz) kept[0] = 0;
+    if (!g_save_mounted) return 0;
+    if (!g_save_unmounted) {
+        SceFsUmountSaveDataOpt uopt;
+        memset(&uopt, 0, sizeof uopt);
+        sceFsInitUmountSaveDataOpt(&uopt);
+        errno = 0;
+        int rc = sceFsUmountSaveData(&uopt, SAVE_MOUNT_POINT, 0, 0);
+        int ue = errno; /* read before sync() can overwrite it */
+        sync();
+        /* EINVAL / ENOENT: not mounted (a reboot, or someone else unmounted it). */
+        if (rc < 0 && ue != EINVAL && ue != ENOENT) {
+            /* Still mounted: do not touch the real save. */
+            return -1;
+        }
+        g_save_unmounted = 1;
     }
     if (g_save_copy[0] && g_save_image[0]) {
         struct stat cst;
@@ -7361,15 +7429,27 @@ static int save_do_unmount(int *written_back) {
                       cst.st_size != g_save_copy_size;
         if (!changed) {
             unlink(g_save_copy);
-        } else if (save_copy_file(g_save_copy, g_save_image) == 0) {
+        } else if (save_write_back(g_save_copy, g_save_image) == 0) {
             *written_back = 1;
             unlink(g_save_copy);
+        } else {
+            fprintf(stderr, "[payload2] save: write-back of %s to %s failed: %s (copy kept)\n",
+                    g_save_copy, g_save_image, strerror(errno));
+            if (++g_save_wb_failures < 2) return -2;
+            /* Twice: give up on writing back, keep the edits under a name the next open never
+             * reuses (same folder, so the rename stays on one device), and close the save. */
+            if (kept_sz && snprintf(kept, kept_sz, "%s.unsaved", g_save_copy) < (int)kept_sz &&
+                rename(g_save_copy, kept) != 0)
+                snprintf(kept, kept_sz, "%s", g_save_copy);
+            if (g_save_copy_key[0]) unlink(g_save_copy_key);
+            sync();
+            save_clear_state();
+            return -3;
         }
     }
     if (g_save_copy_key[0]) unlink(g_save_copy_key);
     sync();
-    g_save_mounted = 0;
-    g_save_image[0] = g_save_copy[0] = g_save_copy_key[0] = 0;
+    save_clear_state();
     return 0;
 }
 
@@ -7450,6 +7530,8 @@ static int save_do_mount(const char *image, char *err, size_t err_sz, int *is_ps
         return -1;
     }
     g_save_mounted = 1;
+    g_save_unmounted = 0;
+    g_save_wb_failures = 0;
     g_save_is_ps4 = is_ps4;
     {
         struct stat cst;
@@ -7494,8 +7576,21 @@ static int handle_save_mount(runtime_state_t *state, const char *body, uint64_t 
         n = save_status_json(resp, sizeof resp, NULL);
     } else {
         char err[512] = {0};
+        char kept[1100];
         int wb = 0;
-        if (g_save_mounted && save_do_unmount(&wb) != 0) {
+        int urc = g_save_mounted ? save_do_unmount(&wb, kept, sizeof kept) : 0;
+        if (urc == -3) {
+            char kesc[1200];
+            json_escape_into(kept, kesc, sizeof kesc);
+            n = snprintf(resp, sizeof resp,
+                         "{\"ok\":false,\"err\":\"save_writeback_failed: the open save's edits could not be "
+                         "written back twice; it is closed now and the edited copy is kept as %s\"}",
+                         kesc);
+        } else if (urc == -2) {
+            n = snprintf(resp, sizeof resp,
+                         "{\"ok\":false,\"err\":\"save_writeback_failed: the open save's edits could not be "
+                         "written back; close it again before opening another\"}");
+        } else if (urc != 0) {
             n = snprintf(resp, sizeof resp,
                          "{\"ok\":false,\"err\":\"save_unmount_failed: the open save could not be closed\"}");
         } else {
@@ -7527,7 +7622,20 @@ static int handle_save_unmount(runtime_state_t *state, const char *body, uint64_
     pthread_mutex_lock(&g_save_mtx);
     int wb = 0;
     int was = g_save_mounted;
-    if (save_do_unmount(&wb) != 0) {
+    char kept[1100];
+    int urc = save_do_unmount(&wb, kept, sizeof kept);
+    if (urc == -3) {
+        char kesc[1200];
+        json_escape_into(kept, kesc, sizeof kesc);
+        n = snprintf(resp, sizeof resp,
+                     "{\"ok\":false,\"err\":\"save_writeback_failed: the edited copy could not be written "
+                     "over the save twice; the save is closed and the edits are kept as %s\"}",
+                     kesc);
+    } else if (urc == -2) {
+        n = snprintf(resp, sizeof resp,
+                     "{\"ok\":false,\"err\":\"save_writeback_failed: the edited copy could not be written "
+                     "over the save; it is kept and the next Close tries again\"}");
+    } else if (urc != 0) {
         n = snprintf(resp, sizeof resp,
                      "{\"ok\":false,\"err\":\"save_unmount_failed: the save is still in use (a game open?)\"}");
     } else {
@@ -8740,36 +8848,77 @@ static void profile_sync_online_json_firstname(uint32_t uid, const char *name) {
 
     int fd = open(path, O_RDONLY);
     if (fd < 0) return; /* no cache → nothing to sync (home reads UserService name) */
-    char buf[2048];
-    ssize_t n = read(fd, buf, sizeof(buf) - 1);
+    /* The whole file, sized from fstat: a fixed 2 KiB read used to rewrite a larger online.json
+     * from its first 2047 bytes, dropping the rest. Past 64 KiB it is not ours to rewrite. */
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size <= 0 || st.st_size > 65536) {
+        close(fd);
+        return;
+    }
+    size_t cap = (size_t)st.st_size + 1;
+    char *buf = malloc(cap);
+    if (!buf) {
+        close(fd);
+        return;
+    }
+    size_t n = 0;
+    for (;;) {
+        ssize_t r = read(fd, buf + n, cap - 1 - n);
+        if (r < 0 && errno == EINTR) continue;
+        if (r <= 0) break;
+        n += (size_t)r;
+        if (n >= cap - 1) break;
+    }
     close(fd);
-    if (n <= 0) return;
+    if (n == 0) {
+        free(buf);
+        return;
+    }
     buf[n] = '\0';
 
     const char *key = "\"firstName\":\"";
     char *p = strstr(buf, key);
-    if (!p) return;
+    if (!p) {
+        free(buf);
+        return;
+    }
     char *vstart = p + strlen(key);
     char *vend = strchr(vstart, '"');
-    if (!vend) return;
+    if (!vend) {
+        free(buf);
+        return;
+    }
 
     char nesc[128];
     json_escape_into(name, nesc, sizeof(nesc)); /* escapes content, no quotes */
 
-    char out[2560];
+    size_t out_cap = n + sizeof(nesc) + 1;
+    char *out = malloc(out_cap);
+    if (!out) {
+        free(buf);
+        return;
+    }
     size_t prefix_len = (size_t)(vstart - buf);
-    int w = snprintf(out, sizeof(out), "%.*s%s%s",
+    int w = snprintf(out, out_cap, "%.*s%s%s",
                      (int)prefix_len, buf, nesc, vend);
-    if (w < 0 || (size_t)w >= sizeof(out)) return;
+    free(buf);
+    if (w < 0 || (size_t)w >= out_cap) {
+        free(out);
+        return;
+    }
 
     /* Atomic replace: write a sibling tmp then rename over the original so a
      * crash mid-write can't leave a truncated online.json. */
     char tmp[300];
     snprintf(tmp, sizeof(tmp), "%s.ps5up-tmp", path);
     int wf = open(tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
-    if (wf < 0) return;
+    if (wf < 0) {
+        free(out);
+        return;
+    }
     int wr = write_full(wf, out, (size_t)w);
     close(wf);
+    free(out);
     if (wr != 0) {
         (void)unlink(tmp);
         return;
@@ -8884,7 +9033,9 @@ __thread volatile unsigned int g_inflight_frame_type = 0;
  * read carve-outs and the same command counter the management handlers use. */
 static runtime_state_t *g_mgmt_fs_state;
 
-static int mgmt_fs_read_allowed(const char *path, int unsafe_read) {
+/* Also the AVA1 data plane's read rule (ava1_glue.c may_read: downloads, hash, crc32), so a path
+ * fs.read may open is one a download may open too (the disc and avatar carve-outs included). */
+int mgmt_fs_read_allowed(const char *path, int unsafe_read) {
     return is_path_allowed(path) || is_profile_avatar_read_path(path) || is_disc_read_path(path) ||
            (unsafe_read && is_safe_unsafe_read_path(path));
 }

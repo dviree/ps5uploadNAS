@@ -566,7 +566,7 @@ fn build_into(
         let mut rule = config.select(&relative);
         if outputs.contains(&relative)
             || glob::matches_any(&relative, &[&pack_glob])
-            || keep_on_disk(&relative, e.size)
+            || (config.keep_files_on_disk && keep_on_disk(&relative, e.size))
         {
             rule = Rule::loose(rule.block_shift);
         }

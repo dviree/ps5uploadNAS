@@ -8,7 +8,7 @@
 #     libxdo, libssl, build-essential, file, curl, wget, unzip, pkg-config, python3)
 #   - Rust toolchain (rustup, stable, default profile)
 #   - Node.js 22 LTS via NodeSource (only if `node` is missing — keeps existing installs)
-#   - Repository-pinned PS5 Payload SDK (currently v0.44) → $PS5_PAYLOAD_SDK
+#   - Repository-pinned PS5 Payload SDK (currently v0.45) → $PS5_PAYLOAD_SDK
 #     (default $HOME/ps5-payload-sdk)
 #
 # After it finishes, the script prints the env exports you need to add to ~/.bashrc
@@ -43,7 +43,7 @@ APT_DEPS=(
   python3
   # LLVM 22 toolchain — required by the PS5 SDK's `prospero-clang` wrapper,
   # which dispatches into `${llvm-bindir}/clang` + `${llvm-bindir}/ld.lld`.
-  # SDK v0.44 supports llvm 16–23; we pin to 22, the major CI builds
+  # SDK v0.45 supports llvm 16–23; we pin to 22, the major CI builds
   # releases with. Ubuntu 24.04
   # doesn't ship llvm-22 in its own repos, so we add apt.llvm.org below
   # before installing these.
@@ -119,7 +119,9 @@ PS5_SDK_INSTALL_DIR="$SDK_DIR" "$REPO_ROOT/scripts/install-ps5-sdk.sh"
 # ─── 5. client npm deps ────────────────────────────────────────────────────────
 if [ -d "$REPO_ROOT/client" ]; then
   log "Installing client npm dependencies"
-  (cd "$REPO_ROOT/client" && npm install --no-audit --no-fund)
+  # `npm ci`, never `npm install`: see NPM_INSTALL in the root Makefile (npm 10
+  # strips the lockfile's libc fields that the Alpine web UI image relies on).
+  (cd "$REPO_ROOT/client" && npm ci --no-audit --no-fund)
   ok "client/node_modules ready"
 fi
 

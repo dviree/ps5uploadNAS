@@ -1179,6 +1179,9 @@ pub fn revert(log_path: &Path, open: &OpenTree) -> std::io::Result<RevertResult>
             Some("path leaves the folder".to_string())
         } else {
             match (here(&src), here(&dst)) {
+                // Already back under its old name (an earlier, partly finished undo): nothing
+                // to do, and not a problem that should keep the run open.
+                (Ok(false), Ok(true)) => None,
                 (Ok(false), _) => Some("moved file is gone".to_string()),
                 (_, Ok(true)) => Some("original name is taken".to_string()),
                 (Ok(true), Ok(false)) => dst
@@ -1220,8 +1223,13 @@ pub fn revert(log_path: &Path, open: &OpenTree) -> std::io::Result<RevertResult>
         .filter_map(|m| root.join(&m.to).parent().map(Path::to_path_buf))
         .collect();
     prune_empty(tree, &root, &made);
-    log.reverted_at = Some(now_iso());
-    write_log(log_path, &log)?;
+    // Only a complete undo is final. A move that could not go back (its old name taken, the
+    // file gone) stays listed, and the run stays undoable so the person can fix the clash
+    // and undo again; the moves already put back are then skipped as "moved file is gone".
+    if out.problems.is_empty() {
+        log.reverted_at = Some(now_iso());
+        write_log(log_path, &log)?;
+    }
     Ok(out)
 }
 

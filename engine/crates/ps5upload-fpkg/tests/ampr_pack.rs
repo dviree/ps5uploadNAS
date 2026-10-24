@@ -143,14 +143,11 @@ fn pack(name: &str, out: &Path) -> ampr_pack::Output {
     let entries =
         ampr_index::parse(&std::fs::read(fixture().join("ampr_emu.index")).unwrap()).unwrap();
     let mut tree = FolderSource::open(&src.0).unwrap();
-    let output = ampr_pack::build(
-        &entries,
-        &mut tree,
-        &profile(name),
-        out,
-        &mut Control::default(),
-    )
-    .unwrap();
+    // drakmor's packer predates keeping empty and read-from-disk files loose.
+    let mut config = profile(name);
+    config.keep_files_on_disk = false;
+    let output =
+        ampr_pack::build(&entries, &mut tree, &config, out, &mut Control::default()).unwrap();
     output.write_small_files(out).unwrap();
     output
 }
