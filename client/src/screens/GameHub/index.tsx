@@ -76,6 +76,7 @@ import { playFor, useTrackedPlay } from "../../lib/trackedPlay";
 import { runningAfterClose, runningOn, useRunningAppsStore } from "../../state/runningApps";
 // Direct import to avoid the barrel's circular-dep warning at build.
 import { useConfirm } from "../../components/ConfirmDialog";
+import { SaveBackupsList } from "./SaveBackupsList";
 import { useStaleHostGuard } from "../../lib/staleHostGuard";
 import { formatBytes, formatDuration } from "../../lib/format";
 
@@ -863,12 +864,13 @@ function SavesTab({ titleId, host }: { titleId: string; host: string | null }) {
                       <span>· {formatDate(new Date(s.mtime * 1000))}</span>
                     )}
                   </div>
+                  {host && <SaveBackupsList host={host} save={s} />}
                 </div>
               </li>
             ))}
           </ul>
           <div className="mt-4">
-            <Button variant="ghost" size="sm" onClick={() => navigate("/saves")}>
+            <Button variant="ghost" size="sm" onClick={() => navigate("/saves", { state: { titleId } })}>
               {tr("game_hub_manage_saves", undefined, "Back up / restore in Saves")}
             </Button>
           </div>

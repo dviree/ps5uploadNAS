@@ -207,6 +207,53 @@ else owns, the engine names the folder, its own UID:GID and the folder's owner. 
 in the compose file to the folder's owner (`ls -ln` shows the numbers), or run
 `chown -R 65532:65532 <host folder>`. `PS5UPLOAD_DATA_DIR` does not fix this.
 
+**Q: I added consoles in the web UI on one computer. Why doesn't another computer see them?**
+Since 7.4.2 it does: the web UI keeps your consoles (names, addresses, order, notes and Wake
+keys) in the container's `/data`, so every browser that opens it sees the same list, and a change
+made in one shows up in the others within about 30 seconds (at once when you switch back to that
+tab). The first browser to open 7.4.2 hands over the consoles it had saved. What stays in each
+browser: which console is selected, theme, language, text size and the sidebar. Before 7.4.2 the
+list lived in each browser only. Anyone who can open the web UI can see the Wake keys, so keep
+`PS5UPLOAD_ALLOW_IP` to your own devices.
+
+**Q: How do automatic save backups work, and how do I restore one?**
+Saves → Automatic backups: choose a folder and how many versions to keep, then turn it on. Every
+ten minutes the engine copies each console's saves that changed since their last backup (a save
+written in the last few minutes waits for the next round). In the desktop app this runs while the
+app runs; in Docker it runs all the time, with no browser open. Use a folder the container keeps,
+such as `/data/save-backups`, or a NAS share you mount into the container. To restore, close the
+game, open its page in PS5Upload, go to Saves and press Restore on the version you want. The save
+on the PS5 is backed up first, so you can go back.
+
+**Q: How do I make room for a big game?**
+Open Clean up and press Make room, or follow "Plan space" when an install says there isn't enough
+room. Enter the size and pick the drive. The plan only suggests safe steps: removing leftovers,
+moving games to another PS5 drive, and uninstalling games your Collection on this computer has a
+copy of. It never deletes a game you have no copy of and never moves games to the computer.
+"Last played" is when the app saw the game running, so a game played while the app was closed
+shows unknown.
+
+**Q: My uploads to the PS5 are slow. How do I find out why?**
+Open Health and press Diagnose under "Diagnose slow transfers". It checks how the PS5 and this
+computer are connected (cable, Wi-Fi or VPN), the cable speed, whether replies slow down while
+sending and the packet size, and runs a speed test unless one ran in the last 10 minutes. The most
+common causes are the PS5 on Wi-Fi (about 30 MiB/s; a cable gets about 105) and a cable or switch
+port that connected at 100 Mb/s (about 11 MiB/s). In Docker, the checks of this computer's
+connection only see the container, and the result says so.
+
+**Q: Can I send a package or link to my PS5 from another app on my phone?**
+Yes, on Android. Use Share in your browser, Files app or download manager and pick PS5Upload. A
+link opens in Install from a link, where you choose how it is fetched and start it. A .pkg in your
+phone's storage installs from where it is, with no copy. A file only the sharing app can read (for
+example from Google Drive or Telegram) is copied into PS5Upload first, up to 2 GB; for anything
+bigger, download it to the phone first and share it from the Files app. The iPhone app can't offer
+this.
+
+**Q: Can I double-click a .pkg to install it with PS5Upload?**
+On Windows and Linux, yes, once the app is installed. On macOS, .pkg also means a Mac installer, so
+PS5Upload doesn't take it over: right-click the file and choose Open With → PS5Upload. Either way
+the app shows the file and asks "Send to <console>?" before it installs.
+
 **Q: Can I use ps5upload from a web browser (no desktop app)?**
 Yes. The `webui` image (above) serves the full app over HTTP; open `http://<host>:19113` from an
 allowed IP. Same security rules: no password, trusted LAN only. "How do I use PS5Upload from my
@@ -613,6 +660,8 @@ seconds later. This works the same in the desktop app.
 **Q: How do I install the Android app?**
 Download `PS5Upload-<ver>-android.apk` from the Releases page and open it. Android asks you to
 allow installs from your browser or file manager the first time. Updates install in place.
+Older 32-bit phones take `PS5Upload-<ver>-android-armv7.apk` instead; if the normal APK says
+"App not installed" on an old phone, that is the one you need.
 
 **Q: The app's text or buttons are huge (or tiny) on my phone.**
 Your phone's Display size or Font size setting scales the whole app. Open **Settings → Text
@@ -686,6 +735,13 @@ Copy them with the **Files** app into **On My iPhone → PS5Upload** (from iClou
 or AirDrop). The app's file browser starts there, and exports such as logs and save backups land
 there too. Keep the app open and the screen on while a transfer or install runs: iOS pauses apps
 in the background.
+
+**Q: Does it work on an iPad or an Android tablet?**
+Yes: the iPhone `.ipa` installs on an iPad, and the Android `.apk` on an Android tablet. On a
+wide screen the app shows the sidebar like the desktop app; held upright, a tablet starts with the
+narrow icon rail so screens keep their width (the arrow at the bottom of the rail opens the full
+sidebar, and the app remembers your choice). Buttons that appear on mouse hover on a computer are
+shown on a touch screen.
 
 **Q: Updating the iPhone app.**
 When a new version is out, the app's update check offers the new `.ipa`. Install it the same way
@@ -897,6 +953,17 @@ In **Files**, select it and choose **Move to…**, then pick the drive's homebre
 folder). It says first whether the move is instant (same drive) or a copy to the other drive,
 and whether it fits; a copy removes the original only after checking it. **Set permissions
 (777)** in the same menu makes files and folders readable and runnable.
+
+**Q: Can I drag files between Files and my computer?**
+Yes, in the desktop app. Drag files or folders (or everything you selected) out of **Files** onto
+the desktop, Finder, Explorer or your Linux file manager to copy them to this computer. The first
+drag fetches them; keep holding the mouse button and the drop happens when they are ready, or let
+go and drag again once the app says they are ready. One drag fetches up to 4 GB; for more, right-click
+→ **Download**. Drag files or folders from your computer into Files to copy them into the open
+folder. To move items into another folder on the PS5 instead, hold **Alt** (**⌥ Option** on a
+Mac) while you drag them onto that folder or a part of the path at the top. In the browser web UI
+you can drop files (not folders) onto Files; they go to the server first, then to the PS5. The
+Android and iPhone apps have no drag and drop.
 
 **Q: Can I copy files off a disc in the PS5's drive?**
 Yes. A data DVD or Blu-ray in the drive shows up in **File System** at `/mnt/disc`; browse it
@@ -1884,6 +1951,17 @@ PS5Upload Minion** has the same On/Off switch. Off removes the home-screen tile 
 page on port 9180, and it stays off after a restart (the helper keeps the choice in its
 `webui.json`). The PC app keeps working, and only it can turn Minion back on.
 
+**Q: How do I remove PS5Upload Minion completely?**
+In the app on your PC, **Settings → PS5Upload Minion → Remove Minion from this PS5**. It turns
+Minion off (no tile, no page on port 9180) and deletes what Minion keeps on the PS5: its Files
+favourites and recent folders, its game Library cache and its controller log. It keeps saved
+network shares, cheats and backups, which the PC app uses too. Minion is part of the helper, so
+nothing is installed again when the helper starts: the helper reads its `webui.json`, which says
+off. If that file is lost (the `/data/ps5upload` folder was wiped), the next connection from a
+computer that turned Minion off turns it off again. You can turn Minion back on from the same
+place at any time. The same Settings section can also let other devices on your network open
+Minion, and shows the address to open.
+
 **Q: Which network shares does the Library see, and where do I set them up?**
 The SMB shares kept on the PS5: add them in Minion's **Files → Network shares**, or from the
 PC in **Servers → Shares on the PS5**, which adds, edits and removes them and can copy a server
@@ -1956,6 +2034,13 @@ anyway" (Windows) or right-click → Open (macOS) once. Grab the
 download straight from the
 [Releases page](https://github.com/phantomptr/ps5upload/releases)
 (not a mirror) and report any AV false positive to your vendor.
+
+Every release file is scanned with ClamAV before it is published, and each one carries a
+GitHub build attestation: proof that it was built by this repository's release workflow from
+the tagged source and not changed since. With the [GitHub CLI](https://cli.github.com) you can
+check a download yourself:
+`gh attestation verify PS5Upload-<ver>-win-x64.zip -R phantomptr/ps5upload`. If that passes, a
+single vendor's flag is a false positive; please report it to that vendor (and tell us which).
 
 **Q: How do updates work?**
 The app checks GitHub once per launch and shows a dot on the Settings entry when a newer version

@@ -1,0 +1,81 @@
+# CodeQL code scanning: injection, path traversal, unsafe deserialisation and the like in
+# our own code. Findings go to the repository's Security tab (Code scanning) rather than
+# failing the build, so a new alert is triaged instead of blocking an unrelated PR. The
+# dependency and secret scan that does gate PRs is the `security scan` job in engine-ci.yml.
+#
+# The payload's C is not analysed here: it builds only with the PS5 Payload SDK.
+name: codeql
+
+# This fork: by hand only (see CLAUDE.md).
+on:
+  workflow_dispatch:
+
+concurrency:
+  group: codeql-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    name: codeql (${{ matrix.language }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [actions, javascript-typescript, python, rust]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: none
+          queries: security-extended
+          config-file: ./.github/codeql/codeql-config.yml
+      - uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4
+        with:
+          category: /language:${{ matrix.language }}
+
+  # Fails when this change leaves an open code-scanning alert: a new finding is fixed (or, when it
+  # is by design, dismissed with its reason) before it merges or ships. Already-dismissed alerts
+  # don't count. Push and same-repo pull requests only (a fork's token cannot read the alerts).
+  gate:
+    name: codeql gate
+    needs: analyze
+    if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: read
+    steps:
+      - name: No open code-scanning alert
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          REF: ${{ github.event_name == 'pull_request' && format('refs/pull/{0}/merge', github.event.pull_request.number) || github.ref }}
+          SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.merge_commit_sha || github.sha }}
+        run: |
+          set -euo pipefail
+          # The uploads just made turn into analyses, then alerts, after a short delay: wait
+          # until all four languages' analyses of this commit are in.
+          for _ in $(seq 1 30); do
+            n="$(gh api "repos/$REPO/code-scanning/analyses?ref=$REF&per_page=100" \
+              --jq "[.[] | select(.commit_sha == \"$SHA\")] | map(.category) | unique | length")"
+            [ "$n" -ge 4 ] && break
+            sleep 20
+          done
+          sleep 20
+          open="$(gh api --paginate "repos/$REPO/code-scanning/alerts?ref=$REF&state=open&per_page=100" \
+            --jq '.[] | "\(.rule.id)  \(.most_recent_instance.location.path):\(.most_recent_instance.location.start_line)  \(.html_url)"')"
+          if [ -n "$open" ]; then
+            echo "$open"
+            echo "::error::open code-scanning alerts (above): fix them, or dismiss a by-design one with its reason"
+            exit 1
+          fi
+          echo "no open code-scanning alerts"

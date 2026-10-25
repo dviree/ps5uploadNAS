@@ -21,7 +21,7 @@ import {
 import { usePayloadPlaylistsStore } from "../state/payloadPlaylists";
 import { log } from "../state/logs";
 import { playlistResendsOurHelper } from "../lib/playlistOps";
-import { useAutoSaveBackup } from "./useAutoSaveBackup";
+import { startSaveBackupSync } from "../state/autoSaveBackup";
 import { useConsoleHandoff } from "./useConsoleHandoff";
 import {
   autoRunStillLoaded,
@@ -99,6 +99,10 @@ import {
   interruptedFsUploadHosts,
   resumeStoppedFsUploadOnWake,
 } from "../state/fsUploadRuntime";
+import { isDragOutCopy } from "../lib/dragOut";
+import { keepMinionOff } from "../state/minionMemory";
+import { startRosterShare } from "../state/rosterShare";
+import { UpdateCheckButton } from "./UpdateCheckButton";
 import { useTransferStore } from "../state/transfer";
 import { useUploadSettingsStore } from "../state/uploadSettings";
 import { ensurePayloadCurrent } from "../lib/ensurePayloadCurrent";
@@ -111,6 +115,7 @@ import { isAndroid, isMobile } from "../lib/platform";
 import { localFs } from "../api/localFs";
 import { getAppVersion } from "../lib/appVersion";
 import { GlobalPackageViewer } from "../components/GlobalPackageViewer";
+import { IncomingShareSheet } from "../components/IncomingShareSheet";
 import { dropTarget, usePackageViewer } from "../state/packageViewer";
 import { installConvertRunner } from "../lib/convertQueueRunner";
 import { recordAppEvent } from "../lib/appJournal";
@@ -1081,6 +1086,16 @@ function useKeepPs5Awake() {
   }, [active]);
 }
 
+/** A console this computer turned Minion off on stays off when it loses its settings
+ *  (state/minionMemory), checked once per helper connection. */
+function useKeepMinionOff() {
+  const host = useConnectionStore((s) => s.host);
+  const up = useConnectionStore((s) => s.payloadStatus === "up");
+  useEffect(() => {
+    if (host && up) void keepMinionOff(host);
+  }, [host, up]);
+}
+
 /** App-wide drag-drop listener: a package, game image or folder dropped on a screen without
  *  its own drop zone opens the package viewer, whose Install… / Convert… takes it to the screen
  *  that does that. A drop never starts anything by itself. Screens with their own drop zone
@@ -1100,7 +1115,11 @@ function usePkgAutoRoute() {
       if (e.payload.type !== "drop") return;
       // The first viewable thing ANYWHERE in the drop, not just paths[0]: a mixed drop like
       // [game.elf, patch.pkg] still finds the package.
-      const target = dropTarget(e.payload.paths ?? [], location.pathname);
+      // A copy Files made for a drag out, dropped back on the window, opens nothing.
+      const target = dropTarget(
+        (e.payload.paths ?? []).filter((p) => !isDragOutCopy(p)),
+        location.pathname,
+      );
       if (!target) return;
       const viewer = usePackageViewer.getState();
       viewer.open(target.path, [
@@ -1435,7 +1454,6 @@ function AndroidLocalNetworkBanner() {
 
 export default function AppShell() {
   useStatusPolling();
-  useAutoSaveBackup();
   useConsoleHandoff();
   useAutoRedeployDownHelpers();
   useMovedConsoleWatch();
@@ -1444,6 +1462,7 @@ export default function AppShell() {
   useRoutePersistence();
   useWindowStatePersistence();
   usePkgAutoRoute();
+  useKeepMinionOff();
   // Schedule runner — fires while window open. Browser-side; for
   // true cron behaviour the user needs an external scheduler.
   useScheduleRunner(runScheduleAction);
@@ -1461,6 +1480,11 @@ export default function AppShell() {
     // Migrate single-host users into the multi-PS5 roster on first
     // start. Idempotent — no-op when the roster is already populated.
     ensureRosterMigrated();
+    // The self-hosted web UI keeps the console list in the engine, so every browser sees the
+    // same consoles. No-op in the desktop and mobile apps.
+    const stopRosterShare = startRosterShare();
+    // Automatic save backups are run by the engine; it backs up the consoles in this list.
+    const stopSaveBackupSync = startSaveBackupSync();
     // Subscribe-once: cross-store accumulator that credits running
     // titles with elapsed wall-clock between updates. Idempotent.
     installPlayTimeAccumulator();
@@ -1476,7 +1500,11 @@ export default function AppShell() {
       runNotificationAutoPrune,
       6 * 3600 * 1000,
     );
-    return () => window.clearInterval(pruneTimer);
+    return () => {
+      window.clearInterval(pruneTimer);
+      stopRosterShare();
+      stopSaveBackupSync();
+    };
   }, []);
   // Window title follows the active console so the macOS Dock / app
   // switcher / Windows taskbar answer "which PS5 am I looking at?"
@@ -1516,6 +1544,8 @@ export default function AppShell() {
           Mounted once; screens drive it via pickLocalPath(). */}
       <LocalPathPicker />
       <GlobalPackageViewer />
+      {/* "Send to PS5": a link or file shared to the app, or a .pkg opened with it. */}
+      <IncomingShareSheet />
       {/* The app's own captures, large (desktop app only; opened from the status bar
           and the Bug report). */}
       {isTauriEnv() && <CaptureViewer />}
@@ -1626,6 +1656,7 @@ function TopBarActions() {
           {typeof navigator !== "undefined" && /mac/i.test(navigator.platform) ? "⌘K" : "Ctrl K"}
         </kbd>
       </button>
+      <UpdateCheckButton variant="orb" />
       <NotificationInbox align="right" placement="below" variant="orb" />
       <button
         type="button"

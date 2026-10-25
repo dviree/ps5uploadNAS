@@ -4,6 +4,140 @@ What's new in ps5upload, written for humans.
 
 ---
 
+## 7.5.1
+
+- **Security scan clean-up.** Every finding of the new code scan was reviewed. A damaged game
+  image can no longer make the converter reserve a huge buffer before reading it. Every GitHub
+  Action the builds use is pinned to an exact commit, and the scan now skips tests, examples and
+  developer tools, which never ship. The rest (the engine opening files you choose, and fixed
+  protocol constants) are by design and were closed with the reason recorded. So they stay
+  fixed: the PR gate now fails on any workflow action not pinned to a commit, a CodeQL gate fails
+  any change that leaves a new open alert, and the release script refuses to tag while one is open.
+
+## 7.5.0
+
+- **A new look.** PS5Upload has a new logo: a PS5 Pro drawn in black and white, with the name set
+  in Titan One. It is the app icon on every platform (macOS, Windows, Linux, Android, iPhone),
+  the in-app logo, the PS5 home-screen tile for Minion (it updates the next time the helper is
+  sent), the website and its screenshots, and the README. The masters and every image are in
+  `branding/`.
+
+## 7.4.4
+
+- **Save backups that run on their own.** Automatic save backups now run in the engine, so the
+  Docker web UI has them too, around the clock with no browser open (the desktop app backs up
+  while it runs, as before). Choose a folder (in Docker, one in a mounted volume such as
+  `/data/save-backups`) and how many versions to keep. Each game's page lists its backups under
+  Saves with a Restore button: the save on the PS5 is backed up first, so a restore can be undone.
+  Settings from the desktop app's earlier automatic backups carry over.
+- **Make room for a game.** Clean up → Make room: say how much space you need and on which PS5
+  drive, and it proposes what to clear: leftovers first, then games that can move to another PS5
+  drive, then games your Collection has a copy of to install again. Nothing without a copy is ever
+  suggested for deletion, and every step is listed before anything happens. It is also offered
+  when an install or send is short of space.
+- **Diagnose slow transfers.** Health → Diagnose slow transfers checks how the PS5 and this
+  computer are connected and lists what slows uploads down, with the fix: Wi-Fi on either side, a
+  VPN, a cable stuck at 100 Mb/s, replies that slow down while sending, a packet size (MTU)
+  mismatch, a Docker bridge network, other transfers or a speed limit in the app, and whether the
+  network or the PS5's drive is the slow side. What it cannot measure, it says. The Upload screen
+  offers it when an upload runs far below what your connection managed.
+- **Send to PS5 from Android's share menu.** Share a download link or a package (or a ZIP, 7z or
+  RAR) to PS5Upload and it asks "Send to <console>?". A package in your phone's storage installs
+  from where it is; one only the sharing app can read (Drive, Telegram) is copied in first, up to
+  2 GB.
+- **Open with PS5Upload.** `.pkg` and `.fpkg` files open in the desktop app (double-click on Windows
+  and Linux, Open With on macOS, where Apple's Installer stays the default), which asks before it
+  installs.
+- **Windows signing, ready to switch on.** The release can sign the Windows app, installer and
+  engine with Azure Artifact Signing once its account is set up; until then nothing changes.
+- **Less empty space on wide windows.** On Convert, Build & install moves under whichever column
+  is shorter, so the options no longer leave a tall empty gap beside them. Console cards stack at
+  their own height, Home shows Notifications under the console status, and Settings no longer has
+  hollow half-width cards.
+- **Fixed: the web UI's shared console list** could be emptied if the engine ever answered with
+  something other than the list; now only a proper answer can change it.
+- **Screenshots toolbar** (thanks @tanner02): Download and Delete sit beside Refresh, and the
+  controls wrap under the description on a narrow window instead of squeezing it.
+
+## 7.4.3
+
+- **Check for updates from anywhere.** A button in the top bar (desktop and tablet) shows your
+  version and checks GitHub when you press it: it says when you are up to date, or the update bar
+  appears. With an update waiting it lights up and opens Settings → Updates. On a phone the
+  version at the foot of More is the same button, and "Check for updates" is in the command
+  palette (Cmd/Ctrl+K). The web UI updates with its engine, so it has no button.
+
+## 7.4.2
+
+- **Web UI and Docker: every browser sees the same consoles.** The consoles you add in the web
+  UI (names, addresses, order, notes and Wake keys) are now kept by the engine in `/data`, not
+  in the browser, so opening the container from another computer shows the same list. A change
+  in one browser reaches the others within about 30 seconds, and two people editing at once both
+  keep their change. The first browser to open 7.4.2 hands over the consoles it had saved. Which
+  console is selected, theme, language and text size stay per browser. The desktop and mobile
+  apps are unchanged.
+- **Fixed: a second browser could make the engine forget what it read from your consoles.** A
+  browser with an empty console list told the engine to drop its saved reads of every other
+  console (used by the game pages); with one shared list that can't happen.
+- **"Didn't finish" with "Minified React error #185".** The queue now says the app's display hit
+  an error and that the transfer may have finished, and logs the details for a bug report so the
+  cause can be found.
+
+## 7.4.1
+
+- Dependency updates: Tauri 2.12.5, Tauri CLI 2.12.4, Vite 8.3.5, lucide-react 1.61.0 and
+  crc32fast 1.5.3.
+- The new security scan no longer flags the Wake screen's made-up sample key, and a test no
+  longer trips the repository's old-port check.
+
+## 7.4.0
+
+- **Security scanning on every change.** Every pull request now runs a security scan: known
+  vulnerable Rust and npm dependencies (cargo audit, npm audit) and secrets anywhere in the git
+  history (gitleaks); `make security` runs the same scan locally. CodeQL checks our Rust,
+  TypeScript, Python and workflow code on every change and weekly. Every release file is
+  scanned with ClamAV before it is published, and gets a GitHub build attestation you can verify
+  with `gh attestation verify <file> -R phantomptr/ps5upload` (FAQ: anti-virus).
+- **Dependency fixes.** crypto-bigint 0.7.7 (constant-time fixes, RUSTSEC-2026-0387), zod 4.6.7
+  (memory exhaustion on oversized input, development tooling only), chacha20 0.10.2 (the yanked
+  0.10.1 replaced). Third-party CI actions are pinned to exact commits, and Dependabot waits
+  three days before proposing a new release.
+- **Smaller Android download, 32-bit phones get their own APK.** The Android app is now built
+  per processor: `PS5Upload-<ver>-android.apk` for 64-bit phones and tablets (nearly all of
+  them), `PS5Upload-<ver>-android-armv7.apk` for older 32-bit ones, and release builds leave out
+  debug symbols. The 64-bit download drops from about 115 MB to about 40 MB. A 32-bit phone that
+  updates from inside the app is offered the 64-bit APK once ("App not installed"); download
+  the armv7 APK from the Releases page instead.
+- **Installed games in the command palette.** Cmd/Ctrl+K finds every game installed on your
+  saved consoles, not only the ones in Collection, and says which console has it.
+- The Wake screen's sample keys are plain made-up values.
+
+## 7.3.1
+
+- **Drag files and folders between Files and your computer.** In the desktop app, drag files or
+  folders (or everything you selected) out of Files onto the desktop, Finder, Explorer or your
+  Linux file manager to copy them to this computer; drag them in from there to copy them into the
+  open folder. Hold Alt (⌥ Option on a Mac) while dragging to move them into a folder on the PS5
+  instead. One drag fetches up to 4 GB; right-click → Download is for more. In the browser web UI,
+  files dropped on Files go up to the PS5 too.
+- **Minion: network access and Remove.** Settings → PS5Upload Minion can now let other devices on
+  your network open Minion (with its address and an Open here button), and has a Remove button: it
+  turns Minion off and deletes what it keeps on the PS5 (its Files favourites and recent folders,
+  its game Library cache, its controller log). Saved network shares, cheats and backups stay; the
+  PC app uses them too.
+- **Minion stays off.** Off was already kept by the PS5 across helper restarts. Now, if the PS5
+  loses Minion's settings (its PS5Upload folder was wiped), the next connection from a computer
+  that turned Minion off turns it off again instead of letting it come back.
+- **iPad and Android tablets.** A tablet held upright starts with the icon rail instead of the
+  full sidebar, so screens keep their width, and buttons that only appeared on mouse hover (the
+  sidebar's pin and hide, notification and payload actions) can be tapped on a touch screen.
+- **More links between screens.** An "installed" notification opens the game's page. Game
+  Activity, Saves and Processes link each game to its page, and the game page's "Back up /
+  restore in Saves" opens Saves on that game. The game page can show the game's folder in Files
+  and search its files. "Not enough space" messages offer Clean up. Uninstalling a game installed
+  from a package warns when your Collection has no copy of it.
+- Faster CI: test shards balanced by measured time, fuzzers run side by side, fewer queued jobs.
+
 ## 7.3.0
 
 - **Convert from Collection.** Every game in Collection has a menu with Convert…, and the game

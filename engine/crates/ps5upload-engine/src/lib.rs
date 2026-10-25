@@ -75,6 +75,7 @@ mod lz4_api;
 mod lz4_compat;
 mod mgmt_route;
 mod migrate_6;
+mod net_doctor;
 mod net_health;
 mod pkg_install;
 mod pkg_sidecar;
@@ -83,6 +84,8 @@ mod profile_image;
 mod remote;
 mod remote_download;
 mod remote_pkg;
+mod save_backup;
+mod shared_state;
 mod state_io;
 mod telemetry;
 #[cfg(feature = "webui")]
@@ -5955,6 +5958,43 @@ async fn health_scan_handler(
     }
 }
 
+/// GET /api/net/doctor?addr=IP
+///
+/// The facts behind "Diagnose slow transfers": this computer's link toward the console (wired,
+/// Wi-Fi, a VPN; its speed and MTU), the console's link from its helper, whether this engine is
+/// in a container, and how long a connection to the console takes to open. The client judges
+/// them together with the speed test. Blocking work, so it runs off the async runtime.
+async fn net_doctor_handler(
+    State(state): State<AppState>,
+    Query(q): Query<AddrQuery>,
+) -> impl IntoResponse {
+    let addr = console_addr_or_default(q.addr, &state.default_ps5_addr);
+    match tokio::task::spawn_blocking(move || net_doctor::gather(&addr)).await {
+        Ok(facts) => (StatusCode::OK, Json(facts)).into_response(),
+        Err(e) => json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")).into_response(),
+    }
+}
+
+/// GET /api/net/doctor/reply?addr=IP
+///
+/// Only the connection-open time, so the doctor can time it again while the speed test is
+/// sending and see whether the reply time balloons under load.
+async fn net_doctor_reply_handler(
+    State(state): State<AppState>,
+    Query(q): Query<AddrQuery>,
+) -> impl IntoResponse {
+    let addr = console_addr_or_default(q.addr, &state.default_ps5_addr);
+    let host = pkg_install::strip_host_port(&addr);
+    match tokio::task::spawn_blocking(move || net_doctor::reply_time(&host, 5)).await {
+        Ok((median_ms, samples)) => (
+            StatusCode::OK,
+            Json(serde_json::json!({ "median_ms": median_ms, "samples": samples })),
+        )
+            .into_response(),
+        Err(e) => json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")).into_response(),
+    }
+}
+
 /// Where the speed test's file is written on this computer: the data folder, or the system
 /// temp folder when there is none.
 fn speed_test_dir() -> std::path::PathBuf {
@@ -10709,6 +10749,8 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
             post(mgmt_route::mgmt_call_handler),
         )
         .route("/api/ps5/health/scan", get(health_scan_handler))
+        .route("/api/net/doctor", get(net_doctor_handler))
+        .route("/api/net/doctor/reply", get(net_doctor_reply_handler))
         .route("/api/speed-test/prepare", post(speed_test_prepare_handler))
         .route("/api/speed-test/cleanup", post(speed_test_cleanup_handler))
         .route("/api/ps5/health/junk", get(health_junk_handler))
@@ -10834,6 +10876,18 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
         .route(
             "/api/collection/check/cancel",
             post(collection_check_api::post_check_cancel),
+        )
+        .route("/api/games/installed", get(games_api::list_installed))
+        .route(
+            "/api/save-backup",
+            get(save_backup::get_view).put(save_backup::put_settings),
+        )
+        .route("/api/save-backup/run", post(save_backup::post_run))
+        .route("/api/save-backup/list", get(save_backup::get_list))
+        .route("/api/save-backup/restore", post(save_backup::post_restore))
+        .route(
+            "/api/shared/{name}",
+            get(shared_state::get_doc).put(shared_state::put_doc),
         )
         .route("/api/games/{id}", get(games_api::get_game))
         .route("/api/games/{id}/refresh", post(games_api::refresh))
@@ -11353,6 +11407,11 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
     // whether the engine was actually listening.
     println!("[ps5upload-engine] listening on http://{bind}  (ps5={ps5_addr})");
     crate::log_info!("listening on http://{bind}  (ps5={ps5_addr})");
+    // Automatic save backups run here, not in a window: they carry on with no app open.
+    save_backup::spawn(
+        &bind,
+        &std::env::var("PS5UPLOAD_BASE_URL").unwrap_or_default(),
+    );
     // Graceful shutdown: when the parent-watcher fires (stdin EOF), the
     // SHUTDOWN Notify wakes this future, axum stops
     // accepting new connections, drains in-flight ones, then returns.

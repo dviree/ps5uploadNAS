@@ -44,8 +44,8 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 22
           # Always the newest 22.x (security releases; the runner image can lag).
@@ -62,17 +62,18 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: stable
           components: rustfmt, clippy
 
       # Restored on every run; saved (under a new key per run, so it stays current) only from
       # main, where later runs can restore it. A PR's own cache would be visible to that PR only.
       - name: Restore cargo cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry
@@ -117,7 +118,7 @@ jobs:
 
       - name: Save cargo cache
         if: github.ref == 'refs/heads/main'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry
@@ -142,15 +143,17 @@ jobs:
           - part: libs
             select: --workspace --exclude ava1-ctest --exclude ps5upload-engine --exclude ps5upload-tests
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
 
       # Restored on every run; saved (under a new key per run, so it stays current) only from
       # main, where later runs can restore it. A PR's own cache would be visible to that PR only.
       - name: Restore cargo cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry
@@ -162,7 +165,7 @@ jobs:
             ${{ runner.os }}-engine-test-${{ matrix.part }}-
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2
         with:
           tool: cargo-nextest
 
@@ -247,7 +250,7 @@ jobs:
 
       - name: Save cargo cache
         if: github.ref == 'refs/heads/main'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry
@@ -268,15 +271,17 @@ jobs:
       matrix:
         shard: [1, 2, 3, 4]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
 
       # Restored on every run; saved (under a new key per run, so it stays current) only from
       # main, where later runs can restore it. A PR's own cache would be visible to that PR only.
       - name: Restore cargo cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry
@@ -294,22 +299,16 @@ jobs:
           RUST_BACKTRACE: 1
           SHARD: ${{ matrix.shard }}
         run: |
-          # Every test file, sorted, dealt round-robin: file N goes to shard (N mod 4) + 1.
-          # A file added later is picked up by one of the four without being listed anywhere.
-          mapfile -t all < <(ls crates/ava1-ctest/tests/*.rs | sort)
-          args=()
-          for i in "${!all[@]}"; do
-            if [ $(( i % 4 + 1 )) -eq "$SHARD" ]; then
-              args+=(--test "$(basename "${all[$i]}" .rs)")
-            fi
-          done
-          [ "${#args[@]}" -gt 0 ] || { echo "::error::shard $SHARD got no test files"; exit 1; }
-          echo "shard $SHARD of 4: ${#args[@]} of ${#all[@]} test files"
+          # Every test file is dealt to one of the four shards, longest first by measured time
+          # (.github/scripts/ctest-shard.py; round-robin by name left one shard ~70 s longer than
+          # the rest). A file added later is picked up by one of the four without being listed.
+          args=$(python3 ../.github/scripts/ctest-shard.py "$SHARD" 4) || exit 1
+          mapfile -t args <<< "$args"
           cargo test -p ava1-ctest "${args[@]}" -- --test-threads=1
 
       - name: Save cargo cache
         if: github.ref == 'refs/heads/main'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry
@@ -328,7 +327,7 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install clang + libFuzzer
         run: sudo apt-get update && sudo apt-get install -y clang libclang-rt-18-dev
@@ -339,21 +338,34 @@ jobs:
       - name: No FTX2 or ports 9113/9114 in the repository
         run: make check-no-ftx2
 
-      - name: Fuzz C decoders + data-plane parsers (60 s each)
+      # The C fuzzers (60 s each) and the Rust ones (60 s + 30 s) are single-threaded and share
+      # nothing, so they run side by side on the 4-core runner instead of one after the other
+      # (~146 s, then ~196 s with the Rust toolchain and build). Each fuzzer still gets its full
+      # time on a core of its own; the Rust side runs at a lower priority so its compile, the
+      # only part that wants more than one core, never takes CPU from the C fuzzer.
+      - name: Fuzz C decoders + data-plane parsers (60 s each) and Rust decoders (60 s + 30 s)
         env:
           AVA1_FUZZ_SECONDS: 60
-        run: make ava1-fuzz-c
-
-      - name: Install Rust nightly + cargo-fuzz
         run: |
-          rustup toolchain install nightly --profile minimal
-          cargo install cargo-fuzz --locked
-
-      - name: Fuzz Rust decoders (60 s + 30 s)
-        working-directory: engine/crates/ava1/fuzz
-        run: |
-          cargo +nightly fuzz run decode -- -max_total_time=60
-          cargo +nightly fuzz run frame_header -- -max_total_time=30
+          rust_log="$RUNNER_TEMP/rust-fuzz.log"
+          nice -n 10 bash -euo pipefail -c '
+            rustup toolchain install nightly --profile minimal
+            cargo install cargo-fuzz --locked
+            cd engine/crates/ava1/fuzz
+            cargo +nightly fuzz run decode -- -max_total_time=60
+            cargo +nightly fuzz run frame_header -- -max_total_time=30
+          ' > "$rust_log" 2>&1 &
+          rust_pid=$!
+          c_status=0
+          make ava1-fuzz-c || c_status=$?
+          rust_status=0
+          wait "$rust_pid" || rust_status=$?
+          echo "::group::Rust decoders (cargo-fuzz) output"
+          cat "$rust_log"
+          echo "::endgroup::"
+          [ "$c_status" -eq 0 ] || echo "::error::C fuzzing failed (exit $c_status); output above"
+          [ "$rust_status" -eq 0 ] || echo "::error::Rust fuzzing failed (exit $rust_status); see the 'Rust decoders' group"
+          [ "$c_status" -eq 0 ] && [ "$rust_status" -eq 0 ]
 
   # ─────────────────────────────────────────────────────────────────────
   # AVA1 sanitizers (review 009 #2a): the whole ctest suite, i.e. every console C path the host can run,
@@ -365,17 +377,19 @@ jobs:
     name: ava1-ctest (ASan + UBSan)
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-    # Four shards, test files dealt round-robin exactly like rust-ctest: the serial sanitized run
-    # was ~15 min on one runner.
+    # Four shards, test files dealt exactly like rust-ctest (by measured time): the serial
+    # sanitized run was ~15 min on one runner.
     strategy:
       fail-fast: false
       matrix:
         shard: [1, 2, 3, 4]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
 
       - name: Install clang + sanitizer runtimes
         run: sudo apt-get update && sudo apt-get install -y clang libclang-rt-18-dev
@@ -383,7 +397,7 @@ jobs:
       # Restored on every run; saved (under a new key per run, so it stays current) only from
       # main, where later runs can restore it. A PR's own cache would be visible to that PR only.
       - name: Restore cargo cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry
@@ -405,20 +419,13 @@ jobs:
           RUST_BACKTRACE: 1
           SHARD: ${{ matrix.shard }}
         run: |
-          mapfile -t all < <(ls crates/ava1-ctest/tests/*.rs | sort)
-          args=()
-          for i in "${!all[@]}"; do
-            if [ $(( i % 4 + 1 )) -eq "$SHARD" ]; then
-              args+=(--test "$(basename "${all[$i]}" .rs)")
-            fi
-          done
-          [ "${#args[@]}" -gt 0 ] || { echo "::error::shard $SHARD got no test files"; exit 1; }
-          echo "sanitized shard $SHARD of 4: ${#args[@]} of ${#all[@]} test files"
+          args=$(python3 ../.github/scripts/ctest-shard.py "$SHARD" 4) || exit 1
+          mapfile -t args <<< "$args"
           cargo test -p ava1-ctest "${args[@]}" -- --test-threads=1
 
       - name: Save cargo cache
         if: github.ref == 'refs/heads/main'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry
@@ -433,45 +440,56 @@ jobs:
   # we ship, while publish.yml remains the authoritative bundle builder.
   # ─────────────────────────────────────────────────────────────────────
   rust-engine-targets:
-    name: rust engine target (${{ matrix.target }})
+    name: rust engine target (${{ matrix.targets }})
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
+            targets: x86_64-unknown-linux-gnu
+            target_args: --target x86_64-unknown-linux-gnu
           # Native arm64 runner — cross-compiling to aarch64 from x86_64
           # ubuntu-24.04 fails because blake3's NEON SIMD path needs
           # aarch64-linux-gnu-gcc (not preinstalled, and bringing it in
           # would mean threading TARGET_CC env vars through every step).
           # Matches publish.yml's arm64 build leg.
           - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
+            targets: aarch64-unknown-linux-gnu
+            target_args: --target aarch64-unknown-linux-gnu
+          # Both macOS targets on one runner, checked by one cargo invocation: they share the
+          # host-side build scripts and proc macros, and one job instead of two takes one of the
+          # 5 concurrent macOS runners this ~30-job workflow queues for. Windows keeps one target
+          # per job: two targets in one run failed there with "can't find crate for `core`".
           - os: macos-14
-            target: aarch64-apple-darwin
-          - os: macos-14
-            target: x86_64-apple-darwin
+            targets: aarch64-apple-darwin,x86_64-apple-darwin
+            target_args: --target aarch64-apple-darwin --target x86_64-apple-darwin
           - os: windows-2022
-            target: x86_64-pc-windows-msvc
+            targets: x86_64-pc-windows-msvc
+            target_args: --target x86_64-pc-windows-msvc
           - os: windows-2022
-            target: aarch64-pc-windows-msvc
+            targets: aarch64-pc-windows-msvc
+            target_args: --target aarch64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 25
+    # The runner's default shell (PowerShell on Windows): under Git Bash, cargo there did not see
+    # the target rustup had just added ("can't find crate for `core`").
+    defaults:
+      run:
+        working-directory: engine
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
-          targets: ${{ matrix.target }}
+          toolchain: stable
+          targets: ${{ matrix.targets }}
 
       - name: cargo check core
-        working-directory: engine
-        run: cargo check -p ps5upload-core --target ${{ matrix.target }}
+        run: cargo check -p ps5upload-core ${{ matrix.target_args }}
 
       - name: cargo check engine
-        working-directory: engine
-        run: cargo check -p ps5upload-engine --target ${{ matrix.target }}
+        run: cargo check -p ps5upload-engine ${{ matrix.target_args }}
 
   # ─────────────────────────────────────────────────────────────────────
   # Rust desktop shell (client/src-tauri). Uses its own workspace so
@@ -487,11 +505,12 @@ jobs:
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: stable
           components: rustfmt, clippy
 
       # Formatting is platform-independent, so gate it on one runner
@@ -550,7 +569,7 @@ jobs:
       # Restored on every run; saved (under a new key per run, so it stays current) only from
       # main, where later runs can restore it. A PR's own cache would be visible to that PR only.
       - name: Restore cargo cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry
@@ -608,7 +627,7 @@ jobs:
 
       - name: Save cargo cache
         if: github.ref == 'refs/heads/main'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry
@@ -624,9 +643,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 22
           # Always the newest 22.x (security releases; the runner image can lag).
@@ -670,6 +689,45 @@ jobs:
         run: npm run test:e2e
 
   # ─────────────────────────────────────────────────────────────────────
+  # Security scan: dependencies with known vulnerabilities (cargo audit,
+  # npm audit) and secrets anywhere in the git history (gitleaks). The same
+  # script as `make security`; accepted findings are listed in it, with why.
+  # ─────────────────────────────────────────────────────────────────────
+  security-scan:
+    name: security scan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    env:
+      GITLEAKS_VERSION: 8.30.1
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # gitleaks reads every commit, not only the tip.
+          fetch-depth: 0
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 22
+          check-latest: true
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2
+        with:
+          tool: cargo-audit
+      - name: Install gitleaks (checksum-verified release)
+        run: |
+          set -euo pipefail
+          base="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
+          tarball="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          cd "$RUNNER_TEMP"
+          curl -fsSLO "$base/$tarball"
+          curl -fsSLO "$base/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          grep " ${tarball}\$" "gitleaks_${GITLEAKS_VERSION}_checksums.txt" | sha256sum -c -
+          tar -xzf "$tarball" gitleaks
+          install -m 0755 gitleaks /usr/local/bin/gitleaks
+          gitleaks version
+      - name: Scan
+        run: bash scripts/security-scan.sh
+
+  # ─────────────────────────────────────────────────────────────────────
   # Repo scripts and hygiene. Runs the same parser/audit layer exposed by
   # `make lint-scripts` / `npm run scripts:check`.
   # ─────────────────────────────────────────────────────────────────────
@@ -682,8 +740,8 @@ jobs:
         os: [ubuntu-24.04, macos-14, windows-2022]
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 22
           # Always the newest 22.x (security releases; the runner image can lag).
@@ -727,9 +785,9 @@ jobs:
     # inspection, not enforcement.
     continue-on-error: true
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 22
           # Always the newest 22.x (security releases; the runner image can lag).
@@ -742,19 +800,20 @@ jobs:
         run: npm ci --no-audit --no-fund
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: stable
           components: llvm-tools-preview
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@cargo-llvm-cov
+        uses: taiki-e/install-action@c3076e6fa5aeb9a93daf1bd8eff73345250a8a9c # cargo-llvm-cov
 
       # scripts/coverage.mjs runs the instrumented suite under nextest when it is installed:
       # the same tests, side by side instead of one binary at a time (the serial pass took
       # ~26 of this job's ~32 min). engine/.config/nextest.toml still serializes the
       # timing-sensitive binaries.
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@v2
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2
         with:
           tool: cargo-nextest
 
@@ -762,7 +821,7 @@ jobs:
         run: npm run coverage
 
       - name: Upload coverage artifact
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: coverage-reports
           path: |
@@ -782,9 +841,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 22
           # Always the newest 22.x (security releases; the runner image can lag).
@@ -879,7 +938,7 @@ jobs:
           fi
 
       - name: Hand the ELFs to the self-test job
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: payload-elves-ci
           path: |
@@ -911,9 +970,9 @@ jobs:
     runs-on: macos-14
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/download-artifact@v8
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
           name: payload-elves-ci
           path: payload
@@ -943,9 +1002,9 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 22
           # Always the newest 22.x (security releases; the runner image can lag).
@@ -954,20 +1013,21 @@ jobs:
           cache-dependency-path: client/package-lock.json
 
       - name: Setup JDK 17
-        uses: actions/setup-java@v6
+        uses: actions/setup-java@b843ebf9b913146b38da2eaa7aeddf76074ae1ad # v6
         with:
           distribution: temurin
           java-version: "17"
 
       - name: Install Rust + Android targets
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with:
+          toolchain: stable
           targets: aarch64-linux-android,armv7-linux-androideabi
 
       # Restored on every run; saved (under a new key per run, so it stays current) only from
       # main, where later runs can restore it. A PR's own cache would be visible to that PR only.
       - name: Restore cargo cache
-        uses: actions/cache/restore@v6
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry
@@ -995,7 +1055,7 @@ jobs:
       # versions, so any recent cache is a useful starting point and a
       # miss only costs a download.
       - name: Cache Gradle dependencies
-        uses: actions/cache@v6
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.gradle/caches
@@ -1063,7 +1123,7 @@ jobs:
         run: npx tauri android build --debug --apk --target aarch64 --target armv7
 
       - name: Upload debug APK
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: ps5upload-android-debug-apk
           path: client/src-tauri/gen/android/app/build/outputs/apk/**/*.apk
@@ -1072,7 +1132,7 @@ jobs:
 
       - name: Save cargo cache
         if: github.ref == 'refs/heads/main'
-        uses: actions/cache/save@v6
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry
@@ -1109,6 +1169,7 @@ jobs:
       - rust-desktop
       - client-frontend
       - repo-scripts
+      - security-scan
       - payload
       - payload-selftests
       - android
