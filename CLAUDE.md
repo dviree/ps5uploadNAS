@@ -31,12 +31,8 @@ Keep it that way:
 
 ## Updating the NAS
 
-The user's NAS runs the image as the container `ps5upload`. Whenever a change
-is pushed to `main`, end the reply with the update command: once the image build is done,
-`sudo /path/to/update.sh` on the NAS (it refuses while an LZ4 build is running,
-an `*.lz4spool` in `/path/to/ps5-lz4`). The script holds the full `docker run` (user
-1000:100, host network, `PS5_ADDR=192.168.1.50`,
-`PS5UPLOAD_ALLOW_IP=192.168.1.0/24,100.64.0.1`, mounts `/games` (roms/ps5, ro), `/pkgs`
-(roms/ps4, ro), `/lz4` (ps5-lz4), `/downloads` (`/path/to/downloads`, ro), `/data`,
-`/tmp`; browse roots `/games,/pkgs,/lz4,/downloads`); when a setting changes, give the user the
-updated script too.
+The user runs the image on a NAS as the container `ps5upload`, updated by a script on the NAS
+that pulls the image and recreates the container (it refuses while an LZ4 build is running).
+Whenever a change is pushed to `main`, end the reply by telling the user to run that update
+script once the image build is done. Keep the user's network addresses, paths and ids out of
+this repository.
