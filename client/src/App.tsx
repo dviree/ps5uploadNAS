@@ -34,6 +34,8 @@ import HomeScreen from "./screens/Home";
 // Settings (2k lines) and Connection pull in a lot; nobody needs them
 // before the first paint of Home.
 const ConnectionScreen = lazyWithReload(() => import("./screens/Connection"));
+const DevicesScreen = lazyWithReload(() => import("./screens/Devices"));
+const MeshDriveScreen = lazyWithReload(() => import("./screens/MeshDrive"));
 const SettingsScreen = lazyWithReload(() => import("./screens/Settings"));
 
 const MoreScreen = lazyWithReload(() => import("./screens/More"));
@@ -189,6 +191,22 @@ function AppRoutes({ location }: { location: Location }) {
           element={
             <Suspense fallback={<ScreenLoader />}>
               <ConnectionScreen />
+            </Suspense>
+          }
+        />
+        <Route
+          path="/devices"
+          element={
+            <Suspense fallback={<ScreenLoader />}>
+              <DevicesScreen />
+            </Suspense>
+          }
+        />
+        <Route
+          path="/mesh-drive"
+          element={
+            <Suspense fallback={<ScreenLoader />}>
+              <MeshDriveScreen />
             </Suspense>
           }
         />

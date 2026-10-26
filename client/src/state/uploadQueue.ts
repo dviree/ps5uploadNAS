@@ -61,6 +61,8 @@ import { useUploadSettingsStore } from "./uploadSettings";
 import { useRecentHostMetricsStore } from "./recentHostMetrics";
 import { pushNotification } from "./notifications";
 import { sleep } from "../lib/wakeableSleep";
+import { guardSet } from "../lib/renderLoopGuard";
+import { wakeForUpload } from "../lib/wakeForUpload";
 import { labelEngineJob } from "../lib/bgWork";
 import { withConsolePrefix } from "./roster";
 import { hostOf, mgmtAddr } from "../lib/addr";
@@ -101,6 +103,8 @@ import {
   type InstallRequest,
   type InstallResult,
 } from "./consoleQueueBridge";
+import { takeMeshLock } from "./mesh";
+import { useToastStore } from "./toasts";
 import { trStatic } from "../lib/trStatic";
 import { fpkg } from "../api/fpkg";
 import { ensurePayloadCurrent } from "../lib/ensurePayloadCurrent";
@@ -736,7 +740,19 @@ export function clearNotice(
   return null;
 }
 
-export const useUploadQueueStore = create<QueueState>((set, get) => {
+export const useUploadQueueStore = create<QueueState>((rawSet, get) => {
+  // A render loop elsewhere in the UI must not fail a transfer (lib/renderLoopGuard). The stack
+  // is logged once per run of loops, which is what a bug report needs to find the component.
+  let loopLogged = 0;
+  const set = guardSet(rawSet, (e) => {
+    const now = Date.now();
+    if (now - loopLogged < 60_000) return;
+    loopLogged = now;
+    log.error(
+      "queue",
+      `render loop during a queue update (kept going): ${e instanceof Error ? (e.stack ?? e.message) : String(e)}`,
+    );
+  });
   // PER-CONSOLE generation counters. Each console drains in its own loop;
   // every startHost() bumps a monotonic counter and stamps it as that
   // host's live generation. A loop captures its generation and bails
@@ -1001,11 +1017,46 @@ export const useUploadQueueStore = create<QueueState>((set, get) => {
 
   /** Run an install item through the executor pkgLibrary registered. Throws
    *  InstallItemError when the install finished but didn't install. */
-  const runInstallItem = async (item: QueueItem) => {
+  const runInstallItem = async (item: QueueItem, isLive: () => boolean) => {
     const exec = getInstallExecutor();
     if (!exec || !item.install) {
       throw new Error("This install can't run: its details were not kept.");
     }
+    // A PS5 installs one package at a time, whichever device asks (8.0.0): wait while another
+    // device's install holds the console. An older helper has no locks and this goes straight on.
+    const releaseTurn = await waitForInstallTurn(hostOf(item.addr), item, isLive);
+    try {
+      return await runInstallItemHeld(item, exec);
+    } finally {
+      void releaseTurn();
+    }
+  };
+
+  const waitForInstallTurn = async (
+    h: string,
+    item: QueueItem,
+    isLive: () => boolean,
+  ): Promise<() => Promise<void>> => {
+    const label = `Installing ${item.displayName}`.slice(0, 110);
+    for (;;) {
+      const turn = await takeMeshLock(h, "install", label);
+      if (turn.ok) {
+        set((s) => ({ items: patchItem(s.items, item.id, { installNote: null }) }));
+        return turn.release;
+      }
+      set((s) => ({
+        items: patchItem(s.items, item.id, {
+          installPhase: "installing",
+          installNote: `Waiting for ${turn.byName}: ${turn.label || "installing"} on this console`,
+        }),
+      }));
+      await new Promise((r) => setTimeout(r, 5_000));
+      if (!isLive()) throw new Error(`Stopped while waiting for ${turn.byName} to finish installing`);
+    }
+  };
+
+  const runInstallItemHeld = async (item: QueueItem, exec: NonNullable<ReturnType<typeof getInstallExecutor>>) => {
+    if (!item.install) throw new Error("This install can't run: its details were not kept.");
     set((s) => ({
       items: patchItem(s.items, item.id, {
         installPhase: "installing",
@@ -1069,7 +1120,26 @@ export const useUploadQueueStore = create<QueueState>((set, get) => {
    *  to continue or stop). The poll loop re-checks `isLive()` after
    *  every await — `stop()` mid-poll exits cleanly without writing
    *  stale state. */
-  const runOne = async (
+  const runOne = async (item: QueueItem, isLive: () => boolean): ReturnType<typeof runUploadItem> => {
+    if (item.sourceKind === "install") return runInstallItem(item, isLive);
+    // Writing into a folder another device writes into too (8.0.0): say so, and go on: two
+    // uploads into one folder are allowed, only the user knows whether they collide.
+    const h = hostOf(item.addr);
+    const write = await takeMeshLock(h, `write:${item.resolvedDest}`, `Uploading ${item.displayName}`.slice(0, 110));
+    if (!write.ok) {
+      useToastStore.getState().push({
+        tone: "warn",
+        message: `${write.byName} is also writing here (${write.label || item.resolvedDest}).`,
+      });
+    }
+    try {
+      return await runUploadItem(item, isLive);
+    } finally {
+      if (write.ok) void write.release();
+    }
+  };
+
+  const runUploadItem = async (
     item: QueueItem,
     isLive: () => boolean,
   ): Promise<{
@@ -1084,7 +1154,6 @@ export const useUploadQueueStore = create<QueueState>((set, get) => {
     /** The finished transfer's bottleneck note, when the engine reported one. */
     live?: JobLive;
   }> => {
-    if (item.sourceKind === "install") return runInstallItem(item);
     const isFolder =
       item.sourceKind === "folder" || item.sourceKind === "game-folder";
     const isArchive = item.sourceKind === "archive";
@@ -1734,6 +1803,7 @@ export const useUploadQueueStore = create<QueueState>((set, get) => {
       }),
     }));
     scheduleSave();
+    wakeForUpload(item.addr, useUploadSettingsStore.getState().wakeForUploads);
     log.info(
       "queue",
       `${hostOf(item.addr)} is in rest mode — ${item.sourcePath || item.id} waits for the PS5 to wake` +
@@ -2772,10 +2842,12 @@ export const useUploadQueueStore = create<QueueState>((set, get) => {
       // loop ever claims it (no cross-loop claim race).
       for (let pass = 0; ; pass++) {
         // The first pass is the user's Start and takes rows parked for a sleeping console too;
-        // later passes leave them to the wake, or a console still asleep would loop here.
+        // later passes leave them to the wake, or a console still asleep would loop here. That
+        // goes for the whole console: a later pass restarting it for a second row would un-park
+        // the first, which parks again ahead of it, forever.
         const hosts = distinctPendingHosts(get().items, {
           includeWaitingForWake: pass === 0,
-        }).filter((h) => !get().runningHosts[h]);
+        }).filter((h) => !get().runningHosts[h] && (pass === 0 || !hostAsleep(h)));
         if (hosts.length === 0) break;
         await Promise.all(hosts.map((h) => get().startHost(h)));
         if (!get().continueOnFailure) break;

@@ -1,7 +1,7 @@
 import { saveLastRoute } from "../lib/lastRoute";
 import { useLocation, useNavigate, useOutlet } from "react-router";
 import { Activity, useEffect, useRef, useState, type ReactNode } from "react";
-import { Lock, Moon, RefreshCw, Search, Sun, WifiOff, X } from "lucide-react";
+import { Lock, Moon, RefreshCw, RotateCw, Search, Sun, WifiOff, X } from "lucide-react";
 import { localNetworkBlocked, requestLocalNetwork } from "../lib/androidLocalNetwork";
 import StatusBar from "./StatusBar";
 import SessionBanner from "./SessionBanner";
@@ -102,6 +102,12 @@ import {
 import { isDragOutCopy } from "../lib/dragOut";
 import { keepMinionOff } from "../state/minionMemory";
 import { startRosterShare } from "../state/rosterShare";
+import { startSharedPrefs } from "../lib/sharedPrefs";
+import { startMeshShare } from "../lib/meshShare";
+import { useToastStore } from "../state/toasts";
+import { useMeshSync } from "./useMeshSync";
+import { compareVersions } from "../lib/semver";
+import { useNavSidebarStore, navListsFromStorage } from "../state/navSidebar";
 import { UpdateCheckButton } from "./UpdateCheckButton";
 import { useTransferStore } from "../state/transfer";
 import { useUploadSettingsStore } from "../state/uploadSettings";
@@ -293,11 +299,18 @@ function useStatusPolling() {
   useEffect(() => {
     if (!visible) return;
     let cancelled = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
     const tick = async () => {
       const up = await engineApi.ping();
-      if (!cancelled) {
+      if (cancelled) return;
+      const before = useConnectionStore.getState().engineStatus;
+      // The engine starts with the window and can take a few seconds (Windows, many consoles):
+      // until it has answered once, a miss inside the grace period is "starting", not "down"
+      // (#515: the red banner flashed on every launch). A failed start or a crash is reported
+      // by the shell itself (engineStartupEvents) and shows at once.
+      const starting = !up && before === "unknown" && engineStartupGrace();
+      if (!starting) {
         // Only the changes go to the journal: "unreachable" and "reachable again".
-        const before = useConnectionStore.getState().engineStatus;
         if (up && before === "down")
           recordAppEvent({ cat: "app", level: "info", code: "engine_up", msg: "engine reachable again" });
         if (!up && before !== "down")
@@ -307,12 +320,12 @@ function useStatusPolling() {
           ...(up ? { engineError: null } : {}),
         });
       }
+      timer = setTimeout(tick, starting ? 1000 : 5000);
     };
-    tick();
-    const h = setInterval(tick, 5000);
+    void tick();
     return () => {
       cancelled = true;
-      clearInterval(h);
+      if (timer) clearTimeout(timer);
     };
   }, [setStatus, visible]);
 
@@ -1229,6 +1242,9 @@ function HelperVersionBanner() {
     payloadVersion !== appVersion;
   const pair = `${payloadVersion}->${appVersion}`;
   if (!mismatch || dismissed === pair) return null;
+  // The helper is the newer one (another device sent it, 8.0.0): sending ours would take that
+  // away from every device. The fix is updating this app.
+  const appOlder = compareVersions(payloadVersion, appVersion) === 1;
 
   return (
     <div className="mx-3 mt-3 rounded-[var(--radius-card)] border border-[color-mix(in_srgb,var(--color-warn)_35%,transparent)] bg-[var(--color-warn-soft)] px-4 py-2.5 backdrop-blur-xl md:mx-5 text-[var(--color-text)]">
@@ -1247,11 +1263,17 @@ function HelperVersionBanner() {
               )}
             </p>
             <p className="text-xs text-[var(--color-muted)]">
-              {tr(
-                "helper_mismatch_body_v2",
-                undefined,
-                "Nothing to do on the PS5 itself: press Reload helper and this app sends the matching helper to the console. Fixes and features from the newer version won't work until then.",
-              )}
+              {appOlder
+                ? tr(
+                    "helper_mismatch_app_older",
+                    undefined,
+                    "Another device sent a newer helper. Update this app to match it; sending this app's helper would replace it with an older one for every device.",
+                  )
+                : tr(
+                    "helper_mismatch_body_v2",
+                    undefined,
+                    "Nothing to do on the PS5 itself: press Reload helper and this app sends the matching helper to the console. Fixes and features from the newer version won't work until then.",
+                  )}
             </p>
           </div>
         </div>
@@ -1259,9 +1281,18 @@ function HelperVersionBanner() {
           <Button
             size="sm"
             variant="primary"
-            onClick={() => navigate("/connection")}
+            onClick={() => {
+              if (appOlder) {
+                void useUpdateStore.getState().checkNow();
+                navigate("/settings");
+              } else {
+                navigate("/connection");
+              }
+            }}
           >
-            {tr("helper_mismatch_go", undefined, "Reload helper")}
+            {appOlder
+              ? tr("helper_mismatch_update_app", undefined, "Update this app")
+              : tr("helper_mismatch_go", undefined, "Reload helper")}
           </Button>
           <Button
             size="sm"
@@ -1452,9 +1483,22 @@ function AndroidLocalNetworkBanner() {
   );
 }
 
+/** How long after the app opened an engine that has not answered yet is still "starting". */
+export const ENGINE_STARTUP_GRACE_MS = 20_000;
+const appOpenedAt = Date.now();
+export function engineStartupGrace(now = Date.now()): boolean {
+  return now - appOpenedAt < ENGINE_STARTUP_GRACE_MS;
+}
+
 export default function AppShell() {
+  const shellTr = useTr();
+  const trRef = useRef(shellTr);
+  useEffect(() => {
+    trRef.current = shellTr;
+  });
   useStatusPolling();
   useConsoleHandoff();
+  useMeshSync();
   useAutoRedeployDownHelpers();
   useMovedConsoleWatch();
   useUpdateCheckOnMount();
@@ -1483,6 +1527,26 @@ export default function AppShell() {
     // The self-hosted web UI keeps the console list in the engine, so every browser sees the
     // same consoles. No-op in the desktop and mobile apps.
     const stopRosterShare = startRosterShare();
+    // ...and the settings every browser shares (lib/sharedPrefs). The sidebar follows another
+    // browser's change at once; the rest at the next page load.
+    const stopSharedPrefs = isTauriEnv()
+      ? () => {}
+      : startSharedPrefs(() => useNavSidebarStore.setState(navListsFromStorage()));
+    // 8.0.0: every device that uses a console shares the console list and set-up through it.
+    const stopMeshShare = startMeshShare(
+      () => useNavSidebarStore.setState(navListsFromStorage()),
+      (count) =>
+        useToastStore.getState().push({
+          tone: "info",
+          duration: 12_000,
+          message: trRef.current(
+            "mesh_settings_arrived",
+            { count },
+            `${count} setting(s) came from your other devices. They apply when the app reloads.`,
+          ),
+          action: { label: trRef.current("mesh_reload", undefined, "Reload"), onClick: () => window.location.reload() },
+        }),
+    );
     // Automatic save backups are run by the engine; it backs up the consoles in this list.
     const stopSaveBackupSync = startSaveBackupSync();
     // Subscribe-once: cross-store accumulator that credits running
@@ -1503,6 +1567,8 @@ export default function AppShell() {
     return () => {
       window.clearInterval(pruneTimer);
       stopRosterShare();
+      stopSharedPrefs();
+      stopMeshShare();
       stopSaveBackupSync();
     };
   }, []);
@@ -1655,6 +1721,15 @@ function TopBarActions() {
         <kbd className={`rounded-full border border-[var(--color-border)] px-2 py-0.5 font-sans text-[0.625rem] ${fold.text}`}>
           {typeof navigator !== "undefined" && /mac/i.test(navigator.platform) ? "⌘K" : "Ctrl K"}
         </kbd>
+      </button>
+      <button
+        type="button"
+        onClick={() => window.location.reload()}
+        aria-label={tr("topbar_reload_page", undefined, "Reload page")}
+        title={tr("topbar_reload_page", undefined, "Reload page")}
+        className="icon-orb-button"
+      >
+        <RotateCw size={18} aria-hidden />
       </button>
       <UpdateCheckButton variant="orb" />
       <NotificationInbox align="right" placement="below" variant="orb" />

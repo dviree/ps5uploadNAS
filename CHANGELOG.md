@@ -4,6 +4,224 @@ What's new in ps5upload, written for humans.
 
 ---
 
+## 8.1.0
+
+### Mesh Drive across consoles
+
+- **Consoles are the masters of their circles.** A drive lives on a console, which keeps its home
+  folder, its devices and their reports; devices sync only through a console, never with each
+  other, and a device can use several consoles.
+- **Link a drive with another console** (the drive's ⋯ menu › **Link to another console…**):
+  pick a console from your list and a home folder on it. That console gets its own copy and
+  becomes the drive's master for the devices that sync through it; a computer or Docker in the
+  drive keeps the two consoles the same, the files going straight from console to console. Each
+  console holds a drive once, so links form a tree and a change never comes back around.
+- **Away is fine.** A device whose console is off syncs through a linked one (a separate record of
+  what agreed with which console, so nothing is deleted on the switch), and a console that was off
+  catches up when it is back. **Unlink** leaves each console with its copy as a drive of its own.
+- **Linked consoles on the drive card:** each with its state, how many devices sync through it,
+  when it last synced and which device carried it.
+
+### Conflicts
+
+- **Settle conflicts** on the drive card lists every conflict copy beside the file it is a copy of
+  (who made it, sizes and times) with one choice each: **Keep the original**, **Keep the copy** or
+  **Keep both** (the copy gets a name of its own). It is settled on the console and every device
+  and linked console follows; what goes is moved to the drive's trash for 30 days.
+
+### Also in this release
+
+- **No red "cannot reach its engine" flash at launch (#515).** On Windows the engine can take a
+  few seconds to start, and the app showed the error banner until it answered. The app now waits
+  up to 20 seconds for a starting engine before calling it down; a real start failure or crash
+  still shows at once.
+- **Restart engine in Settings.** Settings › Engine has a **Restart engine** button (desktop app)
+  to stop and start this computer's engine without closing the app.
+- **Devices and Mesh Drive say when the engine is too old** (an engine elsewhere, such as an older
+  Docker container) instead of showing "request failed (404)".
+
+### Mesh Drive, reworked
+
+- **Making a drive is guided.** Nothing is picked for you any more: name the drive, then either make a new folder on the console (you choose where
+  and its name) or pick one that is already there, and pick the folder on this device. Every
+  choice is checked as you make it (a name that is taken, a folder inside another drive, a file
+  instead of a folder, the app's own data folder) and Create stays off until both are usable.
+- **No more "let in" step.** Joining used to wait for a device already in the drive to approve
+  it, which locked everyone out once that device was gone. Now any device joins from the Mesh Drive page. To
+  keep others out, give the drive a **password** (when you make it, or later from its ⋯ menu); a
+  device joining types it once. Only a salted Argon2id hash is kept on the console, and any
+  device in the drive, or anyone who knows the password, can change or remove it.
+- **Every device in the drive, as the console sees it.** Each device's engine reports to the
+  console after a pass: its state, how many files and how much it holds, its app version, and when
+  it last synced. The drive card lists them all with who is online, so you see who is in the
+  drive and how each is doing from any device; a device that is gone can be removed by any other.
+- **Rename a device from the drive's list** (or in Devices): the console keeps the name, so every
+  device shows it at once. Each device has its kind's icon: a phone, Docker or a computer.
+- **What you'd want to know about the folder:** files, total size, conflict copies, free space on
+  the console, live progress (file 12 of 40 and its name), and files that were left out and why.
+- **Open folder** opens this device's copy in Finder or Explorer (desktop app); **Open on
+  console** opens the drive's home in Files. Files lists every Mesh Drive next to `/data` and the
+  USB drives in its **Drives** row, as a shortcut to its folder on the console.
+- **Steadier syncing.** A pass skips re-reading the console's folder when nothing changed (until
+  two minutes pass); waits while a game installs; rests a file that keeps failing for ten minutes
+  instead of retrying it every pass; leaves out names this device cannot store (Windows) and names
+  that differ only in case (macOS, Windows); never overwrites a file you saved while it was being
+  synced; keeps both copies when the same file is trashed twice in a day or conflicts twice in a
+  minute; ignores a half-finished upload's `.ava-part`; and holds the drive's lock for however long
+  one big file takes. A drive deleted from another device stops syncing here by itself and frees
+  the folder.
+- **Console locks follow a clock that never jumps**, so setting the console's date no longer
+  frees (or keeps) a lock early.
+
+### Several devices
+
+- **The same PS5 from two devices is one console, not two.** Connecting from a second device no
+  longer adds a duplicate to the console list.
+- **Settings and the console list sync with a CRDT** (a last-writer-wins map with hybrid logical
+  clocks): the newest change wins on every device whichever syncs first, a removal stays removed,
+  and a change made on one device never undoes another's. A device's set-up from before it shared
+  takes what your other devices already agreed on instead of overwriting it.
+- **Settings backups.** The app backs up its settings once a day, and before a sync from your
+  other devices or a restore changes several at once. The engine keeps the last 14 (in Docker, in
+  the container's data volume, so the web UI's backups outlive the browser); each console you use
+  keeps every app's latest, so a wiped device gets its set-up back from there. **Settings ›
+  Backup** lists both, with **Back up now** and **Restore**; a restore keeps a copy of what it
+  replaces first.
+- Downloads to a NAS: replacing a file on the server is safe even when the server cannot rename
+  over a file (the old one comes back if the swap fails).
+- **More devices from one address.** The console allowed 12 connections per IP address, which
+  about three engines fill; a computer running the app and a Docker engine (Docker Desktop shows
+  every container as the host) could be refused with "too many connections from this address".
+  Now 24.
+- **Mesh Drive refuses a whole disk, a phone's whole storage or a home folder** (and the console's
+  `/data` or a whole USB drive) as a drive's folder: everything on it would be synced.
+- Check for updates has its own icon; a **Reload page** button sits in the top bar (on a phone,
+  in More).
+
+## 8.0.0
+
+Several devices, one PS5. Your computers, phones and Docker setup can now all use the same console
+at once, see what the others are doing, and stay out of each other's way. Send the helper from
+this version once; every device then connects to it.
+
+- **No more pairing codes.** Any device on your network that reaches the helper connects, and the
+  console remembers it. Devices paired before keep working. (Anyone on your network could already
+  send the helper and get in, so the code protected nothing.) If you want the old behaviour, turn
+  on **Ask before a new device can connect** in **Devices**: a new device then needs the code on
+  the TV, or a connected device to let it in.
+- **Devices.** A new screen lists every phone, computer and Docker setup that uses the console:
+  online or last seen, its app version, and what it is doing right now. Rename, remove or block
+  any of them, and choose how long a device that stopped coming stays on the list (never, 30, 90
+  or 180 days). The list is kept on the console, so every device sees the same one. The footer
+  shows how many other devices are connected and what they are doing.
+- **No surprises from other devices.**
+  - Sending the helper asks first when another device is busy on the console, and every device is
+    told before the helper restarts.
+  - An app older than the console's helper no longer offers to replace it; it asks you to update
+    the app instead, since sending it would downgrade the helper for everyone.
+  - Rest mode and restart say which devices are in the middle of something.
+  - A package install waits its turn while another device is installing: a PS5 installs one at a
+    time.
+  - An upload into a folder another device is writing into says so.
+  - A blocked device is told it is blocked instead of "pairing is closed".
+- **Your set-up follows you.** The console list and the settings that describe how you use
+  PS5Upload (sidebar pins, upload, install, convert and link settings, saved searches and more)
+  are shared through each console, so a new phone or computer gets your consoles and set-up the
+  first time it connects. Theme, language, text size, where files are saved and the bandwidth cap
+  stay per device.
+- **Mesh Drive.** A folder kept the same on your computers, phones and Docker, with its home in a
+  folder on the console. Create one, pick a folder on each device that should keep a copy, and a
+  device already in lets the new one in. Every device syncs with the console every half minute
+  while the helper runs (Docker keeps going with no app open), so a file added anywhere reaches
+  everyone.
+  - A file changed in two places at once keeps both copies, one renamed "(conflict from …)".
+  - Deleted files go to a trash folder for 30 days, and deleting many files at once waits for you
+    to confirm.
+  - A folder that goes missing (an unplugged drive) is treated as offline, never as "everything
+    was deleted".
+- **Download straight to your NAS.** In Files, a file or folder's menu now offers **Download to
+  <server>** for each saved server (SMB share, FTP, FTPS, SFTP or WebDAV): pick a folder on it and
+  the download goes there instead of to this computer. Handy with the Docker web UI running on
+  the NAS. The engine passes each file through on its way, so it needs room for the largest
+  single file, not the whole download; a file already there is replaced, and an interrupted copy
+  never leaves a half file under the real name.
+- **Docker:** the web UI warns when `/data` is not kept by the host, since every update would then
+  make the container a new device.
+
+## 7.5.3
+
+- **Android: bug reports and exports no longer leave a 0-byte file.** The save dialog created an
+  empty file where you pointed it, while the real file went to Downloads, so the report looked
+  empty. Bug reports, logs, settings and other exports now go straight to **Downloads** (the
+  report screen shows the exact name), with no dialog and no empty file. Every report save is
+  now written to the app log with where it went and its size, and a report that comes out empty
+  says so instead of looking saved.
+- **The web UI keeps the screen on during transfers.** In a browser (Docker), the page now holds
+  the screen on while an upload, download or install runs, so a laptop or phone does not sleep
+  and stop the tab that drives the queue, and Settings offers **Keep screen on** there too. The
+  desktop apps already kept the computer awake, the phone apps the screen, and every platform
+  can keep the PS5 awake (Settings › Uploads).
+- **Docker: settings follow you between browsers.** In the self-hosted web UI, pinned and hidden
+  tabs, upload, install, convert and link settings, the save path, beta features and a few facts
+  about each console (helper stopped on purpose, Minion off) are now kept in the container, so
+  every browser and device sees the same set-up. Pinned tabs update in an open page as soon as
+  another browser changes them. Theme, language, text size and which console is on screen stay
+  per device. The desktop and phone apps are unchanged.
+- **Minion notices a USB drive.** Plug a USB stick into the PS5 with Minion open and Home offers
+  **Find games on it** (Library scans it for packages, game folders and images to install or
+  copy) or **Open in Files**: a PS5-only workflow with no computer.
+- **Clean up points at the biggest wins.** Clean up now also counts the installed games and apps
+  never seen running and opens Installed Apps on exactly that list, where each can be
+  uninstalled. Home shows a **Clean up** card when one of the PS5's drives is nearly full (under
+  10% or 20 GB free).
+- **Extracting on the PS5, made easier.** A `.zip`, `.7z` or `.rar` on the console now has an
+  **Extract** button right on its row in Files (it was only in the menu before). The dialog can
+  **delete the archive afterwards** (only when every file came out), warns when the drive has
+  less room than the archive itself, and the finished notice opens the new folder and says
+  what to do next: install the packages inside, or register the game folder. Minion's Extract
+  can delete the archive afterwards too.
+- **An iOS source for AltStore, SideStore and Feather.** Add
+  `https://github.com/phantomptr/ps5upload/releases/latest/download/altstore.json` as a source
+  and the iPhone app updates from there; it always names the newest full release (#512).
+- **Install and restart.** After an update downloads on Windows, macOS or a Linux AppImage, one
+  button installs it and opens the new version: the app closes, the update goes in (the Windows
+  installer runs silently), and PS5Upload starts again. If anything goes wrong, the old version
+  starts instead. A `.deb` / `.rpm` install still shows the one command to run; phones are
+  unchanged. New in Settings › Updates, off by default: **Install updates automatically**, which
+  waits until nothing is transferring before it restarts the app (#513).
+- **A NAS that renames files no longer breaks games.** A Samba share (most Linux NAS boxes)
+  shows a file whose name Windows cannot hold, with a `:` or `?` in it or a trailing dot, under
+  a made-up short name like `C69YSY~1.TXT`. Uploading or converting a game folder from such a
+  share copied those made-up names, and the game would not start. Such a folder is now refused
+  before anything is sent, naming a renamed file, with the fix: add the server over SFTP or FTP,
+  which keep the real names.
+- **A display error no longer fails an install.** On Android a stream install could end in
+  "Didn't finish … (React #185)" while the transfer itself was fine: a screen stuck in a redraw
+  loop made the queue's next progress write throw, and the queue took that for a failed
+  transfer. The write has already happened when that error comes, so it is now logged (with the
+  details a bug report needs to find the screen) and the install carries on.
+
+## 7.5.2
+
+- **Uploads wake a sleeping PS5.** When an upload is waiting for a PS5 in rest mode, the app now
+  sends it a wake signal, re-sends the helper once it is up, and carries on. Only for a console
+  with wake set up on the Connection screen; turn it off under Settings › Uploads ("Wake the PS5
+  for a waiting upload").
+- **Convert reads big Sony-compressed packages.** Some large PS5 packages (Astro Bot, for one)
+  failed in Convert with "the package's inner image uses a layout this reader does not know".
+  Their layout table marks stretches with no stored data, 256 KiB each, and the reader took
+  them for blocks, so every offset after the first one was wrong. It now steps over them: Astro
+  Bot's 166,714 files open in seconds and read back correctly.
+- **Save backups skip the console's own folders.** The PS5 lists its empty `sce_backup`
+  folders among the saves, and automatic backups saved each one as an empty zip (one of them
+  twice, since PS4 and PS5 both have one). Only games' saves are backed up now.
+- **Where to get the PPR patch for fake packages.** Installing a fake package needs
+  `a53_ppr_install_fast.elf`, which has no published download, so the payload catalogue cannot
+  offer it. Install Package and the catalogue now link its source, drakmor/ppr-patch.
+- **Start all no longer spins on a sleeping PS5.** With two or more uploads queued for a console
+  in rest mode, Start all restarted that console over and over without end. The uploads now wait
+  for the wake.
+
 ## 7.5.1
 
 - **Security scan clean-up.** Every finding of the new code scan was reviewed. A damaged game

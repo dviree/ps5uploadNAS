@@ -50,6 +50,8 @@ import {
   WandSparkles,
   FilePen,
   Eraser,
+  MonitorSmartphone,
+  FolderSync,
 } from "lucide-react";
 
 export interface NavItem {
@@ -97,6 +99,8 @@ export const NAV_ITEMS: NavItem[] = [
     section: { key: "nav_section_setup", fallback: "Setup" },
   },
   { to: "/connection", key: "connect", fallback: "Connection", icon: Cable },
+  // 8.0.0: the phones, computers and Docker setups that use the console.
+  { to: "/devices", key: "mesh_devices", fallback: "Devices", icon: MonitorSmartphone },
   // What gets loaded onto the console sits with connecting to it.
   {
     to: "/payloads",
@@ -119,6 +123,8 @@ export const NAV_ITEMS: NavItem[] = [
     fallback: "File System",
     icon: FolderTree,
   },
+  // 8.0.0: a folder kept the same on every device, at home on the console.
+  { to: "/mesh-drive", key: "drive_title", fallback: "Mesh Drive", icon: FolderSync },
   { to: "/search", key: "search", fallback: "Search", icon: Search },
   { to: "/volumes", key: "volumes", fallback: "Volumes", icon: HardDrive },
   {

@@ -52,6 +52,7 @@ mod console_shares_api;
 mod console_snapshot;
 mod convert_source;
 mod disk_usage;
+mod download_relay;
 mod elfldr_guard;
 mod engine_log;
 mod event_journal;
@@ -73,6 +74,9 @@ mod local_fs;
 mod log_dedup;
 mod lz4_api;
 mod lz4_compat;
+mod mesh_api;
+mod mesh_drive;
+mod mesh_drive_plan;
 mod mgmt_route;
 mod migrate_6;
 mod net_doctor;
@@ -85,6 +89,7 @@ mod remote;
 mod remote_download;
 mod remote_pkg;
 mod save_backup;
+mod settings_backup;
 mod shared_state;
 mod state_io;
 mod telemetry;
@@ -5107,8 +5112,8 @@ impl<'a> AppDbOnce<'a> {
 
 /// PS5 title-ids are 4 uppercase letters + 5 digits (PPSA01234, NPXS39041,
 /// CUSA00123, …). Used to filter stray non-title entries out of the
-/// /user/appmeta listing.
-fn looks_like_title_id(name: &str) -> bool {
+/// /user/appmeta listing, and the console's own folders out of save backups.
+pub(crate) fn looks_like_title_id(name: &str) -> bool {
     let b = name.as_bytes();
     b.len() == 9
         && b[..4].iter().all(|c| c.is_ascii_uppercase())
@@ -9596,6 +9601,8 @@ enum Ava1DownloadTarget {
     Folder(std::path::PathBuf),
     /// One `.zip` at this path, Stored (resumable) or Deflated (cannot resume).
     Zip(std::path::PathBuf, ps5upload_ava1::download::ZipCompression),
+    /// A folder on a saved server (`remote://id/dir`), through this engine (download_relay.rs).
+    Server(String),
 }
 
 /// Starts a console -> computer download over AVA1 and answers `ACCEPTED` with the job id.
@@ -9628,6 +9635,7 @@ fn start_ava1_download(
     let dest_display = match &target {
         Ava1DownloadTarget::Folder(dir) => dir.join(&basename).to_string_lossy().to_string(),
         Ava1DownloadTarget::Zip(zip, _) => zip.to_string_lossy().to_string(),
+        Ava1DownloadTarget::Server(dir) => format!("{}/{basename}", dir.trim_end_matches('/')),
     };
     crate::log_info!("transfer_download: job={job_id} protocol=ava1 src={src} dest={dest_display}");
     let progress = Arc::new(AtomicU64::new(0));
@@ -9718,6 +9726,18 @@ fn start_ava1_download(
                     id,
                     &counters,
                     Some(cancel),
+                ),
+                Ava1DownloadTarget::Server(dir) => download_relay::to_server(
+                    &addr,
+                    &src,
+                    kind,
+                    dir,
+                    unsafe_read,
+                    &counters,
+                    cancel,
+                    &crate::remote::store::data_dir()
+                        .unwrap_or_else(std::env::temp_dir)
+                        .join("relay"),
                 ),
             },
         );
@@ -9828,6 +9848,20 @@ async fn transfer_download_handler(
     }
     if req.dest_dir.trim().is_empty() {
         return json_err(StatusCode::BAD_REQUEST, "dest_dir cannot be empty").into_response();
+    }
+    // A folder on a saved server (a NAS share, FTP, SFTP, WebDAV): through this engine.
+    if download_relay::is_server_dest(&req.dest_dir) {
+        if let Err(e) = crate::remote::path::parse(&req.dest_dir) {
+            return json_err(StatusCode::BAD_REQUEST, format!("{e}")).into_response();
+        }
+        return start_ava1_download(
+            &state,
+            mgmt_addr,
+            req.src_path.clone(),
+            kind,
+            req_unsafe,
+            Ava1DownloadTarget::Server(req.dest_dir.clone()),
+        );
     }
 
     let dest_dir = std::path::PathBuf::from(&req.dest_dir);
@@ -11000,6 +11034,39 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
         )
         .route("/api/ps5/focus", get(ps5_focus))
         .route("/api/ps5/net/ports", get(ps5_net_ports))
+        // 8.0.0: this engine as one of the devices that use a console (mesh_api.rs).
+        .route("/api/mesh/me", get(mesh_api::me_get).post(mesh_api::me_set))
+        .route("/api/mesh/state", get(mesh_api::state))
+        .route("/api/mesh/activity", post(mesh_api::activity))
+        .route("/api/mesh/lock", post(mesh_api::lock))
+        .route("/api/mesh/device", post(mesh_api::device))
+        .route("/api/mesh/settings", post(mesh_api::settings))
+        .route(
+            "/api/mesh/doc",
+            get(mesh_api::doc_get).post(mesh_api::doc_put),
+        )
+        .route("/api/mesh/announce", post(mesh_api::announce))
+        // 8.0.0 Mesh Drive (mesh_drive.rs).
+        .route("/api/drive", get(mesh_drive::list))
+        .route("/api/drive/create", post(mesh_drive::create))
+        .route("/api/drive/check", post(mesh_drive::check))
+        .route("/api/drive/join", post(mesh_drive::join))
+        .route("/api/drive/approve", post(mesh_drive::approve))
+        .route("/api/drive/password", post(mesh_drive::password))
+        .route("/api/drive/link", post(mesh_drive::link))
+        .route("/api/drive/unlink", post(mesh_drive::unlink))
+        .route("/api/drive/conflicts", get(mesh_drive::conflicts))
+        .route("/api/drive/resolve", post(mesh_drive::resolve))
+        .route(
+            "/api/settings-backup",
+            get(settings_backup::list).post(settings_backup::save),
+        )
+        .route("/api/settings-backup/get", get(settings_backup::get))
+        .route("/api/drive/leave", post(mesh_drive::leave))
+        .route("/api/drive/delete", post(mesh_drive::delete))
+        .route("/api/drive/pause", post(mesh_drive::pause))
+        .route("/api/drive/sync", post(mesh_drive::sync_now))
+        .route("/api/drive/confirm", post(mesh_drive::confirm))
         .route(
             "/api/ps5/files/prefs",
             get(console_files_api::prefs_get_handler),
@@ -11412,6 +11479,8 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
         &bind,
         &std::env::var("PS5UPLOAD_BASE_URL").unwrap_or_default(),
     );
+    // Mesh Drive folders are kept in sync here too, app open or not.
+    mesh_drive::spawn();
     // Graceful shutdown: when the parent-watcher fires (stdin EOF), the
     // SHUTDOWN Notify wakes this future, axum stops
     // accepting new connections, drains in-flight ones, then returns.

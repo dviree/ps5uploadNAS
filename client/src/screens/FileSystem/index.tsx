@@ -4,8 +4,9 @@ import { consoleAddr, hostOf } from "../../lib/addr";
 import { trStatic } from "../../lib/trStatic";
 import { rememberDestination } from "../../lib/moveTo";
 import { MoveToDialog, type MoveItem } from "./MoveToDialog";
-import { ExtractDialog, type ExtractChoice } from "./ExtractDialog";
+import { ExtractDialog, type ExtractAfter, type ExtractChoice } from "./ExtractDialog";
 import { extractCause, isExtractableArchive, needsPassword } from "../../lib/archiveName";
+import { extractedNext } from "../../lib/extractNext";
 import { SendToConsoleDialog } from "./SendToConsoleDialog";
 import {
   RowActionButtons,
@@ -49,6 +50,7 @@ import {
   FileArchive,
   X,
   HardDrive,
+  FolderSync,
   Usb,
   Eject,
   Eye,
@@ -57,7 +59,11 @@ import {
   FolderInput,
   KeyRound,
   Send,
+  Network,
 } from "lucide-react";
+import type { Connection } from "../../api/remote";
+import { useConnectionsStore } from "../../state/connections";
+import { pickLocalPath } from "../../state/localPicker";
 import { pickPath, pickPaths } from "../../lib/pickPath";
 import { useWebviewDropAll } from "../../lib/useWebviewDrop";
 import { writeClipboard } from "../../lib/clipboard";
@@ -100,6 +106,7 @@ import {
   fsMkdir,
   fsCopy,
   fsListDir,
+  volumeForPath,
   fsOpStatus,
   fsOpCancel,
   jobStatus,
@@ -218,6 +225,7 @@ import {
 import { useStaleHostGuard } from "../../lib/staleHostGuard";
 import { labelEngineJob } from "../../lib/bgWork";
 import { canEjectUsb, useUsbEject } from "../../lib/useUsbEject";
+import { useMeshDriveShortcuts } from "./useMeshDriveShortcuts";
 
 function parent(p: string): string {
   if (p === "/" || p === "") return "/";
@@ -376,6 +384,7 @@ export default function FileSystemScreen() {
   const host = useConnectionStore((s) => s.host);
   const guard = useStaleHostGuard();
   const payloadStatus = useConnectionStore((s) => s.payloadStatus);
+  const meshDrives = useMeshDriveShortcuts(host ?? "", payloadStatus === "up");
   const clipboard = useFsClipboardStore();
   const systemFileRead = useUploadSettingsStore((s) => s.systemFileRead);
   const canDragOut = dragOutAvailable();
@@ -513,6 +522,13 @@ export default function FileSystemScreen() {
   // even if the user switches tabs mid-run.
   const fsBulk = fsBulkOpHandle(host);
   const fsDownload = fsDownloadOpHandle(host);
+  // Saved servers, offered as download destinations (8.0.0).
+  const savedServers = useConnectionsStore((st) => st.connections);
+  const loadServers = useConnectionsStore((st) => st.load);
+  const serversLoaded = useConnectionsStore((st) => st.loaded);
+  useEffect(() => {
+    if (!serversLoaded) void loadServers().catch(() => {});
+  }, [serversLoaded, loadServers]);
   // Custom confirm modal — replaces window.confirm() which is a
   // no-op in Tauri webview and falls through to plugin-dialog's
   // ACL-gated confirm command.
@@ -1871,9 +1887,15 @@ export default function FileSystemScreen() {
     dir: string;
     passwordAsk: "required" | "wrong" | null;
     choice: ExtractChoice | null;
+    after?: ExtractAfter;
   } | null>(null);
   const extractNameTaken = (n: string) => !!entries?.some((e) => e.name === n);
-  const runExtract = async (entry: DirEntry, dir: string, choice: ExtractChoice) => {
+  const runExtract = async (
+    entry: DirEntry,
+    dir: string,
+    choice: ExtractChoice,
+    after: ExtractAfter = { deleteArchive: false },
+  ) => {
     if (!host?.trim() || extractOp) return;
     const src = joinPath(dir, entry.name);
     const dest = joinPath(dir, choice.folder);
@@ -1923,14 +1945,39 @@ export default function FileSystemScreen() {
           ? tr("fs_extract_done_links", { n: out.links }, `${out.links} links or special files were not extracted.`)
           : "",
       ].filter(Boolean);
+      const into = out.path || dest;
+      // Delete the archive only when everything came out of it.
+      let deleted = false;
+      if (after.deleteArchive && out.unsafe === 0 && out.links === 0) {
+        try {
+          await fsDelete(addr, src);
+          deleted = true;
+        } catch (e) {
+          extra.push(
+            tr("fs_extract_delete_failed", { error: humanizePs5Error(String(e)) || String(e) }, `The archive could not be deleted: ${String(e)}`),
+          );
+        }
+      } else if (after.deleteArchive) {
+        extra.push(tr("fs_extract_kept_archive", undefined, "The archive was kept, since not every entry came out."));
+      }
+      if (deleted) extra.push(tr("fs_extract_deleted", undefined, "The archive was deleted."));
+      // What came out decides the next step: packages to install, or a game folder to register.
+      const next = await extractedNext(addr, into);
+      if (next.packages > 0)
+        extra.push(
+          tr("fs_extract_next_pkgs", { n: next.packages }, `It holds ${next.packages} package(s): install them from Games › Install Package, or from their row here.`),
+        );
+      else if (next.game)
+        extra.push(tr("fs_extract_next_game", undefined, "It is a game folder: register it from its row menu to put it on the home screen."));
       pushNotification(
         "success",
         withConsolePrefix(host, tr("fs_extract_done", { name: entry.name }, `Extracted ${entry.name}`)),
         {
           body: [
-            tr("fs_extract_done_body", { n: out.files, path: out.path || dest }, `${out.files} files into ${out.path || dest}`),
+            tr("fs_extract_done_body", { n: out.files, path: into }, `${out.files} files into ${into}`),
             ...extra,
           ].join(" "),
+          link: `/files?path=${encodeURIComponent(into)}`,
         },
       );
       void refresh();
@@ -1947,6 +1994,7 @@ export default function FileSystemScreen() {
           dir,
           passwordAsk: extractCause(msg) === "fs_extract_wrong_password" ? "wrong" : "required",
           choice,
+          after,
         });
       } else {
         task.fail(e);
@@ -2466,7 +2514,7 @@ export default function FileSystemScreen() {
    *  flow as Library's per-row Download — pick a host folder, kick
    *  off `transfer_download`, poll jobStatus to terminal. Single-
    *  flight at the screen level: only one download at a time. */
-  const runDownload = async (entry: DirEntry, asZip = false) => {
+  const runDownload = async (entry: DirEntry, asZip = false, server?: Connection) => {
     // Single-flight per console: only one download at a time on THIS
     // console (others download concurrently into their own slots).
     if (fsDownload.active) return;
@@ -2495,14 +2543,25 @@ export default function FileSystemScreen() {
       start = () =>
         startTransferDownloadZip(remote, destZip, addr, kind, systemFileRead);
     } else {
-      const picked = await pickPath({
-        mode: "folder",
-        title: tr(
-          "fs_download_dialog_title",
-          { name: entry.name },
-          'Pick a destination folder for "{name}"',
-        ),
-      });
+      // A saved server (8.0.0): the engine pulls it off the console and writes it there.
+      const picked = server
+        ? await pickLocalPath({
+            mode: "folder",
+            source: { connectionId: server.id },
+            title: tr(
+              "fs_download_server_title",
+              { name: entry.name, server: server.name },
+              'Pick a folder on {server} for "{name}"',
+            ),
+          })
+        : await pickPath({
+            mode: "folder",
+            title: tr(
+              "fs_download_dialog_title",
+              { name: entry.name },
+              'Pick a destination folder for "{name}"',
+            ),
+          });
       if (typeof picked !== "string") return;
       dest = picked;
       rootName = entry.name;
@@ -2712,6 +2771,11 @@ export default function FileSystemScreen() {
     install: (e) => void runInstallPkg(e),
     loadPayload: (e) => void runLoadPayload(e),
     loadingPayloadName,
+    extract: (e) => {
+      const entry = entries?.find((x) => x.name === e.name);
+      if (entry) setExtractAsk({ entry, dir: path, passwordAsk: null, choice: null });
+    },
+    extractBusy: extractOp !== null,
     remove: (e) => void runDelete(e.name),
   };
   const actionsMenuEntry =
@@ -2780,6 +2844,13 @@ export default function FileSystemScreen() {
               run: () => void runDownload(menuEntry),
               disabled: downloadOp.active,
             },
+            // 8.0.0: straight to a NAS share or another saved server.
+            ...savedServers.slice(0, 6).map((c) => ({
+              icon: Network,
+              label: tr("fs_menu_download_to_server", { server: c.name }, "Download to {server}…"),
+              run: () => void runDownload(menuEntry, false, c),
+              disabled: downloadOp.active,
+            })),
             {
               icon: FolderInput,
               label: tr("fs_move_to", undefined, "Move to…"),
@@ -2922,11 +2993,13 @@ export default function FileSystemScreen() {
           exists={extractAsk.dir === path ? extractNameTaken : () => false}
           passwordAsk={extractAsk.passwordAsk}
           initial={extractAsk.choice}
+          archiveBytes={extractAsk.entry.size}
+          freeBytes={volumes ? (volumeForPath(volumes, extractAsk.dir)?.free_bytes ?? null) : null}
           onCancel={() => setExtractAsk(null)}
-          onConfirm={(choice) => {
+          onConfirm={(choice, after) => {
             const ask = extractAsk;
             setExtractAsk(null);
-            void runExtract(ask.entry, ask.dir, choice);
+            void runExtract(ask.entry, ask.dir, choice, ask.after ?? after);
           }}
         />
       )}
@@ -3085,6 +3158,24 @@ export default function FileSystemScreen() {
                     {ejecting ? <Spinner size={12} /> : <Eject size={12} />}
                   </button>
                 </span>
+              );
+            })}
+            {/* Mesh Drives: a shortcut to each drive's home on the console. */}
+            {meshDrives.map((d) => {
+              const here = path === d.hub || path.startsWith(`${d.hub}/`);
+              return (
+                <button
+                  key={`mesh:${d.id}`}
+                  type="button"
+                  onClick={() => setPath(d.hub)}
+                  title={tr("fs_mesh_drive_shortcut", { name: d.name, path: d.hub }, `Mesh Drive ${d.name}: ${d.hub}`)}
+                  aria-current={here ? "true" : undefined}
+                  aria-pressed={here}
+                  className="chip shrink-0 gap-1 px-2 py-1 sm:gap-1.5 sm:px-3 sm:py-1.5"
+                >
+                  <FolderSync size={12} className="text-[var(--color-accent-bright)]" />
+                  {d.name}
+                </button>
               );
             })}
             {/* When the current path sits under no known volume, mirror the old

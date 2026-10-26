@@ -25,6 +25,7 @@ import {
   Type,
   Vibrate,
   Waves,
+  RotateCcw,
 } from "lucide-react";
 import { useThemeStore, type Theme } from "../../state/theme";
 import {
@@ -51,14 +52,15 @@ import { Button, ErrorCard } from "../../components";
 import { invoke } from "../../lib/invokeLogged";
 import { formatBytes } from "../../lib/format";
 import { clearIconMemoryCache } from "../../lib/iconMemoryCache";
-import { safeGetItem, safeRemoveItem, safeSetItem } from "../../lib/safeStorage";
 import { useConfirm } from "../../components/ConfirmDialog";
 
 import { useKeepAwakeStore } from "../../state/keepAwake";
 import { useNotificationsStore } from "../../state/notifications";
 import { useLangStore, useTr, LANGUAGES } from "../../state/lang";
 import { useUploadSettingsStore } from "../../state/uploadSettings";
-import { useEngineStore, DEFAULT_ENGINE_URL } from "../../state/engine";
+import { useEngineStore, DEFAULT_ENGINE_URL, setLiveEngineUrl } from "../../state/engine";
+import { engineRestart } from "../../lib/engineDiagnosis";
+import { useConnectionStore } from "../../state/connection";
 import { useSaveSettingsStore, DEFAULT_SAVE_PATH } from "../../state/saveSettings";
 import { useBetaFeaturesStore } from "../../state/betaFeatures";
 import { useInstallPathFallbackStore } from "../../state/installPathFallback";
@@ -81,6 +83,8 @@ import {
   setNotifPruneDays,
 } from "../../state/notifications";
 import { formatDate } from "../../lib/formatDate";
+import { applyBundle, backupBeforeChange, buildBundle } from "../../lib/settingsBackup";
+import { SettingsBackups } from "./SettingsBackups";
 // useAuditLogStore + AuditEntry moved to screens/AuditLog/index.tsx
 // (2.12.0 — promoted out of Settings junk drawer).
 
@@ -301,7 +305,55 @@ function EngineUrlSection() {
           ) : null
         }
       />
+      {isTauriEnv() && engineUrl === DEFAULT_ENGINE_URL && <RestartEngineRow />}
     </Section>
+  );
+}
+
+/** Stop and start this computer's engine, without restarting the app: picks up a rebuilt
+ *  engine, or clears one that misbehaves. Asks first, since transfers it runs stop. */
+function RestartEngineRow() {
+  const tr = useTr();
+  const { confirm, dialog } = useConfirm();
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState<{ ok: boolean; text: string } | null>(null);
+  const restart = async () => {
+    const ok = await confirm({
+      title: tr("engine_restart_title", undefined, "Restart the engine?"),
+      message: tr(
+        "engine_restart_body",
+        undefined,
+        "The engine on this computer stops and starts again. Transfers it is running stop; uploads pick up where they left off.",
+      ),
+      confirmLabel: tr("engine_restart_go", undefined, "Restart engine"),
+    });
+    if (!ok) return;
+    setBusy(true);
+    setNote(null);
+    try {
+      const url = await engineRestart();
+      setLiveEngineUrl(url);
+      useConnectionStore.getState().setStatus({ engineStatus: "up", engineError: null });
+      setNote({ ok: true, text: tr("engine_restart_done", undefined, "The engine restarted.") });
+    } catch (e) {
+      setNote({ ok: false, text: e instanceof Error ? e.message : String(e) });
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="mt-3 flex flex-wrap items-center gap-3">
+      {dialog}
+      <Button size="sm" variant="secondary" loading={busy} onClick={() => void restart()}>
+        <RotateCcw size={14} />
+        {tr("engine_restart_go", undefined, "Restart engine")}
+      </Button>
+      {note && (
+        <span className={`text-xs ${note.ok ? "text-[var(--color-good)]" : "text-[var(--color-bad)]"}`}>
+          {note.text}
+        </span>
+      )}
+    </div>
   );
 }
 
@@ -444,6 +496,7 @@ export default function SettingsScreen() {
     alwaysOverwrite,
     showTransferFiles,
     autoResume,
+    wakeForUploads,
     keepPs5AwakeMode,
     autoRedeployOnWake,
     autoBringUp,
@@ -452,6 +505,7 @@ export default function SettingsScreen() {
     setAlwaysOverwrite,
     setShowTransferFiles,
     setAutoResume,
+    setWakeForUploads,
     setKeepPs5AwakeMode,
     setBandwidthCapMbps,
     setAutoRedeployOnWake,
@@ -468,6 +522,8 @@ export default function SettingsScreen() {
   const mobile = isMobile();
   const tauri = isTauriEnv();
   const show = settingsVisibility({ tauri, mobile });
+  // Phones and the browser build keep the screen on; the desktop app keeps the computer awake.
+  const screenOnly = mobile || !tauri;
 
   const [cfgPath, setCfgPath] = useState<string | null>(null);
 
@@ -549,7 +605,7 @@ export default function SettingsScreen() {
         {show.keepDeviceAwake && (
         <Section
           title={
-            mobile
+            screenOnly
               ? tr("keep_awake_mobile", undefined, "Keep screen on")
               : tr("keep_awake", undefined, "Keep computer awake")
           }
@@ -562,7 +618,7 @@ export default function SettingsScreen() {
               label={
                 <span className="inline-flex items-center gap-2 font-medium">
                   <SleepIcon size={14} />
-                  {mobile
+                  {screenOnly
                     ? tr(
                         "keep_awake_on_mobile",
                         undefined,
@@ -576,7 +632,7 @@ export default function SettingsScreen() {
                 </span>
               }
               hint={
-                mobile
+                screenOnly
                   ? tr(
                       "keep_awake_hint_mobile",
                       undefined,
@@ -591,7 +647,7 @@ export default function SettingsScreen() {
             />
             {!supported && (
               <div className="mt-1 text-xs text-[var(--color-warn)]">
-                {mobile
+                {screenOnly
                   ? tr(
                       "keep_awake_unsupported_mobile",
                       undefined,
@@ -787,6 +843,17 @@ export default function SettingsScreen() {
                       "If an upload drops mid-transfer, resume it from where it left off once the PS5's helper answers again, retrying a few times before giving up. This page cannot re-send the helper itself: if the PS5 restarted, send it again first. Fatal problems like the PS5 running out of space still stop right away. On by default.",
                     )
               }
+            />
+
+            <Toggle
+              checked={wakeForUploads}
+              onChange={(checked) => setWakeForUploads(checked)}
+              label={tr("upload_wake_for_uploads", undefined, "Wake the PS5 for a waiting upload")}
+              hint={tr(
+                "upload_wake_for_uploads_hint",
+                undefined,
+                "When an upload is waiting for a PS5 in rest mode, send it a wake signal and carry on once its helper is back. Only for a console with wake set up on the Connection screen. On by default.",
+              )}
             />
           </div>
         </Section>
@@ -1203,16 +1270,8 @@ function BackupRestorePanel() {
   const [info, setInfo] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Backup captures EVERY persisted key in the app's `ps5upload.` namespace via
-  // a prefix scan, rather than a hand-maintained allowlist. The old allowlist
-  // had drifted: it referenced "ps5upload.play_time.v1" while the store had
-  // moved to ".v2" (playtime silently lost on migration), omitted actively
-  // persisted keys (log_level, osNotify, install prefs, keep-awake mode,
-  // register-after-upload, …), and listed phantom keys no store writes. A
-  // prefix scan is immune to that whole class of drift — any new store backed by
-  // a `ps5upload.`-prefixed key is captured automatically.
-  const NS_PREFIX = "ps5upload.";
-
+  // The bundle is every `ps5upload.` key (lib/settingsBackup): a prefix scan, so a new store is
+  // captured without a list to keep up to date.
   const restoredMessage = (count: number) =>
     tr(
       "settings_backup_restored",
@@ -1225,20 +1284,7 @@ function BackupRestorePanel() {
     setError(null);
     setInfo(null);
     try {
-      const bundle: Record<string, unknown> = {
-        meta: {
-          generated_at_ms: Date.now(),
-          schema: 1,
-        },
-        local_storage: {} as Record<string, string | null>,
-      };
-      const ls = bundle.local_storage as Record<string, string | null>;
-      for (let i = 0; i < window.localStorage.length; i++) {
-        const k = window.localStorage.key(i);
-        if (k && k.startsWith(NS_PREFIX)) {
-          ls[k] = safeGetItem(k);
-        }
-      }
+      const bundle = buildBundle("manual");
       const fileName = `ps5upload-settings-${Date.now()}.json`;
       const json = JSON.stringify(bundle, null, 2);
       if (!isTauriEnv()) {
@@ -1265,38 +1311,21 @@ function BackupRestorePanel() {
     }
   }
 
-  /** Shared validate-and-apply step for an import bundle's raw JSON text —
-   *  used by both the native (file-path) and browser (`<input type=file>`)
-   *  read paths below. */
-  function applyBundleText(text: string): number {
-    const parsed = JSON.parse(text);
-    if (
-      !parsed ||
-      typeof parsed !== "object" ||
-      typeof parsed.local_storage !== "object"
-    ) {
-      throw new Error("file is not a ps5upload settings bundle");
+  /** Validate-and-apply for an import's raw JSON text (native and browser read paths). A copy
+   *  of the current settings is kept first, so an import can be undone from the list below. */
+  async function applyBundleText(text: string): Promise<number> {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      throw new Error(tr("settings_backup_not_json", undefined, "That file is not a settings bundle (it is not JSON)."));
     }
-    const ls = parsed.local_storage as Record<string, unknown>;
-    const actions: Array<{ key: string; value: string | null }> = [];
-    for (const k of Object.keys(ls)) {
-      // Safety: only ever touch our own namespace, so a hand-edited or
-      // malicious bundle can't write arbitrary localStorage keys.
-      if (!k.startsWith(NS_PREFIX)) continue;
-      const v = ls[k];
-      if (typeof v === "string") {
-        actions.push({ key: k, value: v });
-      } else if (v === null) {
-        actions.push({ key: k, value: null });
-      } else if (v !== undefined) {
-        throw new Error(`invalid value for ${k}`);
-      }
-    }
-    for (const { key, value } of actions) {
-      if (value === null) safeRemoveItem(key);
-      else safeSetItem(key, value);
-    }
-    return actions.length;
+    // Best effort here: the user holds the file they import, and asked for exactly this.
+    await backupBeforeChange("before-restore").catch(() => {});
+    const n = applyBundle(parsed);
+    // The stores in memory would write their state back over the import: start fresh.
+    window.setTimeout(() => window.location.reload(), 1200);
+    return n;
   }
 
   async function importBundle() {
@@ -1316,7 +1345,7 @@ function BackupRestorePanel() {
       });
       if (!src || typeof src !== "string") return;
       const text = await readTextFileFromPath(src);
-      const restored = applyBundleText(text);
+      const restored = await applyBundleText(text);
       setInfo(restoredMessage(restored));
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -1336,7 +1365,7 @@ function BackupRestorePanel() {
     setInfo(null);
     try {
       const text = await file.text();
-      const restored = applyBundleText(text);
+      const restored = await applyBundleText(text);
       setInfo(restoredMessage(restored));
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -1390,6 +1419,9 @@ function BackupRestorePanel() {
           {error}
         </div>
       )}
+      <div className="border-t border-[var(--color-border)] pt-3">
+        <SettingsBackups />
+      </div>
     </div>
   );
 }
@@ -1761,6 +1793,10 @@ function UpdatesPanel() {
   const checkNow = useUpdateStore((s) => s.checkNow);
   const download = useUpdateStore((s) => s.download);
   const dismissDownload = useUpdateStore((s) => s.dismissDownload);
+  const install = useUpdateStore((s) => s.install);
+  const installing = useUpdateStore((s) => s.installing);
+  const autoInstallEnabled = useUpdateStore((s) => s.autoInstallEnabled);
+  const setAutoInstallEnabled = useUpdateStore((s) => s.setAutoInstallEnabled);
   const autoCheckEnabled = useUpdateStore((s) => s.autoCheckEnabled);
   const setAutoCheckEnabled = useUpdateStore((s) => s.setAutoCheckEnabled);
   const channel = useUpdateStore((s) => s.channel);
@@ -1829,6 +1865,26 @@ function UpdatesPanel() {
           <div className="mb-2 font-mono text-[var(--color-text)]">
             {phase.download.path}
           </div>
+          {phase.download.can_install ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                type="button"
+                disabled={installing}
+                onClick={() => void install()}
+                className="inline-flex items-center gap-1.5 rounded-[var(--radius-card)] bg-[var(--color-accent)] px-3 py-1.5 text-xs font-medium text-[var(--color-accent-contrast)] disabled:opacity-60 max-md:min-h-11"
+              >
+                {installing ? <Spinner size={12} tone="inherit" /> : <RefreshCw size={12} />}
+                {tr("update_install_restart", undefined, "Install and restart")}
+              </button>
+              <span className="text-[var(--color-muted)]">
+                {tr(
+                  "update_install_restart_hint",
+                  undefined,
+                  "PS5Upload closes, installs the new version and opens again. Wait for running transfers to finish first.",
+                )}
+              </span>
+            </div>
+          ) : (
           <ol className="list-inside list-decimal space-y-0.5 text-[var(--color-muted)]">
             <li>{tr("update_step_quit", undefined, "Quit PS5Upload.")}</li>
             {phase.download.install_command ? (
@@ -1854,6 +1910,7 @@ function UpdatesPanel() {
               {tr("update_step_launch", undefined, "Launch the new version.")}
             </li>
           </ol>
+          )}
           <button
             type="button"
             onClick={dismissDownload}
@@ -1862,6 +1919,25 @@ function UpdatesPanel() {
             {tr("update_dismiss", undefined, "Dismiss")}
           </button>
         </div>
+      )}
+      {/* Install by itself: desktop copies that can (the switch does nothing elsewhere, so it is
+          not shown on a phone). It waits for transfers to finish before restarting. */}
+      {!mobile && isTauriEnv() && (
+        <Toggle
+          checked={autoInstallEnabled}
+          onChange={(checked) => setAutoInstallEnabled(checked)}
+          label={
+            <span className="font-medium text-[var(--color-text)]">
+              {tr("update_autoinstall_label", undefined, "Install updates automatically")}
+            </span>
+          }
+          hint={tr(
+            "update_autoinstall_hint",
+            undefined,
+            "Downloads a new release, waits until nothing is transferring, then installs it and restarts PS5Upload. Works for the Windows installer and zip, macOS, and the Linux AppImage; a .deb or .rpm install still asks you to run one command.",
+          )}
+          className="text-xs"
+        />
       )}
       {/* Auto-check preference (default on). When off, the launch check is
           skipped entirely — the user drives updates from the button below. */}

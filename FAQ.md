@@ -80,8 +80,8 @@ running.
 3. Open **Connection**, enter the IP, click **Check**.
 4. Run **Set up your PS5**: it sends kstuff and ShadowMount+, then the helper, in order. If
    something already loads kstuff, send only ps5upload.
-5. Wait for the `helper` dot to turn green. If a 6-digit code appears on the console (helper
-   loaded by another tool), enter it in the app once to pair.
+5. Wait for the `helper` dot to turn green. (If you turned on **Ask before a new device can
+   connect** in Devices, a new device types the 6-digit code the console shows, once.)
 6. Open **Upload**, choose your game, pick the drive and click **Start**. The free-space check
    runs before anything is sent.
 7. Open **Games → Game files** to see it. For a `.pkg`, use **Install Package → Stream &
@@ -124,13 +124,14 @@ That is the normal probe window, up to 20 seconds. If it times out, the payload 
 load; send it again.
 
 **Q: Can I use a helper that is already running (loaded by another tool)?**
-Yes. Open **Connection** while it is up and the app skips the send step. If you loaded it another
-way, the console shows a 6-digit code to confirm once. If the helper is older than this app, the
+Yes. Open **Connection** while it is up and the app skips the send step and connects. If the
+helper is older than this app, the
 app shows **Update helper**, which replaces it in one click.
 
 **Q: Can multiple computers connect to the same PS5 at the same time?**
-Yes, up to 16 sessions; each computer pairs once. Browsing and the hardware view interleave
-cleanly. Two uploads to the same path will fight, since nothing locks a destination.
+Yes: computers, phones and Docker, up to 16 at once, with no pairing code (8.0.0). **Devices**
+lists them and what each is doing; installs take turns, and an upload into a folder another
+device is writing into says so. See "Several devices and Mesh Drive".
 
 **Q: What is the pairing code, and which ports does ps5upload use?**
 Outgoing from this computer to the PS5, two ports: **9120** (the helper, AVA1) and **9021** (the
@@ -151,15 +152,16 @@ straight to the console is a Public network.
 To see every port in use on your PS5, and which payload usually sits on it, open **Processes &
 ports → Ports**.
 
-Every connection is encrypted and each computer pairs with the console once. A helper
-the app launched pairs by itself; one loaded another way shows a 6-digit code on the console,
-which you enter in the app. If the console shows a different PS5 at an address you reuse, forget
-the old one and pair again.
+Every connection is encrypted, and the console remembers each device the first time it
+connects. A 6-digit code only appears when **Ask before a new device can connect** is on in
+**Devices**. If a different PS5 answers at an address you reuse, forget the old one and connect
+again.
 
 **Q: The web UI says it isn't paired, and no code shows on the console.**
-The console only shows a code to a new device for a short while after its helper starts, and
-not at all while another device is paired. On the Connection screen press **Send helper**: the
-engine sends its own helper, which pairs the web UI by itself. Your desktop app stays paired.
+With an 8.0.0 helper this only happens when **Ask before a new device can connect** is on, or the
+device is blocked (Devices). Let it in from a connected device (**Connection → Let another device
+pair**), or press **Send helper** in the web UI: the helper it sends lets it in. A helper older
+than 8.0.0 still asks for pairing; sending the 8.0.0 helper ends that.
 
 **Q: I updated to 6.0 and the app says the helper is old.**
 6.0 and v5.x cannot talk to each other. Click **Update helper** on the Connection screen (or
@@ -194,12 +196,12 @@ pre-release.
 - With a remote engine the app's file pickers browse the **engine's** disk.
 
 **Q: After restarting or updating the Docker container, the web UI says "This PS5 is not accepting new pairings".**
-The container lost its pairing key: `/data` was not mapped to a host folder (see above), so it
-came back as a new device, and the PS5 only takes a new device while nothing else is paired. Map
-`/data` to a host folder first, then either press **Send helper** in the web UI (the helper it
-sends pairs it), or open the desktop app (still paired) → **Connection → Let another device
-pair** and pair the web UI with the code. If Send helper says the loader (port 9021) isn't
-running, load elfldr on the PS5 again first.
+The container lost its key: `/data` was not mapped to a host folder (see above), so it came back
+as a new device. With an 8.0.0 helper a new device simply connects, unless approval is turned on
+in Devices. Map `/data` to a host folder first so it stops happening, then press **Send helper**
+in the web UI (the helper it sends lets it in), or let it in from the desktop app (**Connection →
+Let another device pair**). If Send helper says the loader (port 9021) isn't running, load elfldr
+on the PS5 again first.
 
 **Q: Docker or a NAS says "Permission denied" when I save or upload.**
 The image runs as UID:GID 65532 and keeps its state in `/data`. If you bind-mount a folder someone
@@ -340,9 +342,8 @@ followed by an address, the engine saw your phone as that address. Add it to `PS
 again. Docker Desktop often shows every device as one internal address like that one, which is
 also the address the PS5's downloads come from, so stream installs need it allowed too.
 
-**6. Pair with the PS5.** On the **Connection** screen press **Send helper**, and the web UI
-pairs by itself. If your desktop app is already paired and the console shows no code, see "The
-web UI says it isn't paired, and no code shows on the console."
+**6. Connect to the PS5.** On the **Connection** screen press **Check**; if the helper isn't
+running yet, press **Send helper**. The web UI connects by itself.
 
 **7. Keep the computer awake.** A sleeping computer takes the engine with it, and the page stops
 answering. On a Mac, turn on **System Settings → Battery → Options → Prevent automatic sleeping on
@@ -652,10 +653,11 @@ Settings → Apps → PS5Upload → Permissions → Nearby devices**.
 
 **Q: After updating the app, it says "This PS5 has not accepted this app yet" or "The PS5 is not
 accepting new pairings".**
-To the PS5, an app updated from 5.x is a new device, and the PS5 only takes new devices for a
-short while after its helper starts. Tap **Pair…**, then **Resend helper**: the app sends its
-helper again, the PS5 accepts the app that sent it, and the dialog closes by itself a few
-seconds later. This works the same in the desktop app.
+To the PS5, an app updated from 5.x is a new device. With an 8.0.0 helper it connects by itself
+(unless approval is on in Devices); an older helper only takes new devices for a short while
+after it starts. Tap **Pair…**, then **Resend helper**: the app sends its helper, the PS5 accepts
+the app that sent it, and the dialog closes by itself a few seconds later. This works the same in
+the desktop app.
 
 **Q: How do I install the Android app?**
 Download `PS5Upload-<ver>-android.apk` from the Releases page and open it. Android asks you to
@@ -713,6 +715,16 @@ iPhone stays signed in to your main account; the spare one is only typed into th
 With a free Apple ID an app runs for 7 days at a time. AltStore re-signs it automatically while
 your computer runs AltServer on the same Wi-Fi (or tap **Refresh All** in AltStore). If you let it
 lapse, the app will not open until you refresh it; your settings stay.
+
+**Q: Can AltStore, SideStore or Feather update the app for me?**
+Yes. Add this source once, and the app shows up there with its updates:
+
+`https://github.com/phantomptr/ps5upload/releases/latest/download/altstore.json`
+
+In AltStore or SideStore: **Browse → Sources → +** and paste it. In Feather: **Sources → +**. The
+source always lists the newest full release (not pre-releases); installing from it is the same as
+installing the `.ipa` by hand. Sideloadly has no sources: download the new `.ipa` and drag it in
+again.
 
 **Q: How do I install it with Sideloadly? (quickest one-off install)**
 1. Install **Sideloadly** from sideloadly.io on your computer and open it.
@@ -2006,6 +2018,150 @@ We help prepare and ship files; we do **not** guarantee every high-FW
 title will boot on an older console.
 
 ---
+
+## Several devices and Mesh Drive
+
+**Q: Can my computer, phone and Docker setup all use the PS5 at the same time?**
+Yes, from 8.0.0. Send the helper from an 8.0.0 app once; after that, any device on your network
+that runs PS5Upload connects without a code. **Devices** lists them all, with what each one is
+doing. The footer shows how many others are connected.
+
+**Q: Do I still need to pair?**
+No, unless you want to. Devices paired before 8.0.0 keep working. To make new devices ask first,
+turn on **Ask before a new device can connect** in **Devices**. A new device then types the code
+shown on the TV, or a connected device lets it in from Connection (**Let another device pair**).
+
+**Q: How do I keep a device out?**
+Open **Devices** and press **Block** next to it. It is disconnected and can't connect again until
+you unblock it. **Remove** only takes a device that is offline off the list; it comes back as new
+if it connects again.
+
+**Q: Another device is uploading. Will sending the helper stop it?**
+Sending the helper restarts it for every device. The app asks first and says who is busy, and the
+others are told. Uploads pick up where they left off once the helper is back.
+
+**Q: The app says another device sent a newer helper.**
+Update this app instead of sending its helper. Sending an older helper would take the newer one's
+fixes away from every device.
+
+**Q: Do my settings follow me to a new device?**
+Yes. Your consoles, sidebar pins and upload, install, convert and link settings are shared through
+each console. A new device picks them up the first time it connects (the app offers to reload so
+they take effect). Theme, language, text size, the save folder and the bandwidth cap stay per
+device.
+
+**Q: Two devices changed the same setting. Which one wins?**
+The later change, on every device, whichever syncs first (8.0.1: each change carries a hybrid
+logical clock, so two devices with slightly different clocks still agree). A console removed on
+one device stays removed. Settings a new device had before it ever connected don't overwrite what
+your other devices already agreed on: it takes theirs.
+
+**Q: Are my settings backed up?**
+Yes (8.0.1). Once a day, and before a sync from your other devices or a restore changes several
+settings at once, the app saves a copy. The engine keeps the last 14 (in Docker, in its `/data`
+volume); each console you use keeps every app's latest copy. Open **Settings › Backup** to see
+both lists, press **Back up now**, or **Restore** one: the app keeps a copy of the settings it
+replaces first, then reloads. A wiped or new device can restore another device's copy from the
+console list. **Export bundle** still saves everything to a file you keep.
+
+**Q: What is Mesh Drive?**
+A folder kept the same on every device that joins it, with its home in a folder on the console.
+Open **Mesh Drive** in the sidebar (on a phone, under More) and press **New Mesh Drive**:
+
+1. Name the drive.
+2. Choose its home on the console: **Make a new folder** (pick where, and its name) or **Use a
+   folder that is there**. Files already in it join the drive.
+3. Choose the folder on this device that keeps it.
+4. Optionally, a password.
+
+The dialog checks each choice as you make it (a folder name already taken, a folder that belongs
+to another drive or sits inside one, the app's own data folder) and Create stays off until both
+folders are usable. On each other device, open Mesh Drive and press **Keep on this device…** on
+the drive, then pick a folder there. Each device syncs with the console every half minute while
+the helper runs; Docker keeps syncing with no app open, phones only while the app is open.
+
+**Q: Do I need another device to let a new one in?**
+No (8.0.1). Any device joins from the Mesh Drive page. To keep others out, give the drive a password when you
+make it, or later from the drive's ⋯ menu (**Set a password…**); a device joining types it once.
+The console keeps only a salted hash of it. Any device in the drive can change or remove the
+password, and so can anyone who knows it, so it never locks you out when a device is gone. The
+password is a lock on joining, not encryption: the files on the console are readable with any
+file tool, as before.
+
+**Q: How do I see who is in a drive?**
+Each drive card lists **Devices in this drive**: name, kind (Desktop, Android, iOS, Docker), app
+version, its folder, how many files and how much it holds, when it last synced and any problem
+it has, with a dot for online. That list comes from the console, so every device sees the same
+one. Press **Remove** next to a device that is gone for good; its files stay where they are.
+
+**Q: How do I open the drive's folder?**
+On a computer, press **Open folder** on the drive card (Finder on a Mac, Explorer on Windows). **Open on
+console** opens the drive's home in Files, and Files lists every Mesh Drive in its **Drives** row
+(next to `/data` and your USB drives) so you can jump to one from there. The card also shows the drive's
+file count, size, conflict copies and the free space left on the console.
+
+**Q: Mesh Drive with Docker or the web UI: where are the files?**
+On the engine's disk, inside the container. Map a host folder into the container (for example
+`-v /mnt/user/share/mesh:/mesh` on Unraid) and pick `/mesh/...` in the web UI's folder picker,
+which browses the container. Keep `/data` mapped too; the engine records which folders it syncs
+there. Every browser that opens the web UI sees the same drives, because the engine is the
+device.
+
+**Q: What happens if the same file changes on two devices?**
+Both are kept. The one that synced second is renamed `name (conflict from <device> <date>).ext` and
+reaches every device. A file you save while it is being synced is never overwritten; it is synced
+on the next pass.
+
+**Q: Some files are listed as "left out".**
+The drive card says how many and lists them when you hover. Either they failed three times in a
+row (they are tried again after ten minutes; the card says why), or this device cannot store their
+names: Windows refuses names with `: * ? " < > |` or ending in a dot, and macOS and Windows treat
+`Photo.jpg` and `photo.jpg` as one file. Rename them on the device that made them.
+
+**Q: I deleted a file by mistake.**
+Deleted files go to the drive's `.ps5upload-trash` folder (on each device and on the console),
+sorted by date, for 30 days. Deleting many files at once waits for you to confirm on the Mesh Drive
+page (**Review the deletes**).
+
+**Q: I unplugged the drive my Mesh Drive folder is on. Will it delete everything?**
+No. Every drive folder holds a `.ps5upload-mesh` file. A folder without it counts as offline, and
+nothing is copied to or deleted from it until it is back.
+
+**Q: I have two consoles. Can a drive be on both?**
+Yes (8.1.0). Each console is the master of its own circle: the devices that sync the drive
+through it. On the drive's card, open ⋯ › **Link to another console…**, pick the other console
+from your list and a home folder on it. From then on:
+
+- devices sync with their own console, and the two consoles are kept the same, file by file,
+  directly between them (a computer or Docker in the drive does it; Docker keeps doing it with no
+  app open);
+- a device whose console is off syncs through the linked one until its own is back;
+- the card lists each linked console with its state and how many devices use it.
+
+A console holds a drive once, so links never form a loop. **Unlink** leaves each console with its
+copy as a drive of its own; no files are deleted.
+
+**Q: How do I settle a conflict?**
+When a file changed in two places, both versions are kept and the drive card shows **Settle
+conflicts**. It lists each copy beside the file it is a copy of, with who made it, sizes and
+times. Choose **Keep the original**, **Keep the copy** (it takes the original's name) or **Keep
+both** (the copy gets a name of its own). Every device and linked console follows; what goes
+stays in the drive's trash for 30 days.
+
+**Q: I deleted a drive on one device. What happens on the others?**
+They stop syncing it on their next pass and free their folder for another drive. No files are
+deleted anywhere.
+
+**Q: Can I download from the PS5 straight to my NAS?**
+Yes (8.0.0). Save the NAS under **Servers** (SMB, FTP, FTPS, SFTP or WebDAV). Then, in **Files**,
+open a file or folder's menu and choose **Download to <your NAS>**, and pick the folder on it.
+The bytes pass through the engine on the way (the Docker container, if you use the web UI on the
+NAS), one file at a time, so it only needs room for the largest single file. If the NAS folder
+is also mounted into the container, plain **Download** into that folder works too.
+
+**Q: Docker: the console lists my container as a new device after every update.**
+Map `/data` to a folder or named volume (`-v /your/folder:/data`). Without that, every update
+starts the container with a new identity. The Devices screen warns when this is the case.
 
 ## Advanced
 

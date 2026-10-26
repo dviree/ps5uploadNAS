@@ -23,6 +23,7 @@
 #include "ava1_store.h"
 #include "ava1_trust.h"
 #include "config.h"
+#include "mesh.h"
 #include "fs_jobs.h"
 #include "webui_pkg.h"
 #include "mgmt_rpc.h"
@@ -68,6 +69,27 @@ static void on_pair_request(const char *peer_name, uint32_t code) {
 }
 
 static void on_log(const char *msg) { fprintf(stderr, "%s\n", msg); }
+
+/* The mesh (mesh.c) answers who may connect and keeps the device list; it reaches the server through
+ * these. */
+static int mesh_online_hook(mesh_online_t *out, int max) {
+    ava1_online_t *on;
+    int n, i;
+    if (max > MESH_MAX_DEVICES) max = MESH_MAX_DEVICES;
+    if (!(on = calloc((size_t)max, sizeof *on))) return 0; /* heap: a worker's stack is small */
+    n = ava1_server_online(on, max);
+    for (i = 0; i < n; i++) {
+        memcpy(out[i].key, on[i].key, 32);
+        out[i].ip = on[i].ip;
+        memcpy(out[i].name, on[i].name, sizeof out[i].name);
+    }
+    free(on);
+    return n;
+}
+
+/* The mesh keeps "last seen" dates and forgets old devices by the calendar, so it reads the wall
+ * clock itself (mesh_wall_ms); nothing in AVA1's timing does. */
+static const mesh_hooks_t MESH_HOOKS = { mesh_online_hook, ava1_server_forget, mesh_wall_ms, NULL };
 
 static uint64_t mono_us(void) {
     struct timespec ts;
@@ -196,6 +218,12 @@ int ava1_payload_start(void) {
     cfg.handshake_ms = 10000;
     cfg.pairing_window_s = 300;
     cfg.on_pair_request = on_pair_request;
+    /* 8.0.0: any device that reaches the helper is trusted unless the owner turned on approval or
+     * blocked it (mesh.c). The launcher stays trusted through its slot below. */
+    if (mesh_start(MESH_DIR, &MESH_HOOKS, PS5UPLOAD2_VERSION) != 0)
+        on_log("mesh: cannot create " MESH_DIR "; the device list is kept in memory only");
+    cfg.admit_new = mesh_admit;
+    cfg.refused = mesh_refused;
     cfg.rpc = rpc;
     cfg.log = on_log;
     {
