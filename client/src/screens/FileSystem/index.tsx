@@ -1303,6 +1303,42 @@ export default function FileSystemScreen() {
    *  before the next file. What already landed stays; the half-written file does not. */
   const cancelUpload = () => { pauseFsUploadQueue(host); return cancelFsUpload(host, fsUploadDeps); };
 
+  const deviceInput = useRef<HTMLInputElement>(null);
+  const deviceStagingLock = useRef(false);
+  const [deviceStaging, setDeviceStaging] = useState(false);
+
+  // Capture this render's destination before staging: browsing to another folder must
+  // never redirect files already selected on the phone. A console switch cancels intake.
+  const addDeviceFilesHere = async (files: File[]) => {
+    if (deviceStagingLock.current || files.length === 0) return;
+    deviceStagingLock.current = true;
+    setDeviceStaging(true);
+    setError(null);
+    const probe = guard.capture();
+    const paths: string[] = [];
+    let stagingError: string | null = null;
+    try {
+      for (const file of files) {
+        if (probe.isStale()) return;
+        paths.push((await stageBrowserFile(file)).path);
+      }
+    } catch (e) {
+      stagingError = e instanceof Error ? e.message : String(e);
+    } finally {
+      try {
+        if (!probe.isStale()) {
+          if (paths.length > 0) await addPicked(paths, "file");
+          if (stagingError) setError(stagingError);
+        }
+      } catch (e) {
+        if (!probe.isStale()) setError(e instanceof Error ? e.message : String(e));
+      } finally {
+        deviceStagingLock.current = false;
+        setDeviceStaging(false);
+      }
+    }
+  };
+
   /** Toolbar: pick one or more local files and copy them into this folder. */
   const addFilesHere = async () => {
     const picked = await pickPaths({
@@ -3073,6 +3109,32 @@ export default function FileSystemScreen() {
       />
 
       <ConnectionGate require="payload">
+        {!isTauriEnv() && (
+          <div className="mb-3">
+            <input
+              ref={deviceInput}
+              type="file"
+              multiple
+              hidden
+              aria-label={tr("browserFile.choose", "From this device…")}
+              onChange={(event) => {
+                const files = Array.from(event.currentTarget.files ?? []);
+                event.currentTarget.value = "";
+                void addDeviceFilesHere(files);
+              }}
+            />
+            <Button
+              variant="secondary"
+              leftIcon={<Upload size={14} />}
+              disabled={loading || !host?.trim() || localBusy !== null || deviceStaging}
+              onClick={() => deviceInput.current?.click()}
+            >
+              {deviceStaging
+                ? tr("browserFile.staging", "Uploading to server…")
+                : tr("browserFile.choose", "From this device…")}
+            </Button>
+          </div>
+        )}
         {/* An open edit session means the browsed mount is a game image
             checked out of ShadowMount+ — and that the game is missing from
             the PS5 home screen until it's finished. This is the screen the
