@@ -282,3 +282,6 @@ payload/third_party/sdk-crt/build/
 
 # ─── Release announcement drafts (make release-post) ─────────────────────
 .release_posts/
+
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/

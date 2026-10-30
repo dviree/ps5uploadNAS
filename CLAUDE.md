@@ -36,3 +36,12 @@ that pulls the image and recreates the container (it refuses while an LZ4 build 
 Whenever a change is pushed to `main`, end the reply by telling the user to run that update
 script once the image build is done. Keep the user's network addresses, paths and ids out of
 this repository.
+
+## Trail-code
+
+The user wants Trail-code (`@trailhq/trail-code`, the `trail` command) used in every session.
+Install it if missing (`npm install -g @trailhq/trail-code`), build the code map (`trail build`;
+`graft/` is a local cache) and find code with `trail ask`, `trail grep`, `trail callers`,
+`trail skeleton` and `trail map` before grepping or opening files. Read the learnings in
+`.trail/learnings/` first, check a change with `trail check`, and save what a session worked
+out with `trail note`, committed with the change it came from.
