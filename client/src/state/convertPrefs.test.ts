@@ -46,6 +46,16 @@ describe("convertPrefs", () => {
     expect(second.parseImageLevel("smallest")).toBe("smallest");
   });
 
+  it("puts packages in the web UI's pkg folder (/ps5pkg) by default, and remembers another", async () => {
+    const first = await import("./convertPrefs");
+    expect(first.useConvertPrefs.getState().pkgDir).toBe(first.DEFAULT_PKG_DIR);
+    expect(first.DEFAULT_PKG_DIR).toBe("/ps5pkg");
+    first.useConvertPrefs.getState().setPkgDir("/pkgs-out");
+    vi.resetModules();
+    const second = await import("./convertPrefs");
+    expect(second.useConvertPrefs.getState().pkgDir).toBe("/pkgs-out");
+  });
+
   it("ignores a corrupt stored level", async () => {
     stored.set("ps5upload.convert.compression", "turbo");
     const { useConvertPrefs } = await import("./convertPrefs");

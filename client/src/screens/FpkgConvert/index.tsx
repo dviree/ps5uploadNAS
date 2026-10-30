@@ -107,8 +107,10 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
     host ? (s.runtimeByHost[hostOf(host)]?.ps5Kernel ?? null) : null,
   );
 
-  const outputDir = useConvertPrefs((s) => s.outputDir);
-  const setOutputDir = useConvertPrefs((s) => s.setOutputDir);
+  const baseOutputDir = useConvertPrefs((s) => s.outputDir);
+  const setBaseOutputDir = useConvertPrefs((s) => s.setOutputDir);
+  const pkgDir = useConvertPrefs((s) => s.pkgDir);
+  const setPkgDir = useConvertPrefs((s) => s.setPkgDir);
   const compression = useConvertPrefs((s) => s.compression);
   const setCompression = useConvertPrefs((s) => s.setCompression);
 
@@ -139,6 +141,12 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
   const imageFormat = useConvertPrefs((s) => s.imageFormat);
   const imageCompress = useConvertPrefs((s) => s.imageCompress);
   const setImageChoice = useConvertPrefs((s) => s.setImageChoice);
+  // This fork: a package (.pkg) goes to the pkg folder (in Docker /ps5pkg, the NAS's pkg
+  // folder), images and game folders to the output folder. Choosing a folder while making a
+  // package changes the pkg folder.
+  const toPkgDir = make === "pkg" && pkgDir.trim() !== "";
+  const outputDir = toPkgDir ? pkgDir : baseOutputDir;
+  const setOutputDir = toPkgDir ? setPkgDir : setBaseOutputDir;
   useEffect(() => {
     if (pipeline.phase === "running") {
       const building = makesFolder(pipeline.mode) ? "folder" : makesImage(pipeline.mode) ? "image" : "pkg";

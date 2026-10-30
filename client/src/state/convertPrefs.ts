@@ -18,6 +18,10 @@ const KEY_MAKE = "ps5upload.convert.make";
 const KEY_IMAGE_FORMAT = "ps5upload.convert.image_format";
 const KEY_IMAGE_COMPRESS = "ps5upload.convert.image_compress";
 const KEY_LZ4_DIR = "ps5upload.convert.lz4_dir";
+const KEY_PKG_DIR = "ps5upload.convert.pkg_dir";
+/** Where a package Convert makes (.pkg) goes when nothing is set: the folder the Docker setup
+ *  mounts at /ps5pkg. The desktop app has none, so its packages go to the output folder. */
+export const DEFAULT_PKG_DIR = "/ps5pkg";
 /** Where a game converted to LZ4 goes when nothing is set: the LZ4 folder the Docker setup
  *  mounts at /lz4 (as ps5-lz4's output). The desktop app has no such folder, so its LZ4
  *  games go to the output folder like any other. */
@@ -43,6 +47,9 @@ interface ConvertPrefs {
    *  folder. */
   lz4Dir: string;
   setLz4Dir: (dir: string) => void;
+  /** Where a package Convert makes goes (the pkg folder); empty: the output folder. */
+  pkgDir: string;
+  setPkgDir: (dir: string) => void;
   compression: FpkgCompression;
   /** A game image's read-back check: KiB per read. */
   verifyChunkKib: number;
@@ -97,6 +104,11 @@ export const useConvertPrefs = create<ConvertPrefs>((set) => ({
   setLz4Dir: (dir) => {
     safeSetItem(KEY_LZ4_DIR, dir);
     set({ lz4Dir: dir });
+  },
+  pkgDir: safeGetItem(KEY_PKG_DIR) ?? (isTauriEnv() ? "" : DEFAULT_PKG_DIR),
+  setPkgDir: (dir) => {
+    safeSetItem(KEY_PKG_DIR, dir);
+    set({ pkgDir: dir });
   },
   compression: storedLevel(),
   verifyChunkKib: parseVerifyChunkKib(safeGetItem(KEY_VERIFY_CHUNK)),
