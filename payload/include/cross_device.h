@@ -22,14 +22,16 @@
  * own tmp files into their final name in the SAME directory are safe by
  * construction and do not need it.
  *
- * RENAME AUDIT (P3 Task 19). Every rename(2) call in payload/src, payload/ava1 and payload/installer, by file
+ * RENAME AUDIT (P3 Task 19). Every rename(2) call in payload/src, third_party/ava1/c and payload/installer, by file
  * and count. "dir" = the two names are siblings (a tmp file or a `.old` generation beside the original, the
  * destination built from the source's path), so no device can differ; "guard" = checked with this header (or
  * the hook that wraps it) first, failing closed. A new rename() site must be added here, with its kind; the
- * ava1-ctest test c_every_rename_site_is_audited counts them.
+ * ps5upload-ctest test c_every_rename_site_is_audited counts them.
  *
  *   src/activity.c        1  dir    play-time file: tmp -> final
  *   src/cheats.c          1  dir    cheat state: tmp -> final
+ *   src/cheats_guard.c    1  dir    engine switch, paused game, apply marker: <path>.tmp -> <path>
+ *   src/app_dump_core.c   2  dir    a dump's decrypted file and its fself: <name>.part -> <name> (same folder)
  *   src/main.c            1  dir    stderr.log -> stderr.log.old
  *   src/notif.c           1  dir    notification store: tmp -> final
  *   src/mgmt_fs.c         2  1 guard (fs.rename), 1 dir (fs.write tmp -> final)
@@ -39,6 +41,7 @@
  *                                 an unsaved save copy kept as <copy>.unsaved (same folder)
  *   src/fs_jobs.c         1  dir    chmod/copy tmp inside the destination folder
  *   src/icon_keeper.c     1  dir    hidden_icons.txt: tmp -> final
+ *   src/smp_meta.c        1  dir    restored tile art / param.json: <file>.tmp-<pid> -> file, same appmeta folder
  *   src/register.c        1  dir    param.json: tmp -> final
  *   src/ffpfsc_unpack.c   1  dir    decompressed image: <name>.part -> <name>, beside the .ffpfsc
  *   src/shell_builtin.c   1  guard  `mv` (mv_same_dev, lstat of the source)
@@ -50,6 +53,9 @@
  *   src/smb_shares.c      1  dir    saved shares: <file>.tmp -> file
  *   src/files_prefs.c     1  dir    files-prefs.json: tmp -> final
  *   src/mesh.c            1  dir    device list, settings and shared documents: <file>.tmp -> file
+ *   src/profile.c         4  dir    PSN sign-in backup: <uid>.txt.tmp -> <uid>.txt (made, or a slot added) and
+ *                                   <uid>.txt -> .restored;
+ *                                   an NP file put back: <file>.ps5upload-tmp -> file
  *   src/webui_files.c     2  dir    text save and upload: .ps5u-<hex>.part beside the target -> target
  *                                   (the device is compared too, same_device_as, failing closed)
  *   ava1/ava1_events.c    1  dir    events.log -> events.log.old

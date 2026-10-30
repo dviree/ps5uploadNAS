@@ -75,10 +75,10 @@ describe("Sidebar", () => {
     // safeStorage is mocked empty: a first run, nothing hidden.
     const html = render();
     expect(html).toContain('data-collapsed="false"');
-    for (const to of ["/home", "/upload", "/install-package", "/convert", "/files", "/games", "/console", "/settings"]) {
+    for (const to of ["/home", "/send", "/workshop", "/files", "/games", "/console", "/settings"]) {
       expect(html).toContain(`href="${to}"`);
     }
-    expect(html).toContain("Files &amp; storage");
+    expect(html).toContain("Files &amp; Storage");
     expect(html).toContain('href="/more"');
     // The old favorites hint is gone.
     expect(html).not.toContain("Star screens in More");
@@ -146,22 +146,22 @@ describe("Sidebar", () => {
     expect(html).not.toContain('aria-label="Pin Home"');
   });
 
-  it("shows pinned screens in pin order under Home and Bug report, and keeps them in their sections", async () => {
-    const Pinned = await withLists([], [], ["/processes", "/files"]);
+  it("shows pinned screens in pin order under Home and Bug report, and only there", async () => {
+    const Pinned = await withLists([], [], ["/cheats", "/files"]);
     const html = render(<Pinned />);
     const group = html.slice(html.indexOf('data-testid="nav-pinned"'));
     const groupEnd = group.indexOf("</section>");
     const inGroup = group.slice(0, groupEnd);
     expect(html.indexOf('href="/bug-report"')).toBeLessThan(html.indexOf('data-testid="nav-pinned"'));
     expect(inGroup).toContain(">Pinned<");
-    expect(inGroup.indexOf('href="/processes"')).toBeLessThan(inGroup.indexOf('href="/files"'));
-    expect(inGroup).toContain('aria-label="Unpin Processes &amp; ports"');
+    expect(inGroup.indexOf('href="/cheats"')).toBeLessThan(inGroup.indexOf('href="/files"'));
+    expect(inGroup).toContain('aria-label="Unpin Cheats"');
     // Rows of the Pinned group drag to reorder, and have no hide button.
     expect(inGroup).toContain('draggable="true"');
     expect(inGroup).not.toContain("from the sidebar");
-    // Still in their own sections too, where the pin button now unpins.
-    expect(html.split('href="/files"').length - 1).toBe(2);
-    expect(html).toMatch(/aria-pressed="true"[^>]*aria-label="Unpin File System"/);
+    // Listed once: their own sections leave them out while they are pinned.
+    expect(html.split('href="/files"').length - 1).toBe(1);
+    expect(html.split('href="/cheats"').length - 1).toBe(1);
   });
 
   it("shows a pinned screen that is hidden in Pinned only, and does not count it hidden", async () => {
@@ -196,11 +196,11 @@ describe("Sidebar", () => {
     expect(inGroup).not.toContain("<button");
     expect(inGroup).not.toContain("draggable");
     // Above the sections' icons.
-    expect(html.indexOf('data-testid="nav-pinned"')).toBeLessThan(html.indexOf('href="/upload"'));
+    expect(html.indexOf('data-testid="nav-pinned"')).toBeLessThan(html.indexOf('href="/send"'));
   });
 
   it("offers no drag in the Windows app, whose window takes every drag", async () => {
-    const Win = await withLists([], [], ["/files", "/upload"], false, true);
+    const Win = await withLists([], [], ["/files", "/send"], false, true);
     const html = render(<Win />);
     expect(html).toContain('data-testid="nav-pinned"');
     expect(html).not.toContain("draggable");

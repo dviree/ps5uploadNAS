@@ -45,6 +45,8 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: true
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 22
@@ -63,6 +65,8 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: true
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -96,6 +100,20 @@ jobs:
         working-directory: engine
         run: cargo clippy --locked --workspace -- -D warnings
 
+      # UnRAR is GPL-incompatible and the engine carries third-party GPL/AGPL code, so only
+      # the separate ps5upload-unrar program may link it (LICENSES/UnRAR-exception.md).
+      - name: UnRAR stays out of the engine
+        working-directory: engine
+        run: |
+          if cargo tree --locked -p ps5upload-engine --target all -e normal,build | grep -E ' unrar(_sys)? v'; then
+            echo "::error::ps5upload-engine links unrar; RAR must go through ps5upload-unrar"
+            exit 1
+          fi
+          if cargo tree --locked -p ps5upload-unrar --target all -e normal,build | grep -E 'ps5upload-(core|fpkg|ava1|engine) v'; then
+            echo "::error::ps5upload-unrar must hold only ps5upload's own code and UnRAR"
+            exit 1
+          fi
+
       # The webui feature (rust-embed + static serving) is only enabled
       # in the Docker webui build, not the default workspace clippy/test
       # above. Compile-check it here so a broken #[cfg(feature = "webui")]
@@ -128,7 +146,7 @@ jobs:
 
   # The workspace's tests, in two legs that run side by side: the engine crate (and the
   # integration suite built on it) is about half of the time, everything else the other half.
-  # Together they are `cargo test --workspace --exclude ava1-ctest`; a crate added later lands
+  # Together they are `cargo test --workspace --exclude ps5upload-ctest`; a crate added later lands
   # in `libs` without anyone listing it.
   rust-engine-tests:
     name: rust tests (${{ matrix.part }})
@@ -141,9 +159,11 @@ jobs:
           - part: engine
             select: -p ps5upload-engine -p ps5upload-tests
           - part: libs
-            select: --workspace --exclude ava1-ctest --exclude ps5upload-engine --exclude ps5upload-tests
+            select: --workspace --exclude ps5upload-ctest --exclude ps5upload-engine --exclude ps5upload-tests
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: true
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -165,7 +185,7 @@ jobs:
             ${{ runner.os }}-engine-test-${{ matrix.part }}-
 
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2
+        uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2
         with:
           tool: cargo-nextest
 
@@ -228,6 +248,12 @@ jobs:
             exit 1
           fi
 
+      # The RAR tests (ps5upload-core, ps5upload-ava1, ps5upload-tests) start the separate
+      # ps5upload-unrar program from target/debug; the `engine` leg does not select it.
+      - name: Build the RAR helper (ps5upload-unrar)
+        working-directory: engine
+        run: cargo build -p ps5upload-unrar
+
       - name: cargo nextest
         working-directory: engine
         timeout-minutes: 25
@@ -263,7 +289,7 @@ jobs:
   # rule holds inside one machine, so the test files are dealt across four machines, each still
   # running its share one at a time.
   rust-ctest:
-    name: rust (ava1 C interop ${{ matrix.shard }}/4)
+    name: rust (payload C over AVA1 ${{ matrix.shard }}/4)
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     strategy:
@@ -272,6 +298,8 @@ jobs:
         shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: true
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -292,7 +320,7 @@ jobs:
             ${{ runner.os }}-engine-ctest-${{ hashFiles('engine/Cargo.lock') }}-
             ${{ runner.os }}-engine-ctest-
 
-      - name: cargo test (ava1 C interop, serial)
+      - name: cargo test (payload C over AVA1, serial)
         working-directory: engine
         timeout-minutes: 25
         env:
@@ -304,7 +332,7 @@ jobs:
           # the rest). A file added later is picked up by one of the four without being listed.
           args=$(python3 ../.github/scripts/ctest-shard.py "$SHARD" 4) || exit 1
           mapfile -t args <<< "$args"
-          cargo test -p ava1-ctest "${args[@]}" -- --test-threads=1
+          cargo test -p ps5upload-ctest "${args[@]}" -- --test-threads=1
 
       - name: Save cargo cache
         if: github.ref == 'refs/heads/main'
@@ -317,64 +345,40 @@ jobs:
           key: ${{ runner.os }}-engine-ctest-${{ hashFiles('engine/Cargo.lock') }}-${{ github.run_id }}
 
   # ─────────────────────────────────────────────────────────────────────
-  # AVA1: C/Rust conformance + interop runs in rust-engine-tests and rust-ctest
-  # above. This job adds what those cannot:
-  # fuzzing the C decoders and data-plane parsers under ASan/UBSan and the
-  # Rust decoders with cargo-fuzz.
+  # AVA1 itself (the protocol library, its fuzzers and its own C interop suite) is tested in
+  # github.com/phantomptr/ava1, checked out here as third_party/ava1. Here: the app's side of it.
   # ─────────────────────────────────────────────────────────────────────
   ava1:
-    name: ava1 (fuzz C + Rust decoders)
+    name: ava1 (app schema, no FTX2)
     runs-on: ubuntu-24.04
-    timeout-minutes: 25
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: true
 
-      - name: Install clang + libFuzzer
-        run: sudo apt-get update && sudo apt-get install -y clang libclang-rt-18-dev
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
 
-      - name: C frame AEAD (RFC 8439 + Monocypher differential, AVX2 and portable paths)
-        run: scripts/ava1-aead-test.sh
+      - name: The app's AVA1 codecs match protocol/ps5upload-ava1/app.toml
+        run: make ava1-app-gen ARGS=--check
+
+      - name: The ava1 crate pin matches the third_party/ava1 submodule
+        run: make ava1-version-check
 
       - name: No FTX2 or ports 9113/9114 in the repository
         run: make check-no-ftx2
-
-      # The C fuzzers (60 s each) and the Rust ones (60 s + 30 s) are single-threaded and share
-      # nothing, so they run side by side on the 4-core runner instead of one after the other
-      # (~146 s, then ~196 s with the Rust toolchain and build). Each fuzzer still gets its full
-      # time on a core of its own; the Rust side runs at a lower priority so its compile, the
-      # only part that wants more than one core, never takes CPU from the C fuzzer.
-      - name: Fuzz C decoders + data-plane parsers (60 s each) and Rust decoders (60 s + 30 s)
-        env:
-          AVA1_FUZZ_SECONDS: 60
-        run: |
-          rust_log="$RUNNER_TEMP/rust-fuzz.log"
-          nice -n 10 bash -euo pipefail -c '
-            rustup toolchain install nightly --profile minimal
-            cargo install cargo-fuzz --locked
-            cd engine/crates/ava1/fuzz
-            cargo +nightly fuzz run decode -- -max_total_time=60
-            cargo +nightly fuzz run frame_header -- -max_total_time=30
-          ' > "$rust_log" 2>&1 &
-          rust_pid=$!
-          c_status=0
-          make ava1-fuzz-c || c_status=$?
-          rust_status=0
-          wait "$rust_pid" || rust_status=$?
-          echo "::group::Rust decoders (cargo-fuzz) output"
-          cat "$rust_log"
-          echo "::endgroup::"
-          [ "$c_status" -eq 0 ] || echo "::error::C fuzzing failed (exit $c_status); output above"
-          [ "$rust_status" -eq 0 ] || echo "::error::Rust fuzzing failed (exit $rust_status); see the 'Rust decoders' group"
-          [ "$c_status" -eq 0 ] && [ "$rust_status" -eq 0 ]
 
   # ─────────────────────────────────────────────────────────────────────
   # AVA1 sanitizers (review 009 #2a): the whole ctest suite, i.e. every console C path the host can run,
   # with ASan + UBSan (+ LSan on Linux) on every C unit. A leak, use-after-free, overflow or UB in the
   # payload C fails here instead of on a console with no debugger. Slow on purpose.
-  # engine/crates/ava1-ctest/lsan.supp lists the tests that exit on purpose, each with its reason.
+  # engine/crates/ps5upload-ctest/lsan.supp lists the tests that exit on purpose, each with its reason.
   # ─────────────────────────────────────────────────────────────────────
   ava1-ctest-sanitize:
-    name: ava1-ctest (ASan + UBSan)
+    name: ps5upload-ctest (ASan + UBSan)
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     # Four shards, test files dealt exactly like rust-ctest (by measured time): the serial
@@ -385,6 +389,8 @@ jobs:
         shard: [1, 2, 3, 4]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: true
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -408,20 +414,20 @@ jobs:
             ${{ runner.os }}-ava1-san-${{ hashFiles('engine/Cargo.lock') }}-
             ${{ runner.os }}-ava1-san-
 
-      - name: cargo test -p ava1-ctest (sanitized, serial)
+      - name: cargo test -p ps5upload-ctest (sanitized, serial)
         working-directory: engine
         env:
           CC: clang
           AVA1_CTEST_SANITIZE: '1'
           RUSTFLAGS: -Clinker=clang
           ASAN_OPTIONS: detect_leaks=1
-          LSAN_OPTIONS: suppressions=${{ github.workspace }}/engine/crates/ava1-ctest/lsan.supp:print_suppressions=0
+          LSAN_OPTIONS: suppressions=${{ github.workspace }}/engine/crates/ps5upload-ctest/lsan.supp:print_suppressions=0
           RUST_BACKTRACE: 1
           SHARD: ${{ matrix.shard }}
         run: |
           args=$(python3 ../.github/scripts/ctest-shard.py "$SHARD" 4) || exit 1
           mapfile -t args <<< "$args"
-          cargo test -p ava1-ctest "${args[@]}" -- --test-threads=1
+          cargo test -p ps5upload-ctest "${args[@]}" -- --test-threads=1
 
       - name: Save cargo cache
         if: github.ref == 'refs/heads/main'
@@ -478,6 +484,8 @@ jobs:
         working-directory: engine
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: true
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -485,11 +493,60 @@ jobs:
           toolchain: stable
           targets: ${{ matrix.targets }}
 
+      # Compile cache (the same steps as publish.yml's release builds): this job had no cache
+      # and compiled every dependency from scratch for each target. Written only from main,
+      # like the cargo caches above (a PR's own entries would be visible to that PR alone);
+      # a PR reads main's. A cache sccache cannot reach is a miss, never a failed build.
+      - name: Install sccache
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2
+        with:
+          tool: sccache@0.18.0
+
+      - name: Point sccache at the Actions cache
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        env:
+          RW_MODE: ${{ github.ref == 'refs/heads/main' && 'READ_WRITE' || 'READ_ONLY' }}
+        with:
+          script: |
+            core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+            // The v2 cache service (the only one GitHub runs now); without this sccache's
+            // backend speaks v1, and every read misses and every write fails.
+            core.exportVariable('ACTIONS_CACHE_SERVICE_V2', 'on');
+            core.exportVariable('SCCACHE_ERROR_LOG', `${process.env.RUNNER_TEMP}/sccache.log`);
+            core.exportVariable('SCCACHE_LOG', 'warn');
+            core.exportVariable('SCCACHE_GHA_ENABLED', 'true');
+            core.exportVariable('SCCACHE_GHA_RW_MODE', process.env.RW_MODE);
+            core.exportVariable('SCCACHE_IGNORE_SERVER_IO_ERROR', '1');
+            core.exportVariable('SCCACHE_IDLE_TIMEOUT', '0');
+
+      - name: Start sccache
+        shell: bash
+        run: |
+          if sccache --start-server; then
+            echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          else
+            echo "::warning::sccache did not start; building without the compile cache"
+          fi
+
       - name: cargo check core
         run: cargo check -p ps5upload-core ${{ matrix.target_args }}
 
       - name: cargo check engine
         run: cargo check -p ps5upload-engine ${{ matrix.target_args }}
+
+      # The RAR helper ships next to the engine on every desktop target. Built, not only
+      # checked: a check never links, and on Windows UnRAR needs advapi32 at link time (9.0.0's
+      # first release build failed there).
+      - name: cargo build RAR helper
+        run: cargo build -p ps5upload-unrar ${{ matrix.target_args }}
+
+      - name: Compile cache stats
+        if: always()
+        shell: bash
+        run: |
+          sccache --show-stats || true
+          tail -n 20 "$RUNNER_TEMP/sccache.log" 2>/dev/null || true
 
   # ─────────────────────────────────────────────────────────────────────
   # Rust desktop shell (client/src-tauri). Uses its own workspace so
@@ -506,6 +563,8 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: true
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -610,14 +669,27 @@ jobs:
         run: |
           mkdir -p engine/target/release
           exe=engine/target/release/ps5upload-engine
-          [ "$RUNNER_OS" = "Windows" ] && exe="$exe.exe"
+          helper=engine/target/release/ps5upload-unrar
+          if [ "$RUNNER_OS" = "Windows" ]; then exe="$exe.exe"; helper="$helper.exe"; fi
           printf 'engine stub for CI\n' > "$exe"
+          # The RAR helper is embedded next to the engine the same way (build.rs).
+          printf 'unrar helper stub for CI\n' > "$helper"
 
       # No separate `cargo check --all-targets`: clippy --all-targets type-checks the same code.
       # --locked for the same reason as the engine workspace's clippy step.
       - name: cargo clippy
         working-directory: client/src-tauri
         run: cargo clippy --locked --all-targets -- -D warnings
+
+      # See the engine job: only the separate ps5upload-unrar program may link UnRAR.
+      - name: UnRAR stays out of the desktop app
+        working-directory: client/src-tauri
+        shell: bash
+        run: |
+          if cargo tree --locked --target all -e normal,build | grep -E ' unrar(_sys)? v'; then
+            echo "::error::the desktop app links unrar; RAR must go through ps5upload-unrar"
+            exit 1
+          fi
 
       - name: cargo test
         working-directory: client/src-tauri
@@ -644,6 +716,8 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: true
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
@@ -702,6 +776,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          submodules: true
           # gitleaks reads every commit, not only the tip.
           fetch-depth: 0
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
@@ -709,7 +784,7 @@ jobs:
           node-version: 22
           check-latest: true
       - name: Install cargo-audit
-        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2
+        uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2
         with:
           tool: cargo-audit
       - name: Install gitleaks (checksum-verified release)
@@ -741,6 +816,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: true
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
           node-version: 22
@@ -786,6 +863,8 @@ jobs:
     continue-on-error: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: true
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
@@ -806,14 +885,14 @@ jobs:
           components: llvm-tools-preview
 
       - name: Install cargo-llvm-cov
-        uses: taiki-e/install-action@c3076e6fa5aeb9a93daf1bd8eff73345250a8a9c # cargo-llvm-cov
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # cargo-llvm-cov
 
       # scripts/coverage.mjs runs the instrumented suite under nextest when it is installed:
       # the same tests, side by side instead of one binary at a time (the serial pass took
       # ~26 of this job's ~32 min). engine/.config/nextest.toml still serializes the
       # timing-sensitive binaries.
       - name: Install cargo-nextest
-        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2
+        uses: taiki-e/install-action@5488ac5a951645ce95062214902ac4b6bc1a1037 # v2
         with:
           tool: cargo-nextest
 
@@ -842,6 +921,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: true
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
@@ -971,6 +1052,8 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: true
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
         with:
@@ -1003,6 +1086,8 @@ jobs:
     timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          submodules: true
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:

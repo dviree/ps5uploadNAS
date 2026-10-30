@@ -11,13 +11,13 @@ import {
 } from "../api/ps5";
 import { useConnectionStore } from "./connection";
 import { hostOf } from "../lib/addr";
-import { isTauriEnv } from "../lib/tauriEnv";
 import { safeGetItem, safeSetItem } from "../lib/safeStorage";
 import { isInstallPackagePath } from "../lib/pkgDropDedupe";
 import { remoteApi } from "../api/remote";
 import { materializeRemote } from "../lib/materialize";
 import { isRemotePath } from "../lib/remotePath";
 import { platformFromTitleId, titleIdFromContentId } from "./pkgLibrary";
+import { registerSettingReload } from "../lib/liveSettings";
 
 /**
  * Detected source kind. Drives which options the Upload screen shows.
@@ -360,19 +360,6 @@ export const useUploadStore = create<UploadState>((set, get) => ({
       }
       return;
     }
-    // Archive (.zip/.7z/.rar) upload isn't wired into the browser shim yet —
-    // the inspect step below streams progress over a Tauri Channel with no
-    // browser equivalent (see browserInvoke.ts). Refuse cleanly here rather
-    // than let it hit BrowserUnsupportedError mid-inspect.
-    if (isArchivePath(path) && !isTauriEnv()) {
-      set({
-        source: { kind: "archive", path, meta: null, wrappedHint: null, zipInfo: null },
-        detecting: false,
-        detectError:
-          "Archive upload (.zip/.7z/.rar) isn't available in the browser yet — pick a plain file or folder, or use the desktop app.",
-      });
-      return;
-    }
     // A .zip is an archive source: optimistically mark it, then inspect the
     // central directory (fast — no inflation) to show what it expands to and
     // detect an embedded game. Mirrors pickFolder's stale-result guard.
@@ -603,3 +590,8 @@ export const useUploadStore = create<UploadState>((set, get) => ({
       excludes: s.excludes.filter((e) => e.pattern !== pattern),
     })),
 }));
+
+// A change synced from another device shows at once (lib/liveSettings).
+registerSettingReload(["ps5upload.register_after_upload"], () =>
+  useUploadStore.setState({ registerAfterUpload: safeGetItem("ps5upload.register_after_upload") !== "false" }),
+);

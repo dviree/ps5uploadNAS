@@ -4,17 +4,21 @@ import { hostOf } from "../lib/addr";
 import { isTauriEnv } from "../lib/tauriEnv";
 import { syncId } from "../lib/meshShare";
 import { dailyBackup } from "../lib/settingsBackup";
+import { getEngineUrl } from "../state/engine";
 import { useConnectionStore } from "../state/connection";
 import { useTr } from "../state/lang";
 import {
   deviceName,
   loadMeshMe,
   onMeshEvent,
+  othersRemotePlaying,
   pollMesh,
   presenceItems,
   publishPresence,
+  RP_ACTIVITY,
   useMeshStore,
 } from "../state/mesh";
+import { useRemotePlayStore } from "../state/remotePlay";
 import { useTaskStore } from "../state/tasks";
 import { useToastStore } from "../state/toasts";
 
@@ -30,6 +34,21 @@ const BACKUP_CHECK_MS = 60 * 60 * 1000;
 export function backupLabel(engineName: string | undefined): string {
   const name = engineName || "PS5Upload";
   return isTauriEnv() ? name : `${name} (browser)`;
+}
+
+/** Where a phone joins this app's Remote Play as a controller, per console (pad_link.rs):
+ *  read from the engine once per console, then published with the Remote Play presence. */
+const padWs = new Map<string, string>();
+function padOf(h: string): { pad?: string } {
+  const known = padWs.get(h);
+  if (known === undefined) {
+    padWs.set(h, "");
+    void fetch(`${getEngineUrl()}/api/ps5/rp/pad-link?console=${encodeURIComponent(h)}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((v: { pad_ws?: string | null } | null) => padWs.set(h, v?.pad_ws ?? ""))
+      .catch(() => padWs.delete(h));
+  }
+  return known ? { pad: known } : {};
 }
 
 /**
@@ -98,11 +117,19 @@ export function useMeshSync() {
       const hosts = new Set<string>();
       for (const t of tasks) hosts.add(hostOf(t.consoleId));
       if (conn.payloadStatus === "up") hosts.add(hostOf(conn.host));
+      // Remote Play from this window: the other devices see who has the console's one session.
+      const rp = useRemotePlayStore.getState();
+      const rpHost =
+        rp.stream && rp.target && rp.phase && rp.phase !== "ended" && rp.phase !== "moved"
+          ? hostOf(rp.target.host)
+          : "";
+      if (rpHost) hosts.add(rpHost);
       for (const h of hosts) {
         if (!h) continue;
         const rt = conn.runtimeByHost[h];
         if (rt && rt.payloadStatus !== "up") continue;
-        void publishPresence(h, presenceItems(tasks, h));
+        const items = presenceItems(tasks, h);
+        void publishPresence(h, h === rpHost ? [{ kind: RP_ACTIVITY, ...padOf(h) }, ...items] : items);
       }
     }, PRESENCE_MS);
     return () => window.clearInterval(id);
@@ -141,4 +168,30 @@ export function useMeshSync() {
       }),
     [tr],
   );
+
+  // Another device started Remote Play on a console: say so (this window's own stream, if it
+  // played that console, ends with it).
+  useEffect(() => {
+    const seen = new Map<string, Set<string>>();
+    return useMeshStore.subscribe((s) => {
+      for (const [host, m] of Object.entries(s.byHost)) {
+        // Before the first answer nothing is known: what is already playing then is not news.
+        if (!m.state) continue;
+        const now = new Set(othersRemotePlaying(m.state).map((d) => d.id));
+        const before = seen.get(host);
+        seen.set(host, now);
+        if (!before) continue;
+        for (const id of now) {
+          if (before.has(id)) continue;
+          const d = m.state?.devices.find((x) => x.id === id);
+          if (!d) continue;
+          const name = deviceName(d);
+          useToastStore.getState().push({
+            tone: "info",
+            message: tr("mesh_rp_started", { name }, `${name} started Remote Play on this console`),
+          });
+        }
+      }
+    });
+  }, [tr]);
 }

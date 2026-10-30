@@ -258,6 +258,61 @@ export async function profileActivate(
   return assertOk(resp, "Activate profile");
 }
 
+/** What the console says about a user's PlayStation Network sign-in (np-fake-signin): whether
+ *  a backup from before the first sign-in is kept on it, and the values that decide how the
+ *  console treats the account. `null` where the registry could not be read. */
+export interface NpState {
+  ok: boolean;
+  slot: number;
+  uid: number;
+  backup: boolean;
+  backup_slot: number;
+  online_id: string;
+  /** NP_date_of_birth; np-fake-signin's template sets 1983-04-12. */
+  dob: string;
+  auth_dat: boolean;
+  config_dat: boolean;
+  sub_account: number | null;
+  offline_adult: number | null;
+  age: number | null;
+  login_flag: number | null;
+}
+
+/** The sign-in state of `uid` (0 = the foreground user) for account slot `slot`. */
+export async function profileNpState(slot: number, uid: number, addr: string): Promise<NpState> {
+  const resp = await invoke<NpState & { error?: string | null }>("profile_np_state", {
+    req: { addr, slot, uid },
+  });
+  return assertOk(resp, "Read the sign-in state");
+}
+
+/** Keep, on the console, everything np-fake-signin is about to overwrite. A backup already
+ *  there is kept (it is the state from before the first sign-in); `created` says whether a new
+ *  one was written. */
+export async function profileNpBackup(
+  slot: number,
+  uid: number,
+  addr: string,
+): Promise<{ ok: boolean; created: boolean }> {
+  const resp = await invoke<{ ok: boolean; created: boolean; error?: string | null }>(
+    "profile_np_backup",
+    { req: { addr, slot, uid } },
+  );
+  return assertOk(resp, "Back up the sign-in state");
+}
+
+/** Put the kept sign-in state back: undoes np-fake-signin once the PS5 restarts. */
+export async function profileNpRestore(
+  uid: number,
+  addr: string,
+): Promise<{ ok: boolean; written: number }> {
+  const resp = await invoke<{ ok: boolean; written: number; error?: string | null }>(
+    "profile_np_restore",
+    { req: { addr, slot: 0, uid } },
+  );
+  return assertOk(resp, "Undo the sign-in");
+}
+
 /** Create a new local user account. Returns the new user's uid. */
 export async function userCreate(
   name: string,
@@ -1671,7 +1726,11 @@ export interface HwTemps {
   soc_temp: number;
   /** M.2 NVMe expansion slot temp (celsius). 0 = no drive installed. */
   m2_temp: number;
+  /** A fixed REFERENCE clock the system reports (800 MHz on every console
+   *  measured), not the speed the cores run at. */
   cpu_freq_mhz: number;
+  /** GPU (graphics) clock in MHz from the SoC's power controller. Read only
+   *  with `clocks`; `0` = not read, unsupported or out of range. */
   soc_clock_mhz: number;
   /** milliwatts */
   soc_power_mw: number;
@@ -1708,6 +1767,22 @@ export interface HwTemps {
   fan_guard?: "off" | "ok" | "failing" | "";
   /** The fan controller's filtered temperature (°C, one decimal), null when unreadable. */
   fan_filtered_c?: number | null;
+  /** Where the clocks came from: "mp1" (read), "unsupported" (the console
+   *  refused the read; the helper doesn't try again until it restarts), ""
+   *  (not asked for, or an older helper/engine). */
+  gpu_clock_src?: "mp1" | "unsupported" | "";
+  /** The eight CPU cores' clocks in MHz (the power controller's P-state
+   *  figure); `0` = unknown. Empty unless read with `clocks`. */
+  cpu_core_mhz?: number[];
+  /** Lowest / highest known core clock, `0` when none is known. */
+  cpu_core_mhz_min?: number;
+  cpu_core_mhz_max?: number;
+  /** How the measured clocks came: "add_chain" (timed on the console), "unsupported", or ""
+   *  (not asked for, or an older helper/engine). */
+  cpu_measure_src?: "add_chain" | "unsupported" | "";
+  /** The clock each core really ran at while busy (MHz), indexed like cpu_core_mhz; 0 = not
+   *  measured (the game cores are not open to the helper). */
+  cpu_core_measured_mhz?: number[];
 }
 
 export interface HwPower {
@@ -1735,13 +1810,16 @@ export async function fetchHwInfo(transferAddr: string): Promise<HwInfo> {
  *  telemetry — SoC power, CPU usage, fan duty, product shape. Pass `true`
  *  only from an explicit user action ("Read sensors"); the Dashboard's
  *  auto-poll must call this WITHOUT extended so its 5s tick only ever
- *  triggers the basic, always-safe read on the payload. */
+ *  triggers the basic, always-safe read on the payload. `clocks` (default
+ *  false) also reads the GPU and per-core CPU clocks from the SoC's power
+ *  controller: the Hardware screen's Read sensors click only. */
 export async function fetchHwTemps(
   transferAddr: string,
   extended = false,
+  clocks = false,
 ): Promise<HwTemps> {
   const addr = toMgmtAddr(transferAddr);
-  return invoke<HwTemps>("ps5_hw_temps", { addr, extended });
+  return invoke<HwTemps>("ps5_hw_temps", { addr, extended, clocks });
 }
 
 export async function fetchHwPower(transferAddr: string): Promise<HwPower> {
@@ -2028,6 +2106,8 @@ export interface SmpStatus {
   debug_log_tail: string | null;
   mounted_images: SmpMountedImage[];
   errors: string[];
+  /** SMP's own version from its HTTP API (1.7beta8+); absent when the API doesn't answer. */
+  version?: string | null;
 }
 
 /** SMP status snapshot. `addr` is the management-port address. */
@@ -3194,6 +3274,9 @@ export interface LibraryEntry {
    *  views. Used by the "Most recent first" / "Oldest first" sort
    *  options in the Library. */
   mtime?: number;
+  /** For `game` kind: the game's name from its param.json, read during the scan; null when
+   *  it has none. */
+  title?: string | null;
 }
 
 /** Walk every non-placeholder PS5 volume recursively and return all games
@@ -3452,11 +3535,12 @@ export async function scanLibrary(
   const titleIdLimit = createScanLimiter(6);
   const withTitleIds = await Promise.all(
     rawGames.map(async (game) => {
-      const tid = await titleIdLimit(async () => {
-        const meta = await fetchGameMeta(addr, game.path);
-        return meta.title_id ?? null;
-      });
-      return { ...game, titleId: tid };
+      const meta = await titleIdLimit(() => fetchGameMeta(addr, game.path));
+      return {
+        ...game,
+        titleId: meta.title_id ?? null,
+        title: meta.title ?? null,
+      };
     }),
   );
   // Group by titleId, pick the preferred path per group.
@@ -4245,7 +4329,7 @@ export interface JobSnapshot {
   bytes_finalized?: number;
   /** The sending phase when it is not plain sending: `"skipping"` while a 7z/RAR
    *  resume discards data the console already has. Absent otherwise (and on engines
-   *  that do not report it). Contract: protocol/ava1/CLIENT_CONTRACT.md. */
+   *  that do not report it). Contract: protocol/ps5upload-ava1/PROFILE.md §8. */
   phase?: string;
   /** Skipping progress: bytes decoded so far and bytes to skip in all. */
   skip_done_bytes?: number;
@@ -4678,6 +4762,33 @@ export async function bundledPayloadPath(): Promise<string> {
     throw new Error(resp.error ?? "payload_bundled_path failed");
   }
   return resp.path;
+}
+
+/** Overwrite a copy of the helper the console keeps for boot (an autoloader folder,
+ *  Payload Manager's storage) with this app's helper (#540). The engine refuses any path
+ *  that is not an existing `ps5upload*.elf` in a boot folder. `localPath`: the desktop
+ *  app's bundled ELF; without it the engine uses its own. */
+export async function helperReplaceCopy(
+  host: string,
+  path: string,
+  localPath?: string | null,
+): Promise<"updated" | "unchanged" | "not_found"> {
+  const res = await fetch(`${getEngineUrl()}/api/ps5/helper/replace-copy`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ addr: host, path, local_path: localPath ?? null }),
+    signal: AbortSignal.timeout(120_000),
+  });
+  const body = (await res.json().catch(() => ({}))) as {
+    ok?: boolean;
+    status?: string;
+    error?: string;
+  };
+  if (!res.ok) throw new Error(body.error || `request failed (${res.status})`);
+  if (body.ok && body.status === "unchanged") return "unchanged";
+  if (body.ok) return "updated";
+  if (body.error === "not_found") return "not_found";
+  throw new Error(body.error || "the copy was not replaced");
 }
 
 /** Same as `bundledPayloadPath` but returns the file's size + mtime
@@ -5218,7 +5329,7 @@ export interface CheatTitle {
   /** Game version the downloaded cheat targets, parsed from its filename
    *  (e.g. "01.08"). Empty when the filename carries no version. */
   version?: string;
-  /** Formats on the console for this title: "json" | "shn" | "mc4". */
+  /** Formats on the console for this title: "json" | "shn" | "mc4" | "xml". */
   formats?: string[];
   /** How many of its cheats are switched on. */
   enabled?: number;
@@ -5237,6 +5348,11 @@ export interface CheatMod {
   desc: string;
   type: string;
   on: boolean;
+  /** "xml" for an XML game patch entry (PS-Game-Patch format). */
+  format?: string;
+  /** An XML game patch made for another game version than the installed one; the console
+   *  refuses to turn it on. */
+  other_version?: boolean;
 }
 
 export interface CheatsGetResponse {
@@ -5256,6 +5372,8 @@ export interface CheatsStatusResponse {
   game_running: boolean;
   game_title_id: string;
   game_pid: number;
+  /** The helper paused the running game's cheats: it closed right after they were applied (#550). */
+  held?: boolean;
 }
 
 export async function cheatsList(addr?: string): Promise<CheatsListResponse> {

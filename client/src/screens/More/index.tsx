@@ -106,7 +106,7 @@ export default function MoreScreen() {
   if (editingPins && pinnedItems.length === 0) setEditingPins(false);
   const searching = query.trim().length > 0;
   return (
-    <div className="app-page max-w-4xl! pb-6!">
+    <div className="app-page pb-6!">
       <PageHeader
         icon={LayoutGrid}
         title={tr("more_title", undefined, "More")}
@@ -320,7 +320,8 @@ export function MoreRow({
 }) {
   const tr = useTr();
   const Icon = item.icon;
-  const showErrors = item.to === "/logs" && errorCount > 0;
+  // App log errors: Logs is a tab of Activity & logs (/tasks).
+  const showErrors = item.to === "/tasks" && errorCount > 0;
   const showUpdate = item.to === "/settings" && updateAvailable;
   const hidden = useNavSidebarStore((s) => !fixed && s.hidden.includes(item.to));
   const toggleHidden = useNavSidebarStore((s) => s.toggleHidden);

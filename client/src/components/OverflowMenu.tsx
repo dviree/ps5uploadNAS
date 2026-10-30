@@ -1,6 +1,7 @@
 import {
   type ReactNode,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
 } from "react";
@@ -8,6 +9,7 @@ import { ChevronDown, MoreHorizontal } from "lucide-react";
 
 import { Button, type ButtonVariant } from "./Button";
 import { MenuDropdown } from "./Menu";
+import { fitOnScreen, visibleArea } from "./useFitOnScreen";
 
 /**
  * One action inside an OverflowMenu.
@@ -93,6 +95,22 @@ export function OverflowMenu({
     maxHeight: number;
   }>({ dropUp: false, maxHeight: 0 });
   const wrapperRef = useRef<HTMLDivElement | null>(null);
+  // Horizontal clamp: anchored to one side of its trigger, a menu near the other edge of a
+  // narrow screen (a phone, a wrapped row) ran off it. Once shown it is measured and slid back
+  // so it sits whole on screen.
+  const [shiftX, setShiftX] = useState(0);
+  // Measured once per opening, before paint, as a margin (the menu's entry animation owns its
+  // transform: a transform shift was undone each frame and re-measured without end).
+  useLayoutEffect(() => {
+    if (!open) {
+      setShiftX(0);
+      return;
+    }
+    const menu = wrapperRef.current?.lastElementChild as HTMLElement | null;
+    if (!menu || menu === wrapperRef.current?.firstElementChild) return;
+    const { dx } = fitOnScreen(menu.getBoundingClientRect(), visibleArea(menu));
+    setShiftX(dx);
+  }, [open, placement]);
 
   useEffect(() => {
     if (!open || !wrapperRef.current) return;
@@ -101,9 +119,11 @@ export function OverflowMenu({
       if (!el) return;
       const rect = el.getBoundingClientRect();
       const margin = 8;
-      const vh = window.innerHeight;
-      const below = vh - rect.bottom - margin;
-      const above = rect.top - margin;
+      // Room ends above a phone's floating tab bar and inside the screen area (below the top
+      // bar): a menu flipped up on a short landscape phone ran under the top bar.
+      const area = visibleArea(el);
+      const below = area.bottom - rect.bottom - margin;
+      const above = rect.top - area.top - margin;
       // Flip up only when below is genuinely cramped and above has more room.
       const dropUp = below < 220 && above > below;
       setPlacement({
@@ -176,6 +196,7 @@ export function OverflowMenu({
           onClose={() => setOpen(false)}
           align={align}
           placement={placement}
+          style={shiftX ? { marginLeft: shiftX, marginRight: -shiftX } : undefined}
         />
       )}
     </div>

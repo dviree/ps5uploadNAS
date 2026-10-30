@@ -872,6 +872,41 @@ pub async fn profile_activate(req: ProfileActivateReq) -> Result<JsonValue, Stri
     post_json(&url, &body).await
 }
 
+/// The PSN sign-in backup (np-fake-signin): the account slot and user (uid 0 = foreground).
+#[derive(Debug, Deserialize)]
+pub struct ProfileNpReq {
+    #[serde(default)]
+    pub addr: Option<String>,
+    #[serde(default)]
+    pub slot: i32,
+    #[serde(default)]
+    pub uid: u32,
+}
+
+/// The user's PSN sign-in state and whether a backup is kept. Proxies `/api/profile/np/state`.
+#[tauri::command]
+pub async fn profile_np_state(req: ProfileNpReq) -> Result<JsonValue, String> {
+    let url = format!("{}/api/profile/np/state", engine::url());
+    let body = serde_json::json!({ "addr": req.addr, "slot": req.slot, "uid": req.uid });
+    post_json(&url, &body).await
+}
+
+/// Keep what np-fake-signin overwrites, before it runs. Proxies `/api/profile/np/backup`.
+#[tauri::command]
+pub async fn profile_np_backup(req: ProfileNpReq) -> Result<JsonValue, String> {
+    let url = format!("{}/api/profile/np/backup", engine::url());
+    let body = serde_json::json!({ "addr": req.addr, "slot": req.slot, "uid": req.uid });
+    post_json(&url, &body).await
+}
+
+/// Put the kept sign-in state back. Proxies `/api/profile/np/restore`.
+#[tauri::command]
+pub async fn profile_np_restore(req: ProfileNpReq) -> Result<JsonValue, String> {
+    let url = format!("{}/api/profile/np/restore", engine::url());
+    let body = serde_json::json!({ "addr": req.addr, "uid": req.uid });
+    post_json(&url, &body).await
+}
+
 /// Create a new local user account.
 /// Proxies `/api/ps5/users/create`.
 #[tauri::command]
@@ -2010,16 +2045,21 @@ pub async fn ps5_hw_info(addr: Option<String>) -> Result<JsonValue, String> {
 /// CPU usage / fan duty / product shape) used by the explicit "Read
 /// sensors" click. The Dashboard's auto-poll omits it (or passes false),
 /// so its 5 s tick only ever triggers the basic, always-safe read.
+/// `clocks = Some(true)` also reads the GPU and per-core CPU clocks (`/dev/mp1`): the
+/// Hardware screen's Read sensors click only.
 #[tauri::command]
 pub async fn ps5_hw_temps(
     addr: Option<String>,
     extended: Option<bool>,
+    clocks: Option<bool>,
 ) -> Result<JsonValue, String> {
     let mut url = addr_url("/api/ps5/hw/temps", addr.as_deref());
-    if extended.unwrap_or(false) {
-        let sep = if url.contains('?') { '&' } else { '?' };
-        url.push(sep);
-        url.push_str("extended=1");
+    for (on, param) in [(extended, "extended=1"), (clocks, "clocks=1")] {
+        if on.unwrap_or(false) {
+            let sep = if url.contains('?') { '&' } else { '?' };
+            url.push(sep);
+            url.push_str(param);
+        }
     }
     get_json(&url).await
 }

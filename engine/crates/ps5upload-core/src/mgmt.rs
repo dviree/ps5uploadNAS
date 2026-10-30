@@ -29,7 +29,7 @@ use anyhow::Result;
 /// One management operation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Method {
-    /// The AVA1 method number (`METHOD_*` in `protocol/ava1/schema/ava1.toml`).
+    /// The AVA1 method number (`METHOD_*` in `protocol/ps5upload-ava1/app.toml`).
     pub id: u16,
     /// The legacy label callers put in `payload rejected <LABEL>: ...`.
     pub label: &'static str,
@@ -186,6 +186,9 @@ methods! {
     (MESH_DOC_GET, 179, "MESH_DOC_GET"),
     (MESH_DOC_PUT, 180, "MESH_DOC_PUT"),
     (MESH_ANNOUNCE, 181, "MESH_ANNOUNCE"),
+    (PROFILE_NP_STATE, 182, "PROFILE_NP_STATE"),
+    (PROFILE_NP_BACKUP, 183, "PROFILE_NP_BACKUP"),
+    (PROFILE_NP_RESTORE, 184, "PROFILE_NP_RESTORE"),
 }
 
 /// A management call the payload refused.
@@ -328,7 +331,7 @@ pub struct JobOp {
 
 macro_rules! job_ops {
     ($(($name:ident, $id:expr, $label:expr, $kind:expr),)*) => {
-        /// The operations that run as jobs (`JOB_OP_*` in `protocol/ava1/schema/ava1.toml`).
+        /// The operations that run as jobs (`JOB_OP_*` in `protocol/ps5upload-ava1/app.toml`).
         pub mod ops {
             use super::JobOp;
             $(pub const $name: JobOp = JobOp {
@@ -354,6 +357,7 @@ job_ops! {
     (SDK_SCAN, 9, "SDK_SCAN", "sdk_scan"),
     (FFPFSC_UNPACK, 10, "FFPFSC_UNPACK", "fs_unpack"),
     (ARCHIVE_EXTRACT, 12, "ARCHIVE_EXTRACT", "fs_extract"),
+    (APP_DUMP, 13, "APP_DUMP", "app_dump"),
 }
 
 /// How one long operation is run and followed.

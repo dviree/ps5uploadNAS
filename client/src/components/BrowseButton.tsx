@@ -7,10 +7,12 @@ import { ChevronDown, FolderOpen, HardDrive, Plus, Server } from "lucide-react";
 
 import type { Connection } from "../api/remote";
 import { pickPath, pickPaths, type PickPathOptions } from "../lib/pickPath";
+import { isMobile } from "../lib/platform";
 import { displayPath, isRemotePath } from "../lib/remotePath";
 import { useConnectionsStore, type ConnStatus } from "../state/connections";
 import { Spinner } from "./Spinner";
 import { useTr } from "../state/lang";
+import { useFitOnScreen } from "./useFitOnScreen";
 
 const PROTOCOL: Record<Connection["protocol"], string> = {
   smb: "SMB",
@@ -54,16 +56,22 @@ export function BrowseMenu(props: {
   onAdd: () => void;
 }) {
   const tr = useTr();
+  const ref = useRef<HTMLDivElement>(null);
+  const fit = useFitOnScreen(ref, true);
   const item =
     "flex w-full items-center gap-2 px-3 py-2 text-left text-sm hover:bg-[var(--color-surface-3)] disabled:opacity-50";
   return (
     <div
+      ref={ref}
       role="menu"
-      className="glass-float elev-3 absolute right-0 z-40 mt-1 min-w-56 overflow-hidden rounded-[var(--radius-card)] p-1.5"
+      className="glass-float elev-3 absolute right-0 top-full z-40 mt-1 min-w-56 max-w-[calc(100vw-1rem)] overflow-y-auto rounded-[var(--radius-card)] p-1.5"
+      style={fit}
     >
       <button type="button" role="menuitem" className={item} onClick={props.onLocal}>
         <HardDrive size={14} className="text-[var(--color-muted)]" />
-        {tr("browse_this_computer", undefined, "This computer…")}
+        {isMobile()
+          ? tr("browse_this_device", undefined, "This device…")
+          : tr("browse_this_computer", undefined, "This computer…")}
       </button>
       {props.connections.length > 0 && <div className="my-1 border-t border-[var(--color-border)]" />}
       {props.connections.map((c) => {
@@ -191,7 +199,7 @@ export function BrowseButton(props: BrowseButtonProps) {
           onPickServer={(id) => void pick({ connectionId: id })}
           onAdd={() => {
             setOpen(false);
-            navigate("/connections?add=1");
+            navigate("/shared-folders?add=1");
           }}
         />
       )}

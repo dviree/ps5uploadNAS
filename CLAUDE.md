@@ -8,8 +8,8 @@ runs as the Docker web UI on a NAS.
 
 Only the Docker images build by themselves. `docker-engine.yml` publishes
 `ghcr.io/dviree/ps5upload-engine-webui` (tags `lz4`, `latest`, `lz4-<commit>`) on every push to
-`main`. Every other workflow (`engine-ci.yml`, `publish.yml`, `pages.yml`, `ava1-soak.yml`)
-runs only by hand (`workflow_dispatch`): no desktop, Android or release builds on push, tag,
+`main`. Every other workflow (`engine-ci.yml`, `publish.yml`, `pages.yml`, `ava1-soak.yml`,
+`codeql.yml`, `ios.yml`, `release-tag.yml`, `release-cache.yml`, `ci-runner-retry.yml`) runs only by hand (`workflow_dispatch`): no desktop, Android or release builds on push, tag,
 pull request or schedule.
 
 Keep it that way:

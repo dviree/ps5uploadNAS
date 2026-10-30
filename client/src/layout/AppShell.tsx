@@ -1,13 +1,19 @@
 import { saveLastRoute } from "../lib/lastRoute";
-import { useLocation, useNavigate, useOutlet } from "react-router";
-import { Activity, useEffect, useRef, useState, type ReactNode } from "react";
+import { UNSAFE_LocationContext, useLocation, useNavigate, useOutlet, type Location } from "react-router";
+import { Activity, useContext, useEffect, useRef, useState, type ReactNode } from "react";
 import { Lock, Moon, RefreshCw, RotateCw, Search, Sun, WifiOff, X } from "lucide-react";
 import { localNetworkBlocked, requestLocalNetwork } from "../lib/androidLocalNetwork";
 import StatusBar from "./StatusBar";
 import SessionBanner from "./SessionBanner";
+import RemotePlayBanner from "./RemotePlayBanner";
 import EngineDownBanner from "./EngineDownBanner";
 import MovedConsoleBanner, { useMovedConsoleWatch } from "./MovedConsoleBanner";
 import { PairingDialog } from "../screens/Connection/PairingDialog";
+import { useHelperReplaceGuard } from "../screens/Connection/useHelperReplaceGuard";
+import { helperSendFor, useHelperSendStore } from "../state/helperSend";
+import { sendHelperTo } from "../state/helperSendRuntime";
+import { liveCopyDeps } from "../state/helperStoredCopiesRuntime";
+import { findStoredCopies, type StoredCopy } from "../lib/helperStoredCopies";
 import ConsoleTabs from "./ConsoleTabs";
 import ActivityBar from "./ActivityBar";
 import UpdateToast from "./UpdateToast";
@@ -78,6 +84,7 @@ import { CommandPalette, openCommandPalette } from "../components/CommandPalette
 import { AppLogo } from "../components/AppLogo";
 import { CaptureViewer } from "../components/CaptureViewer";
 import NotificationInbox from "./NotificationInbox";
+import { useTrayApply } from "../screens/Settings/TraySettings";
 import { isDarkTheme, useThemeStore } from "../state/theme";
 import { ShortcutsOverlay } from "../components/ShortcutsOverlay";
 import { LocalPathPicker } from "../components/LocalPathPicker";
@@ -104,7 +111,6 @@ import { keepMinionOff } from "../state/minionMemory";
 import { startRosterShare } from "../state/rosterShare";
 import { startSharedPrefs } from "../lib/sharedPrefs";
 import { startMeshShare } from "../lib/meshShare";
-import { useToastStore } from "../state/toasts";
 import { useMeshSync } from "./useMeshSync";
 import { compareVersions } from "../lib/semver";
 import { useNavSidebarStore, navListsFromStorage } from "../state/navSidebar";
@@ -1142,7 +1148,7 @@ function usePkgAutoRoute() {
               primary: true,
               onClick: () => {
                 viewer.close();
-                navigate("/install-package", { state: { droppedPath: target.path } });
+                navigate("/send", { state: { droppedPath: target.path } });
               },
             }
           : {
@@ -1150,7 +1156,7 @@ function usePkgAutoRoute() {
               primary: true,
               onClick: () => {
                 viewer.close();
-                navigate("/convert", { state: { source: target.path } });
+                navigate("/workshop", { state: { source: target.path } });
               },
             },
       ]);
@@ -1217,6 +1223,12 @@ function useRoutePersistence() {
 function HelperVersionBanner() {
   const tr = useTr();
   const navigate = useNavigate();
+  const host = useConnectionStore((s) => s.host);
+  const { guard: guardReplace, dialog: replaceDialog } = useHelperReplaceGuard();
+  const send = useHelperSendStore((s) => helperSendFor(s, host));
+  // A send started from this banner keeps it (with the send's step) until it ends; a send
+  // started anywhere else does not raise it.
+  const [sentHere, setSentHere] = useState(false);
   const payloadVersion = useConnectionStore((s) => s.payloadVersion);
   const payloadStatus = useConnectionStore((s) => s.payloadStatus);
   const [appVersion, setAppVersion] = useState<string | null>(null);
@@ -1235,20 +1247,42 @@ function HelperVersionBanner() {
     };
   }, []);
 
+  // A send in progress keeps the banner, with its step, until the new helper answers.
+  const sending = send?.state === "busy";
   const mismatch =
     payloadStatus === "up" &&
     !!appVersion &&
     !!payloadVersion &&
     payloadVersion !== appVersion;
   const pair = `${payloadVersion}->${appVersion}`;
-  if (!mismatch || dismissed === pair) return null;
+  const olderHelper =
+    mismatch && compareVersions(payloadVersion ?? "", appVersion ?? "") === -1;
+  // An older helper is usually the copy an autoloader started at boot (#541): look for it,
+  // once per console and version pair, so the banner can say so.
+  const copiesKey = olderHelper ? `${host.trim()}|${pair}` : null;
+  const [bootCopies, setBootCopies] = useState<{ key: string; copies: StoredCopy[] } | null>(null);
+  useEffect(() => {
+    if (!copiesKey) return;
+    let cancelled = false;
+    void findStoredCopies(host.trim(), liveCopyDeps).then((copies) => {
+      if (!cancelled) setBootCopies({ key: copiesKey, copies });
+    });
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- copiesKey carries host and pair
+  }, [copiesKey]);
+  const copies = bootCopies?.key === copiesKey ? bootCopies.copies : [];
+  const following = sentHere && (sending || send?.state === "fail");
+  if (!following && (!mismatch || dismissed === pair)) return null;
   // The helper is the newer one (another device sent it, 8.0.0): sending ours would take that
   // away from every device. The fix is updating this app.
-  const appOlder = compareVersions(payloadVersion, appVersion) === 1;
+  const appOlder = !!payloadVersion && !!appVersion && compareVersions(payloadVersion, appVersion) === 1;
 
   return (
     <div className="mx-3 mt-3 rounded-[var(--radius-card)] border border-[color-mix(in_srgb,var(--color-warn)_35%,transparent)] bg-[var(--color-warn-soft)] px-4 py-2.5 backdrop-blur-xl md:mx-5 text-[var(--color-text)]">
-      <div className="mx-auto flex max-w-6xl flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+      {replaceDialog}
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
         <div className="flex min-w-0 flex-1 items-start gap-3">
           <RefreshCw
             size={18}
@@ -1269,12 +1303,25 @@ function HelperVersionBanner() {
                     undefined,
                     "Another device sent a newer helper. Update this app to match it; sending this app's helper would replace it with an older one for every device.",
                   )
-                : tr(
-                    "helper_mismatch_body_v2",
-                    undefined,
-                    "Nothing to do on the PS5 itself: press Reload helper and this app sends the matching helper to the console. Fixes and features from the newer version won't work until then.",
-                  )}
+                : copies.length > 0
+                  ? tr(
+                      "helper_mismatch_boot_copy",
+                      { list: copies.map((c) => c.path).join(", ") },
+                      "Your PS5 started an older copy of the helper that it keeps for boot ({list}). Press Send helper: this app sends the matching helper and also updates that copy, so the PS5 starts the new one after a restart.",
+                    )
+                  : tr(
+                      "helper_mismatch_body_v3",
+                      undefined,
+                      "Nothing to do on the PS5 itself: press Send helper and this app sends the matching helper to the console. Fixes and features from the newer version won't work until then.",
+                    )}
             </p>
+            {send?.msg && (
+              <p
+                className={`mt-1 text-xs ${send.state === "fail" ? "text-[var(--color-bad)]" : "text-[var(--color-muted)]"}`}
+              >
+                {send.msg}
+              </p>
+            )}
           </div>
         </div>
         <div className="flex shrink-0 gap-2">
@@ -1286,13 +1333,23 @@ function HelperVersionBanner() {
                 void useUpdateStore.getState().checkNow();
                 navigate("/settings");
               } else {
-                navigate("/connection");
+                // Send it right here: the banner already said what this does.
+                const target = host.trim();
+                void guardReplace(target).then((ok) => {
+                  if (!ok) return;
+                  setSentHere(true);
+                  void sendHelperTo(target, tr).finally(() => {
+                    if (helperSendFor(useHelperSendStore.getState(), target)?.state !== "fail") setSentHere(false);
+                  });
+                });
               }
             }}
+            loading={!appOlder && sending}
+            disabled={!appOlder && sending}
           >
             {appOlder
               ? tr("helper_mismatch_update_app", undefined, "Update this app")
-              : tr("helper_mismatch_go", undefined, "Reload helper")}
+              : tr("helper_mismatch_send", undefined, "Send helper")}
           </Button>
           <Button
             size="sm"
@@ -1367,7 +1424,7 @@ function AndroidStorageAccessBanner() {
       {/* Stack on phones (text block over buttons); single row on sm+. The
           old single-row layout squished the text into a narrow column on a
           phone because the button group is shrink-0. */}
-      <div className="mx-auto flex max-w-6xl flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
         <div className="flex min-w-0 flex-1 items-start gap-3">
           <Lock
             size={18}
@@ -1455,7 +1512,7 @@ function AndroidLocalNetworkBanner() {
       role="alert"
       className="mx-3 mt-3 rounded-[var(--radius-card)] border border-[color-mix(in_srgb,var(--color-bad)_45%,transparent)] bg-[var(--color-bad-soft)] px-4 py-3 text-[var(--color-text)] backdrop-blur-xl md:mx-5"
     >
-      <div className="mx-auto flex max-w-6xl flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
+      <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:gap-3">
         <div className="flex min-w-0 flex-1 items-start gap-3">
           <WifiOff size={20} className="mt-0.5 shrink-0 text-[var(--color-bad)]" />
           <div className="min-w-0">
@@ -1499,6 +1556,7 @@ export default function AppShell() {
   useStatusPolling();
   useConsoleHandoff();
   useMeshSync();
+  useTrayApply();
   useAutoRedeployDownHelpers();
   useMovedConsoleWatch();
   useUpdateCheckOnMount();
@@ -1533,20 +1591,8 @@ export default function AppShell() {
       ? () => {}
       : startSharedPrefs(() => useNavSidebarStore.setState(navListsFromStorage()));
     // 8.0.0: every device that uses a console shares the console list and set-up through it.
-    const stopMeshShare = startMeshShare(
-      () => useNavSidebarStore.setState(navListsFromStorage()),
-      (count) =>
-        useToastStore.getState().push({
-          tone: "info",
-          duration: 12_000,
-          message: trRef.current(
-            "mesh_settings_arrived",
-            { count },
-            `${count} setting(s) came from your other devices. They apply when the app reloads.`,
-          ),
-          action: { label: trRef.current("mesh_reload", undefined, "Reload"), onClick: () => window.location.reload() },
-        }),
-    );
+    // A change from another device applies at once (lib/liveSettings): no reload prompt.
+    const stopMeshShare = startMeshShare(() => useNavSidebarStore.setState(navListsFromStorage()));
     // Automatic save backups are run by the engine; it backs up the consoles in this list.
     const stopSaveBackupSync = startSaveBackupSync();
     // Subscribe-once: cross-store accumulator that credits running
@@ -1621,9 +1667,14 @@ export default function AppShell() {
         <NavigationControls />
         <AppLogo size={28} />
         <span className="text-base font-semibold tracking-[-0.02em]">PS5Upload</span>
+        {/* The bell on a phone too: its panel is a full-width sheet there. */}
+        <div className="ms-auto">
+          <NotificationInbox align="right" placement="below" variant="orb" />
+        </div>
       </div>
       <HelperVersionBanner />
       <SessionBanner />
+      <RemotePlayBanner />
       <MovedConsoleBanner />
       <EngineDownBanner />
       <AndroidLocalNetworkBanner />
@@ -1765,28 +1816,34 @@ const KEPT_SCREENS = 6;
  * whole tree of screens per console, and this component is inside each of them. */
 function KeptScreens({ pathname, className }: { pathname: string; className: string }) {
   const outlet = useOutlet();
+  const location = useLocation();
+  const locationContext = useContext(UNSAFE_LocationContext);
   const behindAnotherConsole = useConnectionFrozen();
   // path -> the route element as first rendered for it. The element's props do not change
   // for a given route, so the first one keeps rendering the same component instance.
-  const [kept, setKept] = useState<Array<{ path: string; node: ReactNode }>>([]);
+  // Each also keeps where it was left (its query too): a hidden screen still reads the router, so
+  // it would otherwise see the next screen's URL, and a tabbed screen would fall back to its
+  // first tab while hidden and come back rebuilt, scrolled to the top.
+  const [kept, setKept] = useState<Array<{ path: string; node: ReactNode; location: Location }>>([]);
   useEffect(() => {
     setKept((prev) => {
-      const here = prev.find((k) => k.path === pathname) ?? { path: pathname, node: outlet };
+      const found = prev.find((k) => k.path === pathname);
+      const here = found ? { ...found, location } : { path: pathname, node: outlet, location };
       // Most recent last; the oldest beyond the limit is let go.
       return [...prev.filter((k) => k.path !== pathname), here].slice(-KEPT_SCREENS);
     });
-    // The outlet element is new on every render; only a change of screen matters here.
+    // The outlet element is new on every render; only a change of screen or of its URL matters.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pathname]);
+  }, [pathname, location]);
   // The screen being opened is not in `kept` until the effect above has run.
   const screens = kept.some((k) => k.path === pathname)
     ? kept
-    : [...kept, { path: pathname, node: outlet }];
+    : [...kept, { path: pathname, node: outlet, location }];
   return (
     <>
       {[...screens]
         .sort((a, b) => a.path.localeCompare(b.path))
-        .map(({ path, node }) => {
+        .map(({ path, node, location: leftAt }) => {
           const active = path === pathname;
           return (
             <Activity key={path} mode={active ? "visible" : "hidden"}>
@@ -1802,7 +1859,17 @@ function KeptScreens({ pathname, className }: { pathname: string; className: str
               >
                 {/* The screen on show renders the live route element; a hidden one keeps
                     the element it was last shown with. Same component either way. */}
-                {active ? outlet : node}
+                {/* Always the same wrapper (a different element type would remount the screen);
+                    a hidden screen reads the URL it was left at. */}
+                <UNSAFE_LocationContext.Provider
+                  value={
+                    active
+                      ? locationContext
+                      : { ...locationContext, location: leftAt }
+                  }
+                >
+                  {active ? outlet : node}
+                </UNSAFE_LocationContext.Provider>
               </div>
             </Activity>
           );

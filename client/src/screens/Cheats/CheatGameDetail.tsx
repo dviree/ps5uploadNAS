@@ -27,12 +27,14 @@ import { humanizePs5Error } from "../../lib/humanizeError";
 import { hasVersionMatch, rankCheatFiles, sameVersion, type CheatGame } from "../../lib/cheatGames";
 import { platformForTitleId } from "../../lib/titleDetails";
 import { useTr } from "../../state/lang";
+import { beginTask } from "../../state/trackTask";
 import { useToast } from "../../state/toasts";
 
 /** Where a repo keeps its files, in words. */
 function sourceName(repoId: string): string {
   if (repoId === "etahen") return "etaHEN";
   if (repoId === "henmix") return "HENmix";
+  if (repoId === "psgamepatch") return "PS-Game-Patch";
   return repoId;
 }
 
@@ -103,12 +105,23 @@ export function CheatGameDetail({
   async function download(e: CheatRepoEntry) {
     setDownloading(e.filename);
     setError(null);
+    // The download (fetch from the repo, then send to the console) shows in the activity bar.
+    const task = beginTask({
+      kind: "cheat-download",
+      origin: "cheats",
+      label: tr("activity_cheat_download_label", { name: game.name }, `Cheats for ${game.name}`),
+      detail: e.filename,
+      consoleId: addr,
+    });
     try {
       const r = await cheatsReposDownload(e.repo_id, e.filename, game.titleId, addr);
       if (!r.ok) {
-        setError(r.error || tr("cheats_download_failed", undefined, "The download didn't finish."));
+        const msg = r.error || tr("cheats_download_failed", undefined, "The download didn't finish.");
+        task.fail(new Error(msg));
+        setError(msg);
         return;
       }
+      task.done();
       setFetched((prev) => new Set(prev).add(e.filename));
       toast({
         tone: "success",
@@ -118,6 +131,7 @@ export function CheatGameDetail({
       // it to "Cheats ready" and its switches appear above.
       await onChanged();
     } catch (err) {
+      task.fail(new Error(humanizePs5Error(String(err))));
       setError(humanizePs5Error(String(err)));
     } finally {
       setDownloading(null);
@@ -307,6 +321,11 @@ export function CheatGameDetail({
                     label={m.name || `Cheat #${m.index}`}
                     hint={m.desc || undefined}
                   />
+                  {m.other_version && (
+                    <span className="shrink-0 rounded-full bg-[var(--color-surface-2)] px-2 py-0.5 text-[11px] text-[var(--color-muted)]">
+                      {tr("cheats_other_version", undefined, "Other game version")}
+                    </span>
+                  )}
                   {toggling === m.index && <Spinner size={14} />}
                 </li>
               ))}

@@ -24,18 +24,46 @@ export async function stageBrowserPkg(file: File): Promise<BrowserPkgUpload> {
   return stageBrowserFileAt(file, "/api/pkg/upload");
 }
 
-/** Stage any browser-selected file for the normal Upload review. */
-export async function stageBrowserFile(file: File): Promise<BrowserPkgUpload> {
-  return stageBrowserFileAt(file, "/api/files/upload");
+/** Stage any browser-selected file for the normal Upload review. `onProgress`: bytes of this
+ *  file the engine has received so far, out of its size (a phone's file can take minutes). */
+export async function stageBrowserFile(
+  file: File,
+  onProgress?: (sent: number, total: number) => void,
+): Promise<BrowserPkgUpload> {
+  return stageBrowserFileAt(file, "/api/files/upload", onProgress);
 }
 
-async function stageBrowserFileAt(file: File, endpoint: string): Promise<BrowserPkgUpload> {
+/** POST a form, reporting upload progress (fetch cannot), answered like fetch's Response. */
+function postWithProgress(
+  url: string,
+  form: FormData,
+  onProgress: (sent: number, total: number) => void,
+): Promise<Response> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+    xhr.upload.onprogress = (e) => {
+      if (e.lengthComputable) onProgress(e.loaded, e.total);
+    };
+    xhr.onload = () =>
+      resolve(new Response(xhr.responseText, { status: xhr.status }));
+    xhr.onerror = () => reject(new Error("upload to the engine failed (connection lost)"));
+    xhr.onabort = () => reject(new Error("upload to the engine was cancelled"));
+    xhr.send(form);
+  });
+}
+
+async function stageBrowserFileAt(
+  file: File,
+  endpoint: string,
+  onProgress?: (sent: number, total: number) => void,
+): Promise<BrowserPkgUpload> {
   const form = new FormData();
   form.append(endpoint === "/api/pkg/upload" ? "pkg" : "file", file, file.name);
-  const response = await fetch(`${getEngineUrl()}${endpoint}`, {
-    method: "POST",
-    body: form,
-  });
+  const url = `${getEngineUrl()}${endpoint}`;
+  const response = onProgress
+    ? await postWithProgress(url, form, onProgress)
+    : await fetch(url, { method: "POST", body: form });
   if (!response.ok) throw new Error(await responseError(response));
   const body = (await response.json()) as {
     upload_id?: unknown;

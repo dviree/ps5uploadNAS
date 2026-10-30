@@ -4,6 +4,678 @@ What's new in ps5upload, written for humans.
 
 ---
 
+## 9.5.1
+
+- **Remote Play full screen shows the whole picture.** With **Fit** (the default), the picture is
+  now sized to the screen by the app itself, the way video players letterbox: always the whole
+  picture, with black bars where the screen's shape differs, never cut off. Before, Fit relied on
+  the browser scaling the picture, and full screen could be wider than the visible area (a
+  scrollbar's width on Windows), so an edge could be cut off. **Fill** still crops on purpose and
+  **Stretch** still stretches.
+
+## 9.5.0
+
+- **The cheat engine stays on after a restart (#550).** The helper remembers the cheat engine
+  switch: once it's on, your switched-on cheats and the game's patches apply by themselves when
+  their game starts, also after a reboot, with only the autoloaded helper. Before, it started off
+  with every helper start, so after a reboot Minion showed the switches as On while nothing was
+  applied. Turning it off is remembered too. Tested on a PS5: the switch held across helper
+  restarts, on and off.
+- **Minion tells "saved" from "applied".** While the engine is off (or the game is paused), switched-on
+  cheats read **Saved**, not On, and Minion › Cheats has a button to turn the engine on or off, even
+  before a game is running.
+- **A crashing cheat can't crash its game on every start.** If a game closes within 30 seconds of its
+  cheats being applied, twice in a row, or the console or helper stops in those 30 seconds, the
+  helper pauses that game's cheats and says so on the TV and in the app. Switch any of its cheats to
+  resume.
+- **Remote Play: picture size in full screen.** Fit, Fill and Stretch change in full screen,
+  without leaving it: a **Picture size** button on the full-screen bar (desktop) and a Fit / Fill /
+  Stretch row in the **⋯** menu (phones). Before, Settings left full screen to change it, and on the
+  page, whose box is the picture's own shape, all three look the same, so the change seemed to do
+  nothing. Settings no longer says picture size waits for the next start: it applies at once.
+- **Remote Play: microphone for voice chat (experimental).** Turn on **Microphone (experimental)**
+  in Remote Play › Settings (off by default; sessions without it start exactly as before), and a
+  **Microphone** button on the picture's bar (and **Mic** in the phone **⋯** menu) sends your voice to the PS5 for party and game
+  chat. It's off until you press it, asks for permission the first time, shows a red dot while it's
+  on, and turns off when you press it again or the stream ends. It follows chiaki-ng's microphone
+  code and is tested on our side, but has not been tried on a real PS5 yet, so it's marked
+  experimental.
+- **Game Mode for Remote Play.** In full screen the Mac app turns on Game Mode, and so do the iPhone
+  and iPad apps (iOS 18 and later). While you play, the desktop app keeps the computer and screen
+  awake, on Linux it turns on GameMode (`gamemoded`) if it's installed, and the Android app asks for
+  steady performance and a TV's game mode over HDMI. Windows doesn't let an app turn on Game Mode;
+  the FAQ says how to mark the app as a game in Game Bar. Remote Play › Settings says what applies
+  on your device.
+- **Remote Play in the web UI names the browser it's made for.** In Firefox, Safari and others it
+  says Chrome or Edge work best and what this browser misses (Esc as the controller's ○ in full
+  screen, picture in picture). It can be dismissed.
+- **Every phone controller, and any controller the browser doesn't know.** Phone controllers (Backbone,
+  Razer Kishi, GameSir, Scuf Nomad, ELO Vagabond...) and other pads play Remote Play like any
+  controller. One the browser doesn't recognise used to do nothing; it now plays in the usual layout,
+  and Remote Play › Settings › Controllers maps any controller by pressing its buttons in turn, and
+  gives extra back buttons any PS5 button. The Android app also forwards controllers to the page
+  itself, and the iPhone app keeps the page focused, so they reach Remote Play there.
+- **Your phone as the controller for Remote Play on a computer.** Scan the QR code from the stream's
+  bar, or tap **Use this device as its controller** in the phone app and allow it on the computer:
+  the phone becomes a full-screen controller that plays along with the computer's. Only the
+  controller page is open to the network, and only with the code's key or your OK.
+- **Motion controls (experimental):** a phone's gyro and tilt as the controller's motion sensors,
+  in the apps.
+- **Remote Play: screenshots and clips.** A **Screenshot** button on the picture's bar (and in the
+  phone's **⋯** menu) saves the picture as a PNG at the stream's own size. **Record a clip** records
+  the picture and the game's sound, with a recording light and its time on the picture; stop it to
+  save the clip (MP4 where the device records it, else WebM). The apps save into Downloads (the
+  Files app on iPhone); the web UI downloads them.
+- **Remote Play shows its latency.** With Stats on, a **Latency** line shows the round trip to the
+  engine and the decode time. The PS5's own leg can't be measured (no shared clock), so it isn't
+  guessed at.
+- **Remote Play: Low latency.** A new setting (off by default) for the least delay: the smallest
+  sound buffer and a 2-frame picture queue instead of 6. On a busy network it drops more frames.
+- **Remote Play offers 720p on a busy network.** When a 1080p stream keeps losing frames for about
+  10 seconds, the picture offers **Switch to 720p** (once per session, never back up by itself).
+  It restarts the stream, waiting out the ~12 s the PS5 holds its last session. **Lower quality on a
+  busy network** in Settings turns the offer off.
+
+## 9.4.1
+
+- **Remote Play on Linux shows the picture without extra installs (#548).** The Linux `.zip`
+  (AppImage) now carries GStreamer with its H.264 decoder: before, on Arch, CachyOS and other
+  distributions without that decoder, Remote Play failed with "No decoder found for codec
+  avc1…", and installing it on the system didn't help the AppImage. The `.deb` and `.rpm` now
+  recommend the decoder packages, so a normal install brings them.
+- **No decoder, no wake.** The app checks for an H.264 decoder before it wakes the console. Without
+  one it ends the session cleanly (it used to retry forever) and says what to install, with the
+  command for Arch, Debian/Ubuntu and Fedora.
+
+## 9.4.0
+
+- **Backporting uses ShadowMount+'s own controls (1.7beta8 and later).** To write the backport
+  into a game image, the app now asks ShadowMount+ to mount that one game read-write and to
+  unmount it after: it takes well under a second instead of half a minute or more, and no longer
+  fails with "has not mounted" when the image isn't mounted, which with ShadowMount+'s default
+  settings is every idle image. ShadowMount+ postpones its scans while the image is held, and
+  `config.ini` is left alone. Tried on a PS5 Pro with ShadowMount+ 1.7beta11. Older versions,
+  or one set to answer only on the console, still get the previous method.
+- **The ShadowMount+ panel shows its exact version** (for example 1.7beta11), read from
+  ShadowMount+ itself.
+- The FAQ explains what ShadowMount+ 1.7beta8+ changed: its control interface is open to the
+  local network by default, and 1.7beta10 stopped closing self-made packages on rest mode.
+
+## 9.3.1
+
+- **The real CPU clock.** Read sensors now measures how fast the CPU actually runs ("CPU clock
+  (measured)"): the helper times a short run of simple instructions on each core it may use. The
+  number 9.2.1 showed was only the speed the power controller had set, and on top of that the row
+  mixed in the game cores' idle level, so at the home screen it read "0.80–3.20 GHz". Measured on a
+  PS5 at the home screen, the system cores run about 2.8–3.2 GHz against a 3.2 GHz target. The
+  target is still shown as "CPU target clock", now over the same cores, and hovering lists every
+  core. The four game cores are reserved for games and can't be measured. The measurement runs
+  only when you press Read sensors (about 20 ms per core) and uses no privileged instruction.
+
+## 9.3.0
+
+- **Esc no longer throws you out of full screen.** In Remote Play, Esc is Circle (back in most
+  games), and in full screen it also left full screen, so backing out of a menu ended full screen.
+  Now a quick Esc in full screen is Circle, and holding Esc leaves full screen. Chrome and Edge get
+  the same through the browser's keyboard lock; Safari and Firefox still leave full screen on any
+  Esc (Backspace is Circle there).
+- **Every device knows who is using Remote Play.** A PS5 plays Remote Play with one device at a
+  time. When a phone or another computer is playing a console, the Remote Play page on your other
+  devices says so before you start ("starting here ends it there"), each of them gets a short
+  note when someone starts, and Connection › Devices shows it as that device's activity.
+- **On phones and tablets the Remote Play page is view only.** The on-screen controller now only
+  appears in full screen, and the page says so; taps and scrolls on the page never press a button
+  on the console. A controller or keyboard connected to the phone or tablet still plays there.
+
+## 9.2.2
+
+- **Remote Play Settings always show.** On a wide window the picture grew taller than the
+  screen and Settings opened below it, out of sight, so the button seemed to do nothing. The
+  picture now fits the window height and Settings open above it.
+- **Picture in picture opens in the Mac app.** When the app's own picture-in-picture window
+  didn't open ("Picture in picture did not open"), it now uses the system's picture in picture
+  instead: the picture only, and the controller plays while the app is in front.
+
+## 9.2.1
+
+- **Send helper also updates the copy your PS5 starts at boot** (#540, #541). If Payload Manager,
+  the WebKit Autoloader or an autoload folder starts ps5upload's helper at every boot, it kept
+  starting the old version: Send helper only replaced the copy running in memory, so the "helper
+  is older than this app" message came back after every restart. Now, once the new helper
+  answers, the app finds the stored copies (Payload Manager's storage, `ps5_autoloader` folders on
+  the PS5 and its USB drives, etaHEN's payloads folder) and replaces them under the same name, so
+  your boot order stays as it is. It tells you what it updated, and how to update by hand anything
+  it couldn't. Only files named like the ps5upload helper are touched. The outdated-helper banner
+  now says when the old version came from a stored boot copy.
+- **GPU clock and real CPU clocks on the Hardware screen.** Read sensors now also shows the GPU
+  clock and each CPU core's clock (the row shows the slowest and fastest core; hover for all
+  eight), read from the console's power controller. The old "CPU frequency" row was a fixed
+  reference rate (800 MHz on every console), not the CPU's speed, so it is now called "Reference
+  clock". The clocks are only read when you press Read sensors, the helper never changes them, and
+  if the console's firmware doesn't answer, the rows say so and the helper doesn't ask again until
+  it restarts. Tried by others only on firmware 13.20 and 13.60 so far: please report odd numbers.
+
+## 9.2.0
+
+- **Nothing is in beta any more.** Remote Play was still a beta screen, so it only showed once
+  "Beta features" was turned on in Settings, which is why people couldn't find it. It is now in
+  the sidebar (Console › Remote Play), in More on phones, and behind Play Here in Accounts ›
+  Remote Play. The Beta features switch is gone with it, and the "Beta" marks on the direct
+  console-to-console copy route and on Stream & install / link installs are removed.
+- **Remote Play on phones, redone.**
+  - Held upright, the picture sits on top and its controls sit below it instead of on it: Full
+    screen, Stop and a ⋯ menu with Stats, Picture in picture, Settings and volume. Nothing is
+    squeezed or hidden any more.
+  - Turn the phone sideways while playing and it goes full screen; turn it back and the page
+    returns. In full screen the only control is a small ⋯ handle at the top.
+  - Tapping or double-tapping the picture or the on-screen controller never leaves full screen
+    or stops the stream. Back leaves full screen and keeps playing; Stop is in the ⋯ menu.
+  - The screen stays awake while you play, the page can't scroll or zoom under your fingers, and
+    the on-screen controller has a size and an opacity setting. Create, the touchpad and Options
+    sit in a row at the top, as on the controller.
+  - Desktop: double-click full screen works again.
+  - **Android app:** full screen hides the status and navigation bars (swipe from an edge to see
+    them) and holds the phone in landscape; leaving full screen brings both back.
+- **The whole Remote Play picture shows on Windows** (#538). The picture was enlarged from its
+  top-left corner, cutting off the right and bottom, because Windows drew it through a
+  low-latency path that skipped scaling it to the window. It is now drawn like on the other
+  systems and always fits its box. New **Picture size** in Remote Play › Settings: Fit (the whole
+  picture, the default), Fill (no bars, edges cropped) or Stretch. Devices without a hardware
+  video decoder showed no picture at all; they now fall back to the default decoder.
+- **The queue runs the whole queue** (#536). Adding a package used to start only that install and
+  leave the games queued before it waiting. Now one setting decides: **Start the queue when you add
+  something** (on by default) runs the console's whole queue from the top, in order; turned off,
+  nothing runs until you press **Start queue**. Adding while the queue runs puts the new item at the
+  end. The buttons are named Start queue and Stop queue; the switch is on the queue panel and in
+  Settings › Uploads.
+- **A damaged .zip can't keep the upload busy for hours.** A zip entry that kept being re-read from
+  the start (each re-read decompresses it again) now fails after three tries with a clear message.
+
+## 9.1.0
+
+- **Upload & Install** (was Send to PS5). One drop zone takes everything: packages (installed as
+  a game, update or DLC), game folders and dumps, disk images, archives and any other file.
+  Installs from a link or from the PS5 and USB drives are a small row in it. **Convert first**
+  sends a game, folder or image to Workshop. The note about fake packages is at the top: PS5 fake
+  packages do not start on firmware later than 11.60; PS4 fake packages are fine. A failed
+  Stream & install says what to check (the PS5 has to reach this computer) and offers Retry via
+  upload.
+- **Play from the Games grid.** Every installed game's card has Play (or Close while it runs),
+  on phones too; the table view has a Play column.
+- **Dump this game** is on the game's own page, with its options and progress there. The Manage
+  menu and the Dump games view are gone.
+- **Clearer Games filters.** "Update available" and "DLC missing" are one chip, **Updates & DLC
+  to install** (a newer update or DLC on this computer for a game the PS5 has), and every chip
+  says what it counts.
+- **The progress bar shows what is happening**: the running job, its percentage, speed and time
+  left. Click it for everything running, waiting and just finished, with Cancel and Retry and a
+  link to each one's screen. Phones get it as a pill above the tab bar. Helper sends, playlists,
+  the app's own update, cheat downloads, moves and queued items now show there too.
+- **Notifications** are one feature: the bell (now on phones as well) shows the newest of
+  **This app**'s list; the Notifications screen has This app, On the PS5 and Settings. Looking at
+  a list marks it read. The bell and messages stay inside the screen on phones.
+- **Workshop** is one column. Games are added in one place, and its queue hands installs and
+  uploads to Upload & Install's queue instead of repeating its controls.
+- **Files: a drop starts right away.** The first drop of a session used to wait for Resume.
+- **Settings › Backups** is shorter: grouped by device, repeated copies folded into one row,
+  the newest three shown.
+- **Windows: Install and restart works** (#533). The update used to go through a hidden
+  PowerShell script that security software can block (and that broke on user folders with
+  non-English letters), so the app closed and nothing installed. The installer now starts
+  directly, with a progress bar and its own error if something goes wrong, and starts the new
+  version. On 8.6.1–9.0.1, install this update by hand once (download the setup from the release).
+- **Games on a NAS from the phone** (#534). Adding a games folder offers your saved servers
+  (NAS, SMB, FTP, SFTP, WebDAV) right away, on Android too: before, a phone with no folder yet
+  could only pick one on the phone. Their games show with covers and install from the game's page.
+- AVA1 1.0.5 (the protocol library's history in one commit; no code changes).
+- README: Remote Play section; credits without license names.
+- Translations: every new string in all 21 languages.
+
+## 9.0.1
+
+The first 9.0 release. (9.0.0 was tagged, but its Windows build failed to link the new RAR
+helper, so it was never published; 9.0.1 is the same release with that fixed.)
+
+- **Every game on one page.** Installed games and Games on the PS5's drives are no longer views
+  of their own. The Games grid shows every game once: your copies, what the PS5 has installed,
+  and games found on its drives (a new **On the PS5's drives** filter, and **Never seen played**).
+  Open a game for everything about it:
+  - **On <console>**: Play or Close game, Uninstall, Hide or Show on the home screen, Fix
+    permissions, Backport, Copy to Collection, Suspend and Resume while it runs, and a warning
+    when a disk-image game needs ShadowMount+.
+  - **On the PS5's drives**: each folder and image of the game, with Mount, Unmount, Edit files,
+    Add to home screen, Download, Move, Delete, Convert, Make smaller and the rest.
+  - **On this computer**: your copies, as before.
+  Files on the PS5 that no game links to yet are one line under the grid. Old links to the
+  removed views land on the grid with the matching filter.
+- **Accounts, without the duplicates.** Each user is one row: picture (click it to change the
+  avatar), name, account ID, and whether it is active. A user and its account slot used to be
+  two rows, each with its own name field.
+- **Remote Play**
+  - **Picture in picture**: the stream in a small window that stays on top while you use other
+    apps (desktop app; Chrome and Edge; picture only on Safari). A controller keeps playing in
+    the background on Windows and in Chromium browsers; on macOS and Linux, click the small
+    window first.
+  - A **volume slider** on the picture's bar.
+  - With two consoles, the page shows the one selected in the app. The other console's stream
+    keeps running and is offered there; Start on this one stops it first.
+  - A **setup guide** in Accounts › Remote Play: seven steps from signing in to playing, each
+    with its status and the button that fixes it, plus what to do when it still does not work.
+- **Send helper means send.** When the PS5 runs an older helper, the banner's **Send helper**
+  sends it right there instead of opening Connection, and it waits for the new version to
+  answer (the old one used to answer first and count as done).
+- **Screenshots download again (#531).** On consoles where /user is /original_user (kstuff with
+  ShadowMount, for example), downloads from there were refused; reading it is allowed again.
+- **The app fills the window.** Screens no longer sit in a narrow column on a wide monitor;
+  long lists of cards flow into more columns. Phones are unchanged.
+- **AVA1 1.0.4**, the transfer protocol's first releases as a standalone library: fixes for a
+  download retried right as it finished, a manifest that never arrives, and duplicate
+  small-file records, plus faster resumes. A transfer cancelled and resumed straight away could
+  send everything and then never finish; it now does. A resumed 7z or RAR transfer now reports
+  the data it skips.
+- **Licenses.** RAR extraction now runs in its own small program (`ps5upload-unrar`) next to the
+  engine, so UnRAR's license no longer applies to the rest of the engine. The credits in the
+  README say what each project contributes (included, ported, library, fetched, reference),
+  and the required notices are in `LICENSES/`. The ShadowMount+ metadata self-healer was
+  rewritten from scratch.
+- Translations: every new string in all 21 languages, and about 200 strings that were still
+  English or used an older wording are translated.
+
+## 8.10.0
+
+- **Games is one grid.** The list and its Everywhere / Installed / On PS5 drives / Your copies
+  views are gone: Games is the cover grid that "Your copies" was, plus the games the selected
+  PS5 has installed that you have no copy of ("On the PS5 only"). An **Installed** filter sits
+  beside Not installed, Update and DLC. Installed games, PS5 drives and Dump games stay under
+  Manage.
+- **Remote Play** (renamed from Play) keeps playing when you leave its screen: a bar on every
+  other screen leads back to it or stops it, and closing or reloading the window keeps the
+  session for a minute (setting) to come back to. A dropped connection to the engine
+  reconnects by itself, and stopping no longer says "The connection to the engine dropped".
+  Two windows can show it; the one you look at takes the picture.
+  - Less delay: the picture never queues behind a slow page (it skips ahead instead) and
+    sound is sent ahead of the picture.
+  - Cleaner sound: it plays at the console's 48 kHz through one steady buffer, late packets
+    are put back in order, and a lost one is covered instead of clicking. The buffer is a
+    setting (Lowest delay / Balanced / Steady on Wi-Fi).
+  - Full screen (double-click or the button; Esc leaves), a toolbar on the picture with stats
+    on/off, mute, settings and Stop, and a settings panel: picture, frame rate, sound, how long
+    to keep playing, pointer capture, vibration, the on-screen controller and your keys.
+  - An on-screen controller on phones and tablets (sticks, D-pad, buttons, touchpad); it hides
+    when a controller connects.
+- **Send to PS5 says it installs packages.** It opens with its three jobs: Install a package
+  (.pkg/.fpkg, streamed or uploaded), Copy a game or files, and Install from a link or a drive.
+- **Dumping is built in.** Games → Manage → Dump games copies an installed game (and its DLC)
+  to a USB drive or the console with ps5upload's own helper; ps5-app-dumper is no longer
+  needed. The game is started for it. A plain copy is the default; decrypting the executables
+  (and fake-signed copies for backporting) is an option that says what it risks, for firmware
+  up to 13.60. Based on ps5-app-dumper (EchoStretch, slopmaster33) and ps5-self-pager
+  (idlesauce).
+- **Send to PS5's Upload goes through the queue.** Upload adds the item to the console's
+  queue and starts it, like Upload & install always did for a package. Its progress, install,
+  mount and result show on its queue row with the rest, and a running queue no longer blocks
+  Upload: the new item starts after what is being sent. The Override / Resume question when the
+  destination already has files is unchanged.
+- **Volumes: Free up space** on each drive opens "What takes space?" for it. Once a drive is
+  80% full it is the card's main button.
+- **Minion: the running game's Saves.** Home's "Now running" card has Saves beside Close game
+  and Cheats, to back up (or restore) that game's save.
+- CI: a payload self-test that hangs now fails by name after 4 minutes, with its stacks.
+
+## 8.9.0
+
+- **Games is one list.** Every game shows once, wherever its copies are, and each row names
+  the places: Installed, a PS5 drive (ext0, usb0, internal), This computer, or a saved server
+  by name, with how many copies are there. Narrow it with Everywhere, Installed, On PS5 drives
+  or Your copies. An installed game has Play (or Close game) right on its row.
+  - The five tabs are gone. Their tools are under **Manage**: Installed games, Games on the
+    PS5's drives, Your copies (folders, servers, organize, clean up, export) and Dump games.
+    Old links to the tabs still land there.
+  - Play and Close game are now one implementation everywhere. The game page's Play gains what
+    Installed games already had: when the console refuses homebrew (0x80940033) it says why,
+    and repairs a folder that was sent without execute permission.
+- **Dump installed games, decrypted, with ps5-app-dumper.** Under Games → Manage → Dump games:
+  unlock the dumper once with the code your TV shows, then dump a game (or a queue of them) to
+  a USB drive or the console, start a game for it, and open finished dumps in Files or
+  Workshop.
+- **Remote Play in the app (beta).** Turn on beta features to get a Play screen that streams
+  the console to this computer, with keyboard, controller and touchpad input. Accounts has a
+  Play Here button for a console that is set up for Remote Play.
+- **Send to PS5 is shorter.**
+  - Each queue row shows its steps on one line, "Upload ✓ › Install 62%", or Upload › Mount ›
+    Add to Home, with the step that failed or did not take marked.
+  - What was found in a source (game details, folder size, the time estimate) and the rarely
+    used options (speed limit, files to skip) fold to one line each. The folded line still
+    shows the essentials, and says so when files are being skipped.
+  - "From a link or an archive" and "Already on the PS5" fold to their headings.
+- **Send helper wherever it is missing.** Home's console card, Send to PS5 and every screen
+  that needs the helper offer Send helper in place, instead of sending you to Connection.
+- **Connection holds Devices and Health Check** as tabs. The sidebar has two fewer entries.
+- **Shared Folders: deleting syncs without asking.** Deleting a folder no longer waits for a
+  confirmation unless it would empty more than half the drive. Its files go to the other
+  side's trash, and the emptied folders go too. Sync now looks at both sides at once, so a
+  file deleted on the console with Files syncs straight away. The drive's marker file is hidden
+  in Files, with a note on the folder not to move or rename it.
+- **Screenshots and clips show their thumbnails** again (they stayed on a placeholder).
+- **Smaller things.** Files' "What takes space?" moved into the folder's ⋯ menu. The Remote
+  Play account ID field shows the signed-in account's ID. Workshop's compression tiles no longer
+  stretch to the tallest one.
+- **Minion: Fan, Processes and Clean up are one System section**, with a switch under the
+  title like Games. The Rail goes from 9 entries to 7.
+- **Security:** Remote Play's key exchange moves to k256 0.14, which drops crypto-bigint 0.5
+  (RUSTSEC-2026-0387, timing side channels).
+- **AVA1, the transfer protocol, is its own open-source project.** It now lives at
+  [github.com/phantomptr/ava1](https://github.com/phantomptr/ava1) (MIT or Apache-2.0), with its
+  specification, test vectors, a Rust crate and the C library, so other tools can use it.
+  ps5upload builds it from the `third_party/ava1` submodule: clone with
+  `git clone --recurse-submodules`, or run `git submodule update --init` in an existing checkout
+  (`make` does it for you). Nothing changes on the wire: an 8.9.0 app and an 8.8 helper still
+  talk to each other.
+  - The benchmark switches are now `AVA1_LANES`, `AVA1_CHUNK`, `AVA1_LANES_FIRST`,
+    `AVA1_LOG_SMALL` and `AVA1_TIMING` (they were `PS5UPLOAD_AVA1_*`).
+
+## 8.8.1
+
+- **"Convert…" opens Workshop with the game picked again.** Since 8.7.0, Convert… from Files,
+  a game page, a Collection card and the Send as One Image card opened an empty Workshop:
+  they still linked to the old Convert screen, and the redirect to Workshop lost the game.
+  They go straight to Workshop now, and a test keeps every link off the old screens.
+- **The web UI and Docker take .zip, .7z and .rar archives (#529).** Pick an archive on the
+  server and it is unpacked on the way to the PS5, as in the desktop app: nothing extra is
+  written next to it on the NAS. The web UI used to refuse archives with "isn't available in
+  the browser yet".
+
+## 8.8.0
+
+- **XML game patches, without CheatRunner (#527).** Cheats now also takes game patches in the
+  PS-Game-Patch `.xml` format (the one GoldHEN, etaHEN and CheatRunner read): 60 fps unlocks,
+  resolution and debug-menu patches and the like.
+  - Find them in the cheat browser under **PS-Game-Patch**: the latest release of the repo, one
+    file per game. They download to `/data/ps5upload/cheats/xml/`, or import your own
+    `<TITLE ID>.xml` with Import.
+  - Patches you already have for other tools show up too, from `/data/cheatrunner/patches/xml`
+    and `xml_prospero`, `/data/elf-arsenal/patches/xml` and `/data/GoldHEN/patches/xml`. The app
+    only reads those folders; removing a game's cheats never deletes from them.
+  - Each patch in a file is its own switch, off until you turn it on, and turned back on when
+    the game starts again. A patch only goes on for the game version and executable it was
+    made for; one for another version is marked and refused. Pattern-scan (`mask`) patches
+    and `mask_jump32` detours are supported. As with cheats, a patch is written whole or not
+    at all, and only into the game's own code.
+- **Minion: back up saves to a USB drive (#528).** With a USB drive plugged in, Saves offers
+  **Backups on: Internal drive / USB drive**. Backups, the list of them, Restore and Delete
+  follow the place you pick, so a stick can carry backups off the console and back; you still
+  pick which backup to restore. The save a restore replaces is always kept on the internal
+  drive.
+- **Tests:** the AVA1 transfer tests no longer fail now and then on a loaded CI runner
+  (their 500 ms timeouts were meant for the dead-connection tests only).
+- **Tests:** the browser tests follow 8.7.0's new screen names (Activity & Logs, Send to PS5,
+  Workshop); four of them were waiting on the old ones.
+
+## 8.7.0
+
+- **A simpler sidebar: 25 screens became 21, and every feature is still there.** Screens that
+  did overlapping jobs are now one screen each, named by what you do there. Old links,
+  bookmarks, pinned screens and hidden screens carry over by themselves.
+  - **Send to PS5** replaces Upload and Install Package. Drop or pick anything (a game folder,
+    an image, an archive, a package, any file) and the app works out what to do with it,
+    a package's Stream & install included. Below are install from a link or an archive, the
+    queue, and the packages already on the PS5 (USB drives and copies put there before, with
+    Install all).
+  - **Workshop** replaces Convert Games and Game images. Pick a game once; then convert it, or
+    use **Look Inside** to browse an image or package and write an edited copy, or (macOS and
+    Linux) **Open as a Drive**.
+  - **Shared Folders** replaces Network shares and Mesh Drive: your NAS and servers, the shares
+    the PS5 uses, and your Mesh Drives on one page.
+  - **Accounts** replaces Profile and Remote Play: users, account IDs and avatars, then Remote
+    Play's checklist, the sign-in step and the pairing PIN in the order they are done.
+  - **Payloads** (was Payloads & processes): Processes and Ports are one **Running** tab.
+- **Games opens on one list of every game.** **All** shows each game once, wherever its copies
+  are (installed, on the PS5's drives, on this computer), and opens its game page. The other
+  views are named by place: **Installed**, **On PS5 Storage**, **On This Computer**.
+- **Minion: Games and Library are one Games entry,** with an Installed / On Drives & Shares
+  switch.
+- **Home:** Upload and Install PKG are one **Send to PS5** tile; the freed tile sends a payload.
+- Screen names are Title Case in English (Save Data, Clean Up, Activity & Logs, Bug Report).
+
+## 8.6.1
+
+- **Undo sign-in covers every account slot used.** The copy kept before np-fake-signin now
+  also takes a later slot's settings, untouched, when the account moved to another slot since
+  the first copy; Undo puts those back too.
+- **Restoring a save gives back exactly the save backed up.** A save-details folder that was
+  not there at backup time is emptied on restore instead of mixing newer details with the older
+  save (the automatic safety backup keeps them).
+- **A save's own icon shows for games no longer installed** in Minion's Saves.
+- **Download to PS5 from an .lz4 link:** an image that ends before the size its header gives
+  is filled out instead of failing after the whole download, and a stream in several parts
+  announces the image's full size.
+- **"Unpack on the way" switches the folder back and forth again** once the PS5's drives are
+  known.
+
+## 8.6.0
+
+- **Minion's Library: one card per game, and a full-screen page for each (#526).** Copies,
+  updates, DLC and backports of the same game found on your drives and shares now sit on one
+  card with a sharper cover, an Installed mark and Update / DLC / Backport badges. ✕ opens a
+  full-screen page with the size, the firmware the game needs next to this PS5's (with a warning
+  when it needs a newer one), the SDK it was built with, its formats and where each part was
+  found, and Install / Copy to the PS5 / Add to home screen / Show in Files for every part.
+  ○ goes back. Disk images are named after their file and use the installed game's icon.
+- **Back up and restore a game's save on the console.** Minion has a new **Saves** section:
+  pick a user and a game, then **Back up now** (named by date and time; keep as many as you
+  like), **Restore** or **Delete**. Restore asks first, refuses while the game is running
+  (with a Close game button), backs up the current save as "Before a restore", and puts back
+  the system's own file permissions. Backups stay on the PS5 under
+  `/data/ps5upload/save-backups/`. Handy before a game's point of no return.
+- **○ at Minion's Home leaves at the first press.** It used to need two presses once any
+  section had been opened. The Controls screen now shows ○ working too, and points to
+  Accessibility › Custom Button Assignments for anyone who wants ✕ and ○ swapped.
+- **Uploading from a phone into Minion's Files works again.** A phone never got the Upload
+  button; it does now. On the TV, Files has **Upload from a phone**, with a QR code and the
+  steps (and a shortcut to Settings when LAN access is off).
+- **Download to the PS5 from a link, unpacking `.lz4` on the way.** A link to a game image
+  compressed with the `lz4` tool (such as `Game.exfat.lz4`) is unpacked while it downloads, so
+  the PS5 receives the ready-to-mount image and nothing is stored on this computer; the PS5 only
+  needs room for the unpacked file. The link card shows both sizes, has an **Unpack on the way**
+  checkbox (off keeps the `.lz4` as it is) and puts images in the drive's `homebrew` folder
+  ShadowMount+ scans; the file only appears there once it is complete. A download that has to
+  start over downloads again but doesn't resend what the PS5 already has. Folder archives
+  (`.tar.lz4`) are refused with an explanation.
+- **Payload Manager: add payloads from this computer or the catalogue.** The Payload Manager
+  tab can store an `.elf`/`.bin` picked on this computer (in the web UI too) or a downloaded
+  catalogue payload, which it then offers to update. A payload you stored by hand whose name
+  matches a catalogue download gets **Replace with** the catalogue's release.
+- **Signing in from Profile can be undone, and says what it can do to the console.** The
+  np-fake-signin payload copies a template account's PlayStation Network settings (a 1983 birth
+  date, the offline-adult flag off) onto yours, and some consoles then ask to "Temporarily
+  Disable PS5 Console Restrictions" before every game. The helper now keeps a copy on the PS5 of
+  every setting and file np-fake-signin changes before it runs, and **Undo sign-in** on Profile
+  puts them back (restart afterwards). The confirmation names the side effect. An account signed in
+  before this version has no copy; Profile recognises it and says where Sony's console
+  restrictions are lifted.
+- **Connection says where Send payload went.** Sending kstuff, etaHEN or any other payload
+  moved to Payloads & processes → Send payload; Connection now shows a line and an **Open Send
+  payload** button for it, and the README/FAQ say Send helper where they meant the helper.
+- **HyperHEN's built-in ShadowMount+ is recognised more reliably.** Besides its process name, the
+  app now reads HyperHEN's own "automount ready" marker, so Mount for compressed images, Play
+  on disc-image titles and the setup wizard stop treating a working ShadowMount+ as missing.
+- **Check source opens several files at once when converting a game folder.** The step reads
+  the start of every file to find executables that need repair; on a big game on Windows that
+  took many minutes one file at a time. It now keeps several opens in flight and still shows
+  progress and honours Stop.
+- **Upload says when the file is a payload.** Picking an `.elf` now explains that uploading only
+  copies it (ShadowMount+ picks up game folders and images, never an `.elf`) and offers Send
+  payload, which runs it.
+- **A slow upload says what holds it back, not only when it is the network.** When an upload
+  runs far below the speed test for half a minute, Upload now names the cause the engine
+  measured: reading the source on this computer (USB/hard drive, NAS, archive unpacking), the
+  PS5's drive or its file writing (many small files), or the upload speed limit you set.
+
+## 8.5.1
+
+- **Packages with Windows bookkeeping folders convert to game images again (#523, thanks
+  frzzyone).** An empty `System Volume Information` folder made the read-back check fail after
+  compression. Package sources now omit the same OS junk as game folders and image readers,
+  while keeping real empty game folders and the original package's file offsets.
+- **Sidebar sections make more sense.** Games & content comes first, then Files & storage;
+  **Console** holds the console, its payloads and processes, its profile and Remote Play;
+  **Connect** holds Connection, Devices and the Health Check; **Diagnostics** holds Activity &
+  logs, Notifications and Shell; **App** holds Settings and Help. "Edit image on this computer"
+  is now **Game images**.
+- **Hundreds of untranslated labels translated** in every language, Mesh Drive among them, and
+  a few wrong ones fixed (Chinese "running" read as jogging). Persian is now checked like the
+  other languages.
+
+## 8.5.0
+
+- **A shorter sidebar.** Screens that belong together now live together; every old link still
+  opens the right place.
+  - **Games** has three tabs: On this PS5, Everything (the former Collection: every game on
+    your drives, NAS and consoles) and Files. Game Activity's play time moved into Games: a
+    "Recently played" sort, and each game's page says how long it was played.
+  - **Payloads & processes** holds the payload catalogue and sender, what runs on the PS5 and
+    which ports are open (the former Processes & ports).
+  - **Files** takes in Search (a search box over all drives), Disk usage ("What takes space?"
+    on any folder or drive) and Console snapshots ("Snapshot…" on any file or folder, several
+    at once too).
+  - **Console** checks for firmware spoofing on its own card, in plain words: spoofed, not
+    spoofed or can't tell, and what to do.
+  - **Shell** moved to Diagnostics. **Servers** is now **Network shares**.
+  - **Activity & logs** holds Tasks, Logs and the Audit log; **Help** holds the FAQ, About and
+    What's new. After an update Home says so for a few days, with a link to what's new.
+- **A pinned screen shows once.** Pinning a screen moves it to Pinned instead of listing it
+  twice.
+- **Home greets the console's signed-in user** by name, with their picture.
+- **Coffee or tokens** got a warmer button.
+- **The fan target shows what the console keeps (#522).** Opening Console › Hardware again put
+  the slider back at 65 °C, which looked like the setting had been lost (the console kept it).
+  It now starts at the target the console holds; a target changed from another device or the
+  console's own Fan page replaces "Set to …" here; after applying, the slider follows the
+  console again.
+- **The ShadowMount+ metadata poll slider no longer jumps while it is held** (a refresh moved
+  it under the finger).
+- **OS reads as the system software.** It showed the kernel's own "FreeBSD 0.0-prototype" (the
+  same on every PS5); it now says "PS5 system software 13.60", the kernel's answer on hover.
+- **Power telemetry never takes the Hardware screen down** when a field is missing.
+- **Devices names every app that uses the console.** A phone or computer that only checked the
+  console's status (without opening Devices or Mesh Drive) never said who it was, and showed as
+  "PS5Upload (older version)". Every new connection now introduces itself.
+
+## 8.4.0
+
+- **Games copied from a mounted NAS share no longer arrive with made-up names.** A Samba
+  share mounted by the OS (a Windows mapped drive, a share mounted in Finder) shows files whose
+  real names hold `:` `?` `*` as `C69YSY~1.TXT`; copied that way a game does not start. Uploads
+  and Convert now stop on such a folder and say to copy it over SFTP/FTP instead (the app's own
+  SMB connections already did since 7.5.3).
+- **Bug reports from an iPhone say iOS.** They were filed as macOS (an iPhone's browser says
+  "like Mac OS X").
+- **Convert queue: add and change games while it runs (#518).** Games can be added at any
+  time, and each waiting game has an options button to change what it becomes (package, game
+  image, folder) and what happens after (keep, install, upload).
+- **Each console remembers its screen (#518).** Switching console tabs goes back to the screen
+  you last used with that console, across restarts.
+- **Installed Apps: a failed uninstall says so.** It showed under "Couldn't read installed apps"
+  with advice about installs (Sony's 0x80B2 codes). Uninstall and hide/show failures now have
+  their own message, and a refused uninstall says to close the game or remove it from the PS5's
+  Settings → Storage.
+- **Activity says why a job failed in words.** A queue that failed because the PS5 was not
+  answering showed `ava1_unreachable`; it now reads "The PS5 could not be reached…".
+- **Convert explains an LZ4 image that saved nothing.** A game whose files are already
+  compressed came out at 101% with no word why; the result now says LZ4 found nothing to
+  compress and the image works as usual.
+
+## 8.3.0
+
+### Updates install and restart, every time
+
+- **"Install and restart" no longer freezes the app (macOS, and the same code on Windows and
+  Linux).** Quitting waited on its clean-up with no limit; when that clean-up could not finish,
+  the app sat "not responding" and the update waited for it. Quitting now gives the clean-up a
+  few seconds, then stops the engine itself and exits. The update also closes an app that still
+  has not quit after 30 seconds, instead of opening the old one again.
+- **"Downloading…" no longer sticks after the download finished.** The app waited for Finder to
+  show the Downloads folder before it said the download was done, and Finder can take as long as
+  it likes (half an hour with the screen locked, measured). A copy that installs updates itself
+  no longer opens the folder at all, and on Windows no longer starts the setup on its own next
+  to **Install and restart**.
+
+### Keep running in the system tray (#516)
+
+- **Settings → Window → System tray**: close or minimize to the tray on Windows and Linux; on
+  macOS, keep running in the menu bar when the window is closed (the Dock icon hides too). The
+  tray icon brings the window back and has **Quit**. Transfers and Mesh Drive keep going.
+
+### Pop-ups on iPhone and Android (#517)
+
+- Menus that open near the bottom of a short screen (a phone held sideways) now fit the room
+  there is and scroll, instead of keeping a minimum height that ran past the edge. Checked on
+  every page in the browser engine iOS uses, upright and sideways.
+
+## 8.2.0
+
+### Mesh Drive when a console sleeps or is off
+
+- **A console going to rest mode mid-sync no longer hangs the sync.** The copy in flight waited
+  for the console forever, holding every drive behind it, and each file it gave up on counted as
+  failing (three times and it sat out for ten minutes after the wake). The sync now stops within
+  about a minute, keeps what it copied, and blames no file.
+- **It says what's wrong, not "Problem".** A folder shows **Console asleep**, **Helper not
+  running** (just woke, the helper does not survive rest) or **Console away** (off, other
+  network), since when, and that changes made here are kept. **Wake console** and **Send helper**
+  are on the card.
+- **Back within a round.** A sleeping console is checked over the network each round; when it
+  wakes, syncing resumes in about half a minute instead of after a growing wait. A console that is
+  away is not asked again and again by every folder (each ask used to cost seconds).
+- **Your folders, even with the console asleep.** The Mesh Drive page lists this device's folders
+  and their state when the selected console cannot be reached.
+- **Much faster uploads of many files.** New and changed files go up in batches instead of one job
+  each: 520 files took 25 s instead of about four minutes in a test on a PS5.
+
+### Pop-ups stay on screen on phones
+
+- **Notifications open fully on Android and iPhone.** The panel from the bell in More grew off
+  the left edge of the screen; it now slides back to fit, and on a short or landscape screen it
+  scrolls instead of running off the bottom.
+- **Menus open the way they fit.** The Browse ▾ menu, the Files recent-folders list and the
+  console picker move back on screen and open upwards when there is no room below (above the
+  tab bar on a phone). The ⋯ menus no longer open under the top bar in landscape.
+- **Dialogs scroll on short screens.** Confirmations, the "already on your PS5" question and
+  the file-conflict question now scroll in landscape instead of being cut off top and bottom.
+
+## 8.1.1
+
+### Smoother syncing between devices
+
+- **No more "settings arrived — reload" prompts.** A setting changed on another device now
+  applies at once. Before, the running app kept the old value, and on the next start it could
+  write it back and sync it out again, so two devices traded the same setting back and forth
+  (and you saw the prompt again and again). The startup copy from settings.json now only fills in
+  settings the app has never stored.
+- **Sync now no longer fails now and then.** A drive password saved by another version could make
+  the whole drive list unreadable for a moment ("missing field"). Fields this version does not know
+  are now tolerated.
+
+### Mesh Drive
+
+- **No more repeated copies.** After a file synced, the next pass could see it as changed again
+  and copy or compare it once more (a big file twice). The agreed state is now taken from a fresh
+  listing at the end of a pass.
+- **Saving a file while it uploads** no longer turns your newest edit into a conflict copy: it is
+  simply sent again on the next pass.
+- **Linked consoles:** a passing network error reading the link's record stops that pass instead of
+  starting over (which re-hashed everything and could bring deleted files back); the record now
+  lives in the trash folder, where older versions never sync it; nothing is re-listed on either
+  console while nothing changed; one console's lock is no longer left held for 10 minutes when the
+  other console's was lost; "Let the deletes through" is used only by a pass that ran; a console
+  that was unlinked can be linked again (to the copy it kept).
+- **Failover** waits for a second missed reply before syncing through a linked console, and never
+  does so for a paused folder.
+- **Conflicts** from devices whose names have brackets ("Bob (PC)") are listed and settled like
+  any other; odd file names no longer break the list.
+- **Phones:** the ⋯ menu stays on screen (and above the tab bar), and a drive's buttons fit on one
+  line.
+
 ## 8.1.0
 
 ### Mesh Drive across consoles

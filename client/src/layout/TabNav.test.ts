@@ -5,12 +5,11 @@ import { tabForPath, type TabId } from "./TabNav";
 
 // The tabs must file every screen where the sidebar does: one section, one tab.
 const SECTION_TAB: Record<string, TabId> = {
-  nav_section_setup: "home",
-  nav_section_help: "home",
+  nav_section_connect: "home",
+  nav_section_app: "home",
   nav_section_files: "files",
   nav_section_games_mods: "games",
   nav_section_console: "console",
-  nav_section_advanced: "console",
   nav_section_diagnostics: "tasks",
 };
 
@@ -30,9 +29,9 @@ describe("TabNav groups follow the sidebar's sections", () => {
   });
 
   it("files the screens the audit found misplaced where the sidebar has them", () => {
-    expect(tabForPath("/search")).toBe("files");
-    expect(tabForPath("/backup")).toBe("files");
-    expect(tabForPath("/local-image")).toBe("games");
+    expect(tabForPath("/volumes")).toBe("files");
+    expect(tabForPath("/cleanup")).toBe("files");
+    expect(tabForPath("/workshop")).toBe("games");
   });
 
   it("covers pinned items, redirects and sub-routes", () => {

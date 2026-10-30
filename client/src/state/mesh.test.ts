@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { toMeshState, type MeshState } from "../api/mesh";
 import { busyText, replaceCheck } from "../lib/helperGuard";
-import { deviceName, othersBusy, othersOnline, presenceItems } from "./mesh";
+import { deviceName, othersBusy, othersOnline, othersRemotePlaying, presenceItems, remotePlayPads, RP_ACTIVITY } from "./mesh";
 import { mergeShared, type SharedProfile } from "./rosterShare";
 import type { Task } from "./tasks";
 
@@ -52,6 +52,34 @@ describe("who is busy", () => {
     const busy = othersBusy(s);
     expect(busy.map((b) => b.device.id)).toEqual(["b"]);
     expect(busyText(busy)).toBe("dev b: Install Astro Bot 42%");
+  });
+
+  it("finds the other devices playing Remote Play on the console", () => {
+    const s = state([
+      dev("me", { activity: [{ kind: RP_ACTIVITY }] }),
+      dev("phone", { kind: "android", activity: [{ kind: RP_ACTIVITY }, { kind: "Upload", title: "X" }] }),
+      dev("pc", { activity: [{ kind: "Upload", title: "Y" }] }),
+      dev("gone", { online: false, activity: [{ kind: RP_ACTIVITY }] }),
+    ]);
+    expect(othersRemotePlaying(s).map((d) => d.id)).toEqual(["phone"]);
+    expect(othersRemotePlaying(null)).toEqual([]);
+  });
+
+  it("offers the devices that take this one as a controller, with where to join", () => {
+    const s = state([
+      dev("me", { activity: [{ kind: RP_ACTIVITY, pad: "ws://192.168.1.9:19113/api/pad/ws" }] }),
+      dev("pc", { activity: [{ kind: RP_ACTIVITY, pad: "ws://192.168.1.20:19113/api/pad/ws" }] }),
+      dev("old", { activity: [{ kind: RP_ACTIVITY }] }), // an app before 9.5.0
+      dev("odd", { activity: [{ kind: RP_ACTIVITY, pad: "javascript:alert(1)" }] }),
+    ]);
+    expect(remotePlayPads(s).map((x) => [x.device.id, x.pad])).toEqual([["pc", "ws://192.168.1.20:19113/api/pad/ws"]]);
+    // The address survives the engine's answer being checked field by field.
+    const parsed = toMeshState({
+      supported: true,
+      you: "me",
+      devices: [{ id: "pc", online: true, activity: [{ kind: RP_ACTIVITY, pad: "ws://192.168.1.20:19113/api/pad/ws" }] }],
+    });
+    expect(parsed.supported && !parsed.same && parsed.devices[0].activity[0].pad).toBe("ws://192.168.1.20:19113/api/pad/ws");
   });
 
   it("names an app from before 8.0.0 plainly, and prefers the nickname", () => {

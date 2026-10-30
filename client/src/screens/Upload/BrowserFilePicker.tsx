@@ -8,6 +8,8 @@ export default function BrowserFilePicker({ onFiles }: { onFiles: (paths: string
   const tr = useTr();
   const input = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
+  /** The file on its way to the engine: "2/3 · 45%" (a phone's file can take minutes). */
+  const [progress, setProgress] = useState("");
   const [error, setError] = useState<string | null>(null);
   async function stage(files: File[]) {
     if (busy || !files.length) return;
@@ -15,15 +17,20 @@ export default function BrowserFilePicker({ onFiles }: { onFiles: (paths: string
     setError(null);
     const paths: string[] = [];
     try {
-      for (const file of files) {
+      for (const [i, file] of files.entries()) {
         if (/\.(zip|7z|rar|r\d{2})$/i.test(file.name)) throw new Error(tr("browserFile.archive", "Archive uploads require the native app. Choose a plain file or disk image."));
-        paths.push((await stageBrowserFile(file)).path);
+        const count = files.length > 1 ? `${i + 1}/${files.length} · ` : "";
+        setProgress(`${count}0%`);
+        const staged = await stageBrowserFile(file, (sent, total) =>
+          setProgress(`${count}${total > 0 ? Math.floor((sent / total) * 100) : 0}%`));
+        paths.push(staged.path);
       }
     } catch (e) {
       setError(String(e));
     } finally {
       if (paths.length) onFiles(paths);
       setBusy(false);
+      setProgress("");
     }
   }
   return <div className="rounded-xl border border-[var(--color-border)] p-4 space-y-2"
@@ -35,7 +42,7 @@ export default function BrowserFilePicker({ onFiles }: { onFiles: (paths: string
       void stage(files);
     }} />
     <Button variant="secondary" disabled={busy} onClick={() => input.current?.click()}>
-      {busy ? tr("browserFile.staging", "Uploading to server…") : tr("browserFile.choose", "From this device…")}
+      {busy ? `${tr("browserFile.staging", "Uploading to server…")} ${progress}` : tr("browserFile.choose", "From this device…")}
     </Button>
     <p className="text-xs text-[var(--color-muted)]">{tr("browserFile.hint", "Choose or drop files from this device. They upload to the server first, then appear below for review before sending to the PS5. Keep this tab open until that upload finishes.")}</p>
     {error && <ErrorCard title={error} />}

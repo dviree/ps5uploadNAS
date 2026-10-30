@@ -20,6 +20,14 @@ JOBS ?= $(shell getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null || ec
 NPM_INSTALL ?= npm ci --no-audit --no-fund
 CARGO ?= cargo
 
+# AVA1 is the third_party/ava1 submodule (github.com/phantomptr/ava1). A clone made without
+# --recurse-submodules, or a pull across the change that made it one, leaves it empty: fill it
+# rather than fail later with missing-file errors.
+ifeq ($(wildcard third_party/ava1/Cargo.toml),)
+$(info third_party/ava1 is empty: git submodule update --init third_party/ava1)
+$(shell git submodule update --init third_party/ava1 >&2)
+endif
+
 PS5_HOST ?= 192.168.137.2
 PS5_LOADER_PORT ?= 9021
 
@@ -97,10 +105,10 @@ ADB ?= $(ANDROID_HOME)/platform-tools/adb
 .PHONY: build payload installer engine client _engine-release _payload-if-ready _android-build-if-ready
 .PHONY: test test-root test-engine test-engine-coverage test-desktop test-payload test-client test-client-coverage
 .PHONY: lint lint-scripts lint-client audit-scripts coverage coverage-engine coverage-client
-.PHONY: quality quality-full quality-hardware ci ci-full
+.PHONY: quality quality-full quality-hardware ci ci-full release-check
 .PHONY: clean clean-payload clean-engine clean-client
 .PHONY: verify info install-hooks
-.PHONY: test-ava1 test-ava1-sanitize ava1-fuzz-c ava1-soak check-no-ftx2
+.PHONY: test-ava1 test-ava1-sanitize ava1-app-gen ava1-version-check check-no-ftx2
 .PHONY: run-engine run-client dev start _check-tauri-system-deps
 .PHONY: install-engine uninstall-engine
 .PHONY: dist dist-win dist-win-arm dist-mac dist-mac-x64 dist-linux dist-linux-arm
@@ -152,6 +160,8 @@ help:
 	@echo "  make quality          - Full non-hardware validation gate"
 	@echo "  make quality-full     - quality + payload validation"
 	@echo "  make quality-hardware - quality + live PS5 validate"
+	@echo "  make release-check    - Before a release: quality + Playwright e2e side by side, then"
+	@echo "                          test-payload (BUILD_LOCK=<file> serializes the heavy builds)"
 	@echo "  make coverage         - Rust + frontend coverage reports"
 	@echo "  make coverage-engine  - Rust coverage report only"
 	@echo "  make coverage-client  - Frontend coverage report only"
@@ -469,8 +479,8 @@ send-payload: payload
 engine: setup-engine
 	@echo "Building Rust engine workspace..."
 	@cd $(ENGINE_DIR) && $(CARGO) build --workspace
-	@echo "Building release ps5upload-engine (the binary Tauri spawns)..."
-	@cd $(ENGINE_DIR) && $(CARGO) build --release -p ps5upload-engine
+	@echo "Building release ps5upload-engine + ps5upload-unrar (the binaries Tauri embeds)..."
+	@cd $(ENGINE_DIR) && $(CARGO) build --release -p ps5upload-engine -p ps5upload-unrar
 	@echo "✓ Engine workspace built"
 
 # Internal helper: build the `ps5upload-engine` release binary, which the
@@ -479,11 +489,14 @@ engine: setup-engine
 # this is a cheap no-op when sources are unchanged — and a real rebuild
 # the moment they aren't. (An earlier version guarded with
 # `[ ! -x binary ]`, which stayed stale through code changes; removed.)
+# ps5upload-unrar (the RAR helper; UnRAR is never linked into the engine, see
+# LICENSES/UnRAR-exception.md) is built into the same directory: the desktop
+# build embeds it next to the engine.
 _engine-release: setup-engine
 	@if [ -n "$(ENGINE_TARGET)" ]; then \
-		cd $(ENGINE_DIR) && $(CARGO) build --release -p ps5upload-engine --target "$(ENGINE_TARGET)"; \
+		cd $(ENGINE_DIR) && $(CARGO) build --release -p ps5upload-engine -p ps5upload-unrar --target "$(ENGINE_TARGET)"; \
 	else \
-		cd $(ENGINE_DIR) && $(CARGO) build --release -p ps5upload-engine; \
+		cd $(ENGINE_DIR) && $(CARGO) build --release -p ps5upload-engine -p ps5upload-unrar; \
 	fi
 
 client: setup-client
@@ -533,11 +546,10 @@ _wait-payload-ready:
 # the legacy protocol, and reword anything else to AVA1 terms):
 #   CHANGELOG.md                     history keeps FTX2 by design.
 #   site/releases.json               the website's copy of the release notes (same history).
-#   protocol/ava1/                   the spec, the cutover checklist and the method
-#                                    checklist describe the migration from FTX2.
+#   protocol/ps5upload-ava1/         the method checklist describes the migration from FTX2.
 #   Makefile, .github/workflows/engine-ci.yml
 #                                    name this check and its pattern.
-#   .../ava1-ctest/tests/payload_cutover.rs
+#   .../ps5upload-ctest/tests/payload_cutover.rs
 #                                    asserts the payload no longer says FTX2 or 9113/9114.
 #   .../ps5upload-engine/src/ava1_only_tests.rs
 #                                    the tests that pin the engine free of the retired symbols.
@@ -551,10 +563,10 @@ _wait-payload-ready:
 CHECK_NO_FTX2_PATTERN := ftx2|(^|[^0-9])911[34]([^0-9]|$$)
 CHECK_NO_FTX2_SCOPE := .
 CHECK_NO_FTX2_EXCEPT := \
-	':!engine/crates/ava1-ctest/tests/payload_cutover.rs' \
+	':!engine/crates/ps5upload-ctest/tests/payload_cutover.rs' \
 	':!CHANGELOG.md' ':!site/releases.json' \
 	':!CONTRIBUTING.md' ':!TESTING.md' \
-	':!protocol/ava1' \
+	':!protocol/ps5upload-ava1' ':!third_party/ava1' \
 	':!Makefile' \
 	':!.github/workflows/engine-ci.yml' \
 	':!*Cargo.lock' ':!*package-lock.json' \
@@ -859,6 +871,10 @@ quality:
 quality-full:
 	@npm run validate:full
 
+# quality and the e2e suite at once, then test-payload; see scripts/release/release-check.sh.
+release-check:
+	@bash scripts/release/release-check.sh
+
 quality-hardware:
 	@npm run validate:hardware
 
@@ -887,17 +903,19 @@ test-engine: setup-engine
 	@# process holds without --test-threads=1; engine/.config/nextest.toml serializes the
 	@# timing-sensitive binaries.
 	@# nextest skips doctests, so they run separately. Without nextest: cargo test, serially.
+	@# The RAR tests start the ps5upload-unrar helper from the target directory: build it first.
+	@cd $(ENGINE_DIR) && $(CARGO) build -p ps5upload-unrar
 	@if $(CARGO) nextest --version >/dev/null 2>&1; then \
-		cd $(ENGINE_DIR) && $(CARGO) nextest run --workspace --exclude ava1-ctest && \
-		$(CARGO) test --workspace --exclude ava1-ctest --doc && \
-		$(CARGO) nextest run -p ava1-ctest; \
+		cd $(ENGINE_DIR) && $(CARGO) nextest run --workspace --exclude ps5upload-ctest && \
+		$(CARGO) test --workspace --exclude ps5upload-ctest --doc && \
+		$(CARGO) nextest run -p ps5upload-ctest; \
 	else \
-		cd $(ENGINE_DIR) && $(CARGO) test --workspace --exclude ava1-ctest && \
-		$(CARGO) test -p ava1-ctest -- --test-threads=1; \
+		cd $(ENGINE_DIR) && $(CARGO) test --workspace --exclude ps5upload-ctest && \
+		$(CARGO) test -p ps5upload-ctest -- --test-threads=1; \
 	fi
 	@echo "✓ Engine tests passed"
 	@# Android cross-compile check. The engine cfg's some code out on
-	@# Android (RAR, which needs the UnRAR C++ dep), so a call site added
+	@# Android (RAR, which needs the ps5upload-unrar helper program), so a call site added
 	@# without the matching cfg builds fine on every desktop target and fails
 	@# ONLY here. That is exactly how v5.31.0 shipped with no APK: every local
 	@# gate was green on macOS while the Android build was broken, and it was
@@ -923,6 +941,12 @@ test-desktop: setup-engine
 	@cd $(CLIENT_DIR)/src-tauri && $(CARGO) clippy --all-targets -- -D warnings
 	@cd $(CLIENT_DIR)/src-tauri && $(CARGO) test
 	@echo "✓ Desktop Rust checks passed"
+
+# Each host self-test runs under a time limit (scripts/run-limited.pl): one that hangs fails by
+# name with a stack sample instead of silently eating CI's 20 minutes (twice in Oct 2026 a macOS
+# runner hung in this target, and a cancelled job keeps no log).
+SELFTEST_LIMIT ?= 240
+RUN_LIMITED = perl $(CURDIR)/scripts/run-limited.pl $(SELFTEST_LIMIT)
 
 test-payload: payload
 	@echo "Validating payload binaries..."
@@ -950,183 +974,203 @@ test-payload: payload
 	@echo "Running play-time launch/resume self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -o /tmp/ps5upload-activity-selftest \
 		$(PAYLOAD_DIR)/tests/activity_launch_selftest.c
-	@/tmp/ps5upload-activity-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-activity-selftest
 	@echo "Running app-info layout self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -o /tmp/ps5upload-app-info-selftest \
 		$(PAYLOAD_DIR)/tests/app_info_selftest.c
-	@/tmp/ps5upload-app-info-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-app-info-selftest
 	@echo "Running uninstall outcome self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
 		-o /tmp/ps5upload-unregister-outcome-selftest \
 		$(PAYLOAD_DIR)/tests/unregister_outcome_selftest.c
-	@/tmp/ps5upload-unregister-outcome-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-unregister-outcome-selftest
 	@echo "Running metadata title-id normalizer self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -o /tmp/ps5upload-tmdb-id-selftest \
 		$(PAYLOAD_DIR)/tests/tmdb_id_selftest.c
-	@/tmp/ps5upload-tmdb-id-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-tmdb-id-selftest
 	@echo "Running console port scan self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
 		-o /tmp/ps5upload-net-ports-selftest \
 		$(PAYLOAD_DIR)/tests/net_ports_selftest.c
-	@/tmp/ps5upload-net-ports-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-net-ports-selftest
 	@echo "Running fan servo self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
 		-o /tmp/ps5upload-fan-servo-selftest \
 		$(PAYLOAD_DIR)/tests/fan_servo_selftest.c
-	@/tmp/ps5upload-fan-servo-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-fan-servo-selftest
 	@echo "✓ fan target writes keep the rest of the profile; the guard writes only after a reset and gives up after 5 failures"
 	@echo "Running cheat XML UTF-16 normalizer self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
 		-o /tmp/ps5upload-xml-encoding-selftest \
 		$(PAYLOAD_DIR)/tests/xml_encoding_selftest.c
-	@/tmp/ps5upload-xml-encoding-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-xml-encoding-selftest
 	@echo "✓ UTF-16 SHN/MC4 cheat files convert so their cheats appear"
 	@echo "Running web UI HTTP parser self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
 		-o /tmp/ps5upload-webui-http-selftest \
 		$(PAYLOAD_DIR)/tests/webui_http_selftest.c
-	@/tmp/ps5upload-webui-http-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-webui-http-selftest
 	@echo "Running webui strings lookup self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
 		-o /tmp/ps5upload-webui-strings-selftest \
 		$(PAYLOAD_DIR)/tests/webui_strings_selftest.c $(PAYLOAD_DIR)/src/webui_strings.c
-	@/tmp/ps5upload-webui-strings-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-webui-strings-selftest
 	@echo "✓ GET /strings/<lang>.json answers only the embedded languages, never a crafted path"
 	@echo "Running console package reader self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
 		-o /tmp/ps5upload-pkg-info-selftest \
 		$(PAYLOAD_DIR)/tests/pkg_info_selftest.c
-	@/tmp/ps5upload-pkg-info-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-pkg-info-selftest
 	@echo "✓ the console page's package preview reads PS4/PS5 headers and refuses out-of-range offsets"
 	@echo "Running webui offline copy lookup self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
 		-o /tmp/ps5upload-webui-offline-selftest \
 		$(PAYLOAD_DIR)/tests/webui_offline_selftest.c $(PAYLOAD_DIR)/src/webui_offline.c
-	@/tmp/ps5upload-webui-offline-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-webui-offline-selftest
 	@echo "✓ GET /sw.js and /cache.appcache answer with their own types; nothing else matches"
 	@echo "Running webui auth self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
 		-o /tmp/ps5upload-webui-auth-selftest \
 		$(PAYLOAD_DIR)/tests/webui_auth_selftest.c $(PAYLOAD_DIR)/src/webui_auth.c
-	@/tmp/ps5upload-webui-auth-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-webui-auth-selftest
 	@echo "Running webui server self-test (host build, ~25 s)..."
-	@cc -O2 -Wall -Wextra -Werror -pthread -I$(PAYLOAD_DIR)/include -I$(PAYLOAD_DIR)/ava1 \
+	@cc -O2 -Wall -Wextra -Werror -pthread -I$(PAYLOAD_DIR)/include -I$(AVA1_C) \
 		-o /tmp/ps5upload-webui-server-selftest \
 		$(PAYLOAD_DIR)/tests/webui_server_selftest.c $(PAYLOAD_DIR)/src/webui_server.c \
 		$(PAYLOAD_DIR)/src/webui_http.c $(PAYLOAD_DIR)/src/webui_auth.c
-	@/tmp/ps5upload-webui-server-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-webui-server-selftest
 	@echo "✓ silent, half-sent and flooding web clients never stall the helper"
 	@echo "Running webui codec self-test (host build)..."
-	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include -I$(PAYLOAD_DIR)/ava1 -I$(PAYLOAD_DIR)/ava1/gen \
+	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include -I$(AVA1_C) -I$(AVA1_C)/gen -I$(PAYLOAD_DIR)/gen \
 		-o /tmp/ps5upload-webui-codec-selftest \
 		$(PAYLOAD_DIR)/tests/webui_codec_selftest.c $(PAYLOAD_DIR)/src/webui_codec.c \
-		$(PAYLOAD_DIR)/ava1/gen/ava1_gen.c $(PAYLOAD_DIR)/ava1/ava1_wire.c
-	@/tmp/ps5upload-webui-codec-selftest
+		$(AVA1_C)/gen/ava1_gen.c $(PAYLOAD_DIR)/gen/ava1_app_gen.c $(AVA1_C)/ava1_wire.c
+	@$(RUN_LIMITED) /tmp/ps5upload-webui-codec-selftest
 	@echo "✓ Unicode, quoted and very large folders survive the web UI's JSON both ways"
 	@echo "Running webui file transfer self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -pthread -I$(PAYLOAD_DIR)/include \
 		-o /tmp/ps5upload-webui-files-selftest \
 		$(PAYLOAD_DIR)/tests/webui_files_selftest.c $(PAYLOAD_DIR)/src/webui_files.c
-	@/tmp/ps5upload-webui-files-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-webui-files-selftest
 	@echo "✓ text saves and uploads go through a same-folder temp + rename; a cut-off upload leaves no file; folders stream as a valid .tar"
 	@echo "Running SMB daemon path/address/JSON self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/smb -I$(PAYLOAD_DIR)/include \
 		-o /tmp/ps5upload-smbd-path-selftest $(PAYLOAD_DIR)/tests/smbd_path_selftest.c \
 		$(PAYLOAD_DIR)/smb/smbd_path.c $(PAYLOAD_DIR)/smb/smbd_json.c
-	@/tmp/ps5upload-smbd-path-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-smbd-path-selftest
 	@echo "✓ share paths, server addresses and non-ASCII names parse; bad ones are refused"
 	@echo "Running SMB daemon copy state-machine self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/smb -I$(PAYLOAD_DIR)/include \
 		-o /tmp/ps5upload-smbd-copy-selftest $(PAYLOAD_DIR)/tests/smbd_copy_selftest.c \
 		$(PAYLOAD_DIR)/smb/smbd_copy.c $(PAYLOAD_DIR)/smb/smbd_path.c $(PAYLOAD_DIR)/smb/smbd_localfs.c
-	@/tmp/ps5upload-smbd-copy-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-smbd-copy-selftest
 	@echo "✓ share copies go through a part file, survive a dropped server, cancel and refuse cleanly"
 	@echo "Running game library scan self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/smb -I$(PAYLOAD_DIR)/include \
 		-o /tmp/ps5upload-smbd-library-selftest $(PAYLOAD_DIR)/tests/smbd_library_selftest.c \
 		$(PAYLOAD_DIR)/smb/smbd_library.c $(PAYLOAD_DIR)/smb/smbd_localfs.c $(PAYLOAD_DIR)/smb/smbd_path.c \
 		$(PAYLOAD_DIR)/smb/smbd_json.c $(PAYLOAD_DIR)/src/pkg_info.c
-	@/tmp/ps5upload-smbd-library-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-smbd-library-selftest
 	@echo "✓ the library scan finds packages, folder dumps and images with their covers, stays inside its limits and never walks a dump"
 	@echo "Running console page network-share routes self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -pthread -I$(PAYLOAD_DIR)/include -I$(PAYLOAD_DIR)/smb \
-		-I$(PAYLOAD_DIR)/ava1 -I$(PAYLOAD_DIR)/ava1/gen -I$(PAYLOAD_DIR)/third_party/monocypher \
+		-I$(AVA1_C) -I$(AVA1_C)/gen -I$(PAYLOAD_DIR)/gen -I$(AVA1_C)/third_party/monocypher \
 		-o /tmp/ps5upload-webui-smb-selftest $(PAYLOAD_DIR)/tests/webui_smb_selftest.c \
 		$(PAYLOAD_DIR)/src/webui_smb.c $(PAYLOAD_DIR)/src/smb_shares.c $(PAYLOAD_DIR)/smb/smbd_json.c \
-		$(PAYLOAD_DIR)/smb/smbd_path.c $(PAYLOAD_DIR)/third_party/monocypher/monocypher.c
-	@/tmp/ps5upload-webui-smb-selftest
+		$(PAYLOAD_DIR)/smb/smbd_path.c $(AVA1_C)/third_party/monocypher/monocypher.c
+	@$(RUN_LIMITED) /tmp/ps5upload-webui-smb-selftest
 	@echo "✓ saved shares keep passwords out of the page and the file; copies obey the helper's path policy"
 	@echo "Running file index name-match self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
 		-o /tmp/ps5upload-index-glob-selftest $(PAYLOAD_DIR)/tests/index_glob_selftest.c
-	@/tmp/ps5upload-index-glob-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-index-glob-selftest
 	@echo "✓ index name patterns match in linear time, whatever the pattern"
 	@echo "Running file manager prefs self-test (host build)..."
-	@cc -O2 -Wall -Wextra -Werror -pthread -I$(PAYLOAD_DIR)/include -I$(PAYLOAD_DIR)/ava1 -I$(PAYLOAD_DIR)/ava1/gen \
+	@cc -O2 -Wall -Wextra -Werror -pthread -I$(PAYLOAD_DIR)/include -I$(AVA1_C) -I$(AVA1_C)/gen -I$(PAYLOAD_DIR)/gen \
 		-o /tmp/ps5upload-files-prefs-selftest \
 		$(PAYLOAD_DIR)/tests/files_prefs_selftest.c $(PAYLOAD_DIR)/src/files_prefs.c $(PAYLOAD_DIR)/src/webui_codec.c \
-		$(PAYLOAD_DIR)/ava1/gen/ava1_gen.c $(PAYLOAD_DIR)/ava1/ava1_wire.c
-	@/tmp/ps5upload-files-prefs-selftest
+		$(AVA1_C)/gen/ava1_gen.c $(PAYLOAD_DIR)/gen/ava1_app_gen.c $(AVA1_C)/ava1_wire.c
+	@$(RUN_LIMITED) /tmp/ps5upload-files-prefs-selftest
 	@echo "✓ pinned/recent folders stay bounded; a garbled prefs file reads as empty; saves are atomic"
 	@echo "Running multi-device mesh self-test (host build)..."
-	@cc -O2 -Wall -Wextra -Werror -pthread -I$(PAYLOAD_DIR)/include -I$(PAYLOAD_DIR)/ava1 -I$(PAYLOAD_DIR)/ava1/gen \
+	@cc -O2 -Wall -Wextra -Werror -pthread -I$(PAYLOAD_DIR)/include -I$(AVA1_C) -I$(AVA1_C)/gen -I$(PAYLOAD_DIR)/gen \
 		-o /tmp/ps5upload-mesh-selftest \
 		$(PAYLOAD_DIR)/tests/mesh_selftest.c $(PAYLOAD_DIR)/src/mesh.c $(PAYLOAD_DIR)/src/webui_codec.c \
-		$(PAYLOAD_DIR)/ava1/gen/ava1_gen.c $(PAYLOAD_DIR)/ava1/ava1_wire.c
-	@/tmp/ps5upload-mesh-selftest
+		$(AVA1_C)/gen/ava1_gen.c $(PAYLOAD_DIR)/gen/ava1_app_gen.c $(AVA1_C)/ava1_wire.c
+	@$(RUN_LIMITED) /tmp/ps5upload-mesh-selftest
 	@echo "✓ devices connect, are listed, renamed, blocked and pruned; locks lapse; shared documents keep their revision"
 	@echo "Running Show on TV / Show on PC handoff self-test (host build)..."
-	@cc -O2 -Wall -Wextra -Werror -pthread -I$(PAYLOAD_DIR)/include -I$(PAYLOAD_DIR)/ava1 -I$(PAYLOAD_DIR)/ava1/gen \
+	@cc -O2 -Wall -Wextra -Werror -pthread -I$(PAYLOAD_DIR)/include -I$(AVA1_C) -I$(AVA1_C)/gen -I$(PAYLOAD_DIR)/gen \
 		-o /tmp/ps5upload-files-handoff-selftest \
 		$(PAYLOAD_DIR)/tests/files_handoff_selftest.c $(PAYLOAD_DIR)/src/files_handoff.c $(PAYLOAD_DIR)/src/files_prefs.c \
-		$(PAYLOAD_DIR)/src/webui_codec.c $(PAYLOAD_DIR)/ava1/gen/ava1_gen.c $(PAYLOAD_DIR)/ava1/ava1_wire.c
-	@/tmp/ps5upload-files-handoff-selftest
+		$(PAYLOAD_DIR)/src/webui_codec.c $(AVA1_C)/gen/ava1_gen.c $(PAYLOAD_DIR)/gen/ava1_app_gen.c $(AVA1_C)/ava1_wire.c
+	@$(RUN_LIMITED) /tmp/ps5upload-files-handoff-selftest
 	@echo "✓ a handoff opens once, expires after two minutes, and the PC reads the same prefs as the console"
 	@echo "Running webui settings + tile self-test (host build)..."
-	@cc -O2 -Wall -Wextra -Werror -DWEBUI_TILE_HOST_TEST -I$(PAYLOAD_DIR)/include -I$(PAYLOAD_DIR)/ava1 -I$(PAYLOAD_DIR)/ava1/gen \
+	@cc -O2 -Wall -Wextra -Werror -DWEBUI_TILE_HOST_TEST -I$(PAYLOAD_DIR)/include -I$(AVA1_C) -I$(AVA1_C)/gen -I$(PAYLOAD_DIR)/gen \
 		-o /tmp/ps5upload-webui-settings-selftest \
 		$(PAYLOAD_DIR)/tests/webui_settings_selftest.c $(PAYLOAD_DIR)/src/webui_settings.c \
 		$(PAYLOAD_DIR)/src/webui_tile.c $(PAYLOAD_DIR)/src/webui_codec.c \
-		$(PAYLOAD_DIR)/ava1/gen/ava1_gen.c $(PAYLOAD_DIR)/ava1/ava1_wire.c
-	@/tmp/ps5upload-webui-settings-selftest
+		$(AVA1_C)/gen/ava1_gen.c $(PAYLOAD_DIR)/gen/ava1_app_gen.c $(AVA1_C)/ava1_wire.c
+	@$(RUN_LIMITED) /tmp/ps5upload-webui-settings-selftest
 	@echo "✓ a missing or garbled settings file falls back to defaults; the tile is written only when it differs"
 	@echo "Running webui input log self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
 		-o /tmp/ps5upload-webui-inputlog-selftest \
 		$(PAYLOAD_DIR)/tests/webui_inputlog_selftest.c $(PAYLOAD_DIR)/src/webui_inputlog.c
-	@/tmp/ps5upload-webui-inputlog-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-webui-inputlog-selftest
 	@echo "✓ the controller input log takes only plain short lines and never grows past its 64 KiB ring"
 	@echo "Running webui cheat download store self-test (host build)..."
-	@cc -O2 -Wall -Wextra -Werror -pthread -I$(PAYLOAD_DIR)/include -I$(PAYLOAD_DIR)/ava1 -I$(PAYLOAD_DIR)/ava1/gen \
+	@cc -O2 -Wall -Wextra -Werror -pthread -I$(PAYLOAD_DIR)/include -I$(AVA1_C) -I$(AVA1_C)/gen -I$(PAYLOAD_DIR)/gen \
 		-o /tmp/ps5upload-webui-cheats-store-selftest \
 		$(PAYLOAD_DIR)/tests/webui_cheats_store_selftest.c $(PAYLOAD_DIR)/src/webui_cheats_store.c \
 		$(PAYLOAD_DIR)/src/webui_files.c $(PAYLOAD_DIR)/src/webui_codec.c \
-		$(PAYLOAD_DIR)/ava1/gen/ava1_gen.c $(PAYLOAD_DIR)/ava1/ava1_wire.c
-	@/tmp/ps5upload-webui-cheats-store-selftest
+		$(AVA1_C)/gen/ava1_gen.c $(PAYLOAD_DIR)/gen/ava1_app_gen.c $(AVA1_C)/ava1_wire.c
+	@$(RUN_LIMITED) /tmp/ps5upload-webui-cheats-store-selftest
 	@echo "✓ a downloaded cheat is stored only under a plain name with its format's extension, through a same-folder temp + rename"
 	@echo "Running AVA1 in-flight RPC gate self-test (host build)..."
-	@cc -O2 -Wall -Wextra -Werror -pthread -I$(PAYLOAD_DIR)/ava1 \
+	@cc -O2 -Wall -Wextra -Werror -pthread -I$(AVA1_C) \
 		-o /tmp/ps5upload-ava1-rpc-gate-selftest \
 		$(PAYLOAD_DIR)/tests/ava1_rpc_gate_selftest.c
-	@/tmp/ps5upload-ava1-rpc-gate-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-ava1-rpc-gate-selftest
 	@echo "✓ the helper's exit waits for web UI calls and refuses new ones"
 	@echo "Running cheat title list self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
 		-o /tmp/ps5upload-cheats-list-selftest \
 		$(PAYLOAD_DIR)/tests/cheats_list_selftest.c
-	@/tmp/ps5upload-cheats-list-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-cheats-list-selftest
 	@echo "✓ a large or badly encoded cheat pack lists as valid, bounded JSON"
 	@echo "Running cheat apply-plan self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
 		-o /tmp/ps5upload-cheats-plan-selftest \
 		$(PAYLOAD_DIR)/tests/cheats_plan_selftest.c
-	@/tmp/ps5upload-cheats-plan-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-cheats-plan-selftest
 	@echo "✓ a cheat's code caves are written before the jumps into them, and removed after"
+	@echo "Running cheat engine guard self-test (host build)..."
+	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
+		-o /tmp/ps5upload-cheats-guard-selftest \
+		$(PAYLOAD_DIR)/tests/cheats_guard_selftest.c
+	@$(RUN_LIMITED) /tmp/ps5upload-cheats-guard-selftest
+	@echo "✓ the cheat engine switch survives a helper restart, and a game its cheats keep crashing is paused"
+	@echo "Running XML game patch self-test (host build)..."
+	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
+		-o /tmp/ps5upload-game-patch-selftest \
+		$(PAYLOAD_DIR)/tests/game_patch_selftest.c
+	@$(RUN_LIMITED) /tmp/ps5upload-game-patch-selftest
+	@echo "✓ PS-Game-Patch XML entries parse to the addresses, patterns and bytes GoldHEN would write"
+	@echo "Running title dump self-test (host build)..."
+	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include -I$(AVA1_C) -I$(AVA1_C)/gen -I$(PAYLOAD_DIR)/gen \
+		-o /tmp/ps5upload-app-dump-selftest \
+		$(PAYLOAD_DIR)/tests/app_dump_selftest.c $(PAYLOAD_DIR)/src/app_dump_core.c $(PAYLOAD_DIR)/src/app_dump_pkg.c \
+		$(PAYLOAD_DIR)/src/app_dump_fself.c $(PAYLOAD_DIR)/src/app_dump_self.c $(PAYLOAD_DIR)/src/app_dump_sha256.c \
+		$(PAYLOAD_DIR)/src/webui_codec.c $(AVA1_C)/gen/ava1_gen.c $(PAYLOAD_DIR)/gen/ava1_app_gen.c $(AVA1_C)/ava1_wire.c
+	@$(RUN_LIMITED) /tmp/ps5upload-app-dump-selftest
+	@echo "✓ a running title dumps with its package entries, appmeta, trophy and DLC; a stop leaves dump-incomplete.txt; decryption failures are counted, an unknown firmware keeps the plain copy"
 	@echo "Running console clean-up rules self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
 		-o /tmp/ps5upload-cleanup-rules-selftest \
 		$(PAYLOAD_DIR)/tests/cleanup_rules_selftest.c
-	@/tmp/ps5upload-cleanup-rules-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-cleanup-rules-selftest
 	@echo "✓ clean-up removes only its categories' paths: never the package library, saves, installed games or another drive's system folders"
 	@echo "Checking per-console isolation..."
 	@./scripts/check-per-console-isolation.sh
@@ -1134,38 +1178,53 @@ test-payload: payload
 	@echo "Checking Sony-API lock coverage..."
 	@./scripts/check-sony-api-lock.sh $(PAYLOAD_DIR)/src
 	@echo "✓ every sceUserService/sceRegMgr caller is serialized"
+	@echo "Checking /dev/mp1 stays read-only..."
+	@./payload/tools/check-mp1-readonly.sh $(PAYLOAD_DIR)
+	@echo "✓ no clock-changing /dev/mp1 request anywhere in the payload"
+	@echo "Running GPU/CPU clock (mp1) self-test (host build)..."
+	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
+		-o /tmp/ps5upload-mp1-clock-selftest \
+		$(PAYLOAD_DIR)/tests/mp1_clock_selftest.c
+	@$(RUN_LIMITED) /tmp/ps5upload-mp1-clock-selftest
+	@echo "✓ clock reads are bounded, cached for 2 s, stop for good after one refusal, and never change a clock"
+	@echo "Running measured CPU clock self-test (host build)..."
+	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
+		-o /tmp/ps5upload-cpu-measure-selftest \
+		$(PAYLOAD_DIR)/tests/cpu_measure_selftest.c
+	@$(RUN_LIMITED) /tmp/ps5upload-cpu-measure-selftest
+	@echo "✓ each core measured once on a worker thread, best run wins, cached for 2 s, off for good when no CPU takes the pin"
 	@echo "Running hw-guard fault-recovery self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -o /tmp/ps5upload-hw-guard-selftest \
 		$(PAYLOAD_DIR)/tests/hw_guard_selftest.c
-	@/tmp/ps5upload-hw-guard-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-hw-guard-selftest
 	@echo "✓ hw-guard recovers Sony-getter faults without dropping the helper"
 	@echo "Running wake-watchdog safety self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
 		-o /tmp/ps5upload-wake-watchdog-selftest \
 		$(PAYLOAD_DIR)/tests/wake_watchdog_selftest.c
-	@/tmp/ps5upload-wake-watchdog-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-wake-watchdog-selftest
 	@echo "✓ clock adjustments and unknown firmware state cannot trigger kernel writes"
 	@echo "Running process-identity self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
 		-o /tmp/ps5upload-proc-identity-selftest \
 		$(PAYLOAD_DIR)/tests/proc_identity_selftest.c
-	@/tmp/ps5upload-proc-identity-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-proc-identity-selftest
 	@echo "✓ only our own threads are ever in SIGKILL range"
 	@echo "Running prior-instance verdict self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
 		-o /tmp/ps5upload-instance-verdict-selftest \
 		$(PAYLOAD_DIR)/tests/instance_verdict_selftest.c
-	@/tmp/ps5upload-instance-verdict-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-instance-verdict-selftest
 	@echo "✓ an externally-killed predecessor is reported, never guessed at"
 	@echo "Running ptrace timeout-recovery self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -o /tmp/ps5upload-ptrace-recovery-selftest \
 		$(PAYLOAD_DIR)/tests/ptrace_recovery_selftest.c
-	@/tmp/ps5upload-ptrace-recovery-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-ptrace-recovery-selftest
 	@echo "✓ ptrace timeout recovery never resumes injected registers"
 	@echo "Running app.db raw-scan self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -o /tmp/ps5upload-appdb-scan-selftest \
 		$(PAYLOAD_DIR)/tests/appdb_scan_selftest.c
-	@/tmp/ps5upload-appdb-scan-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-appdb-scan-selftest
 	@echo "✓ app.db scan recovers titles without sqlite"
 	@echo "Running content-database self-test (host build)..."
 	@mkdir -p /tmp/ps5upload-cdb
@@ -1184,7 +1243,7 @@ test-payload: payload
 		$(PAYLOAD_DIR)/src/content_db.c \
 		$(PAYLOAD_DIR)/tests/content_db_selftest.c \
 		/tmp/ps5upload-cdb/sqlite3.o
-	@/tmp/ps5upload-content-db-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-content-db-selftest
 	@echo "✓ content databases read via SQL, with guarded writes"
 	@echo "Running Game Activity JSON self-test (host build)..."
 	@mkdir -p /tmp/ps5upload-actjson
@@ -1201,13 +1260,13 @@ test-payload: payload
 		$(PAYLOAD_DIR)/src/content_db.c \
 		$(PAYLOAD_DIR)/tests/activity_json_selftest.c \
 		/tmp/ps5upload-cdb/sqlite3.o
-	@/tmp/ps5upload-actjson/selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-actjson/selftest
 	@echo "✓ every Game Activity tab names its titles, in the keys the engine reads"
 	@echo "Running timed initializer serialization self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -pthread -I$(PAYLOAD_DIR)/include \
 		-o /tmp/ps5upload-timed-init-selftest \
 		$(PAYLOAD_DIR)/tests/timed_init_selftest.c
-	@/tmp/ps5upload-timed-init-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-timed-init-selftest
 	@echo "✓ timed-out Sony initialization cannot overlap a retry"
 	@echo "Running installer daemon logic self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/installer \
@@ -1216,7 +1275,7 @@ test-payload: payload
 		$(PAYLOAD_DIR)/installer/protocol.c \
 		$(PAYLOAD_DIR)/installer/pathsafe.c \
 		$(PAYLOAD_DIR)/installer/jobs.c
-	@/tmp/ps5upload-installer-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-installer-selftest
 	@echo "✓ installer request parse, replies, path safety and admission are sound"
 	@echo "Running installer HTTP/coverage self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/installer \
@@ -1224,7 +1283,7 @@ test-payload: payload
 		$(PAYLOAD_DIR)/tests/installer_http_selftest.c \
 		$(PAYLOAD_DIR)/installer/http_range.c \
 		$(PAYLOAD_DIR)/installer/jobs.c
-	@/tmp/ps5upload-installer-http-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-installer-http-selftest
 	@echo "✓ installer range parse, headers, coverage and job ring are sound"
 	@echo "Running installer loopback server self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -pthread -I$(PAYLOAD_DIR)/installer \
@@ -1234,67 +1293,67 @@ test-payload: payload
 		$(PAYLOAD_DIR)/installer/http_range.c \
 		$(PAYLOAD_DIR)/installer/pathsafe.c \
 		$(PAYLOAD_DIR)/installer/jobs.c
-	@/tmp/ps5upload-installer-loopback-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-installer-loopback-selftest
 	@echo "✓ loopback server ranges, 404s foreign paths and .crc, serves a real sidecar"
 	@echo "Running installer hint-table self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/installer \
 		-o /tmp/ps5upload-installer-hints-selftest \
 		$(PAYLOAD_DIR)/tests/installer_hints_selftest.c \
 		$(PAYLOAD_DIR)/installer/hints.c
-	@/tmp/ps5upload-installer-hints-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-installer-hints-selftest
 	@echo "✓ installer hint table maps known Sony codes without third-party names"
 	@echo "Running param.json SDK-rewrite self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -o /tmp/ps5upload-sdk-param-selftest \
 		$(PAYLOAD_DIR)/tests/sdk_param_selftest.c
-	@/tmp/ps5upload-sdk-param-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-sdk-param-selftest
 	@echo "✓ SDK version rewrite reports what it actually changed"
 	@echo "Running ELF param-segment self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -o /tmp/ps5upload-elf-param-selftest \
 		$(PAYLOAD_DIR)/tests/elf_param_selftest.c
-	@/tmp/ps5upload-elf-param-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-elf-param-selftest
 	@echo "✓ SDK patcher targets param segments, not stray magic bytes"
 	@echo "Running sandbox library-overlay unmount self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -o /tmp/ps5upload-sandbox-unmount-selftest \
 		$(PAYLOAD_DIR)/tests/sandbox_unmount_selftest.c
-	@/tmp/ps5upload-sandbox-unmount-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-sandbox-unmount-selftest
 	@echo "✓ only a game sandbox's unionfs lib overlay may be force-unmounted"
 	@echo "Running SDK version-pair self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -o /tmp/ps5upload-sdk-pairs-selftest \
 		$(PAYLOAD_DIR)/tests/sdk_pairs_selftest.c
-	@/tmp/ps5upload-sdk-pairs-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-sdk-pairs-selftest
 	@echo "✓ an SDK downgrade writes both halves of the version pair"
 	@echo "Running libc.prx backport-patch self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -o /tmp/ps5upload-libc-backport-selftest \
 		$(PAYLOAD_DIR)/tests/libc_backport_selftest.c
-	@/tmp/ps5upload-libc-backport-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-libc-backport-selftest
 	@echo "✓ the libc.prx symbol swap is same-length and idempotent"
 	@echo "Running fakelib overlay path/refusal self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -o /tmp/ps5upload-fakelib-overlay-selftest \
 		$(PAYLOAD_DIR)/tests/fakelib_overlay_selftest.c
-	@/tmp/ps5upload-fakelib-overlay-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-fakelib-overlay-selftest
 	@echo "✓ fakelib overlay accepts only game sandbox library targets"
 	@echo "Running sys_time settimeofday-fallback self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -pthread -I$(PAYLOAD_DIR)/include \
 		-o /tmp/ps5upload-sys-time-fallback-selftest \
 		$(PAYLOAD_DIR)/src/sys_time.c \
 		$(PAYLOAD_DIR)/tests/sys_time_fallback_selftest.c
-	@/tmp/ps5upload-sys-time-fallback-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-sys-time-fallback-selftest
 	@echo "✓ clock set falls back to settimeofday only when the SCE path did not take"
 	@echo "Running cross-device rename-guard self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -o /tmp/ps5upload-cross-device-selftest \
 		$(PAYLOAD_DIR)/tests/cross_device_selftest.c
-	@/tmp/ps5upload-cross-device-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-cross-device-selftest
 	@echo "✓ cross-mount renames are refused before they can panic the kernel"
 	@echo "Running Remote Play registry-key self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -o /tmp/ps5upload-rp-keys-selftest \
 		$(PAYLOAD_DIR)/tests/rp_keys_selftest.c
-	@/tmp/ps5upload-rp-keys-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-rp-keys-selftest
 	@echo "✓ Remote Play keys match Sony's entry-number formula"
 	@echo "Running SDK Changer filesystem-safety self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
 		-o /tmp/ps5upload-sdk-changer-file-selftest \
 		$(PAYLOAD_DIR)/tests/sdk_changer_file_selftest.c
-	@/tmp/ps5upload-sdk-changer-file-selftest
+	@$(RUN_LIMITED) /tmp/ps5upload-sdk-changer-file-selftest
 	@echo "✓ SDK Changer patches only tracked sources and restores durable backups"
 
 test-client: setup-client
@@ -1343,7 +1402,8 @@ uninstall-engine:
 run-engine: setup-engine
 	@echo "Starting ps5upload-engine (standalone; kept for diagnostics —"
 	@echo "in normal use the Tauri client spawns the engine automatically)..."
-	@cd $(ENGINE_DIR) && $(CARGO) run --release -p ps5upload-engine
+	@# The RAR helper is found next to the engine binary.
+	@cd $(ENGINE_DIR) && $(CARGO) build --release -p ps5upload-unrar && $(CARGO) run --release -p ps5upload-engine
 
 # `run-client` is the one-command dev flow. `npm run dev` in client/ is wired
 # to `tauri dev`, which starts Vite + the Rust main process. The Rust setup
@@ -1518,44 +1578,39 @@ release-post:
 promo-post:
 	@node scripts/promo-posts.js $(ARGS)
 
-AVA1_C := payload/ava1
-AVA1_C_CODEC := $(AVA1_C)/ava1_wire.c $(AVA1_C)/ava1_frame.c $(AVA1_C)/gen/ava1_gen.c \
-	$(AVA1_C)/ava1_keys.c $(AVA1_C)/ava1_noise.c $(AVA1_C)/ava1_aead.c $(AVA1_C)/platform_posix.c \
-	payload/third_party/monocypher/monocypher.c
+# The AVA1 protocol library (github.com/phantomptr/ava1) is the third_party/ava1 submodule; its own
+# tests, fuzzers and sanitizer runs live there (`make -C third_party/ava1 test`). Here: ps5upload's
+# side of it (the helper's management methods over AVA1, the glue) against the library's C.
+AVA1_C := third_party/ava1/c
 
-# scripts/ava1-aead-test.sh: the C AEAD against RFC 8439 and Monocypher, including the
-# AVX2 path (x86-64 natively, or under Rosetta 2 on an arm64 Mac).
 test-ava1:
-	scripts/ava1-aead-test.sh
-	cd engine && cargo test -p ava1 -p ava1-gen -p ava1-chaos
 	# The C server and the data layer are process-wide singletons
 	# (one CServer at a time, one ava1_data_start): serial, not two shells.
-	cd engine && cargo test -p ava1-ctest -- --test-threads=1
+	cd engine && cargo test -p ps5upload-ctest -- --test-threads=1
 
-# The whole ctest suite with ASan + UBSan on every C unit (review 009 #2a), LSan included on Linux.
-# Run it on Linux (CI, or `docker run rust:latest` with clang + libclang-rt-dev installed): the Rust link
-# of the sanitized C did not link with Homebrew's clang on macOS when tried (not investigated further).
-# engine/crates/ava1-ctest/lsan.supp lists the intentional leaks (test-side Box::leak), each with its reason.
+# ps5upload-ctest with ASan + UBSan on every C unit, LSan included on Linux (see the library's
+# `make sanitize` for why macOS is not used). lsan.supp lists the intentional leaks.
 CLANG ?= clang
 test-ava1-sanitize:
 	cd engine && CC=$(CLANG) AVA1_CTEST_SANITIZE=1 RUSTFLAGS="-Clinker=$(CLANG) $$RUSTFLAGS" \
 		ASAN_OPTIONS=$${ASAN_OPTIONS:-detect_leaks=$$([ "$$(uname)" = Linux ] && echo 1 || echo 0)} \
-		LSAN_OPTIONS=suppressions=$(CURDIR)/engine/crates/ava1-ctest/lsan.supp \
-		cargo test -p ava1-ctest -- --test-threads=1
+		LSAN_OPTIONS=suppressions=$(CURDIR)/engine/crates/ps5upload-ctest/lsan.supp \
+		cargo test -p ps5upload-ctest -- --test-threads=1
 
-# The host soak (review 009 #2c): AVA1_SOAK_MINUTES=60 make ava1-soak. Add AVA1_CTEST_SANITIZE=1 (and
-# CC/RUSTFLAGS as above) to run it under ASan.
-ava1-soak:
-	cd engine && AVA1_SOAK_MINUTES=$${AVA1_SOAK_MINUTES:-5} cargo test -p ava1-ctest --test soak -- --ignored --test-threads=1 --nocapture
+# The Rust side takes the `ava1` crate from crates.io, the payload builds the C side from the
+# submodule: both must be the same release. Fails when engine/Cargo.toml or
+# client/src-tauri/Cargo.toml pins another version than the submodule's.
+ava1-version-check:
+	@want=$$(sed -n 's/^version = "\(.*\)"/\1/p' third_party/ava1/Cargo.toml | head -1); \
+	for f in engine/Cargo.toml client/src-tauri/Cargo.toml; do \
+		got=$$(sed -n 's/^ava1 = "=\{0,1\}\([^"]*\)"/\1/p' $$f); \
+		if [ "$$got" != "$$want" ]; then \
+			echo "$$f pins ava1 $$got, the third_party/ava1 submodule is $$want" >&2; exit 1; \
+		fi; \
+	done; echo "ava1 $$want: crates.io pin matches the submodule"
 
-ava1-fuzz-c:
-	$${CC:-clang} -g -O1 -fsanitize=fuzzer,address,undefined -DAVA1_AEAD_PORTABLE -I$(AVA1_C) -I$(AVA1_C)/gen -Ipayload/third_party/monocypher \
-		-o /tmp/ava1-fuzz-decode $(AVA1_C)/fuzz/fuzz_decode.c $(AVA1_C_CODEC)
-	/tmp/ava1-fuzz-decode -max_total_time=$${AVA1_FUZZ_SECONDS:-60} -max_len=65536
-	$${CC:-clang} -g -O1 -fsanitize=fuzzer,address,undefined -I$(AVA1_C) -I$(AVA1_C)/gen -Ipayload/third_party/blake3 \
-		-DBLAKE3_NO_SSE2 -DBLAKE3_NO_SSE41 -DBLAKE3_NO_AVX2 -DBLAKE3_NO_AVX512 -DBLAKE3_USE_NEON=0 \
-		-o /tmp/ava1-fuzz-data $(AVA1_C)/fuzz/fuzz_data.c $(AVA1_C)/ava1_manifest.c $(AVA1_C)/ava1_journal.c \
-		$(AVA1_C)/ava1_ranges.c $(AVA1_C)/ava1_wire.c $(AVA1_C)/ava1_frame.c $(AVA1_C)/gen/ava1_gen.c \
-		payload/third_party/blake3/blake3.c payload/third_party/blake3/blake3_dispatch.c \
-		payload/third_party/blake3/blake3_portable.c
-	/tmp/ava1-fuzz-data -max_total_time=$${AVA1_FUZZ_SECONDS:-60} -max_len=65536
+# Regenerates ps5upload's AVA1 application codecs from protocol/ps5upload-ava1/app.toml.
+ava1-app-gen:
+	cargo run -q --manifest-path third_party/ava1/Cargo.toml -p ava1-gen -- --ext app \
+		--schema protocol/ps5upload-ava1/app.toml --rust engine/crates/ps5upload-ava1/src/app_gen.rs \
+		--c-dir payload/gen --source protocol/ps5upload-ava1/app.toml --regenerate 'run `make ava1-app-gen`' $(ARGS)

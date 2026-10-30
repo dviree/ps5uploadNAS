@@ -10,6 +10,9 @@ import {
   groupNavItems,
   filterNavItems,
   cleanPinned,
+  cleanHidden,
+  NAV_MOVED,
+  navMoved,
   pinnedNavItems,
   pinnedFirst,
   MAX_PINNED,
@@ -42,12 +45,12 @@ describe("NAV_ITEMS", () => {
     expect(grouped).toHaveLength(NAV_ITEMS.length);
   });
 
-  it("keeps Install Package directly reachable", () => {
-    expect(NAV_ITEMS.map((item) => item.to)).toContain("/install-package");
+  it("keeps Upload & Install directly reachable", () => {
+    expect(NAV_ITEMS.map((item) => item.to)).toContain("/send");
   });
 
   it("keeps every screen reachable from More", () => {
-    expect(NAV_ITEMS.map((item) => item.to)).toContain("/install-package");
+    expect(NAV_ITEMS.map((item) => item.to)).toContain("/send");
   });
 
   it("retires standalone backport screens in favor of Games", () => {
@@ -79,18 +82,18 @@ describe("the sidebar's sections", () => {
   });
 
   it("keeps a section whose first screen is hidden, with the rest in it", () => {
-    // Upload opens Files & storage: hiding it must not merge the rest into Setup.
-    const groups = sidebarGroups(["/upload"], false, false);
+    // File System opens Files & Storage: hiding it must not merge the rest into Games & Content.
+    const groups = sidebarGroups(["/files"], false, false);
     const files = groups.find((g) => g.section.key === "nav_section_files");
-    expect(files?.items.map((i) => i.to)).toContain("/files");
-    const setup = groups.find((g) => g.section.key === "nav_section_setup");
-    expect(setup?.items.map((i) => i.to)).not.toContain("/files");
+    expect(files?.items.map((i) => i.to)).toContain("/shared-folders");
+    const games = groups.find((g) => g.section.key === "nav_section_games_mods");
+    expect(games?.items.map((i) => i.to)).not.toContain("/shared-folders");
   });
 
   it("drops a section once every screen in it is hidden", () => {
-    const help = groupNavItems(NAV_ITEMS).find((g) => g.section.key === "nav_section_help")!;
-    const groups = sidebarGroups(help.items.map((i) => i.to), false, false);
-    expect(sections(groups)).not.toContain("nav_section_help");
+    const app = groupNavItems(NAV_ITEMS).find((g) => g.section.key === "nav_section_app")!;
+    const groups = sidebarGroups(app.items.map((i) => i.to), false, false);
+    expect(sections(groups)).not.toContain("nav_section_app");
   });
 
   it("names every screen and section with a key the English catalogue has", () => {
@@ -109,12 +112,12 @@ describe("the sidebar's sections", () => {
     for (const p of browserOnlyHidden) expect(inBrowser).not.toContain(p);
   });
 
-  it("offers Edit image on this computer everywhere (looking inside an image needs no mount, #479)", () => {
-    expect(paths(sidebarGroups([], false, false, true))).toContain("/local-image");
+  it("offers Workshop everywhere (looking inside an image needs no mount, #479)", () => {
+    expect(paths(sidebarGroups([], false, false, true))).toContain("/workshop");
     // Windows or Android desktop app.
-    expect(paths(sidebarGroups([], false, false, false))).toContain("/local-image");
+    expect(paths(sidebarGroups([], false, false, false))).toContain("/workshop");
     // Browser build: the engine reads the image; the screen hides the mount part.
-    expect(paths(sidebarGroups([], false, true, true))).toContain("/local-image");
+    expect(paths(sidebarGroups([], false, true, true))).toContain("/workshop");
   });
 });
 
@@ -256,29 +259,34 @@ describe("retired screens", () => {
     >,
   )[0];
 
-  it("are not in the navigation, and Connections is", async () => {
+  it("are not in the navigation, and Shared Folders is", async () => {
     const { NAV_ITEMS } = await import("./navItems");
     const paths = NAV_ITEMS.map((i: { to: string }) => i.to);
     expect(paths).not.toContain("/smb-browser");
     expect(paths).not.toContain("/ftp-server");
-    expect(paths).toContain("/connections");
+    expect(paths).toContain("/shared-folders");
+    expect(paths).not.toContain("/connections");
+    expect(paths).not.toContain("/mesh-drive");
   });
 
-  it("send their old links to Connections", () => {
+  it("send their old links to Shared Folders", () => {
     for (const old of ["/smb-browser", "/ftp-server"]) {
       expect(APP).toMatch(
-        new RegExp(`path="${old}"\\s+element=\\{<Navigate to="/connections" replace />\\}`),
+        new RegExp(`path="${old}"\\s+element=\\{<Navigate to="/shared-folders" replace />\\}`),
       );
     }
+    // The screens folded into it keep their query (?add=1, ?edit=<id>) and land on their part.
+    expect(APP).toContain(`path="/connections" element={<MovedTo to="/shared-folders" />}`);
+    expect(APP).toContain(`path="/mesh-drive" element={<MovedTo to="/shared-folders" hash="mesh-drive" />}`);
     expect(APP).not.toMatch(/SmbBrowserScreen|FtpServerScreen/);
   });
 });
 
-// Convert Games left the beta program once its packages installed and played: it shows for
-// everyone, with the beta switch off.
-describe("Convert Games", () => {
+// Convert Games (now Workshop) left the beta program once its packages installed and played:
+// it shows for everyone, with the beta switch off.
+describe("Workshop", () => {
   it("is no longer a beta feature", () => {
-    const convert = NAV_ITEMS.find((i) => i.to === "/convert");
+    const convert = NAV_ITEMS.find((i) => i.to === "/workshop");
     expect(convert).toBeDefined();
     expect(convert?.beta).toBeFalsy();
   });
@@ -305,11 +313,33 @@ describe("hasBetaItems", () => {
   });
 });
 
+describe("screens folded into another", () => {
+  it("move to a screen that is in the nav", () => {
+    for (const [from, to] of Object.entries(NAV_MOVED)) {
+      expect(NAV_ITEMS.some((i) => i.to === to), `${from} -> ${to}`).toBe(true);
+      expect(NAV_ITEMS.some((i) => i.to === from), from).toBe(false);
+    }
+    expect(navMoved("/profile")).toBe("/accounts");
+    expect(navMoved("/files")).toBe("/files");
+  });
+
+  it("carry a pin over once, in its place", () => {
+    expect(cleanPinned(["/profile", "/files", "/remote-play"])).toEqual(["/accounts", "/files"]);
+  });
+
+  it("stay hidden only when every screen they replace was hidden", () => {
+    expect(cleanHidden(["/profile", "/files"])).toEqual(["/files"]);
+    expect(cleanHidden(["/remote-play", "/profile", "/files"])).toEqual(["/accounts", "/files"]);
+    expect(cleanHidden(["/accounts"])).toEqual(["/accounts"]);
+    expect(cleanHidden([3, "/files", "/files"])).toEqual(["/files"]);
+  });
+});
+
 describe("pinned screens", () => {
   it("cleans a stored pin list: real screens only, no Home/Bug report, no repeats", () => {
-    expect(cleanPinned(["/files", "/gone", 3, "/files", "/home", "/bug-report", "/upload"])).toEqual([
+    expect(cleanPinned(["/files", "/gone", 3, "/files", "/home", "/bug-report", "/send"])).toEqual([
       "/files",
-      "/upload",
+      "/send",
     ]);
     // Not capped on load: pins this build doesn't show don't count toward MAX_PINNED, and
     // capping here would drop a pin the user still has.
@@ -318,8 +348,8 @@ describe("pinned screens", () => {
   });
 
   it("resolves pins in pin order, ignoring hidden, but not beta or platform rules", () => {
-    expect(pinnedNavItems(["/processes", "/files"], false, false).map((i) => i.to)).toEqual([
-      "/processes",
+    expect(pinnedNavItems(["/cheats", "/files"], false, false).map((i) => i.to)).toEqual([
+      "/cheats",
       "/files",
     ]);
     expect(pinnedNavItems(["/shell", "/files"], false, true).map((i) => i.to)).toEqual(["/files"]);

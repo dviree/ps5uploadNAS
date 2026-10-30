@@ -1,7 +1,9 @@
-import { planStreamSelection, type StreamSelectionItem } from "../../lib/streamSelection";
+import {
+  planStreamSelection,
+  type StreamSelectionItem,
+} from "../../lib/streamSelection";
 import { invoke } from "../../lib/invokeLogged";
-import { openExternalUrl } from "../../lib/openExternalUrl";
-import { PPR_PATCH_REPO } from "../../lib/fpkgPrereqs";
+import { FpkgNote } from "./FpkgNote";
 import { formatDate } from "../../lib/formatDate";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
@@ -33,7 +35,6 @@ import {
   FileText,
   Clock3,
   MapPin,
-  ChevronDown,
   Gamepad2,
 } from "lucide-react";
 
@@ -58,10 +59,15 @@ import {
 } from "../../components";
 import { BrowseButton } from "../../components/BrowseButton";
 import { FakeGameFirmwareNotice } from "../../components/FakeGameFirmwareNotice";
-import { DOC_ANCHORS, faqLink, installErrorLink } from "../../lib/installErrorDoc";
+import {
+  DOC_ANCHORS,
+  faqLink,
+  installErrorLink,
+} from "../../lib/installErrorDoc";
 import { openInFileSystem } from "../../state/fsNavigation";
 import { useConfirm } from "../../components/ConfirmDialog";
 import { useConnectionStore } from "../../state/connection";
+import { FoldSection } from "../../components/FoldSection";
 import { useTr } from "../../state/lang";
 import { pickLocalPaths } from "../../state/localPicker";
 import {
@@ -145,7 +151,9 @@ function PkgRow({
 }) {
   const tr = useTr();
   const navigate = useNavigate();
-  const kernel = useConnectionStore((s) => s.runtimeByHost[hostOf(host)]?.ps5Kernel ?? null);
+  const kernel = useConnectionStore(
+    (s) => s.runtimeByHost[hostOf(host)]?.ps5Kernel ?? null,
+  );
   // After the console refused this package from its own storage, Retry with Stream is offered
   // beside Install when the engine says that is safe for this package.
   const streamOffered = !!entry.lastResult?.retryWithStream && !!onRetryStream;
@@ -392,32 +400,32 @@ function PkgRow({
             {/* After a refusal from the PS5's own storage, Install tries that route again and
                 Retry with Stream (when offered) serves the same copy from this engine. */}
             {streamOffered && (
-                <Button
-                  variant="primary"
-                  size="sm"
-                  leftIcon={<Download size={13} />}
-                  onClick={onRetryStream}
-                  title={tr(
-                    "pkglib.retry_stream_hint",
-                    undefined,
-                    "Send this package from the PS5's own storage through Stream instead. The PS5 refused it the other way (0x80b2116f); the package is not copied again.",
-                  )}
-                >
-                  {tr("pkglib.retry_stream", undefined, "Retry with Stream")}
-                </Button>
-            )}
               <Button
-                variant={installed ? "secondary" : "primary"}
+                variant="primary"
                 size="sm"
-                leftIcon={
-                  installed ? <RotateCcw size={13} /> : <Download size={13} />
-                }
-                onClick={onInstall}
+                leftIcon={<Download size={13} />}
+                onClick={onRetryStream}
+                title={tr(
+                  "pkglib.retry_stream_hint",
+                  undefined,
+                  "Send this package from the PS5's own storage through Stream instead. The PS5 refused it the other way (0x80b2116f); the package is not copied again.",
+                )}
               >
-                {installed
-                  ? tr("pkglib.reinstall", "Reinstall")
-                  : tr("pkglib.install", "Install")}
+                {tr("pkglib.retry_stream", undefined, "Retry with Stream")}
               </Button>
+            )}
+            <Button
+              variant={installed ? "secondary" : "primary"}
+              size="sm"
+              leftIcon={
+                installed ? <RotateCcw size={13} /> : <Download size={13} />
+              }
+              onClick={onInstall}
+            >
+              {installed
+                ? tr("pkglib.reinstall", "Reinstall")
+                : tr("pkglib.install", "Install")}
+            </Button>
             <Button
               variant="ghost"
               size="sm"
@@ -559,8 +567,16 @@ function PkgRow({
                 }
               >
                 {entry.lastResult.ok
-                  ? tr("install_help_wont_launch", undefined, "Game won't launch?")
-                  : tr("install_help_what_means", undefined, "What does this mean?")}
+                  ? tr(
+                      "install_help_wont_launch",
+                      undefined,
+                      "Game won't launch?",
+                    )
+                  : tr(
+                      "install_help_what_means",
+                      undefined,
+                      "What does this mean?",
+                    )}
               </button>
             )}
           </span>
@@ -590,7 +606,16 @@ function PkgRow({
 const installedIdsCache = new Map<string, Set<string>>();
 
 /* ─── Screen ──────────────────────────────────────────────────────────── */
-export default function InstallPackageScreen() {
+/**
+ * Installing packages: from a link or an archive of packages, and from the packages already on
+ * the PS5 (copies put there before, and USB drives). `embedded` is Upload & Install's use: those
+ * parts only, in its order (link and archive, the queue, then what is on the PS5). A package
+ * file on this computer is picked or dropped in Upload & Install's own picker there, so this part
+ * leaves dropped files to it.
+ */
+export default function InstallPackageScreen({
+  embedded = false,
+}: { embedded?: boolean } = {}) {
   const tr = useTr();
   const host = useConnectionStore((s) => s.host);
   const payloadStatus = useConnectionStore((s) => s.payloadStatus);
@@ -620,7 +645,8 @@ export default function InstallPackageScreen() {
   const linkInsecure = useLinkInstallPrefs((s) => s.insecureFor(host));
   // Which of the two ways in is on show; in the address so a link or Back lands on it.
   const [searchParams, setSearchParams] = useSearchParams();
-  const tab: "stream" | "upload" = searchParams.get("tab") === "upload" ? "upload" : "stream";
+  const tab: "stream" | "upload" =
+    searchParams.get("tab") === "upload" ? "upload" : "stream";
   const installUrl = usePkgLibrary(host, (s) => s.installUrl);
   const remove = usePkgLibrary(host, (s) => s.remove);
   const clearFinished = usePkgLibrary(host, (s) => s.clearFinished);
@@ -652,7 +678,9 @@ export default function InstallPackageScreen() {
   // Library rows' queue state, as a string key so this screen re-renders only
   // when a row's state changes, not on every progress tick.
   const libStateKey = useUploadQueueStore((s) =>
-    [...libraryInstallStates(s.items, host)].map(([p, v]) => `${p}\u0000${v}`).join("\n"),
+    [...libraryInstallStates(s.items, host)]
+      .map(([p, v]) => `${p}\u0000${v}`)
+      .join("\n"),
   );
   const libStates = useMemo(() => {
     const m = new Map<string, "queued" | "installing">();
@@ -666,7 +694,10 @@ export default function InstallPackageScreen() {
   const [viewEntry, setViewEntry] = useState<PkgEntry | null>(null);
   const [picking, setPicking] = useState(false);
   // A link that is a real file but not a package (R4, #368): offered as a download-only.
-  const [linkDownload, setLinkDownload] = useState<{ url: string; info: LinkClass } | null>(null);
+  const [linkDownload, setLinkDownload] = useState<{
+    url: string;
+    info: LinkClass;
+  } | null>(null);
   const [checkingLink, setCheckingLink] = useState(false);
   const [dropActive, setDropActive] = useState(false);
   const browserPkgInputRef = useRef<HTMLInputElement>(null);
@@ -793,9 +824,15 @@ export default function InstallPackageScreen() {
   const location = useLocation();
   // A link shared to the app ("Send to PS5", components/IncomingShareSheet): filled in,
   // never started — the user picks how it is fetched and starts it.
-  const [linkPrefill, setLinkPrefill] = useState<{ url: string; key: string } | null>(null);
+  const [linkPrefill, setLinkPrefill] = useState<{
+    url: string;
+    key: string;
+  } | null>(null);
   useEffect(() => {
-    const state = location.state as { droppedPath?: string; sharedLink?: string } | null;
+    const state = location.state as {
+      droppedPath?: string;
+      sharedLink?: string;
+    } | null;
     const dropped = state?.droppedPath;
     if (dropped) {
       dropRef.current(dropped);
@@ -811,7 +848,8 @@ export default function InstallPackageScreen() {
   // Webview drag-drop — accept install packages, but keep mountable UFS images
   // (.ffpkg/.ffpfs) in the File System flow.
   useEffect(() => {
-    if (!host) return;
+    // Embedded in Upload & Install, whose own picker takes every drop (a package included).
+    if (!host || embedded) return;
     // A dropped file is a path on this device; a remote engine can't open it.
     if (!engineIsOnThisDevice()) return;
     let unlisten: (() => void) | null = null;
@@ -866,11 +904,15 @@ export default function InstallPackageScreen() {
       const sel = isMobile()
         ? await pickPath({
             mode: "file",
-            filters: [{ name: "PlayStation Package", extensions: ["pkg", "fpkg"] }],
+            filters: [
+              { name: "PlayStation Package", extensions: ["pkg", "fpkg"] },
+            ],
           })
         : await openDialog({
             multiple: true,
-            filters: [{ name: "PlayStation Package", extensions: ["pkg", "fpkg"] }],
+            filters: [
+              { name: "PlayStation Package", extensions: ["pkg", "fpkg"] },
+            ],
           });
       const paths = Array.isArray(sel) ? sel : sel ? [sel] : [];
       for (const pth of paths) uploadRef.current(pth as string);
@@ -910,7 +952,8 @@ export default function InstallPackageScreen() {
     // staged copy is deleted, so it could never be retried): say it here.
     if (!r.ok && opts?.ephemeral) {
       const q = useUploadQueueStore.getState();
-      for (const id of failedStreamInstallIds(q.items, sourcePath)) q.remove(id);
+      for (const id of failedStreamInstallIds(q.items, sourcePath))
+        q.remove(id);
       setPickError(
         `${streamName}: ${
           r.message ||
@@ -940,7 +983,8 @@ export default function InstallPackageScreen() {
       setPickError(`${e}`);
     } finally {
       // Best effort: a stale-upload sweep also catches browser crashes.
-      for (const id of uploadIds) await deleteBrowserPkgUpload(id).catch(() => {});
+      for (const id of uploadIds)
+        await deleteBrowserPkgUpload(id).catch(() => {});
     }
   }
 
@@ -948,7 +992,12 @@ export default function InstallPackageScreen() {
   async function streamFromServer(paths: string[]) {
     setPickError(null);
     if (!host?.trim()) {
-      setPickError(tr("install.error.noHost", "Set a PS5 host on the Connection screen first."));
+      setPickError(
+        tr(
+          "install.error.noHost",
+          "Set a PS5 host on the Connection screen first.",
+        ),
+      );
       return;
     }
     try {
@@ -965,21 +1014,37 @@ export default function InstallPackageScreen() {
   ) {
     if (!paths.length) return;
     if (!opts?.ephemeral && paths.some((path) => !isInstallPackagePath(path))) {
-      setPickError(tr("pkglib.stream.notPkg", undefined, "Pick a .pkg or .fpkg file."));
+      setPickError(
+        tr("pkglib.stream.notPkg", undefined, "Pick a .pkg or .fpkg file."),
+      );
       return;
     }
     const plan = (
-      await planStreamSelection(paths, (path) => invoke("pkg_metadata_split", { path }))
+      await planStreamSelection(paths, (path) =>
+        invoke("pkg_metadata_split", { path }),
+      )
     ).map((item) => ({ ...item, name: opts?.names?.[item.path] ?? item.name }));
-    if (plan.length > 1 && !await confirm({
-      title: tr("queue_title", undefined, "Queue"),
-      message: plan.map((item) => `${item.name}${item.category ? ` (${item.category})` : ""}`).join("\n"),
-      confirmLabel: tr("pkglib.url.confirm", "Start install"),
-    })) return;
+    if (
+      plan.length > 1 &&
+      !(await confirm({
+        title: tr("queue_title", undefined, "Queue"),
+        message: plan
+          .map(
+            (item) =>
+              `${item.name}${item.category ? ` (${item.category})` : ""}`,
+          )
+          .join("\n"),
+        confirmLabel: tr("pkglib.url.confirm", "Start install"),
+      }))
+    )
+      return;
     // Queued in plan order: each install joins the console queue before the next is added.
     await Promise.all(
       plan.map((item) =>
-        runStreamInstall(item.path, item.name, { ephemeral: opts?.ephemeral, item }),
+        runStreamInstall(item.path, item.name, {
+          ephemeral: opts?.ephemeral,
+          item,
+        }),
       ),
     );
   }
@@ -1005,11 +1070,19 @@ export default function InstallPackageScreen() {
       try {
         const picked = await pickLocalPaths({
           mode: "file",
-          title: tr("pkglib.stream.pickServer", undefined, "Choose a package on the server"),
-          filters: [{ name: "PlayStation Package", extensions: ["pkg", "fpkg"] }],
+          title: tr(
+            "pkglib.stream.pickServer",
+            undefined,
+            "Choose a package on the server",
+          ),
+          filters: [
+            { name: "PlayStation Package", extensions: ["pkg", "fpkg"] },
+          ],
         });
         await queueStreamPaths(picked);
-      } catch (e) { setPickError(String(e)); }
+      } catch (e) {
+        setPickError(String(e));
+      }
       return;
     }
     // No beta gate. Stream is the RELIABLE path and is no longer hidden
@@ -1030,7 +1103,9 @@ export default function InstallPackageScreen() {
       await queueStreamPaths(
         await pickPaths({
           mode: "file",
-          filters: [{ name: "PlayStation Package", extensions: ["pkg", "fpkg"] }],
+          filters: [
+            { name: "PlayStation Package", extensions: ["pkg", "fpkg"] },
+          ],
         }),
       );
     } catch (e) {
@@ -1038,7 +1113,11 @@ export default function InstallPackageScreen() {
     }
   }
 
-  async function handleUrlInstall(req: { url: string; name: string; mode: LinkInstallMode }) {
+  async function handleUrlInstall(req: {
+    url: string;
+    name: string;
+    mode: LinkInstallMode;
+  }) {
     setPickError(null);
     setLinkDownload(null);
     const link = req.url.trim();
@@ -1091,10 +1170,18 @@ export default function InstallPackageScreen() {
     });
     if (!approved) return;
     // Remembered once it is really started, with its name, so it can be found and retried.
-    useRecentLinksStore.getState().remember(host, { url: link, name: req.name, mode: req.mode });
+    useRecentLinksStore
+      .getState()
+      .remember(host, { url: link, name: req.name, mode: req.mode });
     // The user's name for it; else the name the link ended up with (a redirect or
     // Content-Disposition).
-    await runUrlInstall(link, req.mode, req.name || info?.filename, undefined, info?.total_size);
+    await runUrlInstall(
+      link,
+      req.mode,
+      req.name || info?.filename,
+      undefined,
+      info?.total_size,
+    );
   }
 
   /** Start a link install that was approved. `existing`: the user's answer to a different
@@ -1110,15 +1197,28 @@ export default function InstallPackageScreen() {
     setExistingPrompt(null);
     const startedAt = Date.now();
     try {
-      const result = await installUrl(link, host, { mode, displayName, existing, sizeBytes });
+      const result = await installUrl(link, host, {
+        mode,
+        displayName,
+        existing,
+        sizeBytes,
+      });
       if (result.existingFile) {
-        setExistingPrompt({ link, mode, displayName, file: result.existingFile });
+        setExistingPrompt({
+          link,
+          mode,
+          displayName,
+          file: result.existingFile,
+        });
         return;
       }
       // A link that reached the queue (as itself, or as the file a
       // download-first produced) reports on its row. One that never got there
       // — a malformed link, a failed download — has only this line.
-      const hasRow = queueItemsForHost(useUploadQueueStore.getState().items, host).some(
+      const hasRow = queueItemsForHost(
+        useUploadQueueStore.getState().items,
+        host,
+      ).some(
         (it) =>
           it.sourceKind === "install" &&
           it.status === "failed" &&
@@ -1168,23 +1268,24 @@ export default function InstallPackageScreen() {
           undefined,
           "Base game isn't installed",
         ),
-        message: entry.platform === "ps5" && !baseInLib
-          ? tr(
-              "pkglib.baseMissing.bodyPs5",
-              { kind, id: entry.titleId ?? "" },
-              `This ${kind} is for ${entry.titleId}, but its base game isn't installed on the PS5. Some PS5 updates carry the whole app and install on their own; if this one can't, the PS5 will say so.`,
-            )
-          : baseInLib
-          ? tr(
-              "pkglib.baseMissing.bodyInLib",
-              { kind, id: entry.titleId ?? "" },
-              `This ${kind} is for ${entry.titleId}, whose base game isn't installed on the PS5 yet — but it's here in your library. Install the base game first, then this ${kind}. Installing the ${kind} now will be accepted but won't actually apply.`,
-            )
-          : tr(
-              "pkglib.baseMissing.body",
-              { kind, id: entry.titleId ?? "" },
-              `This ${kind} is for ${entry.titleId}, but its base game isn't installed on the PS5. Sony's installer will accept it, but nothing installs until the base game is on the console — install the base first.`,
-            ),
+        message:
+          entry.platform === "ps5" && !baseInLib
+            ? tr(
+                "pkglib.baseMissing.bodyPs5",
+                { kind, id: entry.titleId ?? "" },
+                `This ${kind} is for ${entry.titleId}, but its base game isn't installed on the PS5. Some PS5 updates carry the whole app and install on their own; if this one can't, the PS5 will say so.`,
+              )
+            : baseInLib
+              ? tr(
+                  "pkglib.baseMissing.bodyInLib",
+                  { kind, id: entry.titleId ?? "" },
+                  `This ${kind} is for ${entry.titleId}, whose base game isn't installed on the PS5 yet — but it's here in your library. Install the base game first, then this ${kind}. Installing the ${kind} now will be accepted but won't actually apply.`,
+                )
+              : tr(
+                  "pkglib.baseMissing.body",
+                  { kind, id: entry.titleId ?? "" },
+                  `This ${kind} is for ${entry.titleId}, but its base game isn't installed on the PS5. Sony's installer will accept it, but nothing installs until the base game is on the console — install the base first.`,
+                ),
         confirmLabel: tr(
           "pkglib.baseMissing.installAnyway",
           undefined,
@@ -1431,36 +1532,486 @@ export default function InstallPackageScreen() {
     );
   };
 
+  // The parts Upload & Install shows (embedded) and this screen shows in its own order.
+  const noticesEl = (
+    <>
+      {pickError && (
+        <div className="mb-4">
+          <WarningCard
+            title={tr("install.pickError", "Could not add file")}
+            detail={pickError}
+          />
+        </div>
+      )}
+      {existingPrompt && (
+        <div className="mb-4">
+          <WarningCard
+            title={tr(
+              "linkdl.exists.title",
+              undefined,
+              "A different file already has this name",
+            )}
+            detail={tr(
+              "linkdl.exists.body",
+              {
+                path: existingPrompt.file.path,
+                have: formatBytes(existingPrompt.file.existingBytes),
+                size: formatBytes(existingPrompt.file.total),
+              },
+              "{path} is {have}; the link is {size}. Resume keeps the bytes that match the link and downloads the rest; Replace deletes that file and downloads it again.",
+            )}
+            action={
+              <div className="flex flex-wrap gap-2">
+                {canResumeExisting(
+                  existingPrompt.file.existingBytes,
+                  existingPrompt.file.total,
+                ) && (
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    onClick={() =>
+                      void runUrlInstall(
+                        existingPrompt.link,
+                        existingPrompt.mode,
+                        existingPrompt.displayName,
+                        "resume",
+                      )
+                    }
+                  >
+                    {tr("linkdl.exists.resume", undefined, "Resume")}
+                  </Button>
+                )}
+                <Button
+                  variant="secondary"
+                  size="sm"
+                  onClick={() =>
+                    void runUrlInstall(
+                      existingPrompt.link,
+                      existingPrompt.mode,
+                      existingPrompt.displayName,
+                      "replace",
+                    )
+                  }
+                >
+                  {tr("linkdl.exists.replace", undefined, "Replace")}
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setExistingPrompt(null)}
+                >
+                  {tr("linkdl.exists.cancel", undefined, "Not now")}
+                </Button>
+              </div>
+            }
+          />
+        </div>
+      )}
+      {error && (
+        <div className="mb-4">
+          <WarningCard
+            title={tr("pkglib.error", "Something went wrong")}
+            detail={error}
+          />
+        </div>
+      )}
+
+      {/* A queued install shows its own progress on its queue row, so this
+            line appears only for work the queue doesn't represent. */}
+      {busyNotice && !queueRunningHere && (
+        <div className="mb-4 flex items-center justify-between gap-3 rounded-[var(--radius-card)] border border-[color-mix(in_srgb,var(--color-accent)_40%,transparent)] bg-[var(--color-accent-soft)] px-4 py-3 text-sm">
+          <div className="flex items-start gap-2">
+            <Spinner size={14} tone="accent" className="mt-0.5 shrink-0" />
+            <span>{busyNotice}</span>
+          </div>
+        </div>
+      )}
+      {refreshDeferred && (
+        <p role="status" className="mb-4 text-xs text-[var(--color-muted)]">
+          {tr(
+            "pkglib.refreshDeferred",
+            undefined,
+            "The package list refreshes when the install that is running ends.",
+          )}
+        </p>
+      )}
+      {/* "Download through this computer" runs before its install joins
+            the queue, so it reports here, next to the queue it will join. */}
+      {downloadNotice && (
+        <div className="mb-4 flex items-start gap-2 rounded-[var(--radius-card)] border border-[color-mix(in_srgb,var(--color-accent)_40%,transparent)] bg-[var(--color-accent-soft)] px-4 py-3 text-sm">
+          <Spinner size={14} tone="accent" className="mt-0.5 shrink-0" />
+          <span>{downloadNotice}</span>
+        </div>
+      )}
+    </>
+  );
+  const linkEl = (
+    <>
+      <LinkInstallCard
+        host={host}
+        hostReady={hostReady}
+        checking={checkingLink}
+        prefill={linkPrefill}
+        onInstall={(link) => void handleUrlInstall(link)}
+      />
+      {linkDownload && (
+        <LinkDownloadCard
+          host={host}
+          url={linkDownload.url}
+          info={linkDownload.info}
+          insecureTls={linkInsecure}
+          onClose={() => setLinkDownload(null)}
+        />
+      )}
+    </>
+  );
+  const archiveEl = hostReady ? <ArchivePackagesCard host={host} /> : null;
+  const onPs5El = (
+    <>
+      {hostReady && <ExternalPackages host={host} />}
+
+      <section data-testid="install-library">
+        <header className="mb-2 flex flex-wrap items-center gap-2">
+          <h3 className="flex-1 text-sm font-semibold">
+            {tr(
+              "install.library.title",
+              undefined,
+              "Package copies on the PS5",
+            )}
+          </h3>
+          {/* Install every staged, not-yet-installed package in one tap,
+                      base → update → DLC order. Only shown when it saves taps
+                      (>1 installable row — a single row has its own Install button).
+                      Disabled while any install runs; the store queues behind an
+                      active upload rather than failing. */}
+          {installableCount > 1 && (
+            <Button
+              variant="secondary"
+              size="sm"
+              leftIcon={<Download size={14} />}
+              onClick={() =>
+                void installAll(
+                  host,
+                  effectiveAlternativeSelections,
+                  installedPathsForPlan,
+                )
+              }
+              loading={installingAll}
+              disabled={!hostReady || installingAll}
+              title={
+                !hostReady
+                  ? tr(
+                      "install.add.disabledHint",
+                      "Set a PS5 host on the Connection screen first",
+                    )
+                  : tr(
+                      "pkglib.installAll.hint",
+                      "Install every staged package, base games before updates and DLC",
+                    )
+              }
+            >
+              {tr("pkglib.installAll", undefined, "Install all")} (
+              {installableCount})
+            </Button>
+          )}
+        </header>
+        {alternativeGroups.length > 0 && (
+          <div className="rounded-[var(--radius-panel)] border border-[var(--glass-edge)] bg-[var(--color-surface-raised)] shadow-[var(--edge-highlight),var(--shadow-1)] mb-4 px-4 py-3 text-sm leading-relaxed text-[var(--color-muted)]">
+            <strong className="text-[var(--color-text)]">
+              {tr("pkglib.installAll.what", undefined, "What is Install all?")}
+            </strong>{" "}
+            {tr(
+              "pkglib.installAll.whatBody",
+              undefined,
+              "Install all runs every ready package in order: base game → updates → DLC. When you have two updates of the same version (or two DLC packs that conflict), use the checkbox on each row to choose which one this console should install — only one per group. Uncheck to leave that group out. The Install button on a single row always installs just that package.",
+            )}
+          </div>
+        )}
+
+        {hostReady && entries.length === 0 && !loading ? (
+          <EmptyState
+            icon={dropActive ? HardDrive : PackageOpen}
+            size="hero"
+            title={
+              dropActive
+                ? tr("pkglib.empty.drop.stream", "Drop to stream & install")
+                : tr("pkglib.empty.title.stream", "Install a package")
+            }
+            message={tr(
+              "pkglib.empty.body.stream",
+              "Use Stream & install to install a .pkg or .fpkg straight from this computer, or drop one onto the window. Packages you copy over with Upload & install are listed here so you can reinstall them.",
+            )}
+          />
+        ) : (
+          <>
+            <div className="grid gap-4">
+              {titleGroups.map((group) => {
+                const sections = [
+                  {
+                    key: "base",
+                    label: tr("pkglib.section.base", undefined, "Base game"),
+                    rows: group.entries.filter(
+                      (entry) =>
+                        entry.category !== "gp" && entry.category !== "ac",
+                    ),
+                  },
+                  {
+                    key: "updates",
+                    label: tr("pkglib.section.updates", undefined, "Updates"),
+                    rows: group.entries.filter(
+                      (entry) => entry.category === "gp",
+                    ),
+                  },
+                  {
+                    key: "dlc",
+                    label: tr("pkglib.section.dlc", undefined, "DLC"),
+                    rows: group.entries.filter(
+                      (entry) => entry.category === "ac",
+                    ),
+                  },
+                ].filter((section) => section.rows.length > 0);
+                const groupPaths = new Set(
+                  group.entries.map((entry) => entry.path),
+                );
+                const alternatives = alternativeGroups.filter((alternative) =>
+                  alternative.entries.some((entry) =>
+                    groupPaths.has(entry.path),
+                  ),
+                );
+                const unresolved = alternatives.filter(
+                  (alternative) =>
+                    !effectiveAlternativeSelections[alternative.key],
+                ).length;
+
+                return (
+                  <section
+                    key={group.key}
+                    className="rounded-[var(--radius-panel)] border border-[var(--glass-edge)] bg-[var(--color-surface-raised)] shadow-[var(--edge-highlight),var(--shadow-1)] p-3"
+                  >
+                    <div className="mb-3 flex flex-wrap items-center justify-between gap-2 border-b border-[var(--color-border)] pb-3">
+                      <div className="min-w-0">
+                        <h2 className="truncate text-sm font-semibold">
+                          {group.title}
+                        </h2>
+                        <div className="mt-0.5 flex flex-wrap items-center gap-2 text-xs text-[var(--color-muted)]">
+                          {group.titleId && (
+                            <span className="font-mono">{group.titleId}</span>
+                          )}
+                          <span>
+                            {tr(
+                              "pkglib.group.count",
+                              { n: group.entries.length },
+                              `${group.entries.length} package${group.entries.length === 1 ? "" : "s"}`,
+                            )}
+                          </span>
+                        </div>
+                      </div>
+                      {alternatives.length > 0 && (
+                        <Badge
+                          tone={unresolved > 0 ? "warn" : "accent"}
+                          variant="soft"
+                        >
+                          {unresolved > 0
+                            ? `${unresolved} choice${unresolved === 1 ? "" : "s"} needed`
+                            : `${alternatives.length} variant choice${alternatives.length === 1 ? "" : "s"} set`}
+                        </Badge>
+                      )}
+                    </div>
+
+                    {alternatives.length > 0 && (
+                      <div className="rounded-[var(--radius-card)] border border-[var(--glass-edge)] bg-[var(--color-surface)] mb-3 flex items-start gap-2 p-2.5 text-xs text-[var(--color-muted)]">
+                        <Info size={13} className="mt-0.5 shrink-0" />
+                        <span>
+                          {tr(
+                            "pkglib.variant.help",
+                            undefined,
+                            "Every update/DLC variant is preserved below. Choose one same-version alternative for this PS5; Install all uses the selected row and leaves its siblings staged.",
+                          )}
+                        </span>
+                      </div>
+                    )}
+
+                    <div className="grid gap-4">
+                      {sections.map((section) => (
+                        <div key={section.key}>
+                          <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-muted)]">
+                            <span>{section.label}</span>
+                            <span className="rounded-full bg-[var(--color-surface-3)] px-1.5 py-0.5 font-mono text-[10px] tabular-nums">
+                              {section.rows.length}
+                            </span>
+                          </div>
+                          <ul className="grid gap-2">
+                            {section.rows.map(renderPkgRow)}
+                          </ul>
+                        </div>
+                      ))}
+                    </div>
+                  </section>
+                );
+              })}
+            </div>
+            {entries.length > 0 && (
+              <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-[var(--color-border)] pt-3 text-xs text-[var(--color-muted)]">
+                <span>
+                  {tr(
+                    "pkglib.footer.count",
+                    { n: entries.length },
+                    `${entries.length} package${entries.length === 1 ? "" : "s"}`,
+                  )}
+                </span>
+                <div className="flex items-center gap-2">
+                  {finishedCount > 0 && (
+                    <Button
+                      variant="secondary"
+                      size="sm"
+                      disabled={installing}
+                      onClick={() => void clearFinished(host)}
+                    >
+                      {tr(
+                        "pkglib.clearFinished",
+                        { n: finishedCount },
+                        `Clear finished (${finishedCount})`,
+                      )}
+                    </Button>
+                  )}
+                  <Button
+                    variant="secondary"
+                    size="sm"
+                    disabled={installing}
+                    onClick={async () => {
+                      const ok = await confirm({
+                        title: tr(
+                          "pkglib.clearAll.confirmTitle",
+                          undefined,
+                          "Delete all staged packages?",
+                        ),
+                        message: tr(
+                          "pkglib.clearAll.confirmBody",
+                          { n: entries.length },
+                          `This permanently deletes all ${entries.length} staged .pkg file(s) from the PS5. Installed games are not affected.`,
+                        ),
+                        confirmLabel: tr(
+                          "pkglib.clearAll",
+                          undefined,
+                          "Clear all",
+                        ),
+                        destructive: true,
+                      });
+                      if (ok) void clearAll(host);
+                    }}
+                  >
+                    {tr("pkglib.clearAll", undefined, "Clear all")}
+                  </Button>
+                  <span className="tabular-nums">
+                    {tr(
+                      "pkglib.footer.size",
+                      { size: formatBytes(totalSize) },
+                      `${formatBytes(totalSize)} on PS5`,
+                    )}
+                  </span>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </section>
+    </>
+  );
+  const packagePanel = (
+    <PackagePanel
+      path={
+        viewEntry
+          ? // The original on this computer reads fastest; otherwise the staged copy on the
+            // console, read over its FTP server.
+            viewEntry.sourcePath && !isRemotePath(viewEntry.sourcePath)
+            ? viewEntry.sourcePath
+            : `ps5://${hostOf(host)}${viewEntry.path}`
+          : null
+      }
+      host={host}
+      onClose={() => setViewEntry(null)}
+      actions={
+        viewEntry
+          ? [
+              {
+                label: tr("pkglib.install", undefined, "Install"),
+                primary: true,
+                onClick: () => {
+                  const e = viewEntry;
+                  setViewEntry(null);
+                  void handleInstall(e);
+                },
+              },
+            ]
+          : []
+      }
+    />
+  );
+
+  if (embedded) {
+    // Upload's banner above already says why the helper can't be reached; the parts that need
+    // it wait for it here, and the queue shows either way (its items wait for the helper too).
+    const helperUp = hostReady && payloadStatus === "up";
+    return (
+      <>
+        {packagePanel}
+        {helperUp && noticesEl}
+        {helperUp && (
+          <FoldSection
+            id="send-more"
+            title={tr("send_more_ways", undefined, "From a Link or an Archive")}
+            summary={tr(
+              "send_more_ways_summary",
+              undefined,
+              "Install from a URL, or the packages inside an archive",
+            )}
+          >
+            {linkEl}
+            {archiveEl}
+          </FoldSection>
+        )}
+        <QueuePanel host={hostReady ? host : undefined} />
+        {helperUp && (
+          <FoldSection
+            id="send-on-ps5"
+            title={tr("send_on_ps5", undefined, "Already on the PS5")}
+            summary={
+              entries.length > 0
+                ? tr("send_on_ps5_count", { n: entries.length }, "{n} packages")
+                : tr(
+                    "send_on_ps5_help_short",
+                    undefined,
+                    "Packages on a USB drive or copied to the PS5 before",
+                  )
+            }
+          >
+            <p className="text-sm text-[var(--color-muted)]">
+              {tr(
+                "send_on_ps5_help",
+                undefined,
+                "Packages on a USB drive plugged into the PS5, and package copies put on the PS5 before. Install them from here.",
+              )}
+            </p>
+            <Toggle
+              checked={autoRemove}
+              onChange={setAutoRemove}
+              label={tr(
+                "pkglib.autoRemove",
+                undefined,
+                "Auto-delete each package from the PS5 after it installs",
+              )}
+            />
+            {onPs5El}
+          </FoldSection>
+        )}
+        {dialog}
+      </>
+    );
+  }
+
   return (
     <div className="app-page">
-      <PackagePanel
-        path={
-          viewEntry
-            ? // The original on this computer reads fastest; otherwise the staged copy on the
-              // console, read over its FTP server.
-              viewEntry.sourcePath && !isRemotePath(viewEntry.sourcePath)
-              ? viewEntry.sourcePath
-              : `ps5://${hostOf(host)}${viewEntry.path}`
-            : null
-        }
-        host={host}
-        onClose={() => setViewEntry(null)}
-        actions={
-          viewEntry
-            ? [
-                {
-                  label: tr("pkglib.install", undefined, "Install"),
-                  primary: true,
-                  onClick: () => {
-                    const e = viewEntry;
-                    setViewEntry(null);
-                    void handleInstall(e);
-                  },
-                },
-              ]
-            : []
-        }
-      />
+      {packagePanel}
       <PageHeader
         icon={PackageOpen}
         title={tr("install.title", "Install Package")}
@@ -1485,94 +2036,7 @@ export default function InstallPackageScreen() {
       {hostReady && <QueuePanel host={host} />}
 
       <ConnectionGate require="payload">
-        {pickError && (
-          <div className="mb-4">
-            <WarningCard
-              title={tr("install.pickError", "Could not add file")}
-              detail={pickError}
-            />
-          </div>
-        )}
-        {existingPrompt && (
-          <div className="mb-4">
-            <WarningCard
-              title={tr("linkdl.exists.title", undefined, "A different file already has this name")}
-              detail={tr(
-                "linkdl.exists.body",
-                {
-                  path: existingPrompt.file.path,
-                  have: formatBytes(existingPrompt.file.existingBytes),
-                  size: formatBytes(existingPrompt.file.total),
-                },
-                "{path} is {have}; the link is {size}. Resume keeps the bytes that match the link and downloads the rest; Replace deletes that file and downloads it again.",
-              )}
-              action={
-                <div className="flex flex-wrap gap-2">
-                  {canResumeExisting(existingPrompt.file.existingBytes, existingPrompt.file.total) && (
-                    <Button
-                      variant="primary"
-                      size="sm"
-                      onClick={() =>
-                        void runUrlInstall(existingPrompt.link, existingPrompt.mode, existingPrompt.displayName, "resume")
-                      }
-                    >
-                      {tr("linkdl.exists.resume", undefined, "Resume")}
-                    </Button>
-                  )}
-                  <Button
-                    variant="secondary"
-                    size="sm"
-                    onClick={() =>
-                      void runUrlInstall(existingPrompt.link, existingPrompt.mode, existingPrompt.displayName, "replace")
-                    }
-                  >
-                    {tr("linkdl.exists.replace", undefined, "Replace")}
-                  </Button>
-                  <Button variant="ghost" size="sm" onClick={() => setExistingPrompt(null)}>
-                    {tr("linkdl.exists.cancel", undefined, "Not now")}
-                  </Button>
-                </div>
-              }
-            />
-          </div>
-        )}
-        {error && (
-          <div className="mb-4">
-            <WarningCard
-              title={tr("pkglib.error", "Something went wrong")}
-              detail={error}
-            />
-          </div>
-        )}
-
-        {/* A queued install shows its own progress on its queue row, so this
-            line appears only for work the queue doesn't represent. */}
-        {busyNotice && !queueRunningHere && (
-          <div className="mb-4 flex items-center justify-between gap-3 rounded-[var(--radius-card)] border border-[color-mix(in_srgb,var(--color-accent)_40%,transparent)] bg-[var(--color-accent-soft)] px-4 py-3 text-sm">
-            <div className="flex items-start gap-2">
-              <Spinner size={14} tone="accent" className="mt-0.5 shrink-0" />
-              <span>{busyNotice}</span>
-            </div>
-          </div>
-        )}
-        {refreshDeferred && (
-          <p role="status" className="mb-4 text-xs text-[var(--color-muted)]">
-            {tr(
-              "pkglib.refreshDeferred",
-              undefined,
-              "The package list refreshes when the install that is running ends.",
-            )}
-          </p>
-        )}
-        {/* "Download through this computer" runs before its install joins
-            the queue, so it reports here, next to the queue it will join. */}
-        {downloadNotice && (
-          <div className="mb-4 flex items-start gap-2 rounded-[var(--radius-card)] border border-[color-mix(in_srgb,var(--color-accent)_40%,transparent)] bg-[var(--color-accent-soft)] px-4 py-3 text-sm">
-            <Spinner size={14} tone="accent" className="mt-0.5 shrink-0" />
-            <span>{downloadNotice}</span>
-          </div>
-        )}
-
+        {noticesEl}
         {/* Two ways in, a tab each. They differ in one thing the user has to choose between:
             whether a copy of the package is put on the PS5 first. */}
         <Tabs
@@ -1581,7 +2045,9 @@ export default function InstallPackageScreen() {
           ariaLabel={tr("install.title", "Install Package")}
           value={tab}
           onChange={(id) =>
-            setSearchParams(id === "upload" ? { tab: "upload" } : {}, { replace: true })
+            setSearchParams(id === "upload" ? { tab: "upload" } : {}, {
+              replace: true,
+            })
           }
           tabs={[
             {
@@ -1611,7 +2077,11 @@ export default function InstallPackageScreen() {
               <header className="mb-1 flex items-center gap-2">
                 <PackageOpen size={15} aria-hidden />
                 <h3 className="text-sm font-semibold">
-                  {tr("install.stream.file.title", undefined, "Install a package file")}
+                  {tr(
+                    "install.stream.file.title",
+                    undefined,
+                    "Install a package file",
+                  )}
                 </h3>
               </header>
               <p className="mb-3 text-xs text-[var(--color-muted)]">
@@ -1627,8 +2097,17 @@ export default function InstallPackageScreen() {
                   remote
                   primary
                   icon={<Download size={14} />}
-                  filters={[{ name: "PlayStation Package", extensions: ["pkg", "fpkg"] }]}
-                  label={tr("pkglib.streamInstall", undefined, "Stream & install")}
+                  filters={[
+                    {
+                      name: "PlayStation Package",
+                      extensions: ["pkg", "fpkg"],
+                    },
+                  ]}
+                  label={tr(
+                    "pkglib.streamInstall",
+                    undefined,
+                    "Stream & install",
+                  )}
                   // Installs queue per console, so a running install never
                   // blocks picking the next one.
                   disabled={!hostReady}
@@ -1674,28 +2153,17 @@ export default function InstallPackageScreen() {
                       "Upload a package from the device this browser is running on, then stream it.",
                     )}
                   >
-                    {tr("pkglib.stream.fromDevice", undefined, "From this device")}
+                    {tr(
+                      "pkglib.stream.fromDevice",
+                      undefined,
+                      "From this device",
+                    )}
                   </Button>
                 )}
               </div>
             </section>
 
-            <LinkInstallCard
-              host={host}
-              hostReady={hostReady}
-              checking={checkingLink}
-              prefill={linkPrefill}
-              onInstall={(link) => void handleUrlInstall(link)}
-            />
-            {linkDownload && (
-              <LinkDownloadCard
-                host={host}
-                url={linkDownload.url}
-                info={linkDownload.info}
-                insecureTls={linkInsecure}
-                onClose={() => setLinkDownload(null)}
-              />
-            )}
+            {linkEl}
           </div>
         )}
 
@@ -1712,7 +2180,11 @@ export default function InstallPackageScreen() {
               <header className="mb-1 flex items-center gap-2">
                 <Upload size={15} aria-hidden />
                 <h3 className="text-sm font-semibold">
-                  {tr("install.upload.file.title", undefined, "Copy a package to the PS5 and install it")}
+                  {tr(
+                    "install.upload.file.title",
+                    undefined,
+                    "Copy a package to the PS5 and install it",
+                  )}
                 </h3>
               </header>
               <p className="mb-3 text-xs text-[var(--color-muted)]">
@@ -1775,248 +2247,8 @@ export default function InstallPackageScreen() {
               </div>
             </section>
 
-            {hostReady && <ArchivePackagesCard host={host} />}
-            {hostReady && <ExternalPackages host={host} />}
-
-            <section data-testid="install-library">
-              <header className="mb-2 flex flex-wrap items-center gap-2">
-                <h3 className="flex-1 text-sm font-semibold">
-                  {tr("install.library.title", undefined, "Package copies on the PS5")}
-                </h3>
-                  {/* Install every staged, not-yet-installed package in one tap,
-                      base → update → DLC order. Only shown when it saves taps
-                      (>1 installable row — a single row has its own Install button).
-                      Disabled while any install runs; the store queues behind an
-                      active upload rather than failing. */}
-                  {installableCount > 1 && (
-                    <Button
-                      variant="secondary"
-                      size="sm"
-                      leftIcon={<Download size={14} />}
-                      onClick={() =>
-                        void installAll(
-                          host,
-                          effectiveAlternativeSelections,
-                          installedPathsForPlan,
-                        )
-                      }
-                      loading={installingAll}
-                      disabled={!hostReady || installingAll}
-                      title={
-                        !hostReady
-                          ? tr(
-                              "install.add.disabledHint",
-                              "Set a PS5 host on the Connection screen first",
-                            )
-                          : tr(
-                              "pkglib.installAll.hint",
-                              "Install every staged package, base games before updates and DLC",
-                            )
-                      }
-                    >
-                      {tr("pkglib.installAll", undefined, "Install all")} (
-                      {installableCount})
-                    </Button>
-                  )}
-              </header>
-              {alternativeGroups.length > 0 && (
-                <div className="rounded-[var(--radius-panel)] border border-[var(--glass-edge)] bg-[var(--color-surface-raised)] shadow-[var(--edge-highlight),var(--shadow-1)] mb-4 px-4 py-3 text-sm leading-relaxed text-[var(--color-muted)]">
-                  <strong className="text-[var(--color-text)]">
-                    {tr("pkglib.installAll.what", undefined, "What is Install all?")}
-                  </strong>{" "}
-                  {tr(
-                    "pkglib.installAll.whatBody",
-                    undefined,
-                    "Install all runs every ready package in order: base game → updates → DLC. When you have two updates of the same version (or two DLC packs that conflict), use the checkbox on each row to choose which one this console should install — only one per group. Uncheck to leave that group out. The Install button on a single row always installs just that package.",
-                  )}
-                </div>
-              )}
-
-              {hostReady && entries.length === 0 && !loading ? (
-                <EmptyState
-                  icon={dropActive ? HardDrive : PackageOpen}
-                  size="hero"
-                  title={
-                    dropActive
-                      ? tr("pkglib.empty.drop.stream", "Drop to stream & install")
-                      : tr("pkglib.empty.title.stream", "Install a package")
-                  }
-                  message={tr(
-                    "pkglib.empty.body.stream",
-                    "Use Stream & install to install a .pkg or .fpkg straight from this computer, or drop one onto the window. Packages you copy over with Upload & install are listed here so you can reinstall them.",
-                  )}
-                />
-              ) : (
-                <>
-                  <div className="grid gap-4">
-                    {titleGroups.map((group) => {
-                      const sections = [
-                        {
-                          key: "base",
-                          label: tr("pkglib.section.base", undefined, "Base game"),
-                          rows: group.entries.filter(
-                            (entry) =>
-                              entry.category !== "gp" && entry.category !== "ac",
-                          ),
-                        },
-                        {
-                          key: "updates",
-                          label: tr("pkglib.section.updates", undefined, "Updates"),
-                          rows: group.entries.filter(
-                            (entry) => entry.category === "gp",
-                          ),
-                        },
-                        {
-                          key: "dlc",
-                          label: tr("pkglib.section.dlc", undefined, "DLC"),
-                          rows: group.entries.filter(
-                            (entry) => entry.category === "ac",
-                          ),
-                        },
-                      ].filter((section) => section.rows.length > 0);
-                      const groupPaths = new Set(
-                        group.entries.map((entry) => entry.path),
-                      );
-                      const alternatives = alternativeGroups.filter((alternative) =>
-                        alternative.entries.some((entry) => groupPaths.has(entry.path)),
-                      );
-                      const unresolved = alternatives.filter(
-                        (alternative) =>
-                          !effectiveAlternativeSelections[alternative.key],
-                      ).length;
-
-                      return (
-                        <section
-                          key={group.key}
-                          className="rounded-[var(--radius-panel)] border border-[var(--glass-edge)] bg-[var(--color-surface-raised)] shadow-[var(--edge-highlight),var(--shadow-1)] p-3"
-                        >
-                          <div className="mb-3 flex flex-wrap items-center justify-between gap-2 border-b border-[var(--color-border)] pb-3">
-                            <div className="min-w-0">
-                              <h2 className="truncate text-sm font-semibold">
-                                {group.title}
-                              </h2>
-                              <div className="mt-0.5 flex flex-wrap items-center gap-2 text-xs text-[var(--color-muted)]">
-                                {group.titleId && (
-                                  <span className="font-mono">{group.titleId}</span>
-                                )}
-                                <span>
-                                  {tr(
-                                    "pkglib.group.count",
-                                    { n: group.entries.length },
-                                    `${group.entries.length} package${group.entries.length === 1 ? "" : "s"}`,
-                                  )}
-                                </span>
-                              </div>
-                            </div>
-                            {alternatives.length > 0 && (
-                              <Badge
-                                tone={unresolved > 0 ? "warn" : "accent"}
-                                variant="soft"
-                              >
-                                {unresolved > 0
-                                  ? `${unresolved} choice${unresolved === 1 ? "" : "s"} needed`
-                                  : `${alternatives.length} variant choice${alternatives.length === 1 ? "" : "s"} set`}
-                              </Badge>
-                            )}
-                          </div>
-
-                          {alternatives.length > 0 && (
-                            <div className="rounded-[var(--radius-card)] border border-[var(--glass-edge)] bg-[var(--color-surface)] mb-3 flex items-start gap-2 p-2.5 text-xs text-[var(--color-muted)]">
-                              <Info size={13} className="mt-0.5 shrink-0" />
-                              <span>
-                                {tr(
-                                  "pkglib.variant.help",
-                                  undefined,
-                                  "Every update/DLC variant is preserved below. Choose one same-version alternative for this PS5; Install all uses the selected row and leaves its siblings staged.",
-                                )}
-                              </span>
-                            </div>
-                          )}
-
-                          <div className="grid gap-4">
-                            {sections.map((section) => (
-                              <div key={section.key}>
-                                <div className="mb-2 flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-[var(--color-muted)]">
-                                  <span>{section.label}</span>
-                                  <span className="rounded-full bg-[var(--color-surface-3)] px-1.5 py-0.5 font-mono text-[10px] tabular-nums">
-                                    {section.rows.length}
-                                  </span>
-                                </div>
-                                <ul className="grid gap-2">
-                                  {section.rows.map(renderPkgRow)}
-                                </ul>
-                              </div>
-                            ))}
-                          </div>
-                        </section>
-                      );
-                    })}
-                  </div>
-                  {entries.length > 0 && (
-                    <div className="mt-3 flex flex-wrap items-center justify-between gap-2 border-t border-[var(--color-border)] pt-3 text-xs text-[var(--color-muted)]">
-                      <span>
-                        {tr(
-                          "pkglib.footer.count",
-                          { n: entries.length },
-                          `${entries.length} package${entries.length === 1 ? "" : "s"}`,
-                        )}
-                      </span>
-                      <div className="flex items-center gap-2">
-                        {finishedCount > 0 && (
-                          <Button
-                            variant="secondary"
-                            size="sm"
-                            disabled={installing}
-                            onClick={() => void clearFinished(host)}
-                          >
-                            {tr(
-                              "pkglib.clearFinished",
-                              { n: finishedCount },
-                              `Clear finished (${finishedCount})`,
-                            )}
-                          </Button>
-                        )}
-                        <Button
-                          variant="secondary"
-                          size="sm"
-                          disabled={installing}
-                          onClick={async () => {
-                            const ok = await confirm({
-                              title: tr(
-                                "pkglib.clearAll.confirmTitle",
-                                undefined,
-                                "Delete all staged packages?",
-                              ),
-                              message: tr(
-                                "pkglib.clearAll.confirmBody",
-                                { n: entries.length },
-                                `This permanently deletes all ${entries.length} staged .pkg file(s) from the PS5. Installed games are not affected.`,
-                              ),
-                              confirmLabel: tr(
-                                "pkglib.clearAll",
-                                undefined,
-                                "Clear all",
-                              ),
-                              destructive: true,
-                            });
-                            if (ok) void clearAll(host);
-                          }}
-                        >
-                          {tr("pkglib.clearAll", undefined, "Clear all")}
-                        </Button>
-                        <span className="tabular-nums">
-                          {tr(
-                            "pkglib.footer.size",
-                            { size: formatBytes(totalSize) },
-                            `${formatBytes(totalSize)} on PS5`,
-                          )}
-                        </span>
-                      </div>
-                    </div>
-                  )}
-                </>
-              )}
-            </section>
+            {archiveEl}
+            {onPs5El}
           </div>
         )}
 
@@ -2043,77 +2275,7 @@ export default function InstallPackageScreen() {
             the reader decide whether it applies to them. */}
         {/* A disclosure, not a standing callout: it matters only to someone
             installing a fake package, and they recognise the question. */}
-        <details className="group mb-4 rounded-[var(--radius-field)] border border-[color-mix(in_srgb,var(--color-warn)_40%,transparent)] bg-[var(--color-warn)]/5 text-[12px] text-[var(--color-muted)]">
-          <summary className="flex cursor-pointer list-none items-center gap-2 px-3 py-2 font-medium text-[var(--color-warn)] [&::-webkit-details-marker]:hidden">
-            <AlertTriangle size={13} className="shrink-0" />
-            <span className="flex-1">
-              {tr(
-                "pkglib.fpkgsupport.title",
-                "Installing a fake package (FPKG)?",
-              )}
-            </span>
-            <ChevronDown
-              size={14}
-              className="shrink-0 transition-transform group-open:rotate-180"
-            />
-          </summary>
-          <div className="px-3 pb-3">
-            <div className="flex flex-col gap-1.5">
-              <div>
-                {tr(
-                  "pkglib.fpkgsupport.lead",
-                  "A PS5 fake package only installs when fake-package support is already loaded on the console. Load all three, in this order, before installing:",
-                )}
-              </div>
-              <ol className="ml-4 flex list-decimal flex-col gap-1">
-                <li>
-                  <strong className="text-[var(--color-text)]">kstuff</strong>{" "}
-                  {tr(
-                    "pkglib.fpkgsupport.kstuff",
-                    "— the build with PS5 fake-package support",
-                  )}
-                </li>
-                <li>
-                  <strong className="text-[var(--color-text)]">
-                    a53_ppr_install_fast.elf
-                  </strong>{" "}
-                  {tr(
-                    "pkglib.fpkgsupport.ppr",
-                    "— applies the PPR plaintext / no-auth patch",
-                  )}{" "}
-                  {tr(
-                    "pkglib.fpkgsupport.ppr_where",
-                    "No download is published for it: it is built from the source on GitHub,",
-                  )}{" "}
-                  <button
-                    type="button"
-                    className="underline"
-                    onClick={() => void openExternalUrl(PPR_PATCH_REPO)}
-                  >
-                    {"drakmor/ppr-patch"}
-                  </button>
-                  .
-                </li>
-                <li>
-                  <strong className="text-[var(--color-text)]">
-                    shadowmountplus.elf
-                  </strong>{" "}
-                  {tr(
-                    "pkglib.fpkgsupport.smp",
-                    "— the mount layer that registers the installed title",
-                  )}
-                </li>
-              </ol>
-              <div>
-                {tr(
-                  "pkglib.fpkgsupport.tail",
-                  "Without them the console refuses the install, or takes it and then fails to mount the game. Retail and debug packages need none of this — if that is what you are installing, ignore this note.",
-                )}
-              </div>
-            </div>
-          </div>
-        </details>
-
+        <FpkgNote />
         {dialog}
       </ConnectionGate>
     </div>

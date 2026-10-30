@@ -2,12 +2,15 @@
 // converter, with LZ4 asset packs for a game image) and Compatibility (how LZ4 games run for
 // other players). The tab is in the URL (?tab=), so a refresh or a link keeps it.
 
-import { useSearchParams } from "react-router";
+import { useLocation, useSearchParams } from "react-router";
 import { PackagePlus } from "lucide-react";
 
 import { PageHeader, Tabs } from "../../components";
 import type { CollectionGame, CollectionLocation } from "../../api/collection";
-import { DEFAULT_SEND_SUBPATH, collectionSendItem } from "../../lib/collectionSend";
+import {
+  DEFAULT_SEND_SUBPATH,
+  collectionSendItem,
+} from "../../lib/collectionSend";
 import { DEFAULT_IMAGE_SUBPATH } from "../../lib/imageUpload";
 import { useConnectionStore } from "../../state/connection";
 import { useConvertPrefs } from "../../state/convertPrefs";
@@ -21,14 +24,25 @@ import { MyGames } from "./MyGames";
 
 type ConvertTab = "mine" | "convert" | "compat";
 
-function tabOf(raw: string | null): ConvertTab {
-  return raw === "convert" || raw === "compat" ? raw : "mine";
+/** With no tab in the URL, a link that brings a game to convert (`state.source`, from
+ *  Collection, Files or a game page) or opens Look Inside (`?view=`) lands on Convert. */
+function tabOf(raw: string | null, toConverter: boolean): ConvertTab {
+  if (raw === "convert" || raw === "compat" || raw === "mine") return raw;
+  return toConverter ? "convert" : "mine";
 }
 
 export default function ConvertScreen() {
   const tr = useTr();
   const [params, setParams] = useSearchParams();
-  const tab = tabOf(params.get("tab"));
+  const location = useLocation();
+  const handed = location.state as {
+    source?: unknown;
+    sources?: unknown;
+  } | null;
+  const tab = tabOf(
+    params.get("tab"),
+    params.has("view") || Boolean(handed?.source || handed?.sources),
+  );
   const setTab = (next: ConvertTab) => {
     if (next === tab) return;
     const p = new URLSearchParams(params);
@@ -42,7 +56,9 @@ export default function ConvertScreen() {
   const sendTarget = () => {
     const c = useConnectionStore.getState();
     const host = c.payloadStatus === "up" ? (c.host?.trim() ?? "") : "";
-    return host ? { host, volume: useUploadStore.getState().destinationVolume ?? "/data" } : null;
+    return host
+      ? { host, volume: useUploadStore.getState().destinationVolume ?? "/data" }
+      : null;
   };
   const convertWithLz4 = (path: string, sendTitle?: string) => {
     const { lz4Dir, outputDir } = useConvertPrefs.getState();
@@ -75,12 +91,18 @@ export default function ConvertScreen() {
    *  read. */
   const convertToFfpfsc = (path: string, isFolder: boolean, send = false) => {
     // Not next to the source (the default for an image): the library is mounted read-only.
-    const out = useConvertPrefs.getState().outputDir.trim() || "~/Downloads/fpkgs";
+    const out =
+      useConvertPrefs.getState().outputDir.trim() || "~/Downloads/fpkgs";
     const run = useFpkgConversion.getState();
     // "& send to PS5": the finished .ffpfsc goes into the Upload queue, like an LZ4 folder.
     const to = send ? sendTarget() : null;
     const thenUpload = to
-      ? { host: to.host, volume: to.volume, subpath: DEFAULT_IMAGE_SUBPATH, deleteAfter: false }
+      ? {
+          host: to.host,
+          volume: to.volume,
+          subpath: DEFAULT_IMAGE_SUBPATH,
+          deleteAfter: false,
+        }
       : undefined;
     void (isFolder
       ? run.buildImage(path, out, true, "exfat", thenUpload)
@@ -144,7 +166,11 @@ export default function ConvertScreen() {
         right={tabs}
       />
       {tab === "mine" ? (
-        <MyGames onConvert={convertWithLz4} onFfpfsc={convertToFfpfsc} onSend={sendToPs5} />
+        <MyGames
+          onConvert={convertWithLz4}
+          onFfpfsc={convertToFfpfsc}
+          onSend={sendToPs5}
+        />
       ) : (
         <Compatibility />
       )}

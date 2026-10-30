@@ -6,11 +6,11 @@ use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
-use ava1::gen;
 use ava1::keys::Identity;
 use ava1::send::Progress;
 use ava1_chaos::{ChaosConfig, ChaosProxy};
 use common::*;
+use ps5upload_ava1::gen;
 use ps5upload_ava1::relay::ps5_to_ps5_between;
 use ps5upload_ava1::upload;
 use ps5upload_ava1::zip_source::ZipSource;
@@ -480,7 +480,9 @@ async fn a_zip_with_a_wrong_crc_fails_typed() {
         zip::CompressionMethod::Deflated,
         zip::CompressionMethod::Stored,
     ] {
-        let d = temp("zip-bad-crc");
+        // A directory per method: the engine pins the first host's key for 127.0.0.1 in it, and
+        // a late write from the first round must not meet the second round's host.
+        let d = temp(&format!("zip-bad-crc-{method:?}"));
         let ava = d.join("engine");
         let key = Identity::load_or_create(&ava.join("identity"))
             .unwrap()
@@ -879,4 +881,32 @@ fn a_zip_entrys_own_mtime_is_carried_into_the_manifest() {
     zip.finish().unwrap();
     let (m, _src) = ps5upload_ava1::zip_source::ZipSource::open(&path, &[]).unwrap();
     assert_eq!(m.entries[0].mtime, 1_709_209_840);
+}
+
+#[test]
+fn zip_backward_reads_are_bounded() {
+    use ava1::source::ReadAt;
+    let d = temp("zip-backward");
+    let path = d.join("b.zip");
+    const SIZE: u64 = 2 << 20;
+    zip_with(&path, &[("e", zip::CompressionMethod::Deflated, 7, SIZE)]);
+    let (_, source) = ZipSource::open(&path, &[]).unwrap();
+    let mut r = source.open_entry("e").unwrap();
+    let mut buf = [0u8; 64];
+    // Three backward reads are tolerated (the sender never makes one), each restarting the
+    // inflater from the entry's start.
+    for _ in 0..3 {
+        r.read_at(1 << 20, &mut buf).unwrap();
+        assert_eq!(&buf[..], &pattern(7, 1 << 20, 64)[..]);
+        r.read_at(0, &mut buf).unwrap();
+        assert_eq!(&buf[..], &pattern(7, 0, 64)[..]);
+    }
+    assert_eq!(r.restarts(), 4);
+    r.read_at(1 << 20, &mut buf).unwrap();
+    let err = r.read_at(0, &mut buf).unwrap_err();
+    assert!(err.to_string().contains("re-read too often"), "{err}");
+    assert!(
+        !ps5upload_ava1::zip_source::is_zip_corrupt(&err),
+        "too many re-reads is not a damaged entry"
+    );
 }

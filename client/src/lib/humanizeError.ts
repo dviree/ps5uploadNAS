@@ -18,6 +18,7 @@
 import { t } from "../i18n";
 import { useLangStore } from "../state/lang";
 import { isNpxsContentId } from "./npxs";
+import { trStatic } from "./trStatic";
 
 /** Localised lookup for the humanised error copy below. This module is a
  *  plain function (not a React component), so it reads the active language
@@ -524,7 +525,7 @@ export function humanizePs5Error(
   // before giving up; reaching this means none of them worked. The
   // user's options are limited: update the helper (a newer one may
   // know more variants), install on the console itself, or register
-  // a game folder/image from Games → Game files.
+  // a game folder/image from the game's page in Games.
   if (
     /BGFT symbol missing/i.test(raw) ||
     /dlopen libSceBgft\.sprx failed/i.test(raw) ||
@@ -571,7 +572,10 @@ export function humanizePs5Error(
         baseTitle,
       });
     }
-    return te("err_install_enoent_generic");
+    return trStatic(
+      "err_install_enoent_generic_v2",
+      "Sony's installer couldn't open a file it needed during install (kernel error 0x80020002 = ENOENT). If this is a DLC pkg, the base game isn't installed yet — install the base first. Otherwise the staged package may have been deleted between upload and install; retry the install once. If it keeps failing, install it with Stream & install in Upload & Install, which sends the package straight from this computer instead of copying it to the console first.",
+    );
   }
 
   // ─── BGFT / Install Package error codes ─────────────────────────

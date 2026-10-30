@@ -30,7 +30,7 @@ export function ServersCardView(props: {
     <Card className="xl:col-span-12">
       <div className="mb-3 flex items-center gap-2">
         <Network size={16} className="text-[var(--color-accent-bright)]" />
-        <h2 className="flex-1 text-[0.9375rem] font-semibold">{tr("v5_home_servers", undefined, "Servers")}</h2>
+        <h2 className="flex-1 text-[0.9375rem] font-semibold">{tr("network_shares", undefined, "Network shares")}</h2>
         {props.connections.length > 0 && (
           <Button variant="ghost" size="sm" onClick={props.onAdd}>
             <Plus size={14} />
@@ -99,7 +99,7 @@ export function ServersCard() {
     <ServersCardView
       connections={connections}
       status={status}
-      onAdd={() => navigate("/connections?add=1")}
+      onAdd={() => navigate("/shared-folders?add=1")}
       onBrowse={(c) =>
         browseServer(c, navigate, tr("conn_need_ps5", undefined, "Connect to a PS5 to install."))
       }

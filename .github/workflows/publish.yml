@@ -64,6 +64,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          submodules: true
           ref: ${{ github.event.inputs.tag || github.ref_name }}
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
@@ -213,6 +214,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          submodules: true
           ref: ${{ github.event.inputs.tag || github.ref_name }}
 
       - name: Setup Node
@@ -233,9 +235,54 @@ jobs:
           toolchain: stable
           targets: ${{ matrix.rust_target }}
 
-      # No cargo cache here: release runs are tag runs, and a cache a tag run saves is visible to
-      # that tag only, so saving never helped a later release (it filled the shared 10 GiB and
-      # evicted CI's caches); and CI's debug clippy/test caches don't match this release build.
+      # Compile cache, read-only. A cache a tag run saves is visible to that tag alone, so
+      # saving here never helped a later release (it filled the shared 10 GiB and evicted CI's
+      # caches); what a tag run CAN read is main's. release-cache.yml runs this job's exact
+      # engine + desktop-dependency build on main with sccache writing, so the hundreds of
+      # dependency crates (and unchanged first-party ones) come from the cache here and only
+      # what changed, the final links and LTO are compiled. sccache never fails the build: a
+      # cache it cannot reach is a miss (SCCACHE_IGNORE_SERVER_IO_ERROR), and a server that
+      # does not start leaves cargo without the wrapper. Same three steps in release-cache.yml
+      # and ci's engine-target job (where they were measured).
+      - name: Restore cargo registry
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+          key: ${{ runner.os }}-cargo-registry-${{ hashFiles('engine/Cargo.lock', 'client/src-tauri/Cargo.lock') }}
+          restore-keys: ${{ runner.os }}-cargo-registry-
+
+      - name: Install sccache
+        uses: taiki-e/install-action@1e29709c0ec63babbe8f266397a465f29a825f91 # v2
+        with:
+          tool: sccache@0.18.0
+
+      - name: Point sccache at the Actions cache
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          script: |
+            core.exportVariable('ACTIONS_RESULTS_URL', process.env.ACTIONS_RESULTS_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+            // The v2 cache service (the only one GitHub runs now); without this sccache's
+            // backend speaks v1, and every read misses and every write fails.
+            core.exportVariable('ACTIONS_CACHE_SERVICE_V2', 'on');
+            core.exportVariable('SCCACHE_ERROR_LOG', `${process.env.RUNNER_TEMP}/sccache.log`);
+            core.exportVariable('SCCACHE_LOG', 'warn');
+            core.exportVariable('SCCACHE_GHA_ENABLED', 'true');
+            core.exportVariable('SCCACHE_GHA_RW_MODE', 'READ_ONLY');
+            core.exportVariable('SCCACHE_IGNORE_SERVER_IO_ERROR', '1');
+            core.exportVariable('SCCACHE_IDLE_TIMEOUT', '0');
+
+      - name: Start sccache
+        shell: bash
+        run: |
+          if sccache --start-server; then
+            echo "RUSTC_WRAPPER=sccache" >> "$GITHUB_ENV"
+          else
+            echo "::warning::sccache did not start; building without the compile cache"
+          fi
 
       # Bounded and retried on purpose. During the v5.3.3 publish this step
       # stalled inside apt for 45 minutes, ate the whole job budget, and took
@@ -287,7 +334,12 @@ jobs:
             curl \
             wget \
             file \
-            xdg-utils
+            xdg-utils \
+            gstreamer1.0-plugins-base \
+            gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad \
+            gstreamer1.0-libav \
+            gstreamer1.0-gl
 
       - name: Ensure libclang for bindgen (Windows)
         if: matrix.platform == 'windows'
@@ -352,46 +404,13 @@ jobs:
           ls -la payload/ps5upload.elf.gz payload/installer/ps5upload-installer.elf.gz
 
       - name: Build engine sidecar binary
-        working-directory: engine
         shell: bash
         env:
           RUST_TARGET: ${{ matrix.rust_target }}
-        # --locked: the lockfile is the release's bill of materials; a Cargo.toml
-        # that outgrew it (two green PRs squash-merged, see CI's clippy step)
-        # must fail here, not quietly resolve to something newer.
-        #
-        # The desktop app's dependencies compile alongside, in the background:
-        # the engine build ends in minutes of one-crate, one-core work
-        # (ps5upload-engine, ps5upload-ava1) while the Tauri build later spends
-        # 3-5 min compiling tauri, wry and the rest before the app crate. Same
-        # command line Tauri runs (--bins --features tauri/custom-protocol
-        # --release --target), and on macOS the MACOSX_DEPLOYMENT_TARGET Tauri
-        # sets from bundle.macOS.minimumSystemVersion, so the Tauri build finds
-        # them fresh (checked on macOS with cargo -v: no dependency dirty). It
-        # cannot build the app itself: the app's build script needs the engine
-        # binary, and even once that exists the app's generate_context! needs
-        # client/dist, which only the Tauri build's beforeBuildCommand creates,
-        # so the app crate fails at once and --keep-going finishes the rest;
-        # the Tauri build below compiles the app as before. Nothing here
-        # reaches the engine build's environment, and what the pre-build
-        # leaves is reused only where cargo's fingerprints match, so no binary
-        # changes. It runs at lower priority so the engine build keeps the CPU.
-        run: |
-          (
-            cd ../client/src-tauri
-            if [ "$RUNNER_OS" = "macOS" ]; then
-              MACOSX_DEPLOYMENT_TARGET="$(node -p "require('./tauri.conf.json').bundle.macOS.minimumSystemVersion")"
-              export MACOSX_DEPLOYMENT_TARGET
-            fi
-            nice="$(command -v nice || true)"
-            ${nice:+$nice -n 10} cargo build --locked --release --target "$RUST_TARGET" \
-              --bins --features tauri/custom-protocol --keep-going
-          ) > "$RUNNER_TEMP/desktop-deps.log" 2>&1 &
-          deps=$!
-          cargo build --locked --release -p ps5upload-engine --target "$RUST_TARGET"
-          # Expected to exit non-zero (the app's build script, see above).
-          wait "$deps" || true
-          echo "desktop dependencies pre-built: $(grep -c ' Compiling ' "$RUNNER_TEMP/desktop-deps.log") crates"
+        # The engine and its RAR helper, with the desktop app's dependencies pre-built
+        # alongside (the script says why). release-cache.yml runs the same script on main,
+        # so this build reads its dependencies from the compile cache.
+        run: scripts/release/build-engine-release.sh
 
       - name: Verify engine binary in place
         shell: bash
@@ -401,15 +420,24 @@ jobs:
           target_root="engine/target/${RUST_TARGET}/release"
           if [ "$RUNNER_OS" = "Windows" ]; then
             test -s "$target_root/ps5upload-engine.exe"
-            ls -la "$target_root/ps5upload-engine.exe"
+            test -s "$target_root/ps5upload-unrar.exe"
+            ls -la "$target_root/ps5upload-engine.exe" "$target_root/ps5upload-unrar.exe"
           else
             test -s "$target_root/ps5upload-engine"
-            ls -la "$target_root/ps5upload-engine"
+            test -s "$target_root/ps5upload-unrar"
+            ls -la "$target_root/ps5upload-engine" "$target_root/ps5upload-unrar"
           fi
+          # The helper must not be a stub: it answers --version on the native runners
+          # (every leg but macOS x64, which is cross-built on Apple silicon and runs
+          # under Rosetta when present).
+          helper="$target_root/ps5upload-unrar"
+          [ "$RUNNER_OS" = "Windows" ] && helper="$helper.exe"
+          "$helper" --version || [ "$RUST_TARGET" = x86_64-apple-darwin ]
 
       # Windows signing (Azure Artifact Signing) — only when the secrets exist; otherwise
-      # releases ship unsigned exactly as before. The engine exe is signed here because the app
-      # embeds it; the app exe and the installer are signed by Tauri's signCommand below.
+      # releases ship unsigned exactly as before. The engine exe and the RAR helper exe are signed
+      # here because the app embeds them; the app exe and the installer are signed by Tauri's
+      # signCommand below.
       - name: Sign the engine (Windows, when signing is set up)
         if: runner.os == 'Windows' && env.WINDOWS_SIGNING == 'true'
         shell: pwsh
@@ -421,7 +449,9 @@ jobs:
           AZURE_SIGNING_ENDPOINT: ${{ secrets.AZURE_SIGNING_ENDPOINT }}
           AZURE_SIGNING_ACCOUNT: ${{ secrets.AZURE_SIGNING_ACCOUNT }}
           AZURE_SIGNING_PROFILE: ${{ secrets.AZURE_SIGNING_PROFILE }}
-        run: ./scripts/release/azure-sign.ps1 "engine/target/$env:RUST_TARGET/release/ps5upload-engine.exe"
+        run: |
+          ./scripts/release/azure-sign.ps1 "engine/target/$env:RUST_TARGET/release/ps5upload-engine.exe"
+          ./scripts/release/azure-sign.ps1 "engine/target/$env:RUST_TARGET/release/ps5upload-unrar.exe"
 
       - name: Diagnose linuxdeploy (Linux only)
         if: matrix.platform == 'linux'
@@ -486,6 +516,13 @@ jobs:
           else
             npx tauri build --target "$RUST_TARGET" --ci --verbose
           fi
+
+      - name: Compile cache stats
+        if: always()
+        shell: bash
+        run: |
+          sccache --show-stats || true
+          tail -n 20 "$RUNNER_TEMP/sccache.log" 2>/dev/null || true
 
       - name: Collect bundle artefacts
         shell: bash
@@ -568,11 +605,14 @@ jobs:
           # Ship the engine sidecar binary standalone too (it's also bundled
           # inside the app). Lets users run/inspect the engine on its own and
           # keeps a per-OS/arch engine artifact on every release.
+          # The RAR helper goes with it: the engine looks for it next to its own binary.
           eng_root="engine/target/${RUST_TARGET}/release"
           if [ "$PLATFORM" = windows ]; then
             cp -v "$eng_root/ps5upload-engine.exe" "$dist_abs/ps5upload-engine.exe"
+            cp -v "$eng_root/ps5upload-unrar.exe" "$dist_abs/ps5upload-unrar.exe"
           else
             cp -v "$eng_root/ps5upload-engine" "$dist_abs/ps5upload-engine"
+            cp -v "$eng_root/ps5upload-unrar" "$dist_abs/ps5upload-unrar"
           fi
           ls -la "$dist_abs"
 
@@ -619,6 +659,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          submodules: true
           ref: ${{ github.event.inputs.tag || github.ref_name }}
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
@@ -771,6 +812,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          submodules: true
           ref: ${{ github.event.inputs.tag || github.ref_name }}
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
@@ -864,6 +906,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          submodules: true
           ref: ${{ github.event.inputs.tag || github.ref_name }}
 
       - name: Resolve tag
@@ -937,6 +980,13 @@ jobs:
             ext=""; [ "${f##*.}" = exe ] && ext=".exe"
             cp -v "$f" "release/ps5upload-engine-${TAG_VERSION}-${pa}${ext}"
           done
+          # Its RAR helper (ps5upload-unrar), to keep next to the standalone engine.
+          for f in artifacts/ps5upload-*/ps5upload-unrar artifacts/ps5upload-*/ps5upload-unrar.exe; do
+            [ -f "$f" ] || continue
+            pa="$(basename "$(dirname "$f")")"; pa="${pa#ps5upload-}"
+            ext=""; [ "${f##*.}" = exe ] && ext=".exe"
+            cp -v "$f" "release/ps5upload-unrar-${TAG_VERSION}-${pa}${ext}"
+          done
           if [ -f artifacts/ps5upload-payload/ps5upload.elf ]; then
             cp -v artifacts/ps5upload-payload/ps5upload.elf \
               "release/ps5upload-${TAG_VERSION}.elf"
@@ -986,6 +1036,12 @@ jobs:
             "ps5upload-engine-${TAG_VERSION}-linux-arm64" \
             "ps5upload-engine-${TAG_VERSION}-windows-x64.exe" \
             "ps5upload-engine-${TAG_VERSION}-windows-arm64.exe" \
+            "ps5upload-unrar-${TAG_VERSION}-macos-arm64" \
+            "ps5upload-unrar-${TAG_VERSION}-macos-x64" \
+            "ps5upload-unrar-${TAG_VERSION}-linux-x64" \
+            "ps5upload-unrar-${TAG_VERSION}-linux-arm64" \
+            "ps5upload-unrar-${TAG_VERSION}-windows-x64.exe" \
+            "ps5upload-unrar-${TAG_VERSION}-windows-arm64.exe" \
             "ps5upload-${TAG_VERSION}.elf"; do
             if [ ! -s "release/$name" ]; then
               echo "::error::release asset missing or empty: $name"
@@ -1017,8 +1073,27 @@ jobs:
           sudo systemctl stop clamav-freshclam 2>/dev/null || true
           for i in 1 2 3; do sudo freshclam --quiet && break; sleep 20; done
           clamscan --version
-          clamscan --recursive --infected --scan-archive=yes --max-filesize=4000M \
-            --max-scansize=4000M release/
+          # One clamscan per core over a size-balanced share of the files: a single clamscan is
+          # single-threaded and took 5 of create-release's 6 min (28 files, 2.6 GiB, v9.4.1).
+          # Each process loads the signatures (~10 s, ~1.5 GB), so it is one per core, not one
+          # per file. Any hit or error (exit 1 or 2) in any share still fails the step.
+          n="$(nproc)"
+          shares="$(mktemp -d)"
+          i=0
+          find release -type f -exec du -k {} + | sort -rn | cut -f2- | while IFS= read -r f; do
+            printf '%s\0' "$f" >> "$shares/$((i % n))"
+            i=$((i + 1))
+          done
+          pids=()
+          for share in "$shares"/*; do
+            xargs -0 clamscan --infected --scan-archive=yes --max-filesize=4000M \
+              --max-scansize=4000M < "$share" > "$share.log" 2>&1 &
+            pids+=("$!")
+          done
+          rc=0
+          for pid in "${pids[@]}"; do wait "$pid" || rc=1; done
+          cat "$shares"/*.log
+          exit "$rc"
 
       # A signed record that each file was built by this workflow from this tag, so anyone can
       # check a download is ours and untouched: gh attestation verify <file> -R phantomptr/ps5upload

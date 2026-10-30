@@ -249,8 +249,8 @@ describe("GameCard archive source", () => {
     source,
     onSourceTyped: () => {},
     onCheck: () => {},
-    onBrowseFolder: () => {},
-    onBrowseImage: () => {},
+    onAdd: () => {},
+    onScanFolder: () => {},
     onRemotePick: () => {},
     canBrowse: true,
     inspection: null,
@@ -282,6 +282,24 @@ describe("GameCard archive source", () => {
       </MemoryRouter>,
     );
     expect(folder).not.toContain("unpacked");
+  });
+
+  it("is the one place games are added, with the same buttons as Upload & Install", () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <GameCard {...props("")} />
+      </MemoryRouter>,
+    );
+    expect(html).toContain("Choose file");
+    expect(html).toContain("Choose folder");
+    expect(html).toContain("Add games from a folder…");
+    expect(html).toContain("Several games, or a folder of games, go into the queue");
+    const locked = renderToStaticMarkup(
+      <MemoryRouter>
+        <GameCard {...props("/games/g")} locked />
+      </MemoryRouter>,
+    );
+    expect(locked).toContain("games picked now wait in the queue");
   });
 });
 
@@ -327,28 +345,43 @@ describe("QueueCard adding", () => {
       <QueueCard
         items={items}
         running={false}
-        onScanFolder={noop}
-        onPickFolders={noop}
-        onPickFiles={noop}
+        onOpenUpload={noop}
         onStart={noop}
         onStop={noop}
         onRemove={noop}
+        onUpdate={noop}
+        canInstall
+        host="192.168.1.20"
         onMove={noop}
         onClearFinished={noop}
       />,
     );
 
-  it("adds a folder of games, several game folders, or several images and archives", () => {
-    const html = card();
-    expect(html).toContain("Add games from a folder…");
-    expect(html).toContain("Pick game folders…");
-    expect(html).toContain("Pick packages, images or archives…");
+  const waiting = (status: ConvertItem["status"] = "pending"): ConvertItem => ({
+    id: "w",
+    source: "/games/w",
+    compression: "balanced",
+    then: "stream",
+    host: "192.168.1.20",
+    status,
   });
 
-  it("takes what to make and what to do after from ③, with no second set of choices", () => {
-    const html = card();
+  it("is not shown while nothing is queued: games are added under ①", () => {
+    expect(card()).toBe("");
+  });
+
+  it("has no add buttons and no second set of choices of its own", () => {
+    const html = card([waiting()]);
+    expect(html).not.toContain("Add games from a folder…");
+    expect(html).not.toContain("Choose file");
     expect(html).not.toContain("<select");
-    expect(html).toContain("as chosen under ③");
+    expect(html).toContain("⑤ Queue");
+    expect(html).toContain("Add more under ①");
+  });
+
+  it("offers Upload & Install once a made game has been handed to its queue", () => {
+    expect(card([waiting()])).not.toContain("Open Upload &amp; Install");
+    expect(card([waiting("handed")])).toContain("Open Upload &amp; Install");
   });
 
   it("says which file each queued game becomes", () => {
@@ -371,5 +404,48 @@ describe("QueueCard adding", () => {
     expect(html).toContain(".ffpfsc");
     expect(html).toContain(".exfat");
     expect(html).toMatch(/data-testid="cq-ext"[^>]*>folder</);
+  });
+});
+
+describe("queued game choices (#518)", () => {
+  it("offers what each source can become", async () => {
+    const { kindsFor } = await import("./QueueItemOptions");
+    expect(kindsFor("/games/Astro Bot")).toEqual(["pkg", "image"]);
+    expect(kindsFor("/dl/game.exfat")).toEqual(["pkg", "image", "folder"]);
+    expect(kindsFor("/dl/game.zip")).toEqual(["pkg", "image"]);
+    expect(kindsFor("/dl/notes.txt")).toEqual(["pkg"]);
+  });
+
+  it("keeps an image's format and moves the after-step to what the new kind can do", async () => {
+    const { changeForKind } = await import("./QueueItemOptions");
+    const item = {
+      id: "c1",
+      source: "/games/x",
+      compression: "zlib",
+      build: { kind: "pkg" },
+      then: "stream",
+      host: "10.0.0.2",
+      status: "pending",
+    } as unknown as import("../../state/convertQueue").ConvertItem;
+    expect(changeForKind(item, "image", true, null)).toEqual({
+      build: { kind: "image", format: "exfat", compress: false },
+      then: "upload",
+      host: "10.0.0.2",
+    });
+    expect(changeForKind(item, "folder", true, null)).toEqual({ build: { kind: "folder" }, then: "keep", host: null });
+  });
+});
+
+describe("convert queue update", () => {
+  it("changes a waiting game and leaves a running one alone", async () => {
+    const { useConvertQueue } = await import("../../state/convertQueue");
+    const q = useConvertQueue.getState();
+    q.add({ source: "/games/a", compression: "zlib" as never, build: { kind: "pkg" }, then: "keep", host: null });
+    const all = useConvertQueue.getState().items;
+    const id = all[all.length - 1].id;
+    expect(useConvertQueue.getState().update(id, { then: "stream", host: "h" })).toBe(true);
+    expect(useConvertQueue.getState().items.find((i) => i.id === id)?.then).toBe("stream");
+    useConvertQueue.setState({ items: useConvertQueue.getState().items.map((i) => (i.id === id ? { ...i, status: "running" } : i)) });
+    expect(useConvertQueue.getState().update(id, { then: "keep" })).toBe(false);
   });
 });

@@ -111,7 +111,7 @@ export function SendToPs5({
     }
     const q = useUploadQueueStore.getState();
     const id = q.add(collectionSendItem(game, loc, plan));
-    void q.startHost(host, { onlyIds: [id] });
+    q.startAdded(host, [id]);
   };
 
   return (
@@ -250,8 +250,8 @@ export function SendToPs5({
           onOpen={() =>
             navigate(
               how === "image" && activity?.phase === "building"
-                ? "/convert"
-                : queueLinkFor(host, connectedHost, false),
+                ? "/workshop"
+                : queueLinkFor(host, connectedHost),
             )
           }
         />

@@ -20,7 +20,7 @@ use ps5upload_core::ddp::Power;
 /// `host:9120` — the AVA1 default port. The lab can override an address on
 /// its own Pool; a process environment variable cannot redirect engine jobs.
 pub fn ava1_addr(console: &str) -> String {
-    format!("{}:{}", host_of(console), ava1::gen::DEFAULT_PORT)
+    format!("{}:{}", host_of(console), crate::gen::DEFAULT_PORT)
 }
 
 /// The console string without its port (the pool's key).
@@ -43,6 +43,17 @@ pub(crate) fn host_of(console: &str) -> String {
 /// all) before the transfer fails with a clear reason. The console says BUSY while it recovers a job's files or
 /// has no room for another job; it is never a verdict on the transfer.
 pub(crate) const DEFAULT_BUSY_TRIES: u32 = 12;
+
+/// Told the console's address each time a new session to it opens (on its own thread). The
+/// engine says who it is there: a console lists every device by its sessions, and one that never
+/// said hello shows as an app from before 8.0.0 even when it runs the newest version.
+type SessionHook = Box<dyn Fn(&str) + Send + Sync>;
+static ON_NEW_SESSION: std::sync::OnceLock<SessionHook> = std::sync::OnceLock::new();
+
+/// Sets the new-session hook (once per process; a later call is ignored).
+pub fn on_new_session(f: impl Fn(&str) + Send + Sync + 'static) {
+    let _ = ON_NEW_SESSION.set(Box::new(f));
+}
 
 pub struct Pool {
     dir: PathBuf,
@@ -738,7 +749,7 @@ impl Pool {
                 }
                 Ok((s, _)) => s.close().await, // already trusted: the cached path below
                 Err(Ava1Error::Refused { code, message })
-                    if code == ava1::gen::ERR_PAIRING_CLOSED =>
+                    if code == crate::gen::ERR_PAIRING_CLOSED =>
                 {
                     return Ok(if message.contains("blocked") {
                         Pairing::Blocked
@@ -820,7 +831,8 @@ impl Pool {
             Ok(()) => Ok(Pairing::Paired),
             Err(Ava1Error::NotPaired) => self.pairing_status(console).await,
             Err(Ava1Error::Refused { code, .. })
-                if code == ava1::gen::ERR_PAIRING_CODE || code == ava1::gen::ERR_PAIRING_CLOSED =>
+                if code == crate::gen::ERR_PAIRING_CODE
+                    || code == crate::gen::ERR_PAIRING_CLOSED =>
             {
                 match self.pairing_status(console).await? {
                     Pairing::Code { peer_name, .. } => Ok(Pairing::WrongCode { peer_name }),
@@ -972,6 +984,10 @@ impl Pool {
                 },
             );
             drop(map);
+            if let Some(hook) = ON_NEW_SESSION.get() {
+                let console = console.to_string();
+                std::thread::spawn(move || hook(&console));
+            }
             // Count how often this session ends on its own, so a second engine on the same
             // identity (which the console resolves by ending the older session) is named.
             // Polls through a `Weak`: a watcher must not keep a session (and its console

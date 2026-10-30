@@ -54,7 +54,7 @@ type StepState = "idle" | "busy" | "ok" | "fail" | "rest";
  *   1. Enter PS5 IP, probe the loader port (:9021).
  *   2. Send the payload ELF; poll the helper (:9120) until it
  *      answers so we know the payload actually booted.
- *   3. Unlock "Go to Upload".
+ *   3. Unlock "Open Send to PS5".
  *
  * Progressive disclosure: each step only renders once its predecessor
  * is `ok`. That keeps the screen focused on "what do I do next?"
@@ -596,10 +596,11 @@ export default function ConnectionScreen() {
     if (!(await guardReplace(target))) return;
     setTransientStep2(null);
     setTransientStep2Msg(null);
+    const replacing = useConnectionStore.getState().payloadVersion;
     // Version and kernel are stale from the moment Send is pressed: the run turns the
     // "rechecking…" badge on, and writes the new helper's own figures when it answers.
     setStatus({ payloadVersion: null, ps5Kernel: null });
-    await sendHelperTo(target, tr);
+    await sendHelperTo(target, tr, replacing);
   }
 
   return (
@@ -734,6 +735,10 @@ export default function ConnectionScreen() {
           </p>
         </StepCard>
 
+        {/* Other payloads (kstuff, etaHEN, any .elf) are sent from Payloads, not
+            here; users still look for that button on this screen, so point at it. */}
+        <SendPayloadPointer />
+
         {step1 === "ok" && (
           <StepCard
             index={2}
@@ -803,18 +808,18 @@ export default function ConnectionScreen() {
             <AllowPairing host={host.trim()} />
             <p className="mb-4 text-sm leading-relaxed text-[var(--color-muted)]">
               {tr(
-                "connection_step3_hint_v2",
+                "connection_step3_hint_v3",
                 undefined,
-                "Go to Upload and drop in a game folder, a .exfat image or a .ffpkg image. Uploaded images and folders are listed in Games → Game files, where Mount puts them on the PS5's home screen. To install .pkg packages, use Install Package.",
+                "Open Upload & Install and drop in a game folder, a .exfat or .ffpkg image, or a .pkg package. Images and folders you send are listed in the game's page in Games, where Mount puts them on the PS5's home screen.",
               )}
             </p>
             <Button
               variant="primary"
               size="md"
               rightIcon={<ArrowRight size={14} className="rtl:rotate-180" />}
-              onClick={() => navigate("/upload")}
+              onClick={() => navigate("/send")}
             >
-              {tr("connection_go_upload", undefined, "Go to Upload")}
+              {tr("connection_go_upload_v2", undefined, "Open Upload & Install")}
             </Button>
           </StepCard>
         )}
@@ -1317,6 +1322,39 @@ function CompanionStrip({ host }: { host: string }) {
   );
 }
 
+/** Where "Send payload" went. It used to live on this screen; it is now a tab of Payloads &
+ *  processes, and users who look for it here found only "Send helper" (a Discord report:
+ *  "there is no send payload button in Connection"). Always shown, not dismissible: it is
+ *  one line, and the people who need it are the ones who have not found it yet. The
+ *  browser build has the tab too (it forwards the ELF through the engine). */
+export function SendPayloadPointer() {
+  const tr = useTr();
+  const navigate = useNavigate();
+  return (
+    <div
+      className="flex flex-wrap items-center gap-2 rounded-[var(--radius-card)] border border-[var(--glass-edge)] bg-[var(--color-surface)] p-3 text-xs"
+      data-testid="connection-send-payload-pointer"
+    >
+      <Send size={14} className="shrink-0 text-[var(--color-accent)]" aria-hidden />
+      <span className="min-w-[14rem] flex-1 text-[var(--color-muted)]">
+        {tr(
+          "connection_send_payload_moved",
+          undefined,
+          "Sending another payload (kstuff, etaHEN, any .elf)? That is in Payloads → Send payload. This screen sends only the PS5Upload helper.",
+        )}
+      </span>
+      <Button
+        variant="secondary"
+        size="sm"
+        rightIcon={<ArrowRight size={11} className="rtl:rotate-180" />}
+        onClick={() => navigate("/payloads?tab=send")}
+      >
+        {tr("connection_send_payload_open", undefined, "Open Send payload")}
+      </Button>
+    </div>
+  );
+}
+
 /**
  * Suggestion banner pointing the user at the Payloads tab to install
  * additional homebrew (kstuff, ShadowMount+, etc.). Dismissible —
@@ -1652,7 +1690,7 @@ function VersionBlock({ onResend }: { onResend?: () => void }) {
               )}
             </p>
           </div>
-          {onResend && isTauriEnv() && (
+          {onResend && (
             <Button
               variant="secondary"
               size="sm"

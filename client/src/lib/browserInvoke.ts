@@ -487,12 +487,14 @@ export async function browserInvoke<T>(
       return getJson<T>(addrUrl("/api/ps5/hw/info", args["addr"]));
 
     case "ps5_hw_temps": {
-      const { addr, extended } = args as {
+      const { addr, extended, clocks } = args as {
         addr?: string | null;
         extended?: boolean | null;
+        clocks?: boolean | null;
       };
       let url = addrUrl("/api/ps5/hw/temps", addr);
       if (extended) url += `${url.includes("?") ? "&" : "?"}extended=1`;
+      if (clocks) url += `${url.includes("?") ? "&" : "?"}clocks=1`;
       return getJson<T>(url);
     }
 
@@ -744,6 +746,18 @@ export async function browserInvoke<T>(
         id?: string | null;
       };
       return postJson<T>("/api/profile/activate", { addr, slot, id });
+    }
+
+    case "profile_np_state":
+    case "profile_np_backup":
+    case "profile_np_restore": {
+      const { addr, slot, uid } = args["req"] as {
+        addr?: string | null;
+        slot?: number;
+        uid?: number;
+      };
+      const route = cmd.slice("profile_np_".length);
+      return postJson<T>(`/api/profile/np/${route}`, { addr, slot: slot ?? 0, uid: uid ?? 0 });
     }
 
     // ── Jobs ────────────────────────────────────────────────────────────────

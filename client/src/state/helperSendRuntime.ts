@@ -3,6 +3,7 @@ import { PS5_LOADER_PORT } from "../lib/addr";
 import { isNotPairedError, reportIfNotPaired } from "../lib/consoleSession";
 import { LISTENER_LOADER_HINT, STUCK_LOADER_MESSAGE, waitForLoader } from "../lib/elfldrGuard";
 import { useConnectionStore } from "./connection";
+import { updateHelperCopiesAfterSend } from "./helperStoredCopiesRuntime";
 import { clearHelperStopped } from "./helperStopped";
 import {
   helperSendFor,
@@ -15,6 +16,7 @@ import { invoke } from "../lib/invokeLogged";
 import { sendHelperOnce, sendInFlight, sentAgoMs } from "../lib/helperSendGate";
 import { isTauriEnv } from "../lib/tauriEnv";
 import { trStatic } from "../lib/trStatic";
+import { getAppVersion } from "../lib/appVersion";
 
 /** The web UI has no helper file to send and no socket to the console: the engine sends its
  *  own bundled helper, stamped with its key, so it is paired by the send (#415). */
@@ -52,16 +54,22 @@ const TIMEOUT_EN =
  *
  *  The connection store describes the selected console only, so a send that ends after the
  *  user moved to another console never labels that one. */
-export function sendHelperTo(
+export async function sendHelperTo(
   host: string,
   tr: Translator,
+  /** The version of the helper this send replaces, when the caller already cleared it from the
+   *  store; by default the store's. Until the new helper answers, that one may still answer. */
+  replacing?: string | null,
 ): Promise<HelperSendResult> {
   const target = host.trim();
   const conn = () => useConnectionStore.getState();
+  const old =
+    replacing !== undefined ? replacing : conn().payloadStatusHost === target ? conn().payloadVersion : null;
+  const app = await getAppVersion().catch(() => null);
   // Sending is the explicit "I want the helper": a "stopped by you" mark goes, and the
   // reconnect loop looks after this console again (#471).
   clearHelperStopped(target);
-  return runHelperSend(
+  const result = await runHelperSend(
     target,
     {
       // A send to this console already under way (the automatic redeploy, or this button a
@@ -81,6 +89,9 @@ export function sendHelperTo(
         );
       },
       check: payloadCheck,
+      // The old helper answers until the new one takes over: only a different version (or this
+      // app's own) is the new one. Same version as before: nothing tells them apart, any answer.
+      isNew: (p) => !old || old === app || !p.payloadVersion || p.payloadVersion !== old,
       isNotPaired: isNotPairedError,
       sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
       setProbing: (h, on) => {
@@ -148,6 +159,13 @@ export function sendHelperTo(
           : tr("pairing_title", undefined, "Pair with your PS5"),
     },
   );
+  // The send replaced the helper in memory only; an autoloader starts its stored copy at the
+  // next boot. Update those copies in the background: whatever happens there, this send
+  // stands (#540, #541).
+  if (result === "ok") {
+    void updateHelperCopiesAfterSend(target, tr).catch(() => {});
+  }
+  return result;
 }
 
 /** sendHelperTo for a flow that goes on once the helper is up (Quick bring-up, the setup

@@ -1,5 +1,12 @@
 /** Additional Files picks wait behind the console's current copy. Requests keep their host,
- * destination and conflict decisions across navigation/restart; failures pause the queue. */
+ * destination and conflict decisions across navigation/restart; failures pause the queue.
+ *
+ * Start rule (#536): this queue never runs a new pick ahead of older ones. It is strictly
+ * first-in-first-out, so a drop either starts the whole line from the top (nothing paused)
+ * or joins the line behind a pause and runs, in order, on Resume. It does not follow the
+ * console queue's "Start the queue when you add something" setting on purpose: a drop into
+ * a Files folder is a file-manager copy the person is watching, not a queued send, and it
+ * has no "Add to queue" for later. */
 import { create } from "zustand";
 import { hostOf } from "../lib/addr";
 import { safeGetItem, safeSetItem } from "../lib/safeStorage";
@@ -15,23 +22,29 @@ export interface PendingFsUpload {
 interface Slot { items: PendingFsUpload[]; paused: boolean; running: boolean; error: string | null }
 const IDLE: Slot = { items: [], paused: false, running: false, error: null };
 const KEY = "ps5upload.fsUploadQueue.v1";
+/** "Paused" holds back picks that are WAITING. With nothing waiting there is nothing to hold:
+ *  a pause (a failure, a Cancel, a restart) never outlives the picks it held, so the next drop
+ *  into an empty queue starts at once instead of sitting behind a Resume nobody asked for. */
+function settle(s: Slot): Slot {
+  return s.items.length === 0 ? { ...s, paused: false, error: null } : s;
+}
 function load(): Record<string, Slot> {
   try {
     const saved = JSON.parse(safeGetItem(KEY) ?? "{}") as Record<string, Slot>;
-    return Object.fromEntries(Object.entries(saved).filter(([, s]) => s && Array.isArray(s.items)).map(([host, s]) => [host, {
+    return Object.fromEntries(Object.entries(saved).filter(([, s]) => s && Array.isArray(s.items)).map(([host, s]) => [host, settle({
       ...s,
       // The transfer store restores an in-flight pick as a resumable stopped run.
       // Leave its progress/resume there instead of sending the original pick twice.
       items: s.items.filter((item) => item.id !== fsUploadForHost(useFsUploadStore.getState(), host).stopped?.queueId),
       running: false, paused: true,
-    }]));
+    })]));
   } catch { return {}; }
 }
 export const useFsUploadQueue = create<{ byHost: Record<string, Slot> }>(() => ({ byHost: load() }));
 export const fsUploadQueueFor = (host: string) => useFsUploadQueue.getState().byHost[hostOf(host)] ?? IDLE;
 function patch(host: string, p: Partial<Slot>) {
   const key = hostOf(host);
-  useFsUploadQueue.setState((s) => ({ byHost: { ...s.byHost, [key]: { ...(s.byHost[key] ?? IDLE), ...p } } }));
+  useFsUploadQueue.setState((s) => ({ byHost: { ...s.byHost, [key]: settle({ ...(s.byHost[key] ?? IDLE), ...p }) } }));
   safeSetItem(KEY, JSON.stringify(useFsUploadQueue.getState().byHost));
 }
 function names(req: FsUploadRequest): string[] {

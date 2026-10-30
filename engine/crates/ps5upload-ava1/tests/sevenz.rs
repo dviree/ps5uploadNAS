@@ -9,7 +9,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ava1::gen;
 use ava1::host::FolderHost;
 use ava1::keys::Identity;
 use ava1::manifest::Manifest;
@@ -19,6 +18,7 @@ use ava1::server::{self, ServerCtx};
 use ava1::session::RpcReply;
 use ava1::wire::Message;
 use ava1_chaos::{ChaosConfig, ChaosProxy};
+use ps5upload_ava1::gen;
 use ps5upload_ava1::seq::SevenzSource;
 use ps5upload_ava1::upload::{self, UploadFailure};
 use ps5upload_ava1::Pool;
@@ -246,18 +246,18 @@ fn resume_pass(
         .unwrap_or(Restart::START);
     let mut sink = Collect::default();
     let cancel = AtomicBool::new(false);
-    src.pass(
-        restart,
-        &mut |p, _| {
-            if done.contains(&p) {
-                Keep::Skip
-            } else {
-                Keep::All
-            }
-        },
-        &mut sink,
-        &cancel,
-    )?;
+    let mut want = |p: &str, _| {
+        if done.contains(&p) {
+            Keep::Skip
+        } else {
+            Keep::All
+        }
+    };
+    // What the sender reports as the skip's total must be what the pass then discards.
+    let predicted = SeqSource::bytes_to_skip(src, restart, &mut want);
+    let before = src.bytes_skipped();
+    src.pass(restart, &mut want, &mut sink, &cancel)?;
+    assert_eq!(predicted, Some(src.bytes_skipped() - before));
     Ok(sink.files)
 }
 
@@ -563,8 +563,18 @@ async fn resume_restarts_the_folder_and_sends_only_missing_files() {
         "a finished folder was decoded again ({} opened, {need} unfinished at the cut)",
         src.folders_opened()
     );
+    // A cut that lands exactly where a folder ends leaves the next folder to start fresh, with
+    // nothing to skip; anywhere else the restarted folder has a done prefix to decode past.
+    let at_folder_end = spec
+        .folders
+        .iter()
+        .scan(0u64, |sum, f| {
+            *sum += f.iter().map(|(_, data)| data.len() as u64).sum::<u64>();
+            Some(*sum)
+        })
+        .any(|end| end == fin1);
     assert!(
-        src.bytes_skipped() > 0,
+        at_folder_end || src.bytes_skipped() > 0,
         "the restart folder's done prefix was discarded"
     );
 }

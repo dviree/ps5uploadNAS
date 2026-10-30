@@ -1,6 +1,8 @@
-// Convert a game folder or mount image (.exfat / .ffpkg) into an installable debug FPKG, and
-// optionally install it, as four guided cards: ① Game, ② What to make, ③ Options (the
-// package's or the image's), ④ Build & install.
+// Change a game's format before it goes to the PS5: a game folder, image or archive becomes a
+// package, a game image or a folder, as guided cards in one column: ① Game (the one place games
+// are added: one is checked there, several queue), ② What to make, ③ Options, ④ Build &
+// install, ⑤ Queue. Sending a game as it is belongs to Upload & Install (/send); a made game
+// that should install or upload is handed to that screen's queue, never sent from here.
 //
 // The work runs in the engine (desktop, Docker or Android); the console is only involved at the
 // install. `state/fpkgConversion` drives the run; this screen holds the source, its check and the
@@ -9,16 +11,16 @@
 import { useMakeWay } from "../../lib/useMakeWay";
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 
-import { PackagePlus } from "lucide-react";
+import { FolderSearch, HardDrive, Hammer, Send } from "lucide-react";
 
 import { fpkg, type AmprLz4Options, type FpkgEstimates, type FpkgInspection } from "../../api/fpkg";
 import { appLaunch } from "../../api/ps5";
-import { Callout, Card, PageHeader } from "../../components";
+import { Button, Callout, Card, PageHeader } from "../../components";
 import { FakeGameFirmwareNotice } from "../../components/FakeGameFirmwareNotice";
 import { hostOf, transferAddr } from "../../lib/addr";
 import { createLatest } from "../../lib/latest";
 import { openLocalPath } from "../../lib/openLocalPath";
-import { pickPath, pickPaths } from "../../lib/pickPath";
+import { pickPath } from "../../lib/pickPath";
 import { isIOS } from "../../lib/platform";
 import { isTauriEnv } from "../../lib/tauriEnv";
 import { engineIsOnThisDevice } from "../../state/engine";
@@ -35,17 +37,20 @@ import {
 } from "../../state/fpkgConversion";
 import { useUploadStore } from "../../state/upload";
 import { DEFAULT_IMAGE_SUBPATH } from "../../lib/imageUpload";
-import { useLocation, useNavigate } from "react-router";
+import { useLocation, useNavigate, useSearchParams } from "react-router";
 import { useTr } from "../../state/lang";
 import { pickLocalPath } from "../../state/localPicker";
 import { useTaskStore } from "../../state/tasks";
 import { GameCard } from "./GameCard";
+import { ImageBrowser } from "../LocalImage/ImageBrowser";
+import { isDriveImage, LocalDrivesCard, useLocalDrives } from "../LocalImage/LocalDrives";
+import { BROWSE_IMAGE_EXTENSIONS } from "../LocalImage/imageTypes";
+import { isRemotePath } from "../../lib/remotePath";
 import { MakeCard } from "./MakeCard";
 import { OptionsCard } from "./OptionsCard";
 import { RunCard, lz4Active, type Lz4Choice } from "./RunCard";
 import { SwapJournals } from "./SwapJournals";
 import { QueueCard } from "./QueueCard";
-import { useRunSide } from "./runPlacement";
 import { buildExtension, thenFor, useConvertQueue, type ConvertBuild, type ConvertThen } from "../../state/convertQueue";
 import { gameFoldersAmong, gamesInFolder } from "../../lib/folderScan";
 import { usePackageViewer } from "../../state/packageViewer";
@@ -63,9 +68,37 @@ function dirOf(path: string): string {
   return i > 0 ? path.slice(0, i) : path;
 }
 
+/** Whether Look Inside can open `path`: a game image or package on the engine's own disk
+ *  (the engine reads it in place), not one on a saved server or on the PS5. */
+function canLookInside(path: string): boolean {
+  const p = path.trim().toLowerCase();
+  return (
+    !p.startsWith("ps5://") && !isRemotePath(path) && BROWSE_IMAGE_EXTENSIONS.some((ext) => p.endsWith(`.${ext}`))
+  );
+}
+
+/**
+ * Workshop: one game source, and everything that can be done with it on this computer —
+ * convert it (a package, an image, a folder), look inside an image or package and write an
+ * edited copy, or open an image as a drive (macOS and Linux).
+ *
+ * Convert Games and Game images were two screens that both began by choosing an image. Now
+ * the source is chosen once (① Game); Look Inside swaps the converting steps for the image's
+ * files (`?view=inside`), and Close brings them back. Old /convert and /local-image links land
+ * here, the latter on Look Inside.
+ */
 /** `headerRight`: Convert Games' tabs (screens/Convert). */
-export default function FpkgConvertScreen({ headerRight }: { headerRight?: ReactNode } = {}) {
+export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNode } = {}) {
   const tr = useTr();
+  const [params, setParams] = useSearchParams();
+  const inside = params.get("view") === "inside";
+  const setInside = (on: boolean) => {
+    const next = new URLSearchParams(params);
+    if (on) next.set("view", "inside");
+    else next.delete("view");
+    setParams(next);
+  };
+  const drives = useLocalDrives();
   const host = useConnectionStore((s) => s.host) ?? "";
   const profiles = useRosterStore((s) => s.profiles);
   const payloadUp = useConnectionStore((s) => s.payloadStatus === "up");
@@ -92,10 +125,6 @@ export default function FpkgConvertScreen({ headerRight }: { headerRight?: React
   const finishReplace = useFpkgConversion((s) => s.finishReplace);
   const queueItems = useConvertQueue((s) => s.items);
   const queueRunning = useConvertQueue((s) => s.running);
-  const stepsRef = useRef<HTMLDivElement>(null);
-  const optionsRef = useRef<HTMLDivElement>(null);
-  const runRef = useRef<HTMLDivElement>(null);
-  const runSide = useRunSide(stepsRef, optionsRef, runRef);
   // ③'s one choice of what happens after converting, for Convert and the queue alike.
   const [thenChoice, setThen] = useState<ConvertThen>("keep");
   const [deleteAfter, setDeleteAfter] = useState(false);
@@ -296,34 +325,40 @@ export default function FpkgConvertScreen({ headerRight }: { headerRight?: React
     if (disarm.current) clearTimeout(disarm.current);
   }, []);
 
-  const browse = useCallback(
-    async (mode: "file" | "folder") => {
-      try {
-        const title =
-          mode === "folder"
-            ? tr("fpkg.pickFolder", undefined, "Choose the game folder")
-            : tr("fpkg.pickImage", undefined, "Choose a game image or archive");
-        const picked = !isTauriEnv()
-          ? await pickLocalPath({ mode, title })
-          : await pickPath({
-              mode,
-              title,
-              filters:
-                mode === "file" ? [{ name: "Game image, package or archive", extensions: ["exfat", "ffpkg", "ffpfs", "ffpfsc", "pkg", "zip", "7z", "rar"] }] : undefined,
-            });
-        if (picked) chooseSource(picked);
-      } catch {
-        setError(
-          tr(
-            "fpkg.noPicker",
-            undefined,
-            "This build cannot browse this machine — type a path the engine can see.",
-          ),
-        );
-      }
-    },
-    [chooseSource, tr],
-  );
+  /** Games picked under ①: one becomes the game checked there, several go into the queue. While
+   *  a game is being made, ① cannot change, so even one picked game waits in the queue. */
+  const addSources = (sources: { path: string; isDir: boolean }[], notGames = 0) => {
+    if (sources.length === 0) {
+      if (notGames) queueAll([], notGames);
+      return;
+    }
+    if (sources.length === 1 && notGames === 0 && useFpkgConversion.getState().pipeline.phase !== "running") {
+      chooseSource(sources[0].path);
+      return;
+    }
+    queueAll(sources, notGames);
+  };
+  /** Picked folders: the ones that are games (several picked at once are checked first). */
+  const addFolders = async (folders: { path: string; isDir: boolean }[]) => {
+    if (folders.length === 1) {
+      addSources(folders);
+      return;
+    }
+    const { games, skipped } = await gameFoldersAmong(folders.map((f) => f.path));
+    addSources(
+      games.map((path) => ({ path, isDir: true })),
+      skipped,
+    );
+  };
+  /** "Add games from a folder…": the games in it, or the folder when it is one. */
+  const scanFolder = async (folder: string) => {
+    try {
+      const found = await gamesInFolder(folder);
+      addSources(found.sources, found.skipped);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
 
   /** A dump on the console, read in place over its FTP server. */
   const browseConsole = useCallback(async () => {
@@ -485,18 +520,113 @@ export default function FpkgConvertScreen({ headerRight }: { headerRight?: React
       }
     : undefined;
 
+  // What else this source can be, besides converted: looked inside, or opened as a drive.
+  const lookable = !locked && canLookInside(source);
+  const mountable = drives.canMount && !locked && isDriveImage(source) && !source.startsWith("ps5://") && !isRemotePath(source);
+  const tools =
+    lookable || mountable ? (
+      <div className="flex flex-wrap gap-2 border-t border-[var(--color-border)] pt-3">
+        {lookable && !inside && (
+          <Button size="sm" variant="secondary" leftIcon={<FolderSearch size={14} />} onClick={() => setInside(true)}>
+            {tr("workshop_look_inside", undefined, "Look Inside")}
+          </Button>
+        )}
+        {mountable && (
+          <Button
+            size="sm"
+            variant="secondary"
+            leftIcon={<HardDrive size={14} />}
+            disabled={drives.busy}
+            onClick={() => void drives.open(source.trim())}
+          >
+            {tr("workshop_open_as_drive", undefined, "Open as a Drive")}
+          </Button>
+        )}
+      </div>
+    ) : undefined;
+
+  const gameCard = (
+    <GameCard
+      source={source}
+      onSourceTyped={(v) => {
+        if (locked) return;
+        reset();
+        // The old check belongs to the old path: drop it until this one is checked.
+        latest.current.invalidate();
+        setInspection(null);
+        setEstimates(null);
+        setChecking(false);
+        setSource(v);
+        setPassword("");
+      }}
+      onCheck={() => void check(source)}
+      onAdd={(picked) => {
+        const folders = picked.filter((x) => x.isDir);
+        if (folders.length) void addFolders(folders);
+        else addSources(picked);
+      }}
+      onScanFolder={(folder) => void scanFolder(folder)}
+      onRemotePick={(path, isDir) => addSources([{ path, isDir }])}
+      onPickError={setError}
+      onBrowseConsole={canInstall ? () => void browseConsole() : undefined}
+      onView={
+        inspection && source.trim() && !isArchiveSource(source.trim())
+          ? () => usePackageViewer.getState().open(source.trim())
+          : undefined
+      }
+      canBrowse={canBrowse}
+      inspection={inspection}
+      checking={checking}
+      locked={locked}
+      dropActive={dropActive}
+      password={password}
+      onPassword={setPassword}
+      tools={tools}
+    />
+  );
+
+  if (inside) {
+    return (
+      <div className="app-page flex flex-col gap-4">
+        <PageHeader
+          icon={Hammer}
+          title={tr("workshop_title", undefined, "Workshop")}
+          description={tr(
+            "workshop_inside_description",
+            undefined,
+            "Look inside a game image or package: save files to this computer, or change files and write an edited copy. The image you opened is never changed.",
+          )}
+        />
+        {gameCard}
+        <ImageBrowser
+          source={canLookInside(source) ? source.trim() : null}
+          onChoose={chooseSource}
+          onClose={() => setInside(false)}
+        />
+        <LocalDrivesCard drives={drives} />
+      </div>
+    );
+  }
+
   return (
     <div className="app-page flex flex-col gap-4">
       {makeWayDialog}
       <PageHeader
-        icon={PackagePlus}
-        title={tr("convert_games_title", undefined, "Convert Games")}
+        icon={Hammer}
+        title={tr("workshop_title", undefined, "Workshop")}
         description={tr(
-          "convert_games.subtitle",
-          undefined,
-          "Turn a game folder or game image into an installable package (.pkg), or a game folder into a game image (.exfat, or the smaller .ffpfsc) that ShadowMount+ mounts. The work runs on this computer, not the console.",
+          "workshop_description_v2",
+          { send: tr("send_title_v2", undefined, "Upload & Install") },
+          "Change a game's format before it goes to the PS5: make a package (.pkg), a game image (.exfat, .ffpkg, or the smaller .ffpfsc) or a plain folder, or look inside an image or package and change its files. The work runs on this computer. To send a game as it is, use {send}.",
         )}
-        right={headerRight}
+        right={
+          <div className="flex flex-wrap items-center gap-2">
+            {headerRight}
+            <Button variant="secondary" size="sm" leftIcon={<Send size={14} />} onClick={() => navigate("/send")}>
+              {tr("send_title_v2", undefined, "Upload & Install")}
+            </Button>
+          </div>
+        }
       />
 
       {/* Building still works (it runs on this computer), but a PS5 fake GAME
@@ -505,48 +635,10 @@ export default function FpkgConvertScreen({ headerRight }: { headerRight?: React
           homebrew and when the firmware is unknown. */}
       <FakeGameFirmwareNotice kernel={kernel} contentId={inspection?.content_id} />
 
-      {/* Wide windows: ① and ② on the left, ③ on the right, and ④ under whichever column
-          leaves the smaller hole (runPlacement). ③ grows a lot with what is made (a folder
-          needs almost no options, a compressed image the most), so a fixed place for ④ left
-          a tall empty column beside it. Row 2 is 1fr and the taller column's block spans
-          both rows, so the spare height lands under ④, not between cards. DOM order stays
-          ①②③④ for a narrow window, the keyboard and screen readers. */}
-      <div className="grid items-start gap-4 xl:grid-cols-2 xl:grid-rows-[auto_1fr]">
-        <div
-          ref={stepsRef}
-          className={`flex min-w-0 flex-col gap-4 xl:col-start-1 xl:row-start-1 ${runSide === "right" ? "xl:row-span-2" : ""}`}
-        >
-          <GameCard
-            source={source}
-            onSourceTyped={(v) => {
-              if (locked) return;
-              reset();
-              // The old check belongs to the old path: drop it until this one is checked.
-              latest.current.invalidate();
-              setInspection(null);
-              setEstimates(null);
-              setChecking(false);
-              setSource(v);
-              setPassword("");
-            }}
-            onCheck={() => void check(source)}
-            onBrowseFolder={() => void browse("folder")}
-            onBrowseImage={() => void browse("file")}
-            onRemotePick={chooseSource}
-            onBrowseConsole={canInstall ? () => void browseConsole() : undefined}
-            onView={
-              inspection && source.trim() && !isArchiveSource(source.trim())
-                ? () => usePackageViewer.getState().open(source.trim())
-                : undefined
-            }
-            canBrowse={canBrowse}
-            inspection={inspection}
-            checking={checking}
-            locked={locked}
-            dropActive={dropActive}
-            password={password}
-            onPassword={setPassword}
-          />
+      {/* One column at every width (the user asked for it): the steps read top to bottom,
+          ① to ⑤, and each card takes the window's whole width. */}
+      <div className="flex min-w-0 flex-col gap-4">
+          {gameCard}
 
           <MakeCard
             make={make}
@@ -561,11 +653,6 @@ export default function FpkgConvertScreen({ headerRight }: { headerRight?: React
             locked={locked}
           />
 
-        </div>
-        <div
-          ref={optionsRef}
-          className={`flex min-w-0 flex-col gap-4 xl:col-start-2 xl:row-start-1 ${runSide === "left" ? "xl:row-span-2" : ""}`}
-        >
           <OptionsCard
             outputDir={outputDir}
             onChangeOutput={() => void browseOutput()}
@@ -593,11 +680,7 @@ export default function FpkgConvertScreen({ headerRight }: { headerRight?: React
             hidden={locked}
             shownTitle={pipeline.phase === "done" && pipeline.swap ? pipeline.swap.titleId : null}
           />
-        </div>
-        <div
-          ref={runRef}
-          className={`flex min-w-0 flex-col gap-4 xl:row-start-2 ${runSide === "left" ? "xl:col-start-1" : "xl:col-start-2"}`}
-        >
+
           {error && (
             <Callout tone="error" title={tr("fpkg.error", undefined, "Conversion error")}>
               {error}
@@ -701,68 +784,31 @@ export default function FpkgConvertScreen({ headerRight }: { headerRight?: React
                 subpath: u.destinationSubpath || DEFAULT_IMAGE_SUBPATH,
                 deleteAfter,
               });
-              navigate("/upload");
+              navigate("/send");
             }}
-            onOpenUpload={() => navigate("/upload")}
+            onOpenUpload={() => navigate("/send")}
             onFinishReplace={(choice) =>
               void finishReplace(choice).catch((e) => setError(e instanceof Error ? e.message : String(e)))
             }
           />
-
-        </div>
       </div>
 
-      {/* The queue takes the whole width: its rows are long, and it is the one card that is
-          not a step of converting the current game. */}
+      {/* ⑤ Queue: games added under ① wait here; shown once there is one. */}
       <QueueCard
         items={queueItems}
         running={queueRunning}
-        onScanFolder={() =>
-          void (async () => {
-            const folder = !isTauriEnv()
-              ? await pickLocalPath({ mode: "folder", title: tr("batch_scan_pick", undefined, "Choose the folder that holds your games") })
-              : await pickPath({ mode: "folder", title: tr("batch_scan_pick", undefined, "Choose the folder that holds your games") });
-            if (!folder) return;
-            try {
-              const found = await gamesInFolder(folder);
-              queueAll(found.sources, found.skipped);
-            } catch (err) {
-              setError(err instanceof Error ? err.message : String(err));
-            }
-          })()
-        }
-        onPickFolders={() =>
-          void (async () => {
-            const picked = await pickPaths({
-              mode: "folder",
-              title: tr("cq_pick_folders", undefined, "Pick game folders…"),
-            }).catch(() => [] as string[]);
-            if (!picked.length) return;
-            const { games, skipped } = await gameFoldersAmong(picked);
-            queueAll(
-              games.map((path) => ({ path, isDir: true })),
-              skipped,
-            );
-          })()
-        }
-        onPickFiles={() =>
-          void (async () => {
-            const picked = await pickPaths({
-              title: tr("fpkg.pickImage", undefined, "Choose a game image or archive"),
-              filters: [{ name: "Game image, package or archive", extensions: ["exfat", "ffpkg", "ffpfs", "ffpfsc", "pkg", "zip", "7z", "rar"] }],
-            }).catch(() => [] as string[]);
-            queueAll(
-              picked.map((path) => ({ path, isDir: false })),
-              0,
-            );
-          })()
-        }
+        onOpenUpload={() => navigate("/send")}
         onStart={() => void useConvertQueue.getState().start()}
         onStop={() => useConvertQueue.getState().stop()}
         onRemove={(id) => useConvertQueue.getState().remove(id)}
+        onUpdate={(id, change) => void useConvertQueue.getState().update(id, change)}
+        canInstall={canInstall}
+        host={host}
         onMove={(id, d) => useConvertQueue.getState().move(id, d)}
         onClearFinished={() => useConvertQueue.getState().clearFinished()}
       />
+
+      <LocalDrivesCard drives={drives} quiet />
 
       <details className="text-sm">
         <summary className="cursor-pointer text-[var(--color-muted)]">
@@ -800,9 +846,9 @@ export default function FpkgConvertScreen({ headerRight }: { headerRight?: React
               </p>
               <p>
                 {tr(
-                  "fpkg.aboutFake",
+                  "fpkg.aboutFake_v2",
                   undefined,
-                  "The result is a fake package, so the console needs fake-package support loaded before it will install: kstuff (the build with PS5 fake-package support), a53_ppr_install_fast.elf and shadowmountplus.elf, in that order. Install Package states the same thing next to its Install button.",
+                  "The result is a fake package, so the console needs fake-package support loaded before it will install: kstuff (the build with PS5 fake-package support), a53_ppr_install_fast.elf and shadowmountplus.elf, in that order. Upload & Install says the same next to its install buttons.",
                 )}
               </p>
               <details>

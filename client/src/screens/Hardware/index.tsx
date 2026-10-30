@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { parsePS5Firmware } from "../../lib/ps5Firmware";
 import { Link } from "react-router";
 import { invoke } from "../../lib/invokeLogged";
 import {
@@ -30,6 +31,7 @@ import { useConfirm } from "../../components/ConfirmDialog";
 import PowerTelemetryPanel from "./PowerTelemetryPanel";
 import NetworkPanel from "./NetworkPanel";
 import PeripheralPanel from "./PeripheralPanel";
+import { FwSpoofCard } from "./FwSpoofCard";
 import { fanPresetsFor, fanTargetCeiling } from "../../lib/fanTargets";
 import { usePoll } from "../../lib/usePoll";
 import { mgmtAddr, transferAddr } from "../../lib/addr";
@@ -182,6 +184,132 @@ function formatFreq(mhz: number): string {
   return `${mhz} MHz`;
 }
 
+/** The eight cores as one value: their lowest–highest clock, one figure when
+ *  they agree, a dash when none is known. */
+export function formatFreqRange(minMhz: number, maxMhz: number): string {
+  if (maxMhz <= 0) return "—";
+  if (minMhz <= 0 || minMhz === maxMhz) return formatFreq(maxMhz);
+  if (maxMhz < 1000) return `${minMhz}–${maxMhz} MHz`;
+  return `${(minMhz / 1000).toFixed(2)}–${(maxMhz / 1000).toFixed(2)} GHz`;
+}
+
+type Tr = (
+  key: string,
+  vars?: Record<string, string | number>,
+  fallback?: string,
+) => string;
+
+/** The hint under a clock row (GPU, per-core CPU): what it is once read, else
+ *  why there is no number — not read yet, a helper too old to send it, a
+ *  console that refused the read, or a value out of range. */
+export function clockHint(
+  tr: Tr,
+  temps: Pick<HwTemps, "gpu_clock_src"> | null,
+  hasValue: boolean,
+  readHint: string,
+): string {
+  if (!temps)
+    return tr(
+      "hw_sensor_on_demand",
+      undefined,
+      "Click Read sensors for a live reading",
+    );
+  const src = temps.gpu_clock_src ?? "";
+  if (src === "unsupported")
+    return tr(
+      "hw_clock_unsupported",
+      undefined,
+      "This console's firmware doesn't answer this read",
+    );
+  if (src === "")
+    return tr(
+      "hw_clock_needs_helper",
+      undefined,
+      "Not sent by this helper version",
+    );
+  if (!hasValue)
+    return tr(
+      "hw_sensor_no_reading",
+      undefined,
+      "The console returned no reading for this sensor",
+    );
+  return readHint;
+}
+
+/** The measured row's hint: like clockHint, from the measurement's own source. */
+function measuredHint(tr: Tr, temps: HwTemps | null, hasValue: boolean): string {
+  if (!temps) return clockHint(tr, null, false, "");
+  const src = temps.cpu_measure_src ?? "";
+  if (src === "unsupported")
+    return tr(
+      "hw_cpu_measured_unsupported",
+      undefined,
+      "This console doesn't let the helper time its cores",
+    );
+  return clockHint(
+    tr,
+    { gpu_clock_src: src === "" ? "" : "mp1" },
+    hasValue,
+    tr(
+      "hw_cpu_measured_hint",
+      undefined,
+      "Timed on the system cores while busy; game cores can't be measured",
+    ),
+  );
+}
+
+/** Hover text listing every core's clock, or undefined when none was read. With the measured
+ *  clocks, each core shows what it really ran at next to its target; a core the helper may not
+ *  run on (a game core) says so. */
+export function coreClockTooltip(
+  tr: Tr,
+  cores: number[] | undefined,
+  measured?: number[],
+): string | undefined {
+  if (!cores || cores.length === 0) return undefined;
+  const mhz = (v: number | undefined) => (v && v > 0 ? `${v} MHz` : "—");
+  const anyMeasured = (measured ?? []).some((v) => v > 0);
+  return cores
+    .map((target, i) => {
+      if (!anyMeasured)
+        return tr("hw_cpu_core_clock", { n: i, mhz: mhz(target) }, "Core {n}: {mhz}");
+      const m = measured?.[i] ?? 0;
+      return m > 0
+        ? tr(
+            "hw_cpu_core_measured",
+            { n: i, mhz: mhz(m), target: mhz(target) },
+            "Core {n}: {mhz} measured, {target} target",
+          )
+        : tr(
+            "hw_cpu_core_game",
+            { n: i, target: mhz(target) },
+            "Core {n}: {target} target, not measurable (a game core)",
+          );
+    })
+    .join("\n");
+}
+
+/** The CPU rows' values: the measured clocks' lowest–highest, and the targets' lowest–highest
+ *  over the same cores. Mixing in the game cores' targets made the row read "0.80–3.20 GHz" at
+ *  the home screen, where those cores idle at their lowest level. Without a measurement (an
+ *  older helper) the targets cover every core, as before. */
+export function cpuClockRanges(
+  targets: number[] | undefined,
+  measured: number[] | undefined,
+): { measured: [number, number]; target: [number, number] } {
+  const range = (vs: number[]): [number, number] => {
+    const known = vs.filter((v) => v > 0);
+    return known.length ? [Math.min(...known), Math.max(...known)] : [0, 0];
+  };
+  const m = measured ?? [];
+  const t = targets ?? [];
+  const anyMeasured = m.some((v) => v > 0);
+  return {
+    measured: range(m),
+    target: range(anyMeasured ? t.filter((_, i) => (m[i] ?? 0) > 0) : t),
+  };
+}
+
 /** 0–100 percentage; `-1` (or any negative) = "unavailable" → dash. Used
  *  for CPU usage and fan duty, which the payload reports as -1 when the
  *  API isn't available or on a basic (non-extended) read. */
@@ -205,10 +333,12 @@ export default function HardwareScreen() {
   const tr = useTr();
   const host = useConnectionStore((s) => s.host);
   const payloadStatus = useConnectionStore((s) => s.payloadStatus);
+  const ps5Firmware = parsePS5Firmware(useConnectionStore((s) => s.ps5Kernel));
   const guard = useStaleHostGuard();
 
   const [info, setInfo] = useState<HwInfo | null>(null);
   const [temps, setTemps] = useState<HwTemps | null>(null);
+  const cpuRanges = cpuClockRanges(temps?.cpu_core_mhz, temps?.cpu_core_measured_mhz);
   const [power, setPower] = useState<HwPower | null>(null);
   const [storage, setStorage] = useState<HwStorage | null>(null);
   const [drives, setDrives] = useState<DriveSensorList | null>(null);
@@ -331,8 +461,10 @@ export default function HardwareScreen() {
       // to trigger the on-demand telemetry (SoC power / CPU usage / fan duty
       // / product shape) on the payload. The Dashboard's auto-poll calls
       // fetchHwTemps without extended, so its timer never fires those.
+      // clocks=true: the GPU and per-core CPU clocks from the SoC's power
+      // controller (/dev/mp1) — this click only, not even the bug report.
       const [next, nextDrives] = await Promise.all([
-        fetchHwTemps(addr, true),
+        fetchHwTemps(addr, true, true),
         fetchDriveSensors(addr).catch(() => null),
       ]);
       if (probe.isStale()) return;
@@ -497,11 +629,50 @@ export default function HardwareScreen() {
             title={tr("hardware_performance", undefined, "Performance")}
           >
             <StatRow
-              label={tr("hw_cpu_freq", undefined, "CPU frequency")}
+              label={tr("hw_gpu_clock", undefined, "GPU clock")}
+              value={formatFreq(temps?.soc_clock_mhz ?? 0)}
+              hint={clockHint(
+                tr,
+                temps,
+                (temps?.soc_clock_mhz ?? 0) > 0,
+                tr(
+                  "hw_gpu_clock_hint",
+                  undefined,
+                  "SMU graphics clock, read on request",
+                ),
+              )}
+            />
+            <StatRow
+              label={tr("hw_cpu_measured", undefined, "CPU clock (measured)")}
+              value={formatFreqRange(cpuRanges.measured[0], cpuRanges.measured[1])}
+              hint={measuredHint(tr, temps, cpuRanges.measured[1] > 0)}
+              tooltip={coreClockTooltip(tr, temps?.cpu_core_mhz, temps?.cpu_core_measured_mhz)}
+            />
+            <StatRow
+              label={tr("hw_cpu_target", undefined, "CPU target clock")}
+              value={formatFreqRange(cpuRanges.target[0], cpuRanges.target[1])}
+              hint={clockHint(
+                tr,
+                temps,
+                cpuRanges.target[1] > 0,
+                tr(
+                  "hw_cpu_target_hint",
+                  undefined,
+                  "The power controller's level; the cores can run below it",
+                ),
+              )}
+              tooltip={coreClockTooltip(tr, temps?.cpu_core_mhz, temps?.cpu_core_measured_mhz)}
+            />
+            <StatRow
+              label={tr("hw_reference_clock", undefined, "Reference clock")}
               value={formatFreq(temps?.cpu_freq_mhz ?? 0)}
               hint={
                 temps && temps.cpu_freq_mhz > 0
-                  ? tr("hw_from_kernel_tsc", undefined, "From kernel TSC")
+                  ? tr(
+                      "hw_reference_clock_hint",
+                      undefined,
+                      "A fixed rate the system reports, not the cores' speed",
+                    )
                   : undefined
               }
             />
@@ -590,7 +761,9 @@ export default function HardwareScreen() {
             />
             <StatRow
               label={tr("hw_os", undefined, "OS")}
-              value={info?.os ?? "—"}
+              value={osLabel(tr, info?.os, ps5Firmware)}
+              // The kernel's own answer ("FreeBSD 0.0-prototype" on every PS5) for whoever wants it.
+              hint={info?.os || undefined}
             />
             {/* Precise FW word via kernel R/W (added via the 2026-05
                 SDK refresh, kernel_get_fw_version). 0 means kernel
@@ -631,6 +804,10 @@ export default function HardwareScreen() {
               />
             )}
           </SensorCard>
+
+          {/* Right under System: it answers whether the firmware shown there is the real one.
+              Prefixed key — see the note on FanThresholdCard below. */}
+          <FwSpoofCard key={`fwspoof-${host ?? ""}`} host={host ?? ""} payloadUp={payloadStatus === "up"} />
 
           {storage && (
             <SensorCard
@@ -755,7 +932,7 @@ export default function HardwareScreen() {
       {/* The kernel log has its own tab under Logs. */}
       <p className="mt-6 text-sm text-[var(--color-muted)]">
         <Link
-          to="/logs?tab=kernel"
+          to="/tasks?tab=logs&log=kernel"
           className="inline-flex items-center gap-1 text-[var(--color-accent)] hover:underline"
         >
           <ScrollText size={13} />
@@ -792,10 +969,13 @@ function StatRow({
   label,
   value,
   hint,
+  tooltip,
 }: {
   label: string;
   value: string;
   hint?: string;
+  /** Hover text for the value; the hint when not given. */
+  tooltip?: string;
 }) {
   // One metric row: label left, value right, the hint (if any) under the
   // value in small muted type rather than squeezed in beside it.
@@ -804,7 +984,7 @@ function StatRow({
     // with the value instead of floating between the value and the hint.
     <div className="metric-row min-w-0 py-2" style={{ alignItems: "baseline" }}>
       <dt className="min-w-0 text-[var(--color-muted)]">{label}</dt>
-      <dd className="min-w-0 max-w-[65%] shrink-0 text-right" title={hint}>
+      <dd className="min-w-0 max-w-[65%] shrink-0 text-right" title={tooltip ?? hint}>
         <div className="whitespace-nowrap font-mono tabular-nums">{value}</div>
         {hint && (
           <div className="mt-0.5 text-xs leading-snug text-[var(--color-muted)]">
@@ -816,7 +996,25 @@ function StatRow({
   );
 }
 
-function FanThresholdCard({
+/** Where the fan slider starts: the target ps5upload keeps (pinned), else what the console is
+ *  holding now, else 65 °C; inside the range the slider offers. */
+/** The OS row in words a person expects: the PS5's system software version. The kernel itself
+ *  answers "FreeBSD 0.0-prototype" on every firmware (#522 follow-up), which reads like a fault. */
+export function osLabel(
+  tr: (key: string, vars?: Record<string, string | number>, fallback?: string) => string,
+  kernelOs: string | null | undefined,
+  firmware: string | null,
+): string {
+  if (firmware) return tr("hw_os_system_software", { fw: firmware }, `PS5 system software ${firmware}`);
+  return kernelOs || "—";
+}
+
+export function fanDraftStart(pinnedC: number, targetC: number, stockC: number): number {
+  const c = pinnedC > 0 ? pinnedC : targetC > 0 ? targetC : 65;
+  return Math.max(FAN_THRESHOLD_MIN_C, Math.min(fanTargetCeiling(stockC), Math.round(c)));
+}
+
+export function FanThresholdCard({
   host,
   payloadUp,
   pinnedC,
@@ -848,8 +1046,20 @@ function FanThresholdCard({
    * whether a permanent fan speed is active. lastSetC tracks what the
    * user has set via THIS UI during this session, so the preset
    * highlight stays in sync with the user's own actions. */
-  const [draftC, setDraftC] = useState<number>(65);
+  const [draftC, setDraftC] = useState<number>(() => fanDraftStart(pinnedC, targetC, stockC));
   const [lastSetC, setLastSetC] = useState<number | null>(null);
+  // The slider starts at what the console holds (#522): it showed a fixed 65 °C every time the
+  // screen was opened, which read as the setting having gone back to the default. Followed
+  // until the slider is moved: the first reading arrives after the card opens.
+  const draftTouched = useRef(false);
+  useEffect(() => {
+    if (!draftTouched.current) setDraftC(fanDraftStart(pinnedC, targetC, stockC));
+  }, [pinnedC, targetC, stockC]);
+  // The console is the truth: a target changed elsewhere (another device, the console's own
+  // Fan page) replaces the one set here, which would otherwise keep saying "Set to …".
+  useEffect(() => {
+    if (pinnedC > 0) setLastSetC((last) => (last !== null && last !== pinnedC ? null : last));
+  }, [pinnedC]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [restored, setRestored] = useState<"done" | "restart" | null>(null);
@@ -912,6 +1122,8 @@ function FanThresholdCard({
         await setFanThreshold(addr, clamped);
         setLastSetC(clamped);
         setDraftC(clamped);
+        // Set: the slider follows the console again.
+        draftTouched.current = false;
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
         // The helper refuses a target above the console's own (fans slower than stock).
@@ -977,13 +1189,16 @@ function FanThresholdCard({
           step={1}
           value={draftC}
           disabled={!canSet}
-          onChange={(e) => setDraftC(Number(e.target.value))}
+          onChange={(e) => {
+            draftTouched.current = true;
+            setDraftC(Number(e.target.value));
+          }}
           className="flex-1 accent-[var(--color-accent)] disabled:opacity-50"
         />
         <button
           type="button"
           onClick={() => applyThreshold(draftC)}
-          disabled={!canSet || lastSetC === draftC}
+          disabled={!canSet || (lastSetC ?? (pinnedC > 0 ? pinnedC : null)) === draftC}
           className="chip min-h-8 px-3.5 text-xs disabled:opacity-50"
         >
           {tr("hardware_apply", "Apply")}
@@ -1462,6 +1677,8 @@ function SmpMetaCard({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pollDraft, setPollDraft] = useState<number>(30);
+  // While the slider is held, a refresh must not move it under the finger.
+  const pollDragging = useRef(false);
   const guard = useStaleHostGuard();
 
   const canTalk = payloadUp && !!host.trim();
@@ -1474,7 +1691,7 @@ function SmpMetaCard({
       if (probe.isStale()) return;
       setStats(s);
       setError(null);
-      if (s.poll_seconds > 0) setPollDraft(s.poll_seconds);
+      if (s.poll_seconds > 0 && !pollDragging.current) setPollDraft(s.poll_seconds);
     } catch (e) {
       if (probe.isStale()) return;
       setError(e instanceof Error ? e.message : String(e));
@@ -1546,6 +1763,8 @@ function SmpMetaCard({
 
   const applyPoll = useCallback(
     async (seconds: number) => {
+      // Let go of (or a key released on) the slider: refreshes may set it again.
+      pollDragging.current = false;
       if (!canTalk || busy) return;
       const clamped = Math.max(5, Math.min(600, Math.round(seconds)));
       if (lastAppliedPoll.current === clamped) return;
@@ -1680,7 +1899,10 @@ function SmpMetaCard({
               max={600}
               step={5}
               value={pollDraft}
-              onChange={(e) => setPollDraft(Number(e.target.value))}
+              onChange={(e) => {
+                pollDragging.current = true;
+                setPollDraft(Number(e.target.value));
+              }}
               /* Three commit triggers cover mouse, touch, and
                * keyboard (←/→/Page/Home/End all fire keyup). Without
                * onKeyUp, a keyboard-only user would see the slider

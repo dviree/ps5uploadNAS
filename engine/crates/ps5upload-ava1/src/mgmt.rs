@@ -14,8 +14,8 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::gen::{self, MgmtText};
 use anyhow::Result;
-use ava1::gen::{self, MgmtText};
 use ava1::wire::Message;
 use ava1::Ava1Error;
 use ps5upload_core::mgmt::{
@@ -113,6 +113,7 @@ fn is_read_only(method: u16) -> bool {
             | gen::METHOD_FILES_PREFS_GET
             | gen::METHOD_MESH_STATE
             | gen::METHOD_MESH_DOC_GET
+            | gen::METHOD_PROFILE_NP_STATE
     )
 }
 

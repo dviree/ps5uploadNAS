@@ -17,23 +17,29 @@ client (Tauri/React)  ──HTTP──▶  ps5upload-engine :19113
 
 ## Crates
 
+The AVA1 protocol itself (crates `ava1`, `ava1-gen`, `ava1-chaos`, its C library and spec) is
+[github.com/phantomptr/ava1](https://github.com/phantomptr/ava1). The Rust crate comes from
+crates.io ([`ava1`](https://crates.io/crates/ava1), pinned exactly in `engine/Cargo.toml` and
+`client/src-tauri/Cargo.toml`); the C library the payload builds, `ava1-gen` and the unpublished
+`ava1-chaos` come from the `third_party/ava1` submodule (`git submodule update --init`), checked
+out at the same release (`make ava1-version-check`).
+
 | Crate | What it is |
 |---|---|
-| `ava1` | The AVA1 protocol: frames, generated message codecs, Noise handshake, sessions, lanes, pairing. Spec: `protocol/ava1/SPEC.md`. |
-| `ava1-gen` | Generates the Rust and C codecs from `protocol/ava1/schema/ava1.toml`. Run it after editing the schema. |
-| `ava1-ctest` | Builds the payload's AVA1 C on the host so `cargo test` checks C against Rust. |
-| `ava1-chaos` | A misbehaving TCP proxy (latency, bandwidth caps, blackholes, kills) for resilience tests. |
+| `ps5upload-ava1` | ps5upload over AVA1: uploads, downloads, the helper's management methods (`protocol/ps5upload-ava1/app.toml`, generated with `make ava1-app-gen`), the connection pool. |
+| `ps5upload-ctest` | Builds the payload's C (the AVA1 library from the submodule plus the payload's own AVA1 code) on the host so `cargo test` checks it against the Rust side. |
 | `ps5upload-core` | The bulk of the logic — socket helpers, the management seam, archive inspection and plan previews, filesystem and app RPCs, volume parsing, package install, saves, cheats, hardware, SMB, BPS patching. |
 | `ps5upload-engine` | The Axum HTTP service (~100 routes), job tracking, SSE progress events, and the desktop + mobile entry points. |
 | `ps5upload-pkg` | `.pkg` parsing — headers, entries, split-file sets. |
 | `ps5upload-lab` | CLI for driving the console by hand over AVA1: management calls, uploads, benchmarks (`bench`), pairing and chaos tools. Useful when you want one call, not a workflow. |
 | `ps5upload-tests` | Integration tests that run against in-process and loopback AVA1 peers, with no console. |
+| `ps5upload-unrar` | The RAR helper program: the only binary that contains UnRAR, holding nothing else but ps5upload's own code. The engine starts it for every RAR operation and talks to it over stdin/stdout (`ps5upload-core/src/rar_helper.rs`); it is shipped next to the engine (desktop app, Docker images, release assets). It must not depend on any other crate here — see `LICENSES/UnRAR-exception.md`. |
 
 ## Working on it
 
 ```sh
 cargo test --workspace          # no PS5 required — loopback peers
-cargo test -p ava1-ctest -- --test-threads=1   # payload AVA1 C vs Rust, on the host
+cargo test -p ps5upload-ctest -- --test-threads=1   # payload AVA1 C vs Rust, on the host
 cargo fmt --all -- --check      # CI fails on this; client/src-tauri has its own
 cargo build --release -p ps5upload-engine
 ```

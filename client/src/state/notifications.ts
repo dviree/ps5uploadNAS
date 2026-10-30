@@ -4,6 +4,7 @@ import { appIsForeground, sendOsNotification } from "../lib/osNotify";
 import { nativeJobNotify } from "../lib/bgNotify";
 import { safeGetItem, safeSetItem } from "../lib/safeStorage";
 import { recordAppEvent } from "../lib/appJournal";
+import { NOOP_RELOAD, registerSettingReload } from "../lib/liveSettings";
 
 /**
  * Persistent notification inbox.
@@ -55,6 +56,8 @@ interface NotificationsState {
   entries: Notification[];
   push: (level: NotificationLevel, title: string, extras?: NotificationExtras) => string;
   markAllRead: () => void;
+  /** Mark only these entries read (what a list actually showed). */
+  markRead: (ids: readonly string[]) => void;
   clear: () => void;
   remove: (id: string) => void;
   unreadCount: () => number;
@@ -149,6 +152,13 @@ export const useNotificationsStore = create<NotificationsState>((set, get) => ({
     set({ entries: next });
     persist(next);
   },
+  markRead: (ids) => {
+    const want = new Set(ids);
+    if (!get().entries.some((e) => !e.read && want.has(e.id))) return;
+    const next = get().entries.map((e) => (want.has(e.id) && !e.read ? { ...e, read: true } : e));
+    set({ entries: next });
+    persist(next);
+  },
   clear: () => {
     set({ entries: [] });
     persist([]);
@@ -233,3 +243,6 @@ export function runNotificationAutoPrune() {
   if (days <= 0) return;
   useNotificationsStore.getState().pruneOlderThan(days * 86400 * 1000);
 }
+
+// Read fresh at each use (getNotifPruneDays): nothing to reload (lib/liveSettings).
+registerSettingReload([PRUNE_DAYS_KEY], NOOP_RELOAD);

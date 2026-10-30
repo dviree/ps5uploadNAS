@@ -69,9 +69,9 @@ export function DrivesCard({
             <HardDrive size={15} aria-hidden />
           </span>
           {tr(
-            "game_drives_title",
+            "game_computer_title",
             { n: copies.length },
-            "On your drives ({n})",
+            "On this computer ({n})",
           )}
         </h2>
         <span className="flex flex-wrap items-center gap-2">
@@ -99,14 +99,14 @@ export function DrivesCard({
               leftIcon={<PackageOpen size={13} />}
               data-testid="game-convert"
               onClick={() =>
-                navigate("/convert", {
+                navigate("/workshop", {
                   state: { source: convertible.absolute_path },
                 })
               }
               title={tr(
-                "collection.convert_hint",
+                "collection.convert_hint_v2",
                 undefined,
-                "Open it in Convert: make an installable package, or a different game image.",
+                "Open it in Workshop: make an installable package, or a different game image.",
               )}
             >
               {tr("collection.convert", undefined, "Convert…")}

@@ -11,7 +11,7 @@
  * are that uint64. Reading the base64 high byte first gave pxplay a
  * different account's number, and it answered 403.
  *
- * No BigInt (it breaks the bundle on old WebViews — see Profile/index.tsx)
+ * No BigInt (it breaks the bundle on old WebViews — see Accounts/index.tsx)
  * and no Number (it rounds above 2^53): every conversion is on digit strings.
  */
 
@@ -99,4 +99,11 @@ export function accountIdToPairingB64(raw: string): string | null {
   let bin = "";
   for (let i = 14; i >= 0; i -= 2) bin += String.fromCharCode(parseInt(hex.slice(i, i + 2), 16));
   return btoa(bin);
+}
+
+/** The console's own spelling of an account id in any spelling (0x + 16 hex digits), or "" when
+ *  it is not one: what the pairing form shows as the id it will use. */
+export function accountIdToHex(raw: string): string {
+  const hex = accountIdHex(raw);
+  return hex === null || /^0+$/.test(hex) ? "" : `0x${hex}`;
 }

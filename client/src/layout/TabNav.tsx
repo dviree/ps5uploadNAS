@@ -50,7 +50,7 @@ const TAB_DEFS: TabDef[] = [
     id: "home",
     icon: LayoutDashboard,
     to: "/home",
-    sections: ["nav_section_setup", "nav_section_help"],
+    sections: ["nav_section_connect", "nav_section_app"],
     extra: ["/home", "/dashboard", "/first-run"],
   },
   {
@@ -71,7 +71,7 @@ const TAB_DEFS: TabDef[] = [
     id: "console",
     icon: Cpu,
     to: "/console",
-    sections: ["nav_section_console", "nav_section_advanced"],
+    sections: ["nav_section_console"],
     extra: ["/hardware", "/fan-curve", "/nanodns", "/nano-dns", "/send-payload", "/shadowmount"],
   },
   {
@@ -141,6 +141,7 @@ export function TabBottomNav() {
   return (
     <>
       <nav
+        data-bottom-nav
         aria-label={tr("v5_tab_primary_nav", undefined, "Primary")}
         // Floats above the gesture bar: the safe area is a margin here, not
         // padding, so the pill keeps its shape on every phone.

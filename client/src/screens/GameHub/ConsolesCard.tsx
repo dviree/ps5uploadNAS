@@ -25,6 +25,7 @@ import { pushNotification } from "../../state/notifications";
 import { ActivityLine } from "./ActivityLine";
 import { installOffers } from "./collectionInstall";
 import { SendToPs5 } from "./SendToPs5";
+import { filesViewLink } from "../FileSystem/filesViews";
 
 /** Live enough to say "now": read in the last minute. */
 const LIVE_SEC = 60;
@@ -43,6 +44,7 @@ export function ConsolesCard({
   stopping = false,
   sendHost,
   setSendHost,
+  playBlocked,
 }: {
   titleId: string;
   /** The saved consoles, in the roster's order. */
@@ -60,6 +62,9 @@ export function ConsolesCard({
   /** The console whose send panel is open, or null. */
   sendHost: string | null;
   setSendHost: (host: string | null) => void;
+  /** Why the connected console cannot start it now (a disk image while ShadowMount+ is not
+   *  running): Play is held, and says so. */
+  playBlocked?: string;
 }) {
   const tr = useTr();
   // The connected console first, then the roster's order.
@@ -105,6 +110,7 @@ export function ConsolesCard({
               stopping={stopping}
               sending={sendHost === h}
               setSending={(on) => setSendHost(on ? h : null)}
+              playBlocked={h === connected ? playBlocked : undefined}
             />
           ))}
         </ul>
@@ -129,6 +135,7 @@ function ConsoleRow({
   stopping,
   sending,
   setSending,
+  playBlocked,
 }: {
   host: string;
   name: string;
@@ -145,6 +152,7 @@ function ConsoleRow({
   stopping: boolean;
   sending: boolean;
   setSending: (on: boolean) => void;
+  playBlocked?: string;
 }) {
   const tr = useTr();
   const navigate = useNavigate();
@@ -242,10 +250,15 @@ function ConsoleRow({
             size="sm"
             variant="primary"
             leftIcon={launching ? <Spinner size={13} /> : <Play size={13} />}
-            disabled={launching}
+            disabled={launching || !!playBlocked}
+            title={playBlocked}
             onClick={onPlay}
           >
-            {launching ? tr("game_hub_launching", undefined, "Starting…") : tr("game_play", undefined, "Play")}
+            {playBlocked
+              ? tr("installed_needs_smp", undefined, "Needs SMP")
+              : launching
+                ? tr("game_hub_launching", undefined, "Starting…")
+                : tr("game_play", undefined, "Play")}
           </Button>
         );
       case "install":
@@ -335,7 +348,7 @@ function ConsoleRow({
               aria-label={tr("game_search_files", undefined, "Search this game's files")}
               title={tr("game_search_files", undefined, "Search this game's files")}
               leftIcon={<Search size={13} />}
-              onClick={() => navigate("/search", { state: { titleId } })}
+              onClick={() => navigate(filesViewLink("search", { title: titleId }))}
             />
           )}
           <Button
@@ -362,7 +375,7 @@ function ConsoleRow({
           <ActivityLine
             activity={activity}
             onOpen={() =>
-              navigate(queueLinkFor(host, connectedHost, "installing" in activity && activity.installing))
+              navigate(queueLinkFor(host, connectedHost))
             }
           />
         </div>

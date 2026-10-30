@@ -558,9 +558,9 @@ export default function FirstRunScreen() {
           >
             <p className="mb-3 text-xs text-[var(--color-muted)]">
               {tr(
-                "first_run_step4_body_v2",
+                "first_run_step4_body_v3",
                 undefined,
-                "Drop a USB stick into your PS5 with .ffpkg game images and ShadowMount+ will auto-mount them — they'll appear in Games. To upload other files or install .pkg packages, use Upload and Install Package.",
+                "Drop a USB stick into your PS5 with .ffpkg game images and ShadowMount+ will auto-mount them — they'll appear in Games. To send other files or install .pkg packages, use Upload & Install.",
               )}
             </p>
             <div className="flex flex-wrap gap-2">
@@ -575,9 +575,9 @@ export default function FirstRunScreen() {
               <Button
                 variant="secondary"
                 size="md"
-                onClick={() => navigate("/upload")}
+                onClick={() => navigate("/send")}
               >
-                {tr("first_run_go_upload", undefined, "Open Upload")}
+                {tr("first_run_go_upload_v2", undefined, "Open Upload & Install")}
               </Button>
             </div>
           </SetupCard>

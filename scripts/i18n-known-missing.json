@@ -2,6 +2,7 @@
   "ar": {
     "missing": [
       "convert.tab",
+      "convert_games_title",
       "ffpfsc.error",
       "ffpfsc.line",
       "ffpfsc.none",
@@ -94,15 +95,17 @@
       "br_payloads_placeholder",
       "br_where_discord",
       "cw_settings_app_name",
-      "drive_title",
       "ffpkg_inspect_sce_sys",
-      "fs_mesh_drive_shortcut",
+      "helper_copy_place_pldmgr",
+      "play_title",
+      "rp_pip_title",
       "smp_meta_json"
     ]
   },
   "bn": {
     "missing": [
       "convert.tab",
+      "convert_games_title",
       "ffpfsc.error",
       "ffpfsc.line",
       "ffpfsc.none",
@@ -195,10 +198,11 @@
       "br_payloads_placeholder",
       "br_where_discord",
       "cw_settings_app_name",
-      "drive_title",
       "ffpkg_inspect_sce_sys",
-      "fs_mesh_drive_shortcut",
+      "helper_copy_place_pldmgr",
+      "play_title",
       "processes_pid",
+      "rp_pip_title",
       "screenshots_png_hdr",
       "screenshots_png_sdr",
       "smp_meta_json"
@@ -207,6 +211,7 @@
   "de": {
     "missing": [
       "convert.tab",
+      "convert_games_title",
       "ffpfsc.error",
       "ffpfsc.line",
       "ffpfsc.none",
@@ -298,23 +303,26 @@
       "br_issue_link_placeholder",
       "br_payloads_placeholder",
       "br_where_discord",
+      "captures",
       "console_tab_name",
       "cw_settings_app_name",
-      "drive_title",
       "ffpkg_inspect_sce_sys",
-      "fs_mesh_drive_shortcut",
       "game_hub_addons",
       "health_cat_remoteplay",
+      "helper_copy_place_pldmgr",
+      "play_title",
       "power_wake_signin_rpkey",
       "processes_pid",
       "remotePlay_slot",
       "remote_play",
+      "rp_pip_title",
       "smp_meta_json"
     ]
   },
   "es": {
     "missing": [
       "convert.tab",
+      "convert_games_title",
       "ffpfsc.error",
       "ffpfsc.line",
       "ffpfsc.none",
@@ -407,18 +415,21 @@
       "br_payloads_placeholder",
       "br_where_discord",
       "cw_settings_app_name",
-      "drive_title",
       "ffpkg_inspect_sce_sys",
-      "fs_mesh_drive_shortcut",
+      "health_cat_remoteplay",
+      "helper_copy_place_pldmgr",
+      "play_title",
       "power_wake_signin_rpkey",
       "processes_pid",
       "remote_play",
+      "rp_pip_title",
       "smp_meta_json"
     ]
   },
   "fa": {
     "missing": [
       "convert.tab",
+      "convert_games_title",
       "ffpfsc.error",
       "ffpfsc.line",
       "ffpfsc.none",
@@ -511,13 +522,17 @@
       "br_payloads_placeholder",
       "br_where_discord",
       "cw_settings_app_name",
-      "drive_title",
-      "fs_mesh_drive_shortcut"
+      "health_cat_remoteplay",
+      "helper_copy_place_pldmgr",
+      "play_title",
+      "remote_play",
+      "rp_pip_title"
     ]
   },
   "fr": {
     "missing": [
       "convert.tab",
+      "convert_games_title",
       "ffpfsc.error",
       "ffpfsc.line",
       "ffpfsc.none",
@@ -610,19 +625,19 @@
       "br_payloads_placeholder",
       "br_where_discord",
       "cw_settings_app_name",
-      "drive_title",
       "ffpkg_inspect_sce_sys",
       "hardware_systime_via",
+      "helper_copy_place_pldmgr",
       "power_wake_signin_rpkey",
       "processes_pid",
       "queue_console_total",
-      "remote_play",
       "smp_meta_json"
     ]
   },
   "hi": {
     "missing": [
       "convert.tab",
+      "convert_games_title",
       "ffpfsc.error",
       "ffpfsc.line",
       "ffpfsc.none",
@@ -715,10 +730,11 @@
       "br_payloads_placeholder",
       "br_where_discord",
       "cw_settings_app_name",
-      "drive_title",
       "ffpkg_inspect_sce_sys",
-      "fs_mesh_drive_shortcut",
+      "helper_copy_place_pldmgr",
+      "play_title",
       "processes_pid",
+      "rp_pip_title",
       "screenshots_png_hdr",
       "screenshots_png_sdr",
       "smp_meta_json"
@@ -727,6 +743,7 @@
   "hu": {
     "missing": [
       "convert.tab",
+      "convert_games_title",
       "ffpfsc.error",
       "ffpfsc.line",
       "ffpfsc.none",
@@ -819,17 +836,15 @@
       "br_payloads_placeholder",
       "br_where_discord",
       "cw_settings_app_name",
-      "drive_title",
-      "engine_url_label",
       "ffpkg_inspect_sce_sys",
-      "fs_mesh_drive_shortcut",
       "health_cat_remoteplay",
-      "payloads_prerelease",
+      "helper_copy_place_pldmgr",
       "pkglib.auth.fake",
+      "play_title",
       "power_wake_signin_rpkey",
       "processes_pid",
-      "remotePlay_title",
       "remote_play",
+      "rp_pip_title",
       "screenshots_png_hdr",
       "screenshots_png_sdr",
       "smp_meta_json"
@@ -838,6 +853,7 @@
   "id": {
     "missing": [
       "convert.tab",
+      "convert_games_title",
       "ffpfsc.error",
       "ffpfsc.line",
       "ffpfsc.none",
@@ -930,21 +946,23 @@
       "br_payloads_placeholder",
       "br_where_discord",
       "cw_settings_app_name",
-      "drive_title",
       "ffpkg_inspect_sce_sys",
       "fs_item_one",
-      "fs_mesh_drive_shortcut",
-      "hardware_systime_via",
       "health_cat_remoteplay",
+      "helper_copy_place_pldmgr",
+      "play_title",
       "processes_pid",
       "remotePlay_slot",
       "remote_play",
-      "smp_meta_json"
+      "rp_pip_title",
+      "smp_meta_json",
+      "status_helper_version"
     ]
   },
   "it": {
     "missing": [
       "convert.tab",
+      "convert_games_title",
       "ffpfsc.error",
       "ffpfsc.line",
       "ffpfsc.none",
@@ -1037,12 +1055,16 @@
       "br_payloads_placeholder",
       "br_where_discord",
       "cw_settings_app_name",
-      "drive_title",
       "ffpkg_inspect_sce_sys",
-      "fs_mesh_drive_shortcut",
+      "health_cat_remoteplay",
+      "helper_copy_place_pldmgr",
+      "hw_cpu_core_clock",
+      "play_title",
       "processes_pid",
       "remotePlay_slot",
       "remote_play",
+      "rp_pip",
+      "rp_pip_title",
       "shortcuts_sec_filesystem",
       "smp_meta_json",
       "status_helper_version"
@@ -1051,6 +1073,7 @@
   "ja": {
     "missing": [
       "convert.tab",
+      "convert_games_title",
       "ffpfsc.error",
       "ffpfsc.line",
       "ffpfsc.none",
@@ -1143,8 +1166,8 @@
       "br_payloads_placeholder",
       "br_where_discord",
       "cw_settings_app_name",
-      "drive_title",
       "ffpkg_inspect_sce_sys",
+      "helper_copy_place_pldmgr",
       "processes_pid",
       "screenshots_png_sdr",
       "smp_meta_json"
@@ -1153,6 +1176,7 @@
   "ko": {
     "missing": [
       "convert.tab",
+      "convert_games_title",
       "ffpfsc.error",
       "ffpfsc.line",
       "ffpfsc.none",
@@ -1245,9 +1269,8 @@
       "br_payloads_placeholder",
       "br_where_discord",
       "cw_settings_app_name",
-      "drive_title",
       "ffpkg_inspect_sce_sys",
-      "fs_mesh_drive_shortcut",
+      "helper_copy_place_pldmgr",
       "processes_pid",
       "screenshots_png_hdr",
       "screenshots_png_sdr",
@@ -1257,6 +1280,7 @@
   "pl": {
     "missing": [
       "convert.tab",
+      "convert_games_title",
       "ffpfsc.error",
       "ffpfsc.line",
       "ffpfsc.none",
@@ -1349,17 +1373,21 @@
       "br_payloads_placeholder",
       "br_where_discord",
       "cw_settings_app_name",
-      "drive_title",
       "ffpkg_inspect_sce_sys",
-      "fs_mesh_drive_shortcut",
+      "health_cat_remoteplay",
+      "helper_copy_place_pldmgr",
+      "play_title",
       "power_wake_signin_rpkey",
       "processes_pid",
+      "remote_play",
+      "rp_pip_title",
       "smp_meta_json"
     ]
   },
   "pt-BR": {
     "missing": [
       "convert.tab",
+      "convert_games_title",
       "ffpfsc.error",
       "ffpfsc.line",
       "ffpfsc.none",
@@ -1452,22 +1480,21 @@
       "br_payloads_placeholder",
       "br_where_discord",
       "cw_settings_app_name",
-      "drive_title",
       "ffpkg_inspect_sce_sys",
       "fs_item_one",
-      "fs_mesh_drive_shortcut",
       "hardware_systime_via",
+      "helper_copy_place_pldmgr",
       "power_wake_signin_rpkey",
       "processes_pid",
       "queue_console_total",
       "remotePlay_slot",
-      "remote_play",
       "smp_meta_json"
     ]
   },
   "ru": {
     "missing": [
       "convert.tab",
+      "convert_games_title",
       "ffpfsc.error",
       "ffpfsc.line",
       "ffpfsc.none",
@@ -1560,11 +1587,14 @@
       "br_payloads_placeholder",
       "br_where_discord",
       "cw_settings_app_name",
-      "drive_title",
       "ffpkg_inspect_sce_sys",
-      "fs_mesh_drive_shortcut",
+      "health_cat_remoteplay",
+      "helper_copy_place_pldmgr",
+      "play_title",
       "power_wake_signin_rpkey",
       "processes_pid",
+      "remote_play",
+      "rp_pip_title",
       "screenshots_png_hdr",
       "screenshots_png_sdr",
       "smp_meta_json"
@@ -1573,6 +1603,7 @@
   "th": {
     "missing": [
       "convert.tab",
+      "convert_games_title",
       "ffpfsc.error",
       "ffpfsc.line",
       "ffpfsc.none",
@@ -1665,16 +1696,20 @@
       "br_payloads_placeholder",
       "br_where_discord",
       "cw_settings_app_name",
-      "drive_title",
       "ffpkg_inspect_sce_sys",
-      "fs_mesh_drive_shortcut",
+      "health_cat_remoteplay",
+      "helper_copy_place_pldmgr",
+      "play_title",
       "processes_pid",
+      "remote_play",
+      "rp_pip_title",
       "smp_meta_json"
     ]
   },
   "tr": {
     "missing": [
       "convert.tab",
+      "convert_games_title",
       "ffpfsc.error",
       "ffpfsc.line",
       "ffpfsc.none",
@@ -1767,11 +1802,14 @@
       "br_payloads_placeholder",
       "br_where_discord",
       "cw_settings_app_name",
-      "drive_title",
       "ffpkg_inspect_sce_sys",
-      "fs_mesh_drive_shortcut",
+      "health_cat_remoteplay",
+      "helper_copy_place_pldmgr",
+      "play_title",
       "power_wake_signin_rpkey",
       "processes_pid",
+      "remote_play",
+      "rp_pip_title",
       "screenshots_png_hdr",
       "screenshots_png_sdr",
       "smp_meta_json"
@@ -1780,6 +1818,7 @@
   "vi": {
     "missing": [
       "convert.tab",
+      "convert_games_title",
       "ffpfsc.error",
       "ffpfsc.line",
       "ffpfsc.none",
@@ -1872,18 +1911,21 @@
       "br_payloads_placeholder",
       "br_where_discord",
       "cw_settings_app_name",
-      "drive_title",
       "ffpkg_inspect_sce_sys",
-      "fs_mesh_drive_shortcut",
+      "health_cat_remoteplay",
+      "helper_copy_place_pldmgr",
+      "play_title",
       "power_wake_signin_rpkey",
       "processes_pid",
       "remote_play",
+      "rp_pip_title",
       "smp_meta_json"
     ]
   },
   "zh-CN": {
     "missing": [
       "convert.tab",
+      "convert_games_title",
       "ffpfsc.error",
       "ffpfsc.line",
       "ffpfsc.none",
@@ -1976,8 +2018,8 @@
       "br_payloads_placeholder",
       "br_where_discord",
       "cw_settings_app_name",
-      "drive_title",
       "ffpkg_inspect_sce_sys",
+      "helper_copy_place_pldmgr",
       "processes_pid",
       "screenshots_png_sdr",
       "smp_meta_json"
@@ -1986,6 +2028,7 @@
   "zh-TW": {
     "missing": [
       "convert.tab",
+      "convert_games_title",
       "ffpfsc.error",
       "ffpfsc.line",
       "ffpfsc.none",
@@ -2078,8 +2121,8 @@
       "br_payloads_placeholder",
       "br_where_discord",
       "cw_settings_app_name",
-      "drive_title",
       "ffpkg_inspect_sce_sys",
+      "helper_copy_place_pldmgr",
       "processes_pid",
       "screenshots_png_sdr",
       "smp_meta_json"

@@ -4,7 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
-#include "ava1_gen.h"
+#include "ava1_app_gen.h"
 #include "ava1_wire.h"
 #include "config.h"
 
@@ -843,14 +843,16 @@ int webui_cheats_title_ok(const char *tid) {
 
 int webui_cheats_status_to_json(const char *json, size_t n, char *out, size_t cap) {
     char tid[32];
-    int enabled = 0, running = 0, game, k;
+    int enabled = 0, running = 0, held = 0, game, k;
     if (cap) out[0] = '\0';
     if (webui_json_bool(json, n, "enabled", &enabled) != 1) return -1;
     if (webui_json_bool(json, n, "game_running", &running) != 1) running = 0;
+    if (webui_json_bool(json, n, "held", &held) != 1) held = 0; /* helpers before 9.5.0 */
     game = running && webui_json_str(json, n, "game_title_id", tid, sizeof tid) == 1 && webui_cheats_title_ok(tid) &&
            strcmp(tid, WEBUI_TILE_TITLE_ID) != 0;
     if (game)
-        k = snprintf(out, cap, "{\"engine\":%s,\"game\":{\"title_id\":\"%s\"}}", enabled ? "true" : "false", tid);
+        k = snprintf(out, cap, "{\"engine\":%s,\"game\":{\"title_id\":\"%s\"%s}}", enabled ? "true" : "false", tid,
+                     held ? ",\"held\":true" : "");
     else
         k = snprintf(out, cap, "{\"engine\":%s,\"game\":null}", enabled ? "true" : "false");
     if (k < 0 || (size_t)k >= cap) {
@@ -889,7 +891,7 @@ int webui_cheats_mods_to_json(const char *json, size_t n, char *out, size_t cap,
         const char *el, *end;
         size_t l;
         uint64_t idx;
-        int on = 0;
+        int on = 0, other = 0;
         q = ws(q, e);
         if (q >= e) {
             truncated = 1; /* cut before the closing ']' */
@@ -911,6 +913,7 @@ int webui_cheats_mods_to_json(const char *json, size_t n, char *out, size_t cap,
             if (webui_json_str(el, l, "desc", desc, sizeof desc) != 1) desc[0] = '\0';
             if (webui_json_str(el, l, "type", type, sizeof type) != 1) type[0] = '\0';
             if (webui_json_bool(el, l, "on", &on) != 1) on = 0;
+            if (webui_json_bool(el, l, "other_version", &other) != 1) other = 0; /* XML patch (#527) */
             memset(&w, 0, sizeof w);
             w.out = out + pos;
             w.cap = cap - pos - CHEATS_TAIL_ROOM + 1; /* pos + entry stays CHEATS_TAIL_ROOM short of cap */
@@ -920,6 +923,7 @@ int webui_cheats_mods_to_json(const char *json, size_t n, char *out, size_t cap,
             put(&w, "\",\"desc\":\"", 10);
             esc(&w, desc, strlen(desc));
             put(&w, strcmp(type, "button") == 0 ? "\",\"button\":true" : "\",\"button\":false", strcmp(type, "button") == 0 ? 15 : 16);
+            if (other) put(&w, ",\"other_version\":true", 21);
             put(&w, on ? ",\"on\":true}" : ",\"on\":false}", on ? 11 : 12);
             if (w.full) {
                 truncated = 1;
@@ -944,6 +948,10 @@ const char *webui_cheats_toggle_error(const char *cause, size_t n) {
     if (strstr(msg, "index out of range")) return "bad_index";
     if (strstr(msg, "is not loaded in the target process")) return "module_missing";
     if (strstr(msg, "is attached to the game")) return "game_busy";
+    /* XML game patches (#527): made for another version or executable of the game */
+    if (strstr(msg, "this patch is for") || strstr(msg, "the game's version cannot be read") ||
+        strstr(msg, "pattern is not in the game"))
+        return "wrong_version";
     return "toggle_failed";
 }
 

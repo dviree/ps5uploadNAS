@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { deleteBrowserPkgUpload, stageBrowserPkg } from "./pkgUpload";
+import { deleteBrowserPkgUpload, stageBrowserFile, stageBrowserPkg } from "./pkgUpload";
 
 vi.mock("../state/engine", () => ({
   getEngineUrl: () => "http://engine.test:19113",
@@ -67,5 +67,33 @@ describe("browser package upload", () => {
     await expect(stageBrowserPkg(new File(["x"], "x.pkg"))).rejects.toThrow(
       "invalid package-upload response",
     );
+  });
+
+  it("reports how much of a file the engine has while it uploads", async () => {
+    const seen: Array<[number, number]> = [];
+    class FakeXhr {
+      upload: { onprogress: ((e: { lengthComputable: boolean; loaded: number; total: number }) => void) | null } = { onprogress: null };
+      onload: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      onabort: (() => void) | null = null;
+      status = 0;
+      responseText = "";
+      url = "";
+      open(_method: string, url: string) {
+        this.url = url;
+      }
+      send() {
+        this.upload.onprogress?.({ lengthComputable: true, loaded: 2, total: 4 });
+        this.upload.onprogress?.({ lengthComputable: true, loaded: 4, total: 4 });
+        this.status = 200;
+        this.responseText = JSON.stringify({ upload_id: "id-1", path: "/tmp/x/a.txt", filename: "a.txt", size: 4 });
+        this.onload?.();
+      }
+    }
+    vi.stubGlobal("XMLHttpRequest", FakeXhr);
+    await expect(
+      stageBrowserFile(new File(["test"], "a.txt"), (sent, total) => seen.push([sent, total])),
+    ).resolves.toMatchObject({ uploadId: "id-1", path: "/tmp/x/a.txt" });
+    expect(seen).toEqual([[2, 4], [4, 4]]);
   });
 });

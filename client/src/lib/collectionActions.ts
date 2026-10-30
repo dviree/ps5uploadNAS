@@ -41,10 +41,10 @@ export function openInConvert(
     p.setImageChoice(p.imageFormat, true);
   }
   if (copies.length === 1) {
-    navigate("/convert", { state: { source: copies[0].absolute_path } });
+    navigate("/workshop", { state: { source: copies[0].absolute_path } });
     return;
   }
-  navigate("/convert", {
+  navigate("/workshop", {
     state: {
       sources: copies.map((c) => ({
         path: c.absolute_path,
@@ -114,7 +114,7 @@ export async function sendGamesTo(
   }
   out.installs = installOffers(host, offers);
   out.uploads = uploadIds.length;
-  if (uploadIds.length > 0) void q.startHost(host, { onlyIds: uploadIds });
+  if (uploadIds.length > 0) q.startAdded(host, uploadIds);
   return out;
 }
 
@@ -136,7 +136,7 @@ export function openConsoleCopyInConvert(
     p.setMake("image");
     p.setImageChoice(p.imageFormat, true);
   }
-  navigate("/convert", { state: { source: consoleSource(host, path) } });
+  navigate("/workshop", { state: { source: consoleSource(host, path) } });
 }
 
 /** The Collection folder a copy from a console lands in: the first folder on this computer
@@ -181,7 +181,7 @@ export async function copyToCollection(opts: {
         if (job.phase === "done") {
           pushNotification("info", opts.doneTitle, {
             body: dest,
-            link: "/collection",
+            link: "/games?tab=all",
           });
           void startCollectionScan(false);
         } else if (job.phase === "failed") {

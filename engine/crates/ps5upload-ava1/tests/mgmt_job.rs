@@ -1,19 +1,19 @@
 //! P3 Task 5: long operations over the AVA1 management transport (`job.run`, polled), against
 //! the Rust AVA1 server on 127.0.0.1 with a scripted console that keeps job state.
-//! The C side of the same protocol is tested in `ava1-ctest/tests/job_run.rs`.
+//! The C side of the same protocol is tested in `ps5upload-ctest/tests/job_run.rs`.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use ava1::gen::{self, JobRef, JobRun, Status};
 use ava1::host::FolderHost;
 use ava1::keys::Identity;
 use ava1::peers::PeerStore;
 use ava1::server::{self, ServerCtx};
 use ava1::session::RpcReply;
 use ava1::wire::Message;
+use ps5upload_ava1::gen::{self, JobRef, JobRun, Status};
 use ps5upload_ava1::mgmt::AvaTransport;
 use ps5upload_ava1::mgmt_job::{op_id_of, op_job_id};
 use ps5upload_ava1::Pool;
@@ -270,6 +270,7 @@ fn the_operation_table_matches_the_schema() {
         (ops::SDK_SCAN, gen::JOB_OP_SDK_SCAN),
         (ops::FFPFSC_UNPACK, gen::JOB_OP_FFPFSC_UNPACK),
         (ops::ARCHIVE_EXTRACT, gen::JOB_OP_ARCHIVE_EXTRACT),
+        (ops::APP_DUMP, gen::JOB_OP_APP_DUMP),
     ];
     assert_eq!(want.len(), ops::ALL.len(), "every op is pinned here");
     for (op, id) in want {

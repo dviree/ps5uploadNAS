@@ -43,14 +43,29 @@ import { isMacOrLinuxDesktop } from "../lib/platform";
 const NAV_KEYWORDS: Record<string, string[]> = {
   "/home": ["dashboard", "overview"],
   "/connection": ["host", "ip", "connect"],
-  "/install-package": ["pkg"],
-  "/games": ["library", "apps", "installed"],
+  "/send": ["send to ps5", "send", "upload", "install package", "pkg", "install", "link", "url", "usb", "stream", "archive"],
+  "/games": ["library", "apps", "installed", "dump", "dumper", "app dumper"],
+  "/workshop": ["convert", "convert games", "game images", "edit image", "look inside", "fpkg", "pkg", "exfat", "ffpfsc", "lz4", "compress"],
+  "/shared-folders": ["network shares", "mesh drive", "nas", "smb", "ftp", "sftp", "server", "sync"],
+  "/accounts": ["profile", "users", "avatar", "username", "account id", "remote play", "pin", "pair", "sign in"],
   "/captures": ["screenshots", "videos", "clips"],
   "/volumes": ["disk", "drives"],
   "/files": ["browse", "file system"],
   "/console": ["hardware", "temps", "power"],
-  "/payloads": ["homebrew catalog", "payload library", "kstuff", "shadowmount", "etahen", "nanodns", "hearbridge", "payload manager"],
-  "/processes": ["ports", "task manager", "kill"],
+  "/payloads": [
+    "homebrew catalog",
+    "payload library",
+    "kstuff",
+    "shadowmount",
+    "etahen",
+    "nanodns",
+    "hearbridge",
+    "payload manager",
+    "processes",
+    "ports",
+    "task manager",
+    "kill",
+  ],
   "/tasks": ["transfer log", "jobs"],
   "/bug-report": ["report", "problem", "issue", "discord", "github"],
   "/shell": ["terminal"],
@@ -133,7 +148,7 @@ function useCommands(close: () => void, open: boolean): Command[] {
   const games = useMemo(
     () =>
       paletteGames(
-        library ? Object.values(library.games) : [],
+        library?.games ? Object.values(library.games) : [],
         installed,
         (h) => profileNameForHost(h, profiles),
         tr,
@@ -202,7 +217,12 @@ function useCommands(close: () => void, open: boolean): Command[] {
       ...(isTauriEnv()
         ? [nav("/payloads?tab=send", "payloads_tab_send", "Send payload", ["send payload"])]
         : []),
-      nav("/logs?tab=kernel", "logs_tab_kernel", "Kernel log", ["dmesg", "klog"]),
+      // Logs and Audit log are tabs of Activity & logs; About and What's new tabs of Help.
+      nav("/tasks?tab=logs", "logs", "Logs", ["errors", "app log"]),
+      nav("/tasks?tab=logs&log=kernel", "logs_tab_kernel", "Kernel log", ["dmesg", "klog"]),
+      nav("/tasks?tab=audit", "audit_log_title", "Audit log", ["deleted", "power actions"]),
+      nav("/faq?tab=about", "about", "About", ["version", "license", "credits"]),
+      nav("/faq?tab=whats-new", "whats_new", "What's new", ["changelog", "release notes"]),
       // Desktop and mobile only: the web page updates with the engine that serves it.
       ...(isTauriEnv()
         ? [

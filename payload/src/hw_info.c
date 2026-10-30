@@ -27,6 +27,8 @@
 #include <sys/time.h>
 #include <sys/sysctl.h>
 #include <sys/types.h>
+#include <sys/param.h>
+#include <sys/cpuset.h>
 #include <dlfcn.h>
 #include <setjmp.h>
 #include <signal.h>
@@ -34,9 +36,12 @@
 
 #include <ps5/kernel.h>
 
+#include "kernel_rw_lock.h"
 #include "hw_info.h"
 #include "hw_guard.h"
 #include "fan_servo.h"
+#include "mp1_clock.h"
+#include "cpu_measure.h"
 #include "config.h"
 
 /* ── Fault guard for Sony hardware getters ────────────────────────
@@ -410,7 +415,10 @@ int hw_info_get_text(char *out, size_t out_cap, size_t *out_written,
                  * kfw=0 (string-parse fallback) instead of dropping the
                  * helper. volatile temp for the longjmp path. */
                 volatile uint32_t fw = 0;
+                /* Inside the shared kernel-R/W lock (kernel_rw_lock.h); HW_GUARD returns on a fault. */
+                pthread_mutex_lock(&kernel_rw_lock);
                 HW_GUARD("kernel_get_fw_version", fw = kernel_get_fw_version());
+                pthread_mutex_unlock(&kernel_rw_lock);
                 kfw = fw;
                 fprintf(stderr,
                         "[hw_info] PS5UPLOAD_PRECISE_FW=1 — "
@@ -464,6 +472,100 @@ int hw_info_get_text(char *out, size_t out_cap, size_t *out_written,
 #define HW_TEMP_MIN_C        1      /* >0; 0 already means "no reading" */
 #define HW_TEMP_MAX_C        150    /* CPUs thermal-throttle ~100 °C */
 #define HW_CPU_FREQ_MAX_MHZ  6000   /* generous ceiling over any console CPU */
+
+/* /dev/mp1 for mp1_clock.c: the real calls. The fd is opened read-only and closed after each
+ * read; mp1_clock.c holds its own lock around all of it and only ever passes its two GET
+ * requests through `get`. */
+static int mp1_real_open(void *ctx) {
+    (void)ctx;
+    return open("/dev/mp1", O_RDONLY);
+}
+static int mp1_real_get(void *ctx, int fd, unsigned long req, void *buf) {
+    (void)ctx;
+    return ioctl(fd, req, buf);
+}
+static void mp1_real_close(void *ctx, int fd) {
+    (void)ctx;
+    close(fd);
+}
+static int64_t mp1_real_now_ms(void *ctx) {
+    (void)ctx;
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+static const mp1_ops_t k_mp1_ops = {
+    mp1_real_open, mp1_real_get, mp1_real_close, mp1_real_now_ms, NULL,
+};
+
+/* The measured CPU clock (cpu_measure.c): the real calls. Plain user-mode instructions only (an
+ * add chain, CPUID for the core), on a worker thread so the caller keeps its affinity. */
+typedef struct {
+    void (*fn)(void *);
+    void *arg;
+} cpum_thread_arg_t;
+static void *cpum_thread_main(void *p) {
+    cpum_thread_arg_t *a = p;
+    a->fn(a->arg);
+    return NULL;
+}
+static int cpum_real_run(void *ctx, void (*fn)(void *), void *arg) {
+    (void)ctx;
+    cpum_thread_arg_t a = {fn, arg};
+    pthread_t th;
+    if (pthread_create(&th, NULL, cpum_thread_main, &a) != 0) return -1;
+    pthread_join(th, NULL);
+    return 0;
+}
+/* The SDK's cpuset_t is larger than the console kernel's (FW 13.60 takes 16 bytes and refuses
+ * 32 with ERANGE): the first size that works is kept. */
+static int cpum_real_pin(void *ctx, int cpu) {
+    (void)ctx;
+    static _Atomic size_t size_ok;
+    static const size_t sizes[] = {16, sizeof(cpuset_t), 8};
+    cpuset_t set;
+    CPU_ZERO(&set);
+    CPU_SET(cpu, &set);
+    size_t known = atomic_load(&size_ok);
+    if (known) return cpuset_setaffinity(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, known, &set) ? -1 : 0;
+    for (size_t i = 0; i < sizeof sizes / sizeof sizes[0]; i++) {
+        if (sizes[i] > sizeof(cpuset_t)) continue;
+        if (cpuset_setaffinity(CPU_LEVEL_WHICH, CPU_WHICH_TID, -1, sizes[i], &set) == 0) {
+            atomic_store(&size_ok, sizes[i]);
+            return 0;
+        }
+        if (errno != ERANGE && errno != EINVAL) return -1; /* the size was fine, the CPU is not ours */
+    }
+    return -1;
+}
+static int cpum_real_core_now(void *ctx) {
+    (void)ctx;
+    uint32_t a, b, c, d;
+    __asm__ volatile("cpuid" : "=a"(a), "=b"(b), "=c"(c), "=d"(d) : "a"(1u), "c"(0u));
+    return (int)((b >> 24) >> 1);
+}
+static uint64_t cpum_real_chain_ns(void *ctx) {
+    (void)ctx;
+    struct timespec t0, t1;
+    uint64_t x = 0, n = CPUM_ADDS / 100ull;
+    clock_gettime(CLOCK_MONOTONIC, &t0);
+    /* 100 adds per pass, each needing the one before: one cycle apiece. The whole loop is
+     * assembly so it stays in registers at any optimisation level (this file is built at -O0,
+     * where a C loop would store and reload the sum every pass and read ~7% slow). */
+    __asm__ volatile("1:\n\t"
+                     ".rept 100\n\taddq $1, %0\n\t.endr\n\t"
+                     "decq %1\n\t"
+                     "jnz 1b"
+                     : "+r"(x), "+r"(n)
+                     :
+                     : "cc");
+    clock_gettime(CLOCK_MONOTONIC, &t1);
+    int64_t ns = (int64_t)(t1.tv_sec - t0.tv_sec) * 1000000000ll + (t1.tv_nsec - t0.tv_nsec);
+    return ns > 0 ? (uint64_t)ns : 0;
+}
+static const cpum_ops_t k_cpum_ops = {
+    cpum_real_run, cpum_real_pin, cpum_real_core_now, cpum_real_chain_ns, mp1_real_now_ms, NULL,
+};
 
 /* Cache holds ONLY the basic, auto-poll-safe sensors (CPU/SoC temp +
  * CPU clock). The extended telemetry (power, CPU usage, fan duty, product
@@ -542,6 +644,13 @@ int hw_temps_get_text_ex(int flags, char *out, size_t out_cap,
     long cpu_freq_mhz = 0;
     uint32_t power_mw = 0;
     int cpu_usage_pct = -1, fan_duty_pct = -1, product_shape = -1;
+    /* The GPU (GFX) clock, reported as soc_clock_mhz; 0 = not read / unknown. */
+    uint32_t gpu_clock_mhz = 0;
+    mp1_clocks_t mp1;
+    memset(&mp1, 0, sizeof mp1);
+    cpum_clocks_t cpum;
+    memset(&cpum, 0, sizeof cpum);
+    cpum.state = CPUM_UNSUPPORTED;
 
     /* ── Basic sensors (1 s cache; auto-poll-safe) ── */
     pthread_mutex_lock(&g_temps_lock);
@@ -599,6 +708,11 @@ int hw_temps_get_text_ex(int flags, char *out, size_t out_cap,
                 if (ch == 2 && st >= 20) m2_temp = st;
             }
         }
+        /* cpu_freq_mhz is a REFERENCE clock, not what the cores run at:
+         * sceKernelGetCpuFrequency() returns a fixed rate (800 MHz on every
+         * console measured, FW 5.10 to 13.60; the TSC-style counter rate), and
+         * machdep.tsc_freq is the same kind of figure. The cores' own clocks
+         * come from the SMU on request (HW_EXT_CLOCKS, mp1_clock.c). */
         if (g_hw.cpu_freq) {
             volatile long hz = 0;
             volatile int  got = 0;
@@ -705,6 +819,15 @@ int hw_temps_get_text_ex(int flags, char *out, size_t out_cap,
             if (q10 >= 0) fan_duty_pct = fan_duty_q10_pct((unsigned)q10);
         }
 
+        /* GPU clock and the eight cores' clocks from the SMU (/dev/mp1).
+         * Read-only, own lock, 2 s cache, and it stops for good after the
+         * first refusal: see mp1_clock.h. Only for an explicit 'c'. */
+        if (flags & HW_EXT_CLOCKS) {
+            if (mp1_clocks_read(&k_mp1_ops, &mp1) == MP1_OK) gpu_clock_mhz = mp1.gpu_mhz;
+            /* And the clock the system's cores really run at (cpu_measure.h). */
+            (void)cpu_measure_read(&k_cpum_ops, &cpum);
+        }
+
         /* Basic product shape — a raw Sony enum that distinguishes hardware
          * families (standard / slim / Pro / devkit …). Reported raw; the
          * desktop maps the known codes to a label and otherwise shows the
@@ -721,16 +844,31 @@ int hw_temps_get_text_ex(int flags, char *out, size_t out_cap,
         "soc_temp=%d\n"
         "m2_temp=%d\n"
         "cpu_freq_mhz=%ld\n"
-        "soc_clock_mhz=0\n"
+        "soc_clock_mhz=%u\n"
         "soc_power_mw=%u\n"
         "cpu_usage_pct=%d\n"
         "fan_duty_pct=%d\n"
         "product_shape=%d\n",
-        cpu_temp, soc_temp, m2_temp, cpu_freq_mhz, power_mw,
+        cpu_temp, soc_temp, m2_temp, cpu_freq_mhz, (unsigned)gpu_clock_mhz, power_mw,
         cpu_usage_pct, fan_duty_pct, product_shape);
     if (n < 0 || (size_t)n >= out_cap) {
         if (err_reason_out) *err_reason_out = "hw_temps_format_failed";
         return -1;
+    }
+    /* The clock lines, only when they were asked for (an older desktop never sees them). */
+    if (flags & HW_EXT_CLOCKS) {
+        int c = mp1_clocks_format(&mp1, (flags & HW_EXT_DEBUG) != 0, out + n, out_cap - (size_t)n);
+        if (c < 0 || (size_t)c >= out_cap - (size_t)n) {
+            if (err_reason_out) *err_reason_out = "hw_temps_format_failed";
+            return -1;
+        }
+        n += c;
+        c = cpu_measure_format(&cpum, out + n, out_cap - (size_t)n);
+        if (c < 0 || (size_t)c >= out_cap - (size_t)n) {
+            if (err_reason_out) *err_reason_out = "hw_temps_format_failed";
+            return -1;
+        }
+        n += c;
     }
     /* The fan's state: the target held now, the console's own, the guard, the 28-byte profile. */
     int f = hw_fan_status_text(out + n, out_cap - (size_t)n);
@@ -1179,8 +1317,7 @@ static void hw_fan_watch_tick(void) {
 static void *hw_fan_watcher_thread_fn(void *arg) {
     (void)arg;
     /* Best-effort thread name for ps/top output; ignored if the
-     * syscall isn't available. SYS_thr_set_name is FreeBSD-specific
-     * (matches sonicloader fan.c:170). */
+     * syscall isn't available. SYS_thr_set_name is FreeBSD-specific. */
     (void)syscall(SYS_thr_set_name, -1, "ps5upload-fan");
 
     for (;;) {

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   CheckSquare,
   FolderPlus,
@@ -12,10 +12,12 @@ import {
   List,
   RefreshCw,
   Search,
+  Server,
   Square,
 } from "lucide-react";
 
 import {
+  BrowseButton,
   Button,
   EmptyState,
   ErrorCard,
@@ -70,19 +72,31 @@ import { useActiveCopies } from "../../state/copyActivity";
 import { useShallow } from "zustand/react/shallow";
 import { useCheatTitleIds } from "../../lib/cheatIndex";
 import { parsePS5Firmware } from "../../lib/ps5Firmware";
-import {
-  lastSeenPlayingFor,
-  playSecondsFor,
-  usePlayTimeStore,
-} from "../../state/playTime";
+import { usePlayTimeStore } from "../../state/playTime";
+import { playFor, useTrackedPlay } from "../../lib/trackedPlay";
 import { openInConvert } from "../../lib/collectionActions";
 import { bestConvertible } from "../../lib/collectionConvert";
 import { shrinkCandidate } from "../../lib/collectionInsights";
 import { startCopyChecks } from "../../state/copyChecks";
 import { SendManyModal } from "./SendManyModal";
+import type { PlayState } from "./PlayControl";
+import { useGameLaunch } from "../../lib/useGameLaunch";
+import { installedKindOf } from "../GameHub/installedKind";
+import { useSmpState } from "../GameHub/SmpNeeded";
+import type { CollectionGame } from "../../api/collection";
+import { useInstalledTitles } from "../../state/installedTitles";
+import {
+  driveTitleIds,
+  entryTitleId,
+  libraryForHost,
+  useLibraryStore,
+} from "../../state/library";
+import { useRunningTitleIds } from "../../state/runningApps";
 
-/** The games kept on this computer's drives: PS Game Library, inside ps5upload. */
-export default function CollectionScreen() {
+/** The games kept on this computer's drives: PS Game Library, inside ps5upload.
+ *  `embedded`: shown as the Games screen's grid, under that screen's own
+ *  header, so only the actions are drawn here (no page title or page padding). */
+export default function CollectionScreen({ embedded = false }: { embedded?: boolean } = {}) {
   const tr = useTr();
   // Everything but the scan's progress counters: those change every second
   // while a scan runs, and only the progress line (ScanProgress) needs them.
@@ -139,7 +153,7 @@ export default function CollectionScreen() {
     if (host && helperUp && generatedAt) void loadConsoleStates(host);
   }, [host, helperUp, generatedAt]);
   const consoleEntry = host ? s.consoleByHost[host] : undefined;
-  const consoleStates = useMemo(
+  const copyStates = useMemo(
     () =>
       helperUp && consoleEntry
         ? new Map<string, GameConsoleState>(Object.entries(consoleEntry.states))
@@ -152,14 +166,141 @@ export default function CollectionScreen() {
   const kernel = useConnectionStore((c) => c.ps5Kernel);
   const consoleFw = helperUp ? parsePS5Firmware(kernel) : null;
   const cheatIds = useCheatTitleIds();
+  // The helper's tracked play time (what Game Activity listed), the app's own count without it.
   const playByHost = usePlayTimeStore((p) => p.byHost);
   const seenByHost = usePlayTimeStore((p) => p.lastSeenByHost);
-  const lastPlayed = useCallback(
+  const tracked = useTrackedPlay(helperUp ? host : null);
+  const playOf = useCallback(
     (id: string) =>
-      lastSeenPlayingFor({ lastSeenByHost: seenByHost }, host, id),
-    [seenByHost, host],
+      playFor(tracked, { byHost: playByHost, lastSeenByHost: seenByHost }, host, id),
+    [tracked, playByHost, seenByHost, host],
   );
-  const games = useMemo(() => collectionGames(s.library), [s.library]);
+  const lastPlayed = useCallback((id: string) => playOf(id).lastSeenMs, [playOf]);
+  const copies = useMemo(() => collectionGames(s.library), [s.library]);
+  // Games is one view: the games installed on the selected console that have no copy here show
+  // as cards too ("On the PS5 only"), so the console filter covers everything the PS5 has.
+  const installedTitles = useInstalledTitles(helperUp ? host : undefined);
+  const consoleOnly = useMemo(() => {
+    const have = new Set(copies.map((g) => g.game_id.toUpperCase()));
+    return (installedTitles ?? [])
+      .filter((t) => !t.system && t.titleId && !have.has(t.titleId.toUpperCase()))
+      .map(
+        (t): CollectionGame => ({
+          game_id: t.titleId,
+          title: t.titleName || t.titleId,
+          platform: /^CUSA/i.test(t.titleId) ? "PS4" : "PS5",
+          sources: [],
+          locations: [],
+          total_size_bytes: 0,
+          copies: 0,
+          is_duplicate: false,
+          added_ts: 0,
+        }),
+      );
+  }, [copies, installedTitles]);
+  const consoleOnlyIds = useMemo(() => new Set(consoleOnly.map((g) => g.game_id)), [consoleOnly]);
+  // And the games on the PS5's drives that are neither (a game folder or image it has not
+  // registered): cards too ("On the PS5's drives"), from the drive scan the Games screen keeps.
+  const driveSlot = useLibraryStore((st) => libraryForHost(st, helperUp ? host : ""));
+  const driveIds = useMemo(
+    () => (helperUp && driveSlot.entries ? driveTitleIds(driveSlot) : null),
+    [helperUp, driveSlot],
+  );
+  const [drivesOnly, drivePaths] = useMemo((): [CollectionGame[], Map<string, string>] => {
+    const paths = new Map<string, string>();
+    if (!helperUp || !driveSlot.entries) return [[], paths];
+    const have = new Set(copies.map((g) => g.game_id.toUpperCase()));
+    for (const t of installedTitles ?? []) have.add(t.titleId.toUpperCase());
+    const out = new Map<string, CollectionGame>();
+    for (const e of driveSlot.entries) {
+      const id = entryTitleId(e, driveSlot);
+      if (!id || have.has(id.toUpperCase()) || out.has(id.toUpperCase())) continue;
+      // A folder's own icon; an image's is inside it.
+      if (e.kind === "game") paths.set(id, e.path);
+      out.set(id.toUpperCase(), {
+        game_id: id,
+        title: e.title || id,
+        platform: /^CUSA/i.test(id) ? "PS4" : "PS5",
+        sources: [],
+        locations: [],
+        total_size_bytes: 0,
+        copies: 0,
+        is_duplicate: false,
+        added_ts: 0,
+      });
+    }
+    return [[...out.values()], paths];
+  }, [helperUp, driveSlot, copies, installedTitles]);
+  const drivesOnlyIds = useMemo(() => new Set(drivesOnly.map((g) => g.game_id)), [drivesOnly]);
+  const games = useMemo(
+    () => copies.concat(consoleOnly, drivesOnly),
+    [copies, consoleOnly, drivesOnly],
+  );
+  const consoleStates = useMemo(() => {
+    if (!copyStates && consoleOnly.length === 0 && drivesOnly.length === 0) return undefined;
+    const m = new Map(copyStates ?? []);
+    for (const g of consoleOnly)
+      m.set(g.game_id, { game_id: g.game_id, installed: true, dlc_missing: [], non_package_copy: false });
+    for (const g of drivesOnly)
+      m.set(g.game_id, { game_id: g.game_id, installed: false, dlc_missing: [], non_package_copy: false });
+    return m;
+  }, [copyStates, consoleOnly, drivesOnly]);
+  const playSeconds = useCallback((id: string) => playOf(id).seconds, [playOf]);
+  // What runs on this PS5 now, for the cards' "Playing" tag.
+  const runningIds = useRunningTitleIds(helperUp ? host : null);
+
+  // Play and Close game on the cards of games this PS5 has installed: the game page's own
+  // (useGameLaunch: closes a running game first with the user's say-so, repairs a homebrew
+  // folder the console refuses), held while ShadowMount+ is needed for a disk-image game and
+  // not running. Only with the helper up (installedTitles is null otherwise).
+  const playable = useMemo(() => {
+    const m = new Map<string, { titleId: string; titleName: string; source?: string; disc: boolean }>();
+    for (const t of installedTitles ?? []) {
+      if (t.system || !t.titleId) continue;
+      m.set(t.titleId.toUpperCase(), {
+        titleId: t.titleId,
+        titleName: t.titleName || t.titleId,
+        source: t.source || undefined,
+        disc: installedKindOf(t) === "disc",
+      });
+    }
+    return m;
+  }, [installedTitles]);
+  const anyDisc = useMemo(() => [...playable.values()].some((p) => p.disc), [playable]);
+  const smp = useSmpState(helperUp && anyDisc ? host : "");
+  const nameOf = useCallback(
+    (id: string) => playable.get(id.toUpperCase())?.titleName ?? id,
+    [playable],
+  );
+  const launcher = useGameLaunch({ nameOf });
+  const playStateOf = useCallback(
+    (gameId: string): PlayState | undefined => {
+      const p = playable.get(gameId.toUpperCase());
+      if (!p) return undefined;
+      if (launcher.stoppingId === p.titleId) return "closing";
+      if (runningIds.has(p.titleId) || runningIds.has(gameId)) return "running";
+      if (launcher.launchingId === p.titleId) return "starting";
+      if (p.disc && smp.absent) return "blocked";
+      if (launcher.launchingId) return "wait";
+      return "play";
+    },
+    [playable, launcher.stoppingId, launcher.launchingId, runningIds, smp.absent],
+  );
+  // The cards are memoised: hand them callbacks that never change, reading the latest launcher.
+  const launcherRef = useRef(launcher);
+  const playableRef = useRef(playable);
+  useLayoutEffect(() => {
+    launcherRef.current = launcher;
+    playableRef.current = playable;
+  });
+  const playGame = useCallback((gameId: string) => {
+    const p = playableRef.current.get(gameId.toUpperCase());
+    if (p) void launcherRef.current.launch(p);
+  }, []);
+  const stopGame = useCallback((gameId: string) => {
+    const p = playableRef.current.get(gameId.toUpperCase());
+    if (p) void launcherRef.current.stop(p);
+  }, []);
   const shown = useMemo(
     () =>
       viewGames(games, {
@@ -172,6 +313,8 @@ export default function CollectionScreen() {
         consoleFw,
         cheatIds,
         lastPlayed,
+        driveIds,
+        playSeconds,
       }),
     [
       games,
@@ -184,15 +327,17 @@ export default function CollectionScreen() {
       consoleFw,
       cheatIds,
       lastPlayed,
+      driveIds,
+      playSeconds,
     ],
   );
   const counts = useMemo(
-    () => filterCounts(games, { cheatIds }),
-    [games, cheatIds],
+    () => filterCounts(copies, { cheatIds }),
+    [copies, cheatIds],
   );
   const cCounts = useMemo(
-    () => consoleCounts(games, consoleStates, consoleFw),
-    [games, consoleStates, consoleFw],
+    () => consoleCounts(games, consoleStates, consoleFw, { driveIds, playSeconds }),
+    [games, consoleStates, consoleFw, driveIds, playSeconds],
   );
 
   // Select mode: the cards pick instead of opening, and the bar acts on what is picked.
@@ -289,7 +434,7 @@ export default function CollectionScreen() {
     pushNotification(
       "info",
       tr("collection.queued", { n }, "{n} packages queued for install"),
-      { link: "/install-package" },
+      { link: "/send" },
     );
   }
   const roots = s.settings?.roots ?? [];
@@ -297,17 +442,29 @@ export default function CollectionScreen() {
   const scanning = s.scanning;
   const summary = s.library?.summary;
 
+  const pickFolderTitle = tr(
+    "collection.pick_folder",
+    undefined,
+    "Choose the folder that holds your games",
+  );
   async function addFolder() {
-    const path = await pickPath({
-      mode: "folder",
-      title: tr(
-        "collection.pick_folder",
-        undefined,
-        "Choose the folder that holds your games",
-      ),
-    });
+    const path = await pickPath({ mode: "folder", title: pickFolderTitle });
     if (path) await addCollectionRoot(path);
   }
+  /** "Add a folder", with a ▾ for a folder on a saved server (NAS, FTP, SFTP, WebDAV). The
+   *  plain button picked this device's folders only, so on a phone a NAS could not be added
+   *  until the Collection already had a folder (#534). */
+  const addFolderButton = (primary: boolean) => (
+    <BrowseButton
+      mode="folder"
+      remote
+      primary={primary}
+      title={pickFolderTitle}
+      icon={<FolderPlus size={primary ? 14 : 12} />}
+      label={tr("collection.add_folder", undefined, "Add a folder")}
+      onPick={(p) => void addCollectionRoot(p)}
+    />
+  );
 
   const filterLabel: Record<CollectionFilter, string> = {
     all: tr("collection.filter.all", undefined, "All"),
@@ -358,7 +515,130 @@ export default function CollectionScreen() {
     ),
   };
 
-  const header = (
+  const actions =
+    roots.length > 0 ? (
+      <div className="flex flex-wrap items-center gap-2">
+        <ServingLinks />
+        {scanning ? (
+          <Button
+            size="sm"
+            variant="secondary"
+            leftIcon={<Square size={12} />}
+            onClick={() => void cancelCollectionScan()}
+          >
+            {tr("collection.stop_scan", undefined, "Stop scan")}
+          </Button>
+        ) : (
+          <Button
+            size="sm"
+            variant="primary"
+            leftIcon={<RefreshCw size={12} />}
+            onClick={() => void startCollectionScan(false)}
+          >
+            {tr("collection.scan", undefined, "Scan")}
+          </Button>
+        )}
+        {/* On a phone three buttons fill the row and the "…" menu was left
+            alone on a line of its own: Folders goes into the menu there. */}
+        {!phone && (
+          <Button
+            size="sm"
+            variant="secondary"
+            leftIcon={<FolderSearch size={12} />}
+            onClick={() => setFoldersOpen(true)}
+          >
+            {tr("collection.folders", undefined, "Folders")}
+          </Button>
+        )}
+        <OverflowMenu
+          items={[
+            ...(phone
+              ? [
+                  {
+                    label: tr("collection.folders", undefined, "Folders"),
+                    icon: <FolderSearch size={12} />,
+                    onSelect: () => setFoldersOpen(true),
+                  },
+                ]
+              : []),
+            {
+              label: tr(
+                "collection.rescan_all",
+                undefined,
+                "Rescan everything",
+              ),
+              title: tr(
+                "collection.rescan_all_hint",
+                undefined,
+                "Read every folder size and every item again, ignoring what was cached.",
+              ),
+              disabled: scanning,
+              onSelect: () => void startCollectionScan(true),
+            },
+            {
+              label: tr(
+                "collection.org_menu",
+                undefined,
+                "Organize collection\u2026",
+              ),
+              disabled: scanning,
+              onSelect: () => setOrganizeOpen(true),
+            },
+            {
+              label: tr(
+                "collection.junk_menu",
+                undefined,
+                "Clean up junk files…",
+              ),
+              onSelect: () => setCleanupOpen(true),
+            },
+            {
+              label: tr(
+                "collection.export_csv",
+                undefined,
+                "Export as CSV",
+              ),
+              onSelect: () => void exportCollection("csv"),
+            },
+            {
+              label: tr(
+                "collection.export_md",
+                undefined,
+                "Export as Markdown",
+              ),
+              onSelect: () => void exportCollection("md"),
+            },
+            {
+              label: tr(
+                "collection.export_json",
+                undefined,
+                "Export as JSON",
+              ),
+              onSelect: () => void exportCollection("json"),
+            },
+            ...(consoleStates && cCounts.update + cCounts.dlc > 0
+              ? [
+                  {
+                    label: tr(
+                      "collection.update_all",
+                      undefined,
+                      "Bring this PS5 up to date",
+                    ),
+                    onSelect: () => void bringUpToDate(),
+                  },
+                ]
+              : []),
+          ]}
+        />
+      </div>
+    ) : s.settings && (consoleOnly.length > 0 || drivesOnly.length > 0) ? (
+      // No folder of your own yet, but the PS5 has games, so the grid is not empty and its
+      // "Add a folder" empty state does not show: offer it here instead.
+      addFolderButton(false)
+    ) : undefined;
+  const header = embedded ? (
+    actions && <div className="mb-5 flex justify-end">{actions}</div>
+  ) : (
     <PageHeader
       icon={Library}
       title={tr("collection.title", undefined, "Collection")}
@@ -368,130 +648,14 @@ export default function CollectionScreen() {
         undefined,
         "Every game you keep on this computer's drives, grouped by game: its copies, updates and DLC, duplicates and the space they take. Each item is read from the file itself, wherever it sits.",
       )}
-      right={
-        roots.length > 0 ? (
-          <div className="flex flex-wrap items-center gap-2">
-            <ServingLinks />
-            {scanning ? (
-              <Button
-                size="sm"
-                variant="secondary"
-                leftIcon={<Square size={12} />}
-                onClick={() => void cancelCollectionScan()}
-              >
-                {tr("collection.stop_scan", undefined, "Stop scan")}
-              </Button>
-            ) : (
-              <Button
-                size="sm"
-                variant="primary"
-                leftIcon={<RefreshCw size={12} />}
-                onClick={() => void startCollectionScan(false)}
-              >
-                {tr("collection.scan", undefined, "Scan")}
-              </Button>
-            )}
-            {/* On a phone three buttons fill the row and the "…" menu was left
-                alone on a line of its own: Folders goes into the menu there. */}
-            {!phone && (
-              <Button
-                size="sm"
-                variant="secondary"
-                leftIcon={<FolderSearch size={12} />}
-                onClick={() => setFoldersOpen(true)}
-              >
-                {tr("collection.folders", undefined, "Folders")}
-              </Button>
-            )}
-            <OverflowMenu
-              items={[
-                ...(phone
-                  ? [
-                      {
-                        label: tr("collection.folders", undefined, "Folders"),
-                        icon: <FolderSearch size={12} />,
-                        onSelect: () => setFoldersOpen(true),
-                      },
-                    ]
-                  : []),
-                {
-                  label: tr(
-                    "collection.rescan_all",
-                    undefined,
-                    "Rescan everything",
-                  ),
-                  title: tr(
-                    "collection.rescan_all_hint",
-                    undefined,
-                    "Read every folder size and every item again, ignoring what was cached.",
-                  ),
-                  disabled: scanning,
-                  onSelect: () => void startCollectionScan(true),
-                },
-                {
-                  label: tr(
-                    "collection.org_menu",
-                    undefined,
-                    "Organize collection\u2026",
-                  ),
-                  disabled: scanning,
-                  onSelect: () => setOrganizeOpen(true),
-                },
-                {
-                  label: tr(
-                    "collection.junk_menu",
-                    undefined,
-                    "Clean up junk files…",
-                  ),
-                  onSelect: () => setCleanupOpen(true),
-                },
-                {
-                  label: tr(
-                    "collection.export_csv",
-                    undefined,
-                    "Export as CSV",
-                  ),
-                  onSelect: () => void exportCollection("csv"),
-                },
-                {
-                  label: tr(
-                    "collection.export_md",
-                    undefined,
-                    "Export as Markdown",
-                  ),
-                  onSelect: () => void exportCollection("md"),
-                },
-                {
-                  label: tr(
-                    "collection.export_json",
-                    undefined,
-                    "Export as JSON",
-                  ),
-                  onSelect: () => void exportCollection("json"),
-                },
-                ...(consoleStates && cCounts.update + cCounts.dlc > 0
-                  ? [
-                      {
-                        label: tr(
-                          "collection.update_all",
-                          undefined,
-                          "Bring this PS5 up to date",
-                        ),
-                        onSelect: () => void bringUpToDate(),
-                      },
-                    ]
-                  : []),
-              ]}
-            />
-          </div>
-        ) : undefined
-      }
+      right={actions}
     />
   );
+  const pageClass = embedded ? "" : "app-page";
 
   if (!s.settings && s.loading) {
     return (
-      <div className="app-page">
+      <div className={pageClass}>
         {header}
         <div className="flex items-center gap-2 text-sm text-[var(--color-muted)]">
           <Spinner size={14} />{" "}
@@ -502,7 +666,7 @@ export default function CollectionScreen() {
   }
 
   return (
-    <div className="app-page">
+    <div className={pageClass}>
       {header}
       {s.error && (
         <div className="mb-4">
@@ -541,7 +705,7 @@ export default function CollectionScreen() {
 
       {/* Not loaded (the read failed): an unread collection is not an empty
           one, so no "add the folder that holds your games" under the error. */}
-      {!s.settings ? null : roots.length === 0 ? (
+      {!s.settings ? null : roots.length === 0 && consoleOnly.length === 0 && drivesOnly.length === 0 ? (
         <EmptyState
           fill
           icon={Library}
@@ -554,20 +718,25 @@ export default function CollectionScreen() {
           body={
             <span>
               {tr(
-                "collection.empty_body",
+                "collection.empty_body_v2",
                 undefined,
-                "Packages, game folders, game images and archives anywhere under it are found and grouped by game. Nothing in the folder is changed. A drive, an external disk or a mounted network share all work.",
+                "Packages, game folders, game images and archives anywhere under it are found and grouped by game. Nothing in the folder is changed. A folder on this device, an external drive, or a folder on a NAS or server (SMB, FTP, SFTP, WebDAV) all work.",
               )}
             </span>
           }
           action={
             <div className="flex flex-wrap justify-center gap-2">
+              {addFolderButton(true)}
               <Button
-                variant="primary"
-                leftIcon={<FolderPlus size={14} />}
-                onClick={() => void addFolder()}
+                variant="secondary"
+                leftIcon={<Server size={14} />}
+                onClick={() => setFoldersOpen(true)}
               >
-                {tr("collection.add_folder", undefined, "Add a folder")}
+                {tr(
+                  "collection.add_nas_folder",
+                  undefined,
+                  "From a NAS or server",
+                )}
               </Button>
             </div>
           }
@@ -764,6 +933,16 @@ export default function CollectionScreen() {
                     games.length,
                   ],
                   [
+                    "installed",
+                    tr("collection.console_installed", undefined, "Installed"),
+                    cCounts.installed,
+                    tr(
+                      "collection.console_installed_hint",
+                      undefined,
+                      "Games this PS5 has installed.",
+                    ),
+                  ],
+                  [
                     "missing",
                     tr(
                       "collection.console_missing",
@@ -771,21 +950,68 @@ export default function CollectionScreen() {
                       "Not installed",
                     ),
                     cCounts.missing,
-                  ],
-                  [
-                    "update",
                     tr(
-                      "collection.console_update",
+                      "collection.console_missing_hint",
                       undefined,
-                      "Update available",
+                      "Games you have that this PS5 has not installed.",
                     ),
-                    cCounts.update,
                   ],
-                  [
-                    "dlc",
-                    tr("collection.console_dlc", undefined, "DLC missing"),
-                    cCounts.dlc,
-                  ],
+                  // One chip for both kinds of add-on: "Update available" and "DLC missing"
+                  // read as the console's own store state, which they are not.
+                  ...(cCounts.addons > 0 || s.consoleFilter === "addons"
+                    ? [
+                        [
+                          "addons",
+                          tr(
+                            "collection.console_addons",
+                            undefined,
+                            "Updates & DLC to install",
+                          ),
+                          cCounts.addons,
+                          tr(
+                            "collection.console_addons_hint",
+                            undefined,
+                            "Installed games for which this computer has a newer update, or DLC this PS5 does not have yet.",
+                          ),
+                        ],
+                      ]
+                    : []),
+                  ...(cCounts.unplayed > 0 || s.consoleFilter === "unplayed"
+                    ? [
+                        [
+                          "unplayed",
+                          tr(
+                            "collection.console_unplayed",
+                            undefined,
+                            "Never seen played",
+                          ),
+                          cCounts.unplayed,
+                          tr(
+                            "collection.console_unplayed_hint",
+                            undefined,
+                            "Installed games this app has never seen running on this PS5.",
+                          ),
+                        ],
+                      ]
+                    : []),
+                  ...(cCounts.drives > 0 || s.consoleFilter === "drives"
+                    ? [
+                        [
+                          "drives",
+                          tr(
+                            "collection.console_drives",
+                            undefined,
+                            "On the PS5's drives",
+                          ),
+                          cCounts.drives,
+                          tr(
+                            "collection.console_drives_hint",
+                            undefined,
+                            "Games with a folder or disk image on this PS5's drives.",
+                          ),
+                        ],
+                      ]
+                    : []),
                   ...(consoleFw &&
                   (cCounts.firmware > 0 || s.consoleFilter === "firmware")
                     ? [
@@ -797,16 +1023,22 @@ export default function CollectionScreen() {
                             "Needs newer firmware",
                           ),
                           cCounts.firmware,
+                          tr(
+                            "collection.console_firmware_hint",
+                            { fw: consoleFw },
+                            "Games that ask for newer firmware than this PS5's {fw}: they may not start unless backported.",
+                          ),
                         ],
                       ]
                     : []),
-                ] as [ConsoleFilter, string, number][]
-              ).map(([f, label, n]) => (
+                ] as [ConsoleFilter, string, number, string?][]
+              ).map(([f, label, n, hint]) => (
                 <button
                   key={f}
                   type="button"
                   aria-pressed={s.consoleFilter === f}
                   onClick={() => s.set({ consoleFilter: f })}
+                  title={hint}
                   className="chip min-h-9 gap-1.5 px-4 text-xs font-medium"
                 >
                   {label}
@@ -817,7 +1049,7 @@ export default function CollectionScreen() {
               ))}
             </div>
           )}
-          {consoleStates && cCounts.update + cCounts.dlc > 0 && (
+          {consoleStates && cCounts.addons > 0 && (
             // The one-click catch-up, where it can be seen rather than in the ⋯ menu.
             <div className="surface-panel mb-5 flex flex-wrap items-center gap-3 !rounded-[var(--radius-card)] px-5 py-3 text-sm">
               <span className="min-w-0 flex-1">
@@ -858,9 +1090,9 @@ export default function CollectionScreen() {
                 }
               >
                 {tr(
-                  "collection.smaller_go",
+                  "collection.smaller_go_v2",
                   undefined,
-                  "Queue them in Convert",
+                  "Queue them in Workshop",
                 )}
               </Button>
             </div>
@@ -896,17 +1128,20 @@ export default function CollectionScreen() {
                 <CollectionCard
                   key={g.game_id}
                   game={g}
+                  onlyOnConsole={consoleOnlyIds.has(g.game_id)}
+                  onlyOnDrives={drivesOnlyIds.has(g.game_id)}
+                  drivePath={drivePaths.get(g.game_id)}
+                  running={runningIds.has(g.game_id)}
+                  play={playStateOf(g.game_id)}
+                  onPlay={playGame}
+                  onStop={stopGame}
                   activity={activityOf(g)}
                   consoleState={consoleStates?.get(g.game_id)}
                   onOpen={openGame}
                   host={helperUp ? host : undefined}
                   consoleFw={consoleFw}
                   hasCheats={!!cheatIds?.has(g.game_id.toUpperCase())}
-                  playSec={playSecondsFor(
-                    { byHost: playByHost },
-                    host,
-                    g.game_id,
-                  )}
+                  playSec={playOf(g.game_id).seconds}
                   selecting={selecting}
                   selected={selected.has(g.game_id)}
                   onToggleSelect={toggleSelect}
@@ -921,10 +1156,13 @@ export default function CollectionScreen() {
               consoleFw={consoleFw}
               consoleStates={consoleStates}
               cheatIds={cheatIds}
-              playSec={(id) => playSecondsFor({ byHost: playByHost }, host, id)}
+              playSec={(id) => playOf(id).seconds}
               selecting={selecting}
               selected={selected}
               onToggleSelect={toggleSelect}
+              playOf={playStateOf}
+              onPlay={playGame}
+              onStop={stopGame}
             />
           )}
         </>
@@ -995,6 +1233,7 @@ export default function CollectionScreen() {
         }}
       />
       {dialog}
+      {launcher.dialogs}
       <OrganizeModal
         open={organizeOpen}
         onClose={() => setOrganizeOpen(false)}

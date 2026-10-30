@@ -1,0 +1,1304 @@
+// Remote Play in the app: one stream from the engine's /api/ps5/rp/ws, decoded with WebCodecs.
+//
+// The engine runs the session with the console (ps5upload_core::rp_stream, a port of chiaki-ng)
+// and relays it over a WebSocket: binary records out ([kind][payload]: 0 video header, 1 video
+// access unit, 3 audio header, 4 audio frame), JSON status lines out, pad state in. This file
+// turns that into pixels on a canvas, sound, and input; the screen only drives it.
+
+import type { MotionReading } from "./motion";
+import { getEngineUrl } from "../state/engine";
+import { safeGetItem, safeRemoveItem, safeSetItem } from "./safeStorage";
+
+/** Button bits, as the console (and chiaki) number them. */
+export const PadButton = {
+  CROSS: 1,
+  CIRCLE: 2,
+  SQUARE: 4,
+  TRIANGLE: 8,
+  LEFT: 16,
+  RIGHT: 32,
+  UP: 64,
+  DOWN: 128,
+  L1: 256,
+  R1: 512,
+  L3: 1024,
+  R3: 2048,
+  OPTIONS: 4096,
+  SHARE: 8192,
+  TOUCHPAD: 16384,
+  PS: 32768,
+} as const;
+
+export interface PadState {
+  buttons: number;
+  l2: number;
+  r2: number;
+  lx: number;
+  ly: number;
+  rx: number;
+  ry: number;
+  /** One finger on the touchpad, in its 1920×942 space, or none. */
+  touch?: [number, number] | null;
+  /** A phone's motion sensors in the controller's axes (lib/motion.ts), or none. */
+  motion?: MotionReading | null;
+}
+
+export const IDLE_PAD: PadState = { buttons: 0, l2: 0, r2: 0, lx: 0, ly: 0, rx: 0, ry: 0 };
+
+/** The touchpad point for a position on the picture (fractions 0-1 across and down). */
+export function touchAt(fx: number, fy: number): [number, number] {
+  const c = (v: number) => Math.max(0, Math.min(1, v));
+  return [Math.round(c(fx) * 1919), Math.round(c(fy) * 941)];
+}
+
+/** What a key does: a button, a stick direction, or a trigger. */
+export type KeyAction =
+  | { button: number }
+  | { stick: "lx" | "ly" | "rx" | "ry"; dir: -1 | 1 }
+  | { trigger: "l2" | "r2" };
+
+/** The default keyboard map (KeyboardEvent.code → action). */
+export const DEFAULT_KEYMAP: Record<string, KeyAction> = {
+  ArrowUp: { button: PadButton.UP },
+  ArrowDown: { button: PadButton.DOWN },
+  ArrowLeft: { button: PadButton.LEFT },
+  ArrowRight: { button: PadButton.RIGHT },
+  Enter: { button: PadButton.CROSS },
+  Space: { button: PadButton.CROSS },
+  Backspace: { button: PadButton.CIRCLE },
+  Escape: { button: PadButton.CIRCLE },
+  KeyQ: { button: PadButton.SQUARE },
+  KeyE: { button: PadButton.TRIANGLE },
+  KeyZ: { button: PadButton.L1 },
+  KeyC: { button: PadButton.R1 },
+  Digit1: { trigger: "l2" },
+  Digit3: { trigger: "r2" },
+  KeyF: { button: PadButton.L3 },
+  KeyG: { button: PadButton.R3 },
+  Tab: { button: PadButton.OPTIONS },
+  Backquote: { button: PadButton.SHARE },
+  KeyH: { button: PadButton.PS },
+  KeyT: { button: PadButton.TOUCHPAD },
+  KeyW: { stick: "ly", dir: -1 },
+  KeyS: { stick: "ly", dir: 1 },
+  KeyA: { stick: "lx", dir: -1 },
+  KeyD: { stick: "lx", dir: 1 },
+  KeyI: { stick: "ry", dir: -1 },
+  KeyK: { stick: "ry", dir: 1 },
+  KeyJ: { stick: "rx", dir: -1 },
+  KeyL: { stick: "rx", dir: 1 },
+};
+
+/** The actions a key can be set to, in the order the remap list shows them. */
+export const PAD_ACTIONS: ReadonlyArray<{ id: string; label: string; action: KeyAction }> = [
+  { id: "up", label: "D-pad up", action: { button: PadButton.UP } },
+  { id: "down", label: "D-pad down", action: { button: PadButton.DOWN } },
+  { id: "left", label: "D-pad left", action: { button: PadButton.LEFT } },
+  { id: "right", label: "D-pad right", action: { button: PadButton.RIGHT } },
+  { id: "cross", label: "✕", action: { button: PadButton.CROSS } },
+  { id: "circle", label: "○", action: { button: PadButton.CIRCLE } },
+  { id: "square", label: "□", action: { button: PadButton.SQUARE } },
+  { id: "triangle", label: "△", action: { button: PadButton.TRIANGLE } },
+  { id: "l1", label: "L1", action: { button: PadButton.L1 } },
+  { id: "r1", label: "R1", action: { button: PadButton.R1 } },
+  { id: "l2", label: "L2", action: { trigger: "l2" } },
+  { id: "r2", label: "R2", action: { trigger: "r2" } },
+  { id: "l3", label: "L3", action: { button: PadButton.L3 } },
+  { id: "r3", label: "R3", action: { button: PadButton.R3 } },
+  { id: "options", label: "Options", action: { button: PadButton.OPTIONS } },
+  { id: "create", label: "Create", action: { button: PadButton.SHARE } },
+  { id: "ps", label: "PS button", action: { button: PadButton.PS } },
+  { id: "touchpad", label: "Touchpad press", action: { button: PadButton.TOUCHPAD } },
+  { id: "ls_up", label: "Left stick up", action: { stick: "ly", dir: -1 } },
+  { id: "ls_down", label: "Left stick down", action: { stick: "ly", dir: 1 } },
+  { id: "ls_left", label: "Left stick left", action: { stick: "lx", dir: -1 } },
+  { id: "ls_right", label: "Left stick right", action: { stick: "lx", dir: 1 } },
+  { id: "rs_up", label: "Right stick up", action: { stick: "ry", dir: -1 } },
+  { id: "rs_down", label: "Right stick down", action: { stick: "ry", dir: 1 } },
+  { id: "rs_left", label: "Right stick left", action: { stick: "rx", dir: -1 } },
+  { id: "rs_right", label: "Right stick right", action: { stick: "rx", dir: 1 } },
+];
+
+const sameAction = (a: KeyAction, b: KeyAction) => JSON.stringify(a) === JSON.stringify(b);
+
+/** The keys bound to an action. */
+export function keysFor(keymap: Record<string, KeyAction>, action: KeyAction): string[] {
+  return Object.entries(keymap)
+    .filter(([, a]) => sameAction(a, action))
+    .map(([k]) => k);
+}
+
+/** `keymap` with `code` as the one key for `action` (taken off whatever it did before). */
+export function rebind(keymap: Record<string, KeyAction>, action: KeyAction, code: string): Record<string, KeyAction> {
+  const next: Record<string, KeyAction> = {};
+  for (const [k, a] of Object.entries(keymap)) {
+    if (k !== code && !sameAction(a, action)) next[k] = a;
+  }
+  next[code] = action;
+  return next;
+}
+
+const KEYMAP_KEY = "ps5upload.rp_keymap.v1";
+
+/** The keyboard map in use on this device (the default until changed). */
+export function loadKeymap(): Record<string, KeyAction> {
+  try {
+    const raw = safeGetItem(KEYMAP_KEY);
+    const v = raw ? (JSON.parse(raw) as Record<string, KeyAction>) : null;
+    return v && typeof v === "object" && Object.keys(v).length ? v : DEFAULT_KEYMAP;
+  } catch {
+    return DEFAULT_KEYMAP;
+  }
+}
+
+export function saveKeymap(keymap: Record<string, KeyAction> | null): void {
+  if (keymap) safeSetItem(KEYMAP_KEY, JSON.stringify(keymap));
+  else safeRemoveItem(KEYMAP_KEY);
+}
+
+const clampAxis = (v: number) => Math.max(-32768, Math.min(32767, Math.round(v)));
+
+/** The pad the held keys amount to. */
+export function padFromKeys(held: Iterable<string>, keymap: Record<string, KeyAction> = DEFAULT_KEYMAP): PadState {
+  const p = { ...IDLE_PAD };
+  for (const code of held) {
+    const a = keymap[code];
+    if (!a) continue;
+    if ("button" in a) p.buttons |= a.button;
+    else if ("stick" in a) p[a.stick] = clampAxis(p[a.stick] + a.dir * 32767);
+    else p[a.trigger] = 255;
+  }
+  return p;
+}
+
+/** Gamepad API "standard" mapping, button index → pad bit (6/7 are the analog triggers). */
+const STANDARD_BUTTONS = [
+  PadButton.CROSS, PadButton.CIRCLE, PadButton.SQUARE, PadButton.TRIANGLE, PadButton.L1, PadButton.R1, 0, 0,
+  PadButton.SHARE, PadButton.OPTIONS, PadButton.L3, PadButton.R3, PadButton.UP, PadButton.DOWN, PadButton.LEFT,
+  PadButton.RIGHT, PadButton.PS, PadButton.TOUCHPAD,
+];
+
+/** Where one control of the console's pad comes from on a controller: a button (by index), or
+ *  half of an axis (index, the direction it moves when pressed, and where it rests: -1 for a
+ *  trigger reported as an axis that rests at one end). */
+export type PadSource = { b: number } | { a: number; d: 1 | -1; rest?: number };
+
+/** A stick axis: the controller's axis index, inverted when it reads the other way round. */
+export interface PadAxis {
+  a: number;
+  inv?: boolean;
+}
+
+/** How a controller's buttons and axes become the console's pad. Several sources may drive one
+ *  button (an extra back button set to ✕ as well, say). */
+export interface PadProfile {
+  buttons: Array<[bit: number, src: PadSource]>;
+  l2: PadSource | null;
+  r2: PadSource | null;
+  lx: PadAxis | null;
+  ly: PadAxis | null;
+  rx: PadAxis | null;
+  ry: PadAxis | null;
+}
+
+/** The browser's "standard" layout (W3C Gamepad standard mapping). */
+export const STANDARD_PROFILE: PadProfile = {
+  buttons: STANDARD_BUTTONS.flatMap((bit, i): Array<[number, PadSource]> => (bit ? [[bit, { b: i }]] : [])),
+  l2: { b: 6 },
+  r2: { b: 7 },
+  lx: { a: 0 },
+  ly: { a: 1 },
+  rx: { a: 2 },
+  ry: { a: 3 },
+};
+
+/** How far (0-1) a source is pressed on `g`. */
+export function sourceValue(g: Gamepad, src: PadSource): number {
+  if ("b" in src) {
+    const b = g.buttons[src.b];
+    return b ? Math.max(b.pressed ? 1 : 0, b.value) : 0;
+  }
+  const v = g.axes[src.a];
+  if (v === undefined) return 0;
+  const rest = src.rest ?? 0;
+  return Math.min(1, Math.max(0, (v - rest) / (src.d - rest)));
+}
+
+/** A controller the browser lays out the standard way, or one it does not recognize: then the
+ *  standard order is the best guess (most controllers follow it), until it is mapped. */
+export const guessProfile = (_g: Gamepad): PadProfile => STANDARD_PROFILE;
+
+/** The pad the connected controllers amount to (all of them, merged), each read through its
+ *  profile. */
+export function padFromGamepads(
+  pads: ReadonlyArray<Gamepad | null>,
+  profileOf: (g: Gamepad) => PadProfile = guessProfile,
+): PadState {
+  const p = { ...IDLE_PAD };
+  const axis = (v: number) => (Math.abs(v) < 0.08 ? 0 : clampAxis(v * 32767));
+  // Several pads: the stick pushed furthest wins, so a resting pad does not cancel another.
+  const pick = (cur: number, v: number) => (Math.abs(v) > Math.abs(cur) ? v : cur);
+  const stick = (g: Gamepad, ax: PadAxis | null) => (ax ? axis((g.axes[ax.a] ?? 0) * (ax.inv ? -1 : 1)) : 0);
+  for (const g of pads) {
+    if (!g || !g.connected) continue;
+    const prof = profileOf(g);
+    for (const [bit, src] of prof.buttons) if (sourceValue(g, src) > 0.5) p.buttons |= bit;
+    if (prof.l2) p.l2 = Math.max(p.l2, Math.round(sourceValue(g, prof.l2) * 255));
+    if (prof.r2) p.r2 = Math.max(p.r2, Math.round(sourceValue(g, prof.r2) * 255));
+    p.lx = pick(p.lx, stick(g, prof.lx));
+    p.ly = pick(p.ly, stick(g, prof.ly));
+    p.rx = pick(p.rx, stick(g, prof.rx));
+    p.ry = pick(p.ry, stick(g, prof.ry));
+  }
+  return p;
+}
+
+export function mergePads(a: PadState, b: PadState): PadState {
+  return {
+    buttons: a.buttons | b.buttons,
+    l2: Math.max(a.l2, b.l2),
+    r2: Math.max(a.r2, b.r2),
+    lx: clampAxis(a.lx + b.lx),
+    ly: clampAxis(a.ly + b.ly),
+    rx: clampAxis(a.rx + b.rx),
+    ry: clampAxis(a.ry + b.ry),
+    touch: a.touch ?? b.touch ?? null,
+    motion: a.motion ?? b.motion ?? null,
+  };
+}
+
+/** Play the console's rumble on every controller that can (Gamepad API "dual-rumble").
+ *  Each message is the current level, so it is played for a while and replaced by the next;
+ *  zero stops it. */
+export function playRumble(pads: ReadonlyArray<Gamepad | null>, strong: number, weak: number): void {
+  for (const g of pads) {
+    const act = (g as (Gamepad & { vibrationActuator?: GamepadHapticActuator | null }) | null)?.vibrationActuator;
+    if (!act) continue;
+    if (strong === 0 && weak === 0) {
+      void act.reset?.();
+      continue;
+    }
+    void act.playEffect?.("dual-rumble", {
+      duration: 1000,
+      strongMagnitude: strong / 255,
+      weakMagnitude: weak / 255,
+    });
+  }
+}
+
+/** True when an Annex-B access unit starts a picture the decoder can begin at. */
+export function isKeyframe(au: Uint8Array, hevc: boolean): boolean {
+  for (let i = 0; i + 3 < au.length; i++) {
+    if (au[i] !== 0 || au[i + 1] !== 0 || au[i + 2] !== 1) continue;
+    if (hevc) {
+      const t = (au[i + 3] >> 1) & 0x3f;
+      if (t >= 16 && t <= 21) return true; // IRAP: BLA, IDR, CRA
+      if (t < 16) return false;
+    } else {
+      const t = au[i + 3] & 0x1f;
+      if (t === 5) return true;
+      if (t === 1) return false;
+    }
+  }
+  return false;
+}
+
+/** `avc1.PPCCLL` from the SPS in an Annex-B header. */
+export function avcCodecString(header: Uint8Array): string {
+  for (let i = 0; i + 6 < header.length; i++) {
+    if (header[i] === 0 && header[i + 1] === 0 && header[i + 2] === 1 && (header[i + 3] & 0x1f) === 7) {
+      const h = (b: number) => b.toString(16).padStart(2, "0");
+      return `avc1.${h(header[i + 4])}${h(header[i + 5])}${h(header[i + 6])}`;
+    }
+  }
+  return "avc1.4d4028";
+}
+
+const HEVC_CANDIDATES = ["hev1.1.6.L153.B0", "hvc1.1.6.L153.B0", "hev1.2.4.L153.B0", "hvc1.2.4.L153.B0", "hev1.1.6.L150.90"];
+
+/** The first HEVC codec string this device decodes, or null. */
+export async function supportedHevc(width: number, height: number): Promise<string | null> {
+  if (typeof VideoDecoder === "undefined") return null;
+  for (const codec of HEVC_CANDIDATES) {
+    try {
+      if ((await VideoDecoder.isConfigSupported({ codec, codedWidth: width, codedHeight: height })).supported) {
+        return codec;
+      }
+    } catch {
+      // Not this one.
+    }
+  }
+  return null;
+}
+
+/** H.264 as the PS5 sends it (Main, up to level 5.0 for 1080p), then plainer forms. */
+const AVC_CANDIDATES = ["avc1.4d4032", "avc1.640032", "avc1.4d4028", "avc1.42e01f"];
+
+/** False only when this device answers that it decodes none of the H.264 forms; a check that
+ *  throws is not a no, so a device with a quirky check still gets to try. */
+export async function canDecodeAvc(width: number, height: number): Promise<boolean> {
+  if (typeof VideoDecoder === "undefined") return false;
+  let answered = false;
+  for (const codec of AVC_CANDIDATES) {
+    try {
+      if ((await VideoDecoder.isConfigSupported({ codec, codedWidth: width, codedHeight: height })).supported) {
+        return true;
+      }
+      answered = true;
+    } catch {
+      // Not an answer.
+    }
+  }
+  return !answered;
+}
+
+/** True for a decoder error that means "no decoder for this codec here", which starting over
+ *  cannot fix (Linux without GStreamer's H.264 decoder: "No decoder found for codec …"). */
+export function isNoDecoderError(e: unknown): boolean {
+  const name = (e as { name?: string } | null)?.name ?? "";
+  return name === "NotSupportedError" || /no decoder/i.test(String(e));
+}
+
+/** HEVC whenever this device can decode it (same picture in fewer bits); else H.264. The PS5
+ *  offers only these two. */
+export async function chooseCodec(width: number, height: number): Promise<"h265" | "h264"> {
+  return (await supportedHevc(width, height)) ? "h265" : "h264";
+}
+
+/** How the picture fills the place it is shown in: the whole picture with black bars (fit),
+ *  no bars with the edges cut off (fill), or no bars with the picture pulled out of shape
+ *  (stretch). */
+export type PictureFit = "fit" | "fill" | "stretch";
+
+const FIT_CLASS: Record<PictureFit, string> = {
+  fit: "object-contain",
+  fill: "object-cover",
+  stretch: "object-fill",
+};
+
+/** The picture sizes in the order a full-screen button steps through them. */
+export const FIT_ORDER: PictureFit[] = ["fit", "fill", "stretch"];
+
+/** The picture size after `fit` (back to the first after the last). */
+export function nextFit(fit: PictureFit): PictureFit {
+  const i = FIT_ORDER.indexOf(fit);
+  return FIT_ORDER[(i + 1) % FIT_ORDER.length];
+}
+
+/** The canvas's classes for a fit. It never takes a pointer: presses belong to the stage it is
+ *  on and to the controls drawn over it. Fill and Stretch: the canvas's box is the place it is in
+ *  and object-fit decides the picture in it. Fit: the stream sizes the canvas itself to the whole
+ *  picture (containSize), so no part of it can fall outside, whatever the browser does with
+ *  object-fit on a canvas or with the full-screen box; the classes only keep it inside. */
+export function canvasClass(fit: PictureFit): string {
+  const size = fit === "fit" ? "" : "h-full w-full ";
+  return `pointer-events-none block ${size}min-h-0 min-w-0 max-h-full max-w-full ${FIT_CLASS[fit] ?? FIT_CLASS.fit}`;
+}
+
+/** The largest size with the picture's shape (picW:picH) that fits inside boxW × boxH, in whole
+ *  CSS pixels: the whole picture, with black bars where the shapes differ. */
+export function containSize(boxW: number, boxH: number, picW: number, picH: number): { w: number; h: number } {
+  if (!(boxW > 0 && boxH > 0 && picW > 0 && picH > 0)) return { w: 0, h: 0 };
+  const scale = Math.min(boxW / picW, boxH / picH);
+  return { w: Math.max(1, Math.floor(picW * scale)), h: Math.max(1, Math.floor(picH * scale)) };
+}
+
+/** True when this device can play a stream at all. */
+export function canStream(): boolean {
+  return typeof VideoDecoder !== "undefined" && typeof WebSocket !== "undefined";
+}
+
+export interface StreamStats {
+  fps: number;
+  mbps: number;
+  decodeMs: number;
+  codec: string;
+  lossPct: number;
+  rebuilt: number;
+  lost: number;
+  /** Sound waiting to play, in ms, and how often it ran dry since the start. */
+  audioMs: number;
+  underruns: number;
+  /** Round trip from this page to the engine and back, ms (null until measured, or an engine
+   *  that does not answer pings). The console's leg cannot be measured: no shared clock. */
+  rttMs: number | null;
+}
+
+/** A round trip from a ping's own timestamp, smoothed into the last value (a spike moves it a
+ *  quarter of the way); null when `sentAt` is not a number. */
+export function nextRtt(prev: number | null, sentAt: unknown, now: number): number | null {
+  if (typeof sentAt !== "number" || !Number.isFinite(sentAt)) return prev;
+  const rtt = Math.max(0, now - sentAt);
+  return prev === null ? rtt : prev + (rtt - prev) / 4;
+}
+
+export type StreamPhase =
+  | "connecting"
+  | "waking"
+  | "starting"
+  | "playing"
+  /** The socket to the engine dropped; the session is still running and this rejoins it. */
+  | "reconnecting"
+  /** Another window took the stream; `takeOver()` brings it back here. */
+  | "moved"
+  | "ended"
+  | "error";
+
+export interface StreamError {
+  /** Stable, from the engine: busy, busy_other, asleep, unreachable, keys, wake_failed,
+   *  passcode, video_refused, other — or client-side: decode, no_decoder, socket. */
+  code: string;
+  retryS?: number;
+  /** busy_other: the console that is streaming. */
+  host?: string;
+  detail: string;
+}
+
+export interface StreamOptions {
+  host: string;
+  registKey: string;
+  rpKey: string;
+  width: number;
+  height: number;
+  fps?: number;
+  /** How long the engine keeps the session for this app to come back to. */
+  keepAliveS?: number;
+  /** Sound kept ready to play: lower is less delay, higher rides out a busy network. */
+  audioBufferMs?: number;
+  /** Join the session the engine already runs for this console; never start one. */
+  attach?: boolean;
+  /** Ask the engine for a shorter video queue and skip to the next keyframe sooner. */
+  lowLatency?: boolean;
+  /** Set the session up for the microphone (experimental; Settings). Only then is `mic`
+   *  in the start message, so a session without it starts exactly as before. */
+  mic?: boolean;
+  /** How the picture fills the place it is shown in (default: the whole picture). */
+  fit?: PictureFit;
+  /** False: the console's rumble is not played on the controllers. */
+  rumble?: () => boolean;
+  onPhase: (p: StreamPhase) => void;
+  onStats: (s: StreamStats) => void;
+  onError: (e: StreamError) => void;
+  /** The console's light-bar colour for this pad. Browsers cannot set a controller's light
+   *  bar (the Gamepad API has no such control), so the screen shows it. */
+  onLight?: (rgb: [number, number, number]) => void;
+  /** The pad state to send; polled every animation frame and on key events. */
+  readPad: () => PadState;
+  /** The controllers rumble is played on (default: this page's). A picture-in-picture window
+   *  has its own list where the engine gives controllers only to the window in front. */
+  gamepads?: () => ReadonlyArray<Gamepad | null>;
+}
+
+/** Waits between tries to rejoin after the socket dropped (the last one repeats), and for how
+ *  long in all. */
+const RECONNECT_WAITS_MS = [250, 500, 1000, 2000, 4000];
+const RECONNECT_FOR_MS = 30_000;
+/** Audio frames that may arrive ahead of a missing one before it is given up on. The engine
+ *  sends a lost frame's recovered copy (FEC) right after the next ones. */
+const AUDIO_HOLD = 3;
+/** The decoder this far behind: skip to the next keyframe rather than show old pictures. */
+const VIDEO_BACKLOG = 4;
+const VIDEO_BACKLOG_LOW_LATENCY = 2;
+
+/** The audio player: a ring buffer in an AudioWorklet that starts once `target` samples are in,
+ *  fades in after a gap, and trims itself back when it runs ahead (a sound card a little slower
+ *  than the console) so delay never builds up. */
+const AUDIO_WORKLET = `
+class RpAudio extends AudioWorkletProcessor {
+  constructor() {
+    super();
+    this.cap = 48000;
+    this.buf = [new Float32Array(this.cap), new Float32Array(this.cap)];
+    this.r = 0; this.w = 0; this.n = 0;
+    this.target = 2880; this.primed = false; this.gain = 0; this.last = [0, 0];
+    this.under = 0; this.skip = 0; this.tick = 0;
+    this.port.onmessage = (e) => {
+      const d = e.data;
+      if (d.target) { this.target = d.target; return; }
+      if (d.reset) { this.r = this.w = this.n = 0; this.primed = false; return; }
+      this.push(d.planes, d.scale || 1);
+    };
+  }
+  push(planes, scale) {
+    const len = planes[0].length;
+    for (let i = 0; i < len; i++) {
+      if (this.n === this.cap) { this.r = (this.r + 1) % this.cap; this.n--; }
+      for (let c = 0; c < 2; c++) this.buf[c][this.w] = planes[c % planes.length][i] * scale;
+      this.w = (this.w + 1) % this.cap; this.n++;
+    }
+    // Far ahead after a stall: drop back to the target in one go.
+    if (this.n > this.target * 3) {
+      const drop = this.n - this.target;
+      this.r = (this.r + drop) % this.cap; this.n -= drop;
+    }
+  }
+  process(_inputs, outputs) {
+    const out = outputs[0];
+    const len = out[0].length;
+    if (!this.primed && this.n >= this.target) { this.primed = true; this.gain = 0; }
+    for (let i = 0; i < len; i++) {
+      if (!this.primed || this.n === 0) {
+        if (this.primed) { this.primed = false; this.under++; }
+        // Ease the last sample to silence instead of a hard step (a click).
+        for (let c = 0; c < out.length; c++) { this.last[c % 2] *= 0.95; out[c][i] = this.last[c % 2]; }
+        continue;
+      }
+      for (let c = 0; c < out.length; c++) {
+        const v = this.buf[c % 2][this.r] * this.gain;
+        out[c][i] = v; this.last[c % 2] = v;
+      }
+      if (this.gain < 1) this.gain = Math.min(1, this.gain + 1 / 480);
+      this.r = (this.r + 1) % this.cap; this.n--;
+      // Running ahead by more than 20 ms: skip one sample in 200 (inaudible) until back.
+      if (this.n > this.target + 960 && ++this.skip % 200 === 0 && this.n > 0) {
+        this.r = (this.r + 1) % this.cap; this.n--;
+      }
+    }
+    if (++this.tick % 24 === 0) this.port.postMessage({ ms: (this.n / sampleRate) * 1000, under: this.under });
+    return true;
+  }
+}
+registerProcessor("rp-audio", RpAudio);
+`;
+
+/** End the session the engine runs for `host` without showing it (it moved to another window,
+ *  or this page was reloaded). */
+export function stopEngineSession(host: string): void {
+  const ws = new WebSocket(getEngineUrl().replace(/^http/, "ws") + "/api/ps5/rp/ws");
+  ws.onopen = () => {
+    ws.send(JSON.stringify({ host, regist_key: "", rp_key: "", attach_only: true }));
+    ws.send(JSON.stringify({ stop: true }));
+    window.setTimeout(() => ws.close(), 1000);
+  };
+}
+
+/** One stream. It belongs to the app, not to a screen: leaving the screen keeps it (and the
+ *  console's session) running. `stop()` ends it. */
+export class RemotePlayStream {
+  /** The picture; the screen puts it on the page wherever it shows the stream. */
+  readonly canvas: HTMLCanvasElement;
+  private ctx: CanvasRenderingContext2D | null;
+  private ws: WebSocket | null = null;
+  private video: VideoDecoder | null = null;
+  private header: Uint8Array | null = null;
+  private hevc = false;
+  private codecChoice: "h265" | "h264" = "h264";
+  private sawKey = false;
+  private ts = 0;
+  private queued: EncodedVideoChunk[] = [];
+  private sentAt = new Map<number, number>();
+  private audioCtx: AudioContext | null = null;
+  private gainNode: GainNode | null = null;
+  private worklet: AudioWorkletNode | null = null;
+  private audio: AudioDecoder | null = null;
+  private audioNext = 0;
+  private audioRate = 48000;
+  private audioFrame = 480;
+  /** Next audio frame wanted (unwrapped), frames that came ahead of it, the last played. */
+  private audioWant = -1;
+  private audioAhead = new Map<number, Uint8Array>();
+  private audioLastOut = -1;
+  private audioPrev: Float32Array[] | null = null;
+  private audioMs = 0;
+  private underruns = 0;
+  private volume = 1;
+  private lastPad = "";
+  private raf = 0;
+  /** The window whose animation frames poll the pad: this page's, or a picture-in-picture
+   *  window's, which keeps them coming while this page is hidden or minimized. */
+  private frameWin: Window | null = null;
+  private rafWin: Window = window;
+  private ticking = false;
+  private decoded = 0;
+  private bytes = 0;
+  private decodeMs = 0;
+  private codec = "";
+  private statsTimer = 0;
+  private lastLoss = { lossPct: 0, rebuilt: 0, lost: 0 };
+  private rttMs: number | null = null;
+  private phase: StreamPhase = "connecting";
+  /** The session is over (stopped here, ended by the engine or the console). */
+  private ended = false;
+  private stopping = false;
+  private engineEnded = false;
+  private moved = false;
+  private reconnectSince = 0;
+  private reconnectTry = 0;
+  private reconnectTimer = 0;
+  /** The page's mic is on (remotePlayMic.ts); said again on every reattach. */
+  private micOn = false;
+
+  constructor(private readonly o: StreamOptions) {
+    this.canvas = document.createElement("canvas");
+    this.canvas.dataset.testid = "rp-canvas";
+    // Fit is laid out here: on being put in a place (the canvas's own size changes), when that
+    // place changes size (a window resize, full screen, turning the phone) and when the picture's
+    // size does.
+    if (typeof ResizeObserver !== "undefined") {
+      // On the next frame, not inside the callback: resizing the canvas there would ask the
+      // observer again in the same frame ("ResizeObserver loop").
+      this.fitObserver = new ResizeObserver(() => {
+        if (this.fitFrame) return;
+        this.fitFrame = requestAnimationFrame(() => {
+          this.fitFrame = 0;
+          this.layoutFit();
+        });
+      });
+      this.fitObserver.observe(this.canvas);
+    }
+    this.setFit(o.fit ?? "fit");
+    // Not `desynchronized`: Chromium honours it only on Windows and ChromeOS, where the canvas
+    // is presented through its own swap chain/overlay instead of the page's compositor. The
+    // Windows app (only there) showed the picture enlarged from the top-left corner, cropped on
+    // the right and bottom (#538): the canvas's CSS size and object-fit were not applied. The
+    // page's compositor, as on every other platform, scales it to its box.
+    this.ctx = this.canvas.getContext("2d", { alpha: false });
+  }
+
+  /** How the picture fills the place it is shown in (see PictureFit). */
+  setFit(fit: PictureFit): void {
+    const f: PictureFit = fit in FIT_CLASS ? fit : "fit";
+    this.fit = f;
+    this.canvas.className = canvasClass(f);
+    this.canvas.dataset.fit = f;
+    this.layoutFit();
+  }
+
+  private fit: PictureFit = "fit";
+  /** A frame has set the canvas to the picture's own size. */
+  private framed = false;
+  private fitFrame = 0;
+  private fitObserver: ResizeObserver | null = null;
+  private fitPlace: Element | null = null;
+
+  /** Fit: size the canvas to the whole picture inside the place it is in (its content box). */
+  private layoutFit(): void {
+    const c = this.canvas;
+    const place = c.parentElement;
+    if (place !== this.fitPlace) {
+      if (this.fitPlace) this.fitObserver?.unobserve(this.fitPlace);
+      if (place) this.fitObserver?.observe(place);
+      this.fitPlace = place;
+    }
+    if (this.fit !== "fit" || !place) {
+      c.style.width = "";
+      c.style.height = "";
+      return;
+    }
+    const cs = getComputedStyle(place);
+    const px = (v: string) => Number.parseFloat(v) || 0;
+    const boxW = place.clientWidth - px(cs.paddingLeft) - px(cs.paddingRight);
+    const boxH = place.clientHeight - px(cs.paddingTop) - px(cs.paddingBottom);
+    // Before the first frame the canvas is the browser's 300×150: lay out a 16:9 picture.
+    const [pw, ph] = this.framed ? [c.width, c.height] : [16, 9];
+    const { w, h } = containSize(boxW, boxH, pw, ph);
+    const width = w ? `${w}px` : "";
+    const height = h ? `${h}px` : "";
+    if (c.style.width !== width) c.style.width = width;
+    if (c.style.height !== height) c.style.height = height;
+  }
+
+  get host(): string {
+    return this.o.host;
+  }
+
+  get currentPhase(): StreamPhase {
+    return this.phase;
+  }
+
+  /** Start the session (call from the click that asks for it, so sound may play). */
+  async start(): Promise<void> {
+    const { width, height } = this.o;
+    try {
+      // The console sends 48 kHz: a context at that rate never resamples 10 ms pieces.
+      this.audioCtx = new AudioContext({ sampleRate: 48000, latencyHint: "interactive" });
+    } catch {
+      this.audioCtx = new AudioContext({ latencyHint: "interactive" });
+    }
+    void this.audioCtx.resume();
+    this.gainNode = this.audioCtx.createGain();
+    this.gainNode.gain.value = this.volume;
+    this.gainNode.connect(this.audioCtx.destination);
+    const [codec] = await Promise.all([chooseCodec(width, height), this.openWorklet()]);
+    if (codec === "h264" && !(await canDecodeAvc(width, height))) {
+      // Found before the console is woken or asked to stream.
+      this.o.onError({ code: "no_decoder", detail: "" });
+      this.finish();
+      return;
+    }
+    this.codecChoice = codec;
+    this.hevc = codec === "h265";
+    this.connect(!!this.o.attach);
+    this.ticking = true;
+    this.schedule();
+    let lastDecoded = 0;
+    let lastBytes = 0;
+    this.statsTimer = window.setInterval(() => {
+      this.o.onStats({
+        fps: this.decoded - lastDecoded,
+        mbps: ((this.bytes - lastBytes) * 8) / 1e6,
+        decodeMs: this.decodeMs,
+        codec: this.codec,
+        audioMs: this.audioMs,
+        underruns: this.underruns,
+        rttMs: this.rttMs,
+        ...this.lastLoss,
+      });
+      lastDecoded = this.decoded;
+      lastBytes = this.bytes;
+      this.ping();
+    }, 1000);
+  }
+
+  private async openWorklet(): Promise<void> {
+    const actx = this.audioCtx;
+    if (!actx?.audioWorklet || !this.gainNode) return;
+    const url = URL.createObjectURL(new Blob([AUDIO_WORKLET], { type: "application/javascript" }));
+    try {
+      await actx.audioWorklet.addModule(url);
+      const node = new AudioWorkletNode(actx, "rp-audio", { outputChannelCount: [2] });
+      node.port.onmessage = (e: MessageEvent<{ ms: number; under: number }>) => {
+        this.audioMs = e.data.ms;
+        this.underruns = e.data.under;
+      };
+      node.connect(this.gainNode);
+      this.worklet = node;
+      this.setAudioBuffer(this.o.audioBufferMs ?? 60);
+    } catch {
+      // No worklet here: frames are scheduled one by one instead.
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+
+  private setPhase(p: StreamPhase): void {
+    this.phase = p;
+    this.o.onPhase(p);
+  }
+
+  private connect(attachOnly: boolean): void {
+    const { width, height } = this.o;
+    const url = getEngineUrl().replace(/^http/, "ws") + "/api/ps5/rp/ws";
+    const ws = new WebSocket(url);
+    ws.binaryType = "arraybuffer";
+    this.ws = ws;
+    if (!attachOnly) this.setPhase("connecting");
+    ws.onopen = () => {
+      ws.send(
+        JSON.stringify({
+          host: this.o.host,
+          regist_key: this.o.registKey,
+          rp_key: this.o.rpKey,
+          width,
+          height,
+          fps: this.o.fps,
+          codec: this.codecChoice,
+          keep_alive_s: this.o.keepAliveS,
+          attach_only: attachOnly,
+          low_latency: !!this.o.lowLatency,
+          ...(this.o.mic ? { mic: true } : {}),
+        }),
+      );
+      // Attaching turns the console's mic off in the engine: a page that has it on says so.
+      if (this.micOn) ws.send(JSON.stringify({ mic: true }));
+    };
+    ws.onmessage = (m) => {
+      if (ws !== this.ws) return;
+      if (typeof m.data === "string") return this.onStatus(m.data);
+      const b = new Uint8Array(m.data as ArrayBuffer);
+      const kind = b[0];
+      const payload = b.subarray(1);
+      if (kind <= 1) this.onVideo(kind, payload);
+      else this.onAudio(kind, payload);
+    };
+    // What a close means is decided in onclose; an error alone says nothing more.
+    ws.onerror = () => {};
+    ws.onclose = () => {
+      if (ws !== this.ws) return;
+      this.ws = null;
+      if (this.stopping || this.engineEnded) return this.finish();
+      if (this.moved) return this.setPhase("moved");
+      this.reconnect();
+    };
+  }
+
+  /** The socket dropped while the session runs: rejoin it, a little later each time. */
+  private reconnect(): void {
+    const now = Date.now();
+    if (this.phase !== "reconnecting") {
+      this.reconnectSince = now;
+      this.reconnectTry = 0;
+      this.setPhase("reconnecting");
+    }
+    if (now - this.reconnectSince > RECONNECT_FOR_MS) {
+      this.o.onError({ code: "socket", detail: "" });
+      return this.finish();
+    }
+    const wait = RECONNECT_WAITS_MS[Math.min(this.reconnectTry++, RECONNECT_WAITS_MS.length - 1)];
+    this.reconnectTimer = window.setTimeout(() => {
+      this.resetMedia();
+      this.connect(true);
+    }, wait);
+  }
+
+  private readonly tick = (): void => {
+    this.sendPad();
+    this.schedule();
+  };
+
+  private schedule(): void {
+    if (!this.ticking) return;
+    const w = this.frameWin && !this.frameWin.closed ? this.frameWin : window;
+    this.rafWin = w;
+    this.raf = w.requestAnimationFrame(this.tick);
+  }
+
+  /** Poll the pad on `w`'s animation frames (a picture-in-picture window), or this page's (null). */
+  setFrameWindow(w: Window | null): void {
+    this.frameWin = w;
+    if (!this.ticking) return;
+    try {
+      this.rafWin.cancelAnimationFrame(this.raf);
+    } catch {
+      // That window is gone.
+    }
+    this.schedule();
+  }
+
+  /** Show the stream here again after another window took it. */
+  takeOver(): void {
+    if (this.ended || this.ws) return;
+    this.moved = false;
+    this.resetMedia();
+    this.setPhase("starting");
+    this.connect(true);
+  }
+
+  /** A fresh start for the picture and sound: the engine sends the headers again on attach. */
+  private resetMedia(): void {
+    try {
+      this.video?.close();
+    } catch {
+      // Already closed.
+    }
+    this.video = null;
+    this.header = null;
+    this.sawKey = false;
+    this.queued = [];
+    this.sentAt.clear();
+    try {
+      this.audio?.close();
+    } catch {
+      // Already closed.
+    }
+    this.audio = null;
+    this.audioWant = -1;
+    this.audioAhead.clear();
+    this.audioLastOut = -1;
+    this.worklet?.port.postMessage({ reset: true });
+  }
+
+  /** Time a round trip to the engine (answered with `{"pong": t}`). */
+  private ping(): void {
+    const ws = this.ws;
+    if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ ping: performance.now() }));
+  }
+
+  /** The picture as it is now, a PNG at the stream's own size (null before the first frame). */
+  snapshot(): Promise<Blob | null> {
+    const c = this.canvas;
+    if (!this.decoded) return Promise.resolve(null);
+    return new Promise((resolve) => c.toBlob((b) => resolve(b), "image/png"));
+  }
+
+  /** The picture and the game's sound as one MediaStream, for a recording. The sound is tapped
+   *  off before the volume (a muted player still records it) into a second output, so what
+   *  plays is untouched. `release()` takes the tap off again. */
+  captureMedia(fps: number): { stream: MediaStream; release: () => void } | null {
+    const c = this.canvas as HTMLCanvasElement & { captureStream?: (fps?: number) => MediaStream };
+    if (typeof c.captureStream !== "function") return null;
+    const stream = c.captureStream(fps);
+    const actx = this.audioCtx;
+    const from: AudioNode | null = this.worklet ?? this.gainNode;
+    let dest: MediaStreamAudioDestinationNode | null = null;
+    try {
+      if (actx && from && typeof actx.createMediaStreamDestination === "function") {
+        dest = actx.createMediaStreamDestination();
+        from.connect(dest);
+        for (const t of dest.stream.getAudioTracks()) stream.addTrack(t);
+      }
+    } catch {
+      dest = null; // a picture without sound rather than no recording
+    }
+    return {
+      stream,
+      release: () => {
+        for (const t of stream.getTracks()) t.stop();
+        try {
+          if (dest) from?.disconnect(dest);
+        } catch {
+          // Already gone with the session.
+        }
+      },
+    };
+  }
+
+  /** Send the pad now if it changed (call on key events so short taps are not missed). */
+  sendPad(): void {
+    const ws = this.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    const p = this.o.readPad();
+    const s = JSON.stringify(p);
+    if (s === this.lastPad) return;
+    this.lastPad = s;
+    ws.send(JSON.stringify({ pad: p }));
+  }
+
+  /** This session was started with the mic set up (Settings › Microphone). */
+  get micEnabled(): boolean {
+    return !!this.o.mic;
+  }
+
+  /** Turn the console's microphone on or off (experimental; see remotePlayMic.ts). */
+  setMic(on: boolean): void {
+    if (!this.o.mic) return;
+    this.micOn = on;
+    const ws = this.ws;
+    if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ mic: on }));
+  }
+
+  /** One `[5][Opus packet]` mic frame; dropped while the socket is down. */
+  sendMicFrame(msg: Uint8Array<ArrayBuffer>): void {
+    const ws = this.ws;
+    if (this.micOn && ws && ws.readyState === WebSocket.OPEN) ws.send(msg);
+  }
+
+  /** 0-1; 0 is muted. */
+  setVolume(v: number): void {
+    this.volume = Math.max(0, Math.min(1, v));
+    if (this.gainNode) this.gainNode.gain.value = this.volume;
+  }
+
+  setAudioBuffer(ms: number): void {
+    this.worklet?.port.postMessage({ target: Math.round((Math.max(20, ms) / 1000) * 48000) });
+  }
+
+  /** End the session; the engine reports it and closes the socket. */
+  stop(): void {
+    this.stopping = true;
+    window.clearTimeout(this.reconnectTimer);
+    const ws = this.ws;
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      if (ws) ws.close();
+      else this.finish();
+      // A session nobody is attached to still has to be told.
+      if (!ws || ws.readyState !== WebSocket.OPEN) stopEngineSession(this.o.host);
+      return;
+    }
+    ws.send(JSON.stringify({ stop: true }));
+    window.setTimeout(() => ws.close(), 3000);
+  }
+
+  private finish(): void {
+    this.fitObserver?.disconnect();
+    if (this.ended) return;
+    this.ended = true;
+    this.ticking = false;
+    try {
+      this.rafWin.cancelAnimationFrame(this.raf);
+    } catch {
+      // That window is gone.
+    }
+    window.clearInterval(this.statsTimer);
+    window.clearTimeout(this.reconnectTimer);
+    this.resetMedia();
+    try {
+      this.worklet?.disconnect();
+    } catch {
+      // Already gone.
+    }
+    void this.audioCtx?.close();
+    this.ws = null;
+    this.setPhase("ended");
+  }
+
+  private onStatus(text: string): void {
+    let s: {
+      stage?: string;
+      code?: string;
+      retry_s?: number;
+      error?: string;
+      stats?: Record<string, number>;
+      host?: string;
+      rumble?: [number, number];
+      light?: [number, number, number];
+      pong?: unknown;
+    };
+    try {
+      s = JSON.parse(text);
+    } catch {
+      return;
+    }
+    if (s && typeof s === "object" && "pong" in s) {
+      this.rttMs = nextRtt(this.rttMs, s.pong, performance.now());
+      return;
+    }
+    if (s.rumble) {
+      if (this.o.rumble && !this.o.rumble()) return;
+      playRumble(this.o.gamepads?.() ?? navigator.getGamepads?.() ?? [], s.rumble[0], s.rumble[1]);
+      return;
+    }
+    if (s.light) {
+      this.o.onLight?.(s.light);
+      return;
+    }
+    switch (s.stage) {
+      case "waking":
+        this.setPhase("waking");
+        break;
+      case "nonce":
+      case "session":
+      case "takion":
+      case "bang":
+      case "streaminfo":
+        this.setPhase("starting");
+        break;
+      case "first_frame":
+        this.setPhase("playing");
+        break;
+      case "stats": {
+        const st = s.stats ?? {};
+        const units = st.units ?? 0;
+        this.lastLoss = {
+          lossPct: units ? ((st.units_lost ?? 0) * 100) / units : 0,
+          rebuilt: st.frames_rebuilt ?? 0,
+          lost: st.frames_lost ?? 0,
+        };
+        break;
+      }
+      case "moved":
+        this.moved = true;
+        break;
+      case "ended":
+        this.engineEnded = true;
+        break;
+      case "error":
+        this.engineEnded = true;
+        this.o.onError({
+          code: s.code ?? "other",
+          retryS: s.retry_s ?? undefined,
+          host: s.host,
+          detail: s.error ?? "",
+        });
+        break;
+    }
+  }
+
+  private onVideo(kind: number, payload: Uint8Array): void {
+    if (kind === 0) {
+      this.header = payload.slice();
+      if (!this.video) this.openVideo();
+      return;
+    }
+    this.bytes += payload.length;
+    const key = isKeyframe(payload, this.hevc);
+    // Behind: old pictures are no use to someone playing. Skip to a keyframe.
+    const backlog = this.o.lowLatency ? VIDEO_BACKLOG_LOW_LATENCY : VIDEO_BACKLOG;
+    if (!key && this.video && this.video.decodeQueueSize > backlog) {
+      this.sawKey = false;
+      this.ws?.send(JSON.stringify({ keyframe: true }));
+    }
+    if (!this.sawKey && !key) return;
+    this.sawKey = true;
+    let data = payload;
+    if (key && this.header) {
+      data = new Uint8Array(this.header.length + payload.length);
+      data.set(this.header);
+      data.set(payload, this.header.length);
+    }
+    this.ts += 16667;
+    this.sentAt.set(this.ts, performance.now());
+    if (this.sentAt.size > 120) this.sentAt.clear();
+    const chunk = new EncodedVideoChunk({ type: key ? "key" : "delta", timestamp: this.ts, data });
+    if (!this.video || this.video.state !== "configured") {
+      this.queued.push(chunk); // the HEVC codec string is still being probed
+      return;
+    }
+    this.video.decode(chunk);
+  }
+
+  private openVideo(): void {
+    const video = new VideoDecoder({
+      output: (frame) => {
+        const t = this.sentAt.get(frame.timestamp);
+        if (t !== undefined) {
+          this.decodeMs = performance.now() - t;
+          this.sentAt.delete(frame.timestamp);
+        }
+        // The canvas is the picture's own size (its visible part, at the display aspect), taken
+        // from each frame, never from the size asked for: the console may send another.
+        const c = this.canvas;
+        if (c.width !== frame.displayWidth || c.height !== frame.displayHeight || !this.framed) {
+          c.width = frame.displayWidth;
+          c.height = frame.displayHeight;
+          this.framed = true;
+          this.layoutFit();
+        }
+        this.ctx?.drawImage(frame, 0, 0, c.width, c.height);
+        frame.close();
+        this.decoded++;
+      },
+      error: (e) => {
+        if (video !== this.video) return;
+        if (isNoDecoderError(e)) {
+          // Starting over would fail the same way, forever: end the session instead.
+          this.video = null;
+          this.o.onError({ code: "no_decoder", detail: String(e) });
+          this.stop();
+          return;
+        }
+        // A broken picture: start over from the next keyframe rather than give up.
+        this.video = null;
+        this.sawKey = false;
+        if (this.header) this.openVideo();
+        this.ws?.send(JSON.stringify({ keyframe: true }));
+        if (this.decoded === 0) this.o.onError({ code: "decode", detail: String(e) });
+      },
+    });
+    this.video = video;
+    const configure = async (codec: string) => {
+      // The hardware decoder when there is one. "prefer-hardware" is a demand, not a wish: where
+      // the device has none for this codec, configure() fails and no picture ever comes.
+      let cfg: VideoDecoderConfig = { codec, optimizeForLatency: true, hardwareAcceleration: "prefer-hardware" };
+      try {
+        if (!(await VideoDecoder.isConfigSupported(cfg)).supported) cfg = { codec, optimizeForLatency: true };
+      } catch {
+        cfg = { codec, optimizeForLatency: true };
+      }
+      if (video !== this.video) return;
+      this.codec = codec;
+      try {
+        video.configure(cfg);
+      } catch (e) {
+        this.video = null;
+        this.o.onError({ code: isNoDecoderError(e) ? "no_decoder" : "decode", detail: String(e) });
+        this.stop();
+        return;
+      }
+      for (const q of this.queued) video.decode(q);
+      this.queued = [];
+    };
+    if (this.hevc) {
+      void supportedHevc(this.o.width, this.o.height).then((c) => {
+        if (c) void configure(c);
+        else this.o.onError({ code: "decode", detail: "This device cannot decode HEVC." });
+      });
+    } else if (this.header) {
+      void configure(avcCodecString(this.header));
+    }
+  }
+
+  private onAudio(kind: number, payload: Uint8Array): void {
+    if (!this.audioCtx) return;
+    if (kind === 3) return this.openAudio(payload);
+    if (!this.audio || this.audio.state !== "configured") return;
+    const idx = (payload[0] << 8) | payload[1];
+    const data = payload.subarray(2);
+    if (this.audioWant < 0) this.audioWant = idx;
+    const d = (idx - (this.audioWant & 0xffff)) & 0xffff;
+    if (d >= 0x8000) return; // a copy of a frame already played
+    if (d > 200) {
+      // Far ahead (a long stall): start again from here.
+      this.audioAhead.clear();
+      this.audioWant = idx;
+      return this.onAudio(kind, payload);
+    }
+    const u = this.audioWant + d;
+    if (d === 0) {
+      this.decodeAudio(u, data);
+      this.audioWant++;
+    } else {
+      this.audioAhead.set(u, data.slice());
+      // A frame missing for too long is given up on (the output covers the gap).
+      if (this.audioAhead.size > AUDIO_HOLD) {
+        while (!this.audioAhead.has(this.audioWant)) this.audioWant++;
+      }
+    }
+    for (let next = this.audioAhead.get(this.audioWant); next; next = this.audioAhead.get(this.audioWant)) {
+      this.audioAhead.delete(this.audioWant);
+      this.decodeAudio(this.audioWant, next);
+      this.audioWant++;
+    }
+  }
+
+  private decodeAudio(u: number, data: Uint8Array): void {
+    this.audio?.decode(
+      new EncodedAudioChunk({ type: "key", timestamp: Math.round(u * (this.audioFrame / this.audioRate) * 1e6), data }),
+    );
+  }
+
+  private openAudio(header: Uint8Array): void {
+    const actx = this.audioCtx;
+    if (!actx) return;
+    const dv = new DataView(header.buffer, header.byteOffset, header.byteLength);
+    const channels = header[0];
+    this.audioRate = dv.getUint32(2);
+    this.audioFrame = dv.getUint32(6);
+    const frameUs = (this.audioFrame / this.audioRate) * 1e6;
+    try {
+      this.audio?.close();
+    } catch {
+      // Already closed.
+    }
+    const audio = new AudioDecoder({
+      output: (data) => {
+        const n = data.numberOfFrames;
+        const planes: Float32Array[] = [];
+        for (let c = 0; c < data.numberOfChannels; c++) {
+          const plane = new Float32Array(n);
+          data.copyTo(plane, { planeIndex: c, format: "f32-planar" });
+          planes.push(plane);
+        }
+        const u = Math.round(data.timestamp / frameUs);
+        data.close();
+        // Frames that never came: the one before, quieter, instead of a hard gap (a click).
+        const missing = this.audioLastOut >= 0 ? Math.min(u - this.audioLastOut - 1, AUDIO_HOLD) : 0;
+        for (let k = 0; k < missing && this.audioPrev; k++) this.play(this.audioPrev, 0.5 / (k + 1));
+        this.audioLastOut = u;
+        this.audioPrev = planes;
+        this.play(planes, 1);
+      },
+      error: () => {
+        // Start over on the next header-less frame: a new decoder for the same stream.
+        if (audio === this.audio) {
+          this.audio = null;
+          this.openAudio(header);
+        }
+      },
+    });
+    audio.configure({ codec: "opus", sampleRate: this.audioRate, numberOfChannels: channels });
+    this.audio = audio;
+  }
+
+  private play(planes: Float32Array[], scale: number): void {
+    if (this.worklet) {
+      const copy = scale === 1 ? planes : planes.map((p) => p.slice());
+      this.worklet.port.postMessage({ planes: copy, scale });
+      return;
+    }
+    // No worklet: each frame scheduled back to back ~60 ms ahead.
+    const actx = this.audioCtx;
+    if (!actx || !this.gainNode) return;
+    const n = planes[0].length;
+    const buf = actx.createBuffer(planes.length, n, this.audioRate);
+    planes.forEach((p, c) => buf.copyToChannel(scale === 1 ? (p as Float32Array<ArrayBuffer>) : p.map((v) => v * scale), c));
+    const now = actx.currentTime;
+    if (this.audioNext < now + 0.01) this.audioNext = now + 0.06;
+    if (this.audioNext > now + 0.25) return; // already far enough ahead: drop rather than pile up
+    const src = actx.createBufferSource();
+    src.buffer = buf;
+    src.connect(this.gainNode);
+    src.start(this.audioNext);
+    this.audioNext += n / this.audioRate;
+  }
+}

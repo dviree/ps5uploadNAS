@@ -160,6 +160,22 @@ describe("runFsUpload", () => {
     expect(tasks[0].consoleId).toBe(HOST);
   });
 
+  it("says when everything is on the console, and not when a run fails", async () => {
+    const ok = fakeEngine();
+    let done = 0;
+    await runFsUpload(
+      { host: HOST, addr: HOST, destDir: "/data/x", srcPaths: ["/pc/a.bin"] },
+      { ...ok.deps, onDone: () => done++ },
+    );
+    expect(done).toBe(1);
+    const bad = fakeEngine({ "job-1": [{ status: "failed", error: "disk full" } as Snap] });
+    await runFsUpload(
+      { host: HOST, addr: HOST, destDir: "/data/x", srcPaths: ["/pc/a.bin"] },
+      { ...bad.deps, onDone: () => done++ },
+    );
+    expect(done).toBe(1);
+  });
+
   it("stops the batch at a failed file and keeps what is left, to resume", async () => {
     const e = fakeEngine({
       "job-1": [{ status: "failed", error: "disk full" } as Snap],

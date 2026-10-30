@@ -6,7 +6,7 @@
 // (DriveDialogs.tsx) where every folder is the user's choice and is checked before anything is made.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { useNavigate } from "react-router";
+import { useLocation, useNavigate } from "react-router";
 import {
   FolderOpen,
   FolderSync,
@@ -26,7 +26,7 @@ import {
   X,
 } from "lucide-react";
 
-import { Badge, Button, Callout, OverflowMenu, PageHeader, type OverflowMenuItem } from "../../components";
+import { Badge, Button, Callout, OverflowMenu, SectionHeading, type OverflowMenuItem } from "../../components";
 import { useConfirm, usePrompt } from "../../components/ConfirmDialog";
 import { meshDevice, setMeshName } from "../../api/mesh";
 import {
@@ -49,6 +49,7 @@ import { agoText, KIND_ICONS } from "../Devices";
 import { CreateDriveDialog, JoinDriveDialog, PasswordDialog } from "./DriveDialogs";
 import { ConflictsDialog, LinkDialog, LinkedConsoles, linkName } from "./LinksAndConflicts";
 import { useRosterStore } from "../../state/roster";
+import { AwayActions, AwayFolders, awayText, useConsoleName } from "./AwayFolders";
 
 type Tone = "good" | "warn" | "bad" | "neutral" | "accent";
 
@@ -62,11 +63,29 @@ const TONE_TEXT: Record<Tone, string> = {
 
 type Loaded = Extract<DrivesAnswer, { supported: true }>;
 
-function statusOf(tr: Translator, l: LocalDriveMember, now: number): { tone: Tone; short: string; long: string } {
+function statusOf(
+  tr: Translator,
+  l: LocalDriveMember,
+  now: number,
+  consoleName: string,
+): { tone: Tone; short: string; long: string } {
   const s = l.status;
   const ago = s.last_ok ? agoText(tr, now - s.last_ok) : "";
+  // Its console is away: say which way, and that nothing made here is lost.
+  if (s.state === "offline" && s.away) return { tone: "warn", ...awayText(tr, s, consoleName, now) };
   switch (s.state) {
     case "idle":
+      // A linked console stands in while this one is away.
+      if (s.away)
+        return {
+          tone: "good",
+          short: tr("drive_badge_synced", undefined, "In sync"),
+          long: tr(
+            "drive_away_via",
+            { name: consoleName },
+            `${consoleName} is away: synced through a linked console`,
+          ),
+        };
       return {
         tone: "good",
         short: tr("drive_badge_synced", undefined, "In sync"),
@@ -284,7 +303,8 @@ function DriveCard({
   const profiles = useRosterStore((s) => s.profiles);
   const myMember = d.members.find((m) => m.id === mine?.member);
   const iAmIn = d.members.some((m) => m.device === data.me) || d.by === data.me;
-  const st = mine ? statusOf(tr, mine, now) : null;
+  const consoleName = useConsoleName(host);
+  const st = mine ? statusOf(tr, mine, now, consoleName) : null;
   const devices = new Set(d.members.map((m) => m.device)).size;
   const free = data.free[d.id];
   // A folder of this device opens in Finder / Explorer; a phone or a Docker engine has none to show.
@@ -454,7 +474,12 @@ function DriveCard({
                 {tr("drive_here_at", { path: mine.path }, `Here: ${mine.path}`)}
               </p>
             )}
-            {st?.long && <p className={`mt-1 truncate text-xs ${TONE_TEXT[st.tone]}`}>{st.long}</p>}
+            {st?.long && <p className={`mt-1 text-xs ${TONE_TEXT[st.tone]}`}>{st.long}</p>}
+            {mine?.status.state === "offline" && mine.status.away && (
+              <div className="mt-2">
+                <AwayActions console={host} why={mine.status.away} />
+              </div>
+            )}
             {!!mine?.status.skipped?.length && (
               <p className="mt-1 text-xs text-[var(--color-warn)]" title={mine.status.skipped.join("\n")}>
                 {tr(
@@ -540,7 +565,15 @@ function DriveCard({
   );
 }
 
-export default function MeshDriveScreen() {
+/** The anchor old /mesh-drive links land on: /shared-folders#mesh-drive scrolls here. */
+export const MESH_DRIVE_ANCHOR = "mesh-drive";
+
+/**
+ * Mesh Drives, as a section of Shared Folders: folders kept the same on every device, with
+ * their home on this console. It was its own screen; servers (NAS, SMB, FTP, SFTP) sit beside
+ * it now, since to a user both are folders reached over the network.
+ */
+export function MeshDriveSection() {
   const tr = useTr();
   const navigate = useNavigate();
   const host = useConnectionStore((s) => s.host);
@@ -614,31 +647,46 @@ export default function MeshDriveScreen() {
     await load();
   };
 
+  // An old /mesh-drive link lands on /shared-folders#mesh-drive: bring the section into view once.
+  const { hash } = useLocation();
+  const sectionRef = useRef<HTMLElement>(null);
+  const scrolled = useRef(false);
+  useEffect(() => {
+    if (hash !== `#${MESH_DRIVE_ANCHOR}` || scrolled.current) return;
+    scrolled.current = true;
+    sectionRef.current?.scrollIntoView?.({ block: "start", behavior: "smooth" });
+  }, [hash]);
+
   const header = (
-    <>
-      <PageHeader
-        icon={FolderSync}
-        title={tr("drive_title", undefined, "Mesh Drive")}
-        description={tr(
-          "drive_subtitle",
-          undefined,
-          "A folder kept the same on your computers, phones and Docker, with its home on this console. Add a file anywhere and it reaches every device in the drive.",
-        )}
-        right={
-          data?.supported ? (
-            <Button variant="primary" leftIcon={<Plus size={16} />} onClick={() => setCreating(true)}>
-              {tr("drive_create", undefined, "New Mesh Drive")}
-            </Button>
-          ) : undefined
-        }
-      />
-    </>
+    <SectionHeading
+      id="mesh-drive-heading"
+      icon={FolderSync}
+      title={tr("drive_title", undefined, "Mesh Drive")}
+      description={tr(
+        "drive_subtitle",
+        undefined,
+        "A folder kept the same on your computers, phones and Docker, with its home on this console. Add a file anywhere and it reaches every device in the drive.",
+      )}
+      right={
+        data?.supported ? (
+          <Button variant="secondary" leftIcon={<Plus size={16} />} onClick={() => setCreating(true)}>
+            {tr("drive_create", undefined, "New Mesh Drive")}
+          </Button>
+        ) : undefined
+      }
+    />
   );
+  const sectionProps = {
+    ref: sectionRef,
+    id: MESH_DRIVE_ANCHOR,
+    "aria-labelledby": "mesh-drive-heading",
+    className: "scroll-mt-4 space-y-4",
+  };
 
   if (!up || data?.supported === false) {
     const engineOld = data?.supported === false && data.engineOld;
     return (
-      <div className="app-page">
+      <section {...sectionProps}>
         {header}
         <Callout
           tone="info"
@@ -664,12 +712,13 @@ export default function MeshDriveScreen() {
             </Button>
           )}
         </Callout>
-      </div>
+        {!engineOld && <AwayFolders />}
+      </section>
     );
   }
 
   return (
-    <div className="app-page space-y-4">
+    <section {...sectionProps}>
       {header}
       {(error ?? pollError) && (
         <Callout tone="error" title={tr("mesh_failed", undefined, "That didn't work")}>
@@ -814,6 +863,6 @@ export default function MeshDriveScreen() {
           }}
         />
       )}
-    </div>
+    </section>
   );
 }

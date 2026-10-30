@@ -10,6 +10,7 @@ import {
   Square,
   Trash2,
   ScanSearch,
+  Hammer,
   RotateCcw,
   ListOrdered,
   X,
@@ -59,6 +60,8 @@ import { useTitleInfo } from "../../lib/useTitleInfo";
 import { formatBytes, formatDuration } from "../../lib/format";
 import { MAX_AUTO_RECOVER_ATTEMPTS } from "../../lib/uploadRecovery";
 import { useTr } from "../../state/lang";
+import { queueStages } from "./queueStages";
+import { StageRail } from "./StageRail";
 // Direct import to avoid the barrel's circular-dep warning at build.
 import { useConfirm } from "../../components/ConfirmDialog";
 import { useConsoleLabel } from "../../state/roster";
@@ -70,12 +73,21 @@ import {
 } from "../../state/uploadQueue";
 import { isRemotePath } from "../../lib/remotePath";
 import { useTransferStore } from "../../state/transfer";
-import { BottleneckLine, JobLiveNotes, RouteLine, UnsettledLine } from "./Bottleneck";
+import { useUploadSettingsStore } from "../../state/uploadSettings";
+import {
+  BottleneckLine,
+  JobLiveNotes,
+  RouteLine,
+  UnsettledLine,
+} from "./Bottleneck";
 import { WhySlowPanel } from "./WhySlow";
 import { RarPasswordPrompt } from "./RarPasswordPrompt";
 import { rarPasswordProblem } from "../../lib/rarPassword";
 import { partialUploadPath } from "../../lib/partialUpload";
 import { isStreamUnreachableError } from "../../lib/networkFix";
+import { streamInstallFailHelp } from "../../lib/streamInstallHint";
+import { convertFirstState, type WorkshopHandOver } from "../../lib/convertFirst";
+import { useInRouterContext, useNavigate } from "react-router";
 import { NetworkFixActions } from "../InstallPackage/NetworkFixActions";
 
 /** One console's slice of the queue, in first-seen order. */
@@ -166,20 +178,37 @@ export function queueSections(
 
 /** The console queue. On Upload it shows every console; Install Package
  *  passes `host` to show just the console being installed to. */
-export const QueuePanel = memo(function QueuePanel({ host }: { host?: string } = {}) {
+export const QueuePanel = memo(function QueuePanel({
+  host,
+}: { host?: string } = {}) {
   const tr = useTr();
   const allItems = useUploadQueueStore((s) => s.items);
-  const items = useMemo(() => queueItemsForHost(allItems, host), [allItems, host]);
+  const items = useMemo(
+    () => queueItemsForHost(allItems, host),
+    [allItems, host],
+  );
   // Bytes the queue still has to upload, across every console shown here.
   // Counts down live while a transfer runs, alongside the count chips. Installs
   // have their own line (InstallSpace), against the install drive's free space.
-  const totalBytes = useMemo(() => queueRemainingBytes(uploadsOnly(items)), [items]);
+  const totalBytes = useMemo(
+    () => queueRemainingBytes(uploadsOnly(items)),
+    [items],
+  );
   // Saved servers a running transfer reads from: rows on them hold their art read.
-  const busyKey = useMemo(() => [...busyServers(allItems)].sort().join("\n"), [allItems]);
-  const busy = useMemo(() => new Set(busyKey ? busyKey.split("\n") : []), [busyKey]);
+  const busyKey = useMemo(
+    () => [...busyServers(allItems)].sort().join("\n"),
+    [allItems],
+  );
+  const busy = useMemo(
+    () => new Set(busyKey ? busyKey.split("\n") : []),
+    [busyKey],
+  );
   const continueOnFailure = useUploadQueueStore((s) => s.continueOnFailure);
   const running = useUploadQueueStore((s) => s.running);
   const runningHosts = useUploadQueueStore((s) => s.runningHosts);
+  const limitedHosts = useUploadQueueStore((s) => s.limitedHosts);
+  const queueAutoStart = useUploadSettingsStore((s) => s.queueAutoStart);
+  const setQueueAutoStart = useUploadSettingsStore((s) => s.setQueueAutoStart);
   const loaded = useUploadQueueStore((s) => s.loaded);
   const persistenceError = useUploadQueueStore((s) => s.persistenceError);
   const isLeader = useUploadQueueStore((s) => s.isLeader);
@@ -243,7 +272,22 @@ export const QueuePanel = memo(function QueuePanel({ host }: { host?: string } =
   // from here). Without it, the Upload screen's "all consoles" actions.
   const scopeHost = host?.trim() ? hostOf(host) : null;
   const runningHere = scopeHost ? !!runningHosts[scopeHost] : running;
-  const startHere = () => (scopeHost ? startHost(scopeHost) : start());
+  // A run that takes only some rows (one row's own Start, a retry): the rest wait, so
+  // Start queue stays on offer beside Stop and turns it into a full run.
+  const limitedHere = scopeHost
+    ? !!limitedHosts[scopeHost]
+    : Object.keys(runningHosts).some((h) => limitedHosts[h]);
+  // Unscoped, Start also widens a console's limited run: start() only starts consoles
+  // that are not running, so a one-row run elsewhere would otherwise stay one row.
+  const startHere = () =>
+    scopeHost
+      ? startHost(scopeHost)
+      : Promise.all([
+          start(),
+          ...Object.keys(runningHosts)
+            .filter((h) => limitedHosts[h])
+            .map((h) => startHost(h)),
+        ]);
   const stopHere = () => (scopeHost ? stopHost(scopeHost) : stop());
   const retryFailedHere = () => retryFailed(scopeHost ?? undefined);
   const clearHere = async () => {
@@ -278,11 +322,7 @@ export const QueuePanel = memo(function QueuePanel({ host }: { host?: string } =
       {persistenceError && (
         <div className="mb-4">
           <ErrorCard
-            title={tr(
-              "save_failed",
-              undefined,
-              "Save failed",
-            )}
+            title={tr("save_failed", undefined, "Save failed")}
             detail={persistenceError}
           />
         </div>
@@ -326,8 +366,29 @@ export const QueuePanel = memo(function QueuePanel({ host }: { host?: string } =
           <Toggle
             checked={continueOnFailure}
             onChange={setContinueOnFailure}
-            label={tr("queue_continue_on_failure", undefined, "Continue on failure")}
+            label={tr(
+              "queue_continue_on_failure",
+              undefined,
+              "Continue on failure",
+            )}
           />
+          <span
+            title={tr(
+              "queue_auto_start_tooltip",
+              undefined,
+              "On: Install, Upload now and Send start this console's whole queue, in order. Off: they only add to the queue, and nothing runs until you press Start queue.",
+            )}
+          >
+            <Toggle
+              checked={queueAutoStart}
+              onChange={setQueueAutoStart}
+              label={tr(
+                "queue_auto_start",
+                undefined,
+                "Start the queue when you add something",
+              )}
+            />
+          </span>
 
           {failedCount > 0 && (
             <Button
@@ -340,6 +401,23 @@ export const QueuePanel = memo(function QueuePanel({ host }: { host?: string } =
             </Button>
           )}
 
+          {runningHere && limitedHere && pendingCount > 0 && (
+            <Button
+              variant="primary"
+              size="sm"
+              leftIcon={<Play size={12} />}
+              onClick={() => void startHere()}
+              title={tr(
+                "queue_start_rest_tooltip",
+                undefined,
+                "Only the items you started are running. This runs everything waiting too, in queue order.",
+              )}
+            >
+              {multiConsole
+                ? tr("queue_start_all", undefined, "Start all")
+                : tr("queue_start_v2", undefined, "Start queue")}
+            </Button>
+          )}
           {runningHere ? (
             <Button
               variant="secondary"
@@ -354,7 +432,7 @@ export const QueuePanel = memo(function QueuePanel({ host }: { host?: string } =
             >
               {multiConsole
                 ? tr("queue_stop_all", undefined, "Stop all")
-                : tr("queue_stop", undefined, "Stop")}
+                : tr("queue_stop_v2", undefined, "Stop queue")}
             </Button>
           ) : (
             <Button
@@ -375,7 +453,7 @@ export const QueuePanel = memo(function QueuePanel({ host }: { host?: string } =
             >
               {multiConsole
                 ? tr("queue_start_all", undefined, "Start all")
-                : tr("queue_start", undefined, "Start")}
+                : tr("queue_start_v2", undefined, "Start queue")}
             </Button>
           )}
 
@@ -403,6 +481,7 @@ export const QueuePanel = memo(function QueuePanel({ host }: { host?: string } =
             host={g.host}
             items={g.items}
             hostRunning={!!runningHosts[g.host]}
+            hostLimited={!!limitedHosts[g.host]}
             showHeader={multiConsole}
             onStartHost={() => void startHost(g.host)}
             onStopHost={() => stopHost(g.host)}
@@ -439,7 +518,11 @@ function QueueSummary({
   if (running > 0)
     chips.push({
       key: "running",
-      text: tr("queue_summary_running", { n: running }, `${running} in progress`),
+      text: tr(
+        "queue_summary_running",
+        { n: running },
+        `${running} in progress`,
+      ),
       tone: "bg-[var(--color-accent)]/15 text-[var(--color-accent)]",
     });
   if (pending > 0)
@@ -481,6 +564,7 @@ function ConsoleGroup({
   host,
   items,
   hostRunning,
+  hostLimited,
   showHeader,
   onStartHost,
   onStopHost,
@@ -496,6 +580,8 @@ function ConsoleGroup({
   items: QueueItem[];
   busy: ReadonlySet<string>;
   hostRunning: boolean;
+  /** This console's run takes only some rows; Start queue widens it. */
+  hostLimited: boolean;
   showHeader: boolean;
   onStartHost: () => void;
   onStopHost: () => void;
@@ -539,7 +625,10 @@ function ConsoleGroup({
   const sections = useMemo(() => queueSections(items), [items]);
   // This console's remaining queue size, shown as a chip in the group
   // header next to the counts. Counts down live while an upload runs.
-  const groupBytes = useMemo(() => queueRemainingBytes(uploadsOnly(items)), [items]);
+  const groupBytes = useMemo(
+    () => queueRemainingBytes(uploadsOnly(items)),
+    [items],
+  );
   // A waiting row can move only past a neighbour in the same install tier —
   // the tier (base → update → DLC) decides the order before the list does.
   const movable = useMemo(() => {
@@ -661,6 +750,21 @@ function ConsoleGroup({
             </span>
           )}
           <InstallSpace host={host} items={items} />
+          {hostRunning && hostLimited && pending > 0 && (
+            <Button
+              variant="primary"
+              size="sm"
+              leftIcon={<Play size={12} />}
+              onClick={onStartHost}
+              title={tr(
+                "queue_start_rest_tooltip",
+                undefined,
+                "Only the items you started are running. This runs everything waiting too, in queue order.",
+              )}
+            >
+              {tr("queue_start_v2", undefined, "Start queue")}
+            </Button>
+          )}
           {hostRunning ? (
             <Button
               variant="secondary"
@@ -673,7 +777,7 @@ function ConsoleGroup({
                 "Stops sending. What already reached the PS5 is kept for 7 days, and Start continues from there.",
               )}
             >
-              {tr("queue_stop", undefined, "Stop")}
+              {tr("queue_stop_v2", undefined, "Stop queue")}
             </Button>
           ) : (
             <Button
@@ -698,7 +802,7 @@ function ConsoleGroup({
                     : undefined
               }
             >
-              {tr("queue_start", undefined, "Start")}
+              {tr("queue_start_v2", undefined, "Start queue")}
             </Button>
           )}
         </div>
@@ -763,6 +867,15 @@ export function QueueRow({
     }
   }, [isPendingRow, artSize, item.estimatedBytes, item.id, noteSourceSize]);
   const isInstall = item.sourceKind === "install";
+  const streamHelp = streamInstallFailHelp(item);
+  // A game, folder or image not sent yet (waiting, or failed) can go to the Workshop first.
+  const inRouter = useInRouterContext();
+  const convertState =
+    inRouter && (item.status === "pending" || item.status === "failed")
+      ? convertFirstState([
+          { path: item.sourcePath, isDir: item.sourceKind !== "image", kind: item.sourceKind },
+        ])
+      : null;
   const viewPath = queueItemViewPath(item);
   // A running install can be stopped (here, or after cancelling it on the PS5, which the app
   // cannot see): the PS5 just stops getting the package.
@@ -832,6 +945,7 @@ export function QueueRow({
   return (
     <li
       ref={rowRef}
+      data-testid="queue-row"
       className={`rounded-[var(--radius-card)] border text-sm shadow-[var(--edge-highlight),var(--shadow-1)] transition-colors ${
         isActive ? "px-4 py-3.5" : "px-4 py-3"
       } ${
@@ -901,12 +1015,19 @@ export function QueueRow({
                 {item.sourceKind === "ps5" && item.fromConsole && (
                   <FromConsole addr={item.fromConsole} path={item.sourcePath} />
                 )}
-                <span className="truncate font-mono">→ {item.resolvedDest}</span>
+                <span className="truncate font-mono">
+                  → {item.resolvedDest}
+                </span>
               </>
             )}
-            {isPending && <span>· {queueItemBytes(item) > 0
-              ? formatBytes(queueItemBytes(item))
-              : tr("queue_size_unknown", "Size not known yet")}</span>}
+            {isPending && (
+              <span>
+                ·{" "}
+                {queueItemBytes(item) > 0
+                  ? formatBytes(queueItemBytes(item))
+                  : tr("queue_size_unknown", "Size not known yet")}
+              </span>
+            )}
             {!isInstall && !finished && (
               <span>
                 ·{" "}
@@ -948,7 +1069,8 @@ export function QueueRow({
               item.installAfterUpload !== false &&
               !item.installPhase && (
                 <span>
-                  · {tr("queue_will_install", undefined, "install after upload")}
+                  ·{" "}
+                  {tr("queue_will_install", undefined, "install after upload")}
                 </span>
               )}
             {(item.installPhase === "done" ||
@@ -970,12 +1092,12 @@ export function QueueRow({
                       "install accepted; verify on PS5 (package kept)",
                     )
                   : item.installPhase === "warn"
-                  ? tr(
-                      "queue_installed_warn",
-                      undefined,
-                      "installed (may not launch)",
-                    )
-                  : tr("queue_installed", undefined, "installed")}
+                    ? tr(
+                        "queue_installed_warn",
+                        undefined,
+                        "installed (may not launch)",
+                      )
+                    : tr("queue_installed", undefined, "installed")}
                 {item.installProgress && item.installProgress.total > 0
                   ? ` · ${formatBytes(item.installProgress.total)}`
                   : ""}
@@ -1018,6 +1140,7 @@ export function QueueRow({
               </button>
             </>
           )}
+          {convertState && <ConvertFirstButton state={convertState} />}
           {viewPath && (
             <button
               type="button"
@@ -1041,7 +1164,11 @@ export function QueueRow({
                 type="button"
                 onClick={() => void stopInstall()}
                 title={tr("queue_stop_install", undefined, "Stop this install")}
-                aria-label={tr("queue_stop_install", undefined, "Stop this install")}
+                aria-label={tr(
+                  "queue_stop_install",
+                  undefined,
+                  "Stop this install",
+                )}
                 className="rounded-full p-1.5 text-[var(--color-bad)] hover:bg-[var(--color-bad)] hover:text-[var(--color-accent-contrast)]"
               >
                 <Ban size={14} />
@@ -1121,10 +1248,18 @@ export function QueueRow({
           data-testid="queue-waiting-for-wake"
           className="mt-2 flex items-center gap-2 rounded-[var(--radius-field)] bg-[var(--color-accent-soft)] px-2 py-1.5 text-xs text-[var(--color-text)]"
         >
-          <Moon size={12} className="shrink-0 text-[var(--color-accent-bright)]" aria-hidden />
+          <Moon
+            size={12}
+            className="shrink-0 text-[var(--color-accent-bright)]"
+            aria-hidden
+          />
           <span className="min-w-0 flex-1">
             <span className="font-medium">
-              {tr("queue_waiting_for_wake", undefined, "Waiting for the PS5 to wake")}
+              {tr(
+                "queue_waiting_for_wake",
+                undefined,
+                "Waiting for the PS5 to wake",
+              )}
             </span>
             {" · "}
             {tr(
@@ -1159,6 +1294,7 @@ export function QueueRow({
         </div>
       )}
 
+      <StageRail stages={queueStages(item)} installPct={item.installPct} />
       {showInstallProgress && <InstallProgressBlock item={item} />}
 
       {isActive && !showInstallProgress && !isRecovering && (
@@ -1256,7 +1392,9 @@ export function QueueRow({
       {item.status === "done" && !isInstall && item.live?.bottleneck && (
         <BottleneckLine cause={item.live.bottleneck} />
       )}
-      {item.status === "done" && !isInstall && <UnsettledLine live={item.live} />}
+      {item.status === "done" && !isInstall && (
+        <UnsettledLine live={item.live} />
+      )}
       {(item.status === "done" || item.status === "failed") && !isInstall && (
         <WhySlowPanel jobId={item.jobId} />
       )}
@@ -1278,12 +1416,16 @@ export function QueueRow({
               ? undefined
               : () => {
                   if (useUploadQueueStore.getState().retryItem(item.id))
-                    void useUploadQueueStore.getState().startHost(hostOf(item.addr), { onlyIds: [item.id] });
+                    void useUploadQueueStore
+                      .getState()
+                      .startHost(hostOf(item.addr), { onlyIds: [item.id] });
                 }
           }
         />
       )}
-      {partialUploadPath(item) && <PartialFileNote id={item.id} path={partialUploadPath(item)!} />}
+      {partialUploadPath(item) && (
+        <PartialFileNote id={item.id} path={partialUploadPath(item)!} />
+      )}
       {item.status === "failed" && isStreamUnreachableError(item.error) && (
         <NetworkFixActions diag={null} />
       )}
@@ -1299,6 +1441,18 @@ export function QueueRow({
           />
         )}
 
+      {streamHelp.hint && (
+        <p
+          className="mt-2 text-xs leading-relaxed text-[var(--color-muted)]"
+          data-testid="stream-fail-hint"
+        >
+          {tr(
+            "queue_stream_fail_hint",
+            undefined,
+            "Stream & install has the PS5 fetch the package from this computer. If it keeps failing, allow ps5upload through this computer's firewall on the local network so the PS5 can reach it, or use Retry via upload, which copies the package to the PS5 first and then installs it.",
+          )}
+        </p>
+      )}
       {item.status === "failed" && isInstall && (
         <div className="mt-2 flex flex-wrap gap-2">
           <Button
@@ -1309,9 +1463,9 @@ export function QueueRow({
           >
             {tr("task_retry", undefined, "Retry")}
           </Button>
-          {item.fallbackToUpload && (
+          {(item.fallbackToUpload || streamHelp.retryViaUpload) && (
             <Button
-              variant="primary"
+              variant={item.fallbackToUpload ? "primary" : "secondary"}
               size="sm"
               leftIcon={<UploadCloud size={12} />}
               onClick={onRetryViaUpload}
@@ -1322,6 +1476,25 @@ export function QueueRow({
         </div>
       )}
     </li>
+  );
+}
+
+/** "Convert first" on a queue row: opens the Workshop with this game, folder or image. */
+function ConvertFirstButton({ state }: { state: WorkshopHandOver }) {
+  const tr = useTr();
+  const navigate = useNavigate();
+  const label = tr("upload_convert_first", undefined, "Convert first");
+  return (
+    <button
+      type="button"
+      onClick={() => navigate("/workshop", { state })}
+      title={label}
+      aria-label={label}
+      data-testid="queue-convert-first"
+      className="rounded-full p-1.5 text-[var(--color-muted)] hover:bg-[var(--color-surface-3)]"
+    >
+      <Hammer size={14} />
+    </button>
   );
 }
 
@@ -1371,7 +1544,8 @@ const QUIET_HINT_SECS = 60;
 export function InstallProgressBlock({ item }: { item: QueueItem }) {
   const tr = useTr();
   const p = item.installProgress ?? null;
-  const pulling = item.status === "running" && !!p && p.total > 0 && p.current < p.total;
+  const pulling =
+    item.status === "running" && !!p && p.total > 0 && p.current < p.total;
   const quiet = useQuietSeconds(p?.current ?? null, pulling);
   const phaseLabel = !p
     ? tr("queue_phase_preparing", undefined, "Getting ready…")
@@ -1427,8 +1601,7 @@ export function InstallProgressBlock({ item }: { item: QueueItem }) {
             <span>
               {rate}
               {rate && eta ? " · " : ""}
-              {eta &&
-                tr("queue_time_left", { eta }, `${eta} left`)}
+              {eta && tr("queue_time_left", { eta }, `${eta} left`)}
             </span>
           )}
         </div>
@@ -1473,7 +1646,8 @@ export function rowPhase(item: {
 }): "installing" | "finalizing" | null {
   if (item.status !== "running") return null;
   if (item.installPhase === "installing") return "installing";
-  if (item.totalBytes > 0 && item.bytesSent >= item.totalBytes) return "finalizing";
+  if (item.totalBytes > 0 && item.bytesSent >= item.totalBytes)
+    return "finalizing";
   return null;
 }
 
@@ -1482,7 +1656,11 @@ export function rowPhase(item: {
  *  store a raw content id as `installedTitle`, so preferring it made a row
  *  flip from "Star Wars…" to "UP1082-…" the moment its install finished. */
 export function queueRowName(
-  item: { sourceKind: string; installedTitle?: string | null; displayName: string },
+  item: {
+    sourceKind: string;
+    installedTitle?: string | null;
+    displayName: string;
+  },
   onlineTitle: string | undefined,
   /** The title read from the source itself (lib/queueArt). */
   sourceTitle?: string | null,
@@ -1490,7 +1668,9 @@ export function queueRowName(
   sourcePath?: string | null,
 ): string {
   if (item.sourceKind === "pkg") {
-    return onlineTitle || item.installedTitle || sourceTitle || item.displayName;
+    return (
+      onlineTitle || item.installedTitle || sourceTitle || item.displayName
+    );
   }
   // A caller's own name ("Game · Update 1.02", the user's name for a link) stays.
   if (sourceTitle && sourcePath && item.displayName === baseName(sourcePath)) {
@@ -1500,7 +1680,12 @@ export function queueRowName(
 }
 
 function baseName(p: string): string {
-  return p.replace(/[\\/]+$/, "").split(/[\\/]/).pop() ?? p;
+  return (
+    p
+      .replace(/[\\/]+$/, "")
+      .split(/[\\/]/)
+      .pop() ?? p
+  );
 }
 
 const NO_BUSY_SERVERS: ReadonlySet<string> = new Set();
@@ -1517,14 +1702,20 @@ function uploadsOnly(items: QueueItem[]): QueueItem[] {
 export function queueRowIcon(
   item: Pick<QueueItem, "sourceKind" | "contentId" | "status" | "resolvedDest">,
   art: SourceArt | null,
-): { titleId: string | null; gamePath: string | null; sourceSrc: string | null } {
+): {
+  titleId: string | null;
+  gamePath: string | null;
+  sourceSrc: string | null;
+} {
   const titleId =
     titleIdFromContentId(item.contentId) ||
     titleIdFromContentId(art?.contentId) ||
     art?.titleId ||
     null;
   const gamePath =
-    item.sourceKind === "game-folder" && item.status === "done" && item.resolvedDest
+    item.sourceKind === "game-folder" &&
+    item.status === "done" &&
+    item.resolvedDest
       ? item.resolvedDest
       : null;
   return { titleId, gamePath, sourceSrc: art?.icon ?? null };
@@ -1547,11 +1738,17 @@ function InstallSpace({ host, items }: { host: string; items: QueueItem[] }) {
   const parts: string[] = [];
   if (line.need > 0) {
     parts.push(
-      tr("queue_space_need", { size: formatBytes(line.need) }, `${formatBytes(line.need)} to install`),
+      tr(
+        "queue_space_need",
+        { size: formatBytes(line.need) },
+        `${formatBytes(line.need)} to install`,
+      ),
     );
   }
   if (line.free) {
-    const drive = line.free.drive ?? tr("queue_space_internal", undefined, "internal storage");
+    const drive =
+      line.free.drive ??
+      tr("queue_space_internal", undefined, "internal storage");
     parts.push(
       tr(
         "queue_space_free",
@@ -1562,7 +1759,11 @@ function InstallSpace({ host, items }: { host: string; items: QueueItem[] }) {
   }
   if (line.unknown > 0) {
     parts.push(
-      tr("queue_space_unknown", { n: line.unknown }, `Items without a size: ${line.unknown}`),
+      tr(
+        "queue_space_unknown",
+        { n: line.unknown },
+        `Items without a size: ${line.unknown}`,
+      ),
     );
   }
   if (parts.length === 0) return null;
@@ -1662,10 +1863,17 @@ function FailedRowErrorCard({
   return (
     <div className="mt-2">
       <ErrorCard
-        title={humanized ?? tr("queue_upload_failed", undefined, "Didn't finish")}
+        title={
+          humanized ?? tr("queue_upload_failed", undefined, "Didn't finish")
+        }
         action={
           onRetry && (
-            <Button variant="secondary" size="sm" leftIcon={<RotateCcw size={12} />} onClick={onRetry}>
+            <Button
+              variant="secondary"
+              size="sm"
+              leftIcon={<RotateCcw size={12} />}
+              onClick={onRetry}
+            >
               {tr("queue_retry_item", undefined, "Retry")}
             </Button>
           )
@@ -1709,7 +1917,9 @@ function FailedRowErrorCard({
               </details>
             </>
           ) : (
-            <span className="block whitespace-pre-wrap break-words text-xs">{rawError}</span>
+            <span className="block whitespace-pre-wrap break-words text-xs">
+              {rawError}
+            </span>
           )
         }
       />
@@ -1727,19 +1937,31 @@ function PartialFileNote({ id, path }: { id: string; path: string }) {
   if (state === "gone") {
     return (
       <p className="mt-2 text-xs text-[var(--color-good)]">
-        {tr("queue_partial_deleted", undefined, "Partial file deleted. Retry starts the upload over.")}
+        {tr(
+          "queue_partial_deleted",
+          undefined,
+          "Partial file deleted. Retry starts the upload over.",
+        )}
       </p>
     );
   }
   const remove = async () => {
     const ok = await confirm({
-      title: tr("queue_partial_delete_title", undefined, "Delete the partial file?"),
+      title: tr(
+        "queue_partial_delete_title",
+        undefined,
+        "Delete the partial file?",
+      ),
       message: tr(
         "queue_partial_delete_body",
         { path },
         "{path} will be deleted from the PS5. The upload then starts over from the beginning.",
       ),
-      confirmLabel: tr("queue_partial_delete", undefined, "Delete partial file"),
+      confirmLabel: tr(
+        "queue_partial_delete",
+        undefined,
+        "Delete partial file",
+      ),
       destructive: true,
     });
     if (!ok) return;
@@ -1754,7 +1976,10 @@ function PartialFileNote({ id, path }: { id: string; path: string }) {
     }
   };
   return (
-    <div className="mt-2 text-xs text-[var(--color-muted)]" data-testid="queue-partial-file">
+    <div
+      className="mt-2 text-xs text-[var(--color-muted)]"
+      data-testid="queue-partial-file"
+    >
       {dialog}
       <p>
         {tr(
@@ -1800,13 +2025,7 @@ function StatusIcon({ status }: { status: QueueItemStatus }) {
         />
       );
     case "running":
-      return (
-        <Spinner
-          size={18}
-          tone="accent"
-          className="mt-0.5 shrink-0"
-        />
-      );
+      return <Spinner size={18} tone="accent" className="mt-0.5 shrink-0" />;
     case "done":
       return (
         <CheckCircle2
@@ -1831,10 +2050,18 @@ function installSourceLabel(
 ): string {
   const req = item.install;
   if (req?.via === "stream" && isRemotePath(req.source)) {
-    return tr("queue_install_from_server", undefined, "Stream install from a saved server");
+    return tr(
+      "queue_install_from_server",
+      undefined,
+      "Stream install from a saved server",
+    );
   }
   if (req?.via === "stream") {
-    return tr("queue_install_from_pc", undefined, "Stream install from this computer");
+    return tr(
+      "queue_install_from_pc",
+      undefined,
+      "Stream install from this computer",
+    );
   }
   if (req?.via === "link" || item.sourcePath.startsWith("url:")) {
     return tr("queue_install_from_link", undefined, "Install from a link");

@@ -1,6 +1,7 @@
-export type PayloadTabId = "catalog" | "send" | "ps5";
+export type PayloadTabId = "catalog" | "send" | "ps5" | "running";
 
-const ALL_TABS: readonly PayloadTabId[] = ["catalog", "send", "ps5"];
+/** Payloads first, then what is running on the console: its processes and the ports in use. */
+const ALL_TABS: readonly PayloadTabId[] = ["catalog", "send", "ps5", "running"];
 
 /** Catalog downloads use the native shell; browser Send forwards selected ELF bytes through the engine. */
 export function payloadTabsFor(native: boolean): readonly PayloadTabId[] {
@@ -22,15 +23,18 @@ const LEGACY_CARD: Record<string, string> = {
   hearbridge: "hearbridge",
 };
 
-/** Where an old Payloads tab (`?tab=manager|shadowmount|nanodns|ports`) lives now, or null
- *  for a current tab. Integrations became cards on "On your PS5"; Ports moved next to
- *  Processes. */
+/** Where an old Payloads tab (`?tab=manager|shadowmount|nanodns|hearbridge|processes|ports`)
+ *  lives now, or null for a current tab. Integrations became cards on "On your PS5";
+ *  Processes and Ports became one Running tab. */
 export function legacyPayloadsTarget(tab: string | null): string | null {
   if (!tab) return null;
-  if (tab === "ports") return "/processes?tab=ports";
+  if (tab === "processes" || tab === "ports") return RUNNING_LINK;
   const card = LEGACY_CARD[tab];
   return card ? payloadCardLink(card) : null;
 }
+
+/** The Running tab: the console's processes, then the ports in use. */
+export const RUNNING_LINK = "/payloads?tab=running";
 
 /** The link that opens "On your PS5" with one card's Manage panel expanded. */
 export function payloadCardLink(cardId: string): string {

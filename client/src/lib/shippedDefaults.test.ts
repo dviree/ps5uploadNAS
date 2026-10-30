@@ -37,12 +37,12 @@ function read(rel: string): string {
  */
 describe("shipped defaults are usable as-is", () => {
   it("Backport ships the approved SDK target", () => {
-    const src = read("InstalledApps/BackportPanel.tsx");
+    const src = read("Backport/BackportPanel.tsx");
     expect(src).toContain('sdkPatch(titleId, "0x04000031"');
   });
 
   it("Backport keeps the risky libc patch opt-in", () => {
-    const src = read("InstalledApps/BackportPanel.tsx");
+    const src = read("Backport/BackportPanel.tsx");
     expect(src).toContain("useState(false)");
   });
 
@@ -50,7 +50,7 @@ describe("shipped defaults are usable as-is", () => {
     // A relative default would resolve against whatever the payload's
     // cwd happens to be, which is not a thing a user can reason about.
     for (const [file, re] of [
-      ["DiskUsage/index.tsx", /const \[path, setPath\] = useState\("(.*?)"\)/],
+      ["DiskUsage/index.tsx", /filesViewLink\("space", \{ path: "(.*?)" \}\)/],
       ["Shell/index.tsx", /const \[cwd, setCwd\] = useState\("(.*?)"\)/],
     ] as const) {
       const m = re.exec(read(file));

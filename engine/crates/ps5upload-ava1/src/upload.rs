@@ -8,8 +8,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use crate::gen;
 use anyhow::{anyhow, Result};
-use ava1::gen;
 use ava1::manifest::{self, Entry, Manifest};
 use ava1::send::{send_job, Progress, SendError, SendOptions};
 use ava1::source::{LocalSource, Source};
@@ -20,12 +20,6 @@ use crate::pool::{pool, Pool};
 use crate::progress::{bottleneck_name, Bridge};
 use crate::source::{FsSource, ListSource};
 use crate::zip_source::ZipSource;
-
-/// Retained for the engine's fallback match: AVA1 no longer caps zip entry size
-/// (`ZipEntryReader` keeps its inflater, so a large entry inflates once).
-#[derive(Debug, thiserror::Error)]
-#[error("zip entry {0} is too large for AVA1")]
-pub struct ZipTooLarge(pub String);
 
 /// The archive cannot be an AVA1 source (a path the manifest refuses, an unsupported
 /// method, encryption, a damaged directory).
@@ -1550,7 +1544,8 @@ mod list_destination_tests {
 #[cfg(test)]
 mod failure_reason_tests {
     use super::{refusal, refusal_reason, terminal_connection_reason};
-    use ava1::{gen, Ava1Error};
+    use crate::gen;
+    use ava1::Ava1Error;
     use std::io;
 
     #[test]

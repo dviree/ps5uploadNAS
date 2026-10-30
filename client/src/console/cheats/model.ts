@@ -6,16 +6,19 @@
  *   /api/cheats/status            → {engine, game: {title_id} | null}   (CHEATS_STATUS)
  *   /api/cheats/list   {title_id} → {mods: [{index,name,desc,button,on}], truncated} (CHEATS_GET)
  *   /api/cheats/toggle {title_id, index, on} → {ok, on}                  (CHEATS_TOGGLE)
+ *   /api/cheats/engine {enabled}  → {ok, enabled}                       (CHEATS_ENGINE_SET)
  * A toggle needs that game running (the helper patches the live process); a
- * switch-on also turns the helper's cheat engine on.
+ * switch-on also turns the helper's cheat engine on. The helper remembers the
+ * engine switch across restarts (#550).
  */
 import { ApiError, call, isOffline } from "../api";
 import { t } from "../strings";
 
 export interface CheatsStatus {
-  /** The helper's cheat engine (re-applies switched-on cheats when the game restarts). */
+  /** The helper's cheat engine: applies switched-on cheats when their game starts. */
   engine: boolean;
-  game: { title_id: string } | null;
+  /** `held`: the helper paused this game's cheats (it closed right after they were applied). */
+  game: { title_id: string; held?: boolean } | null;
 }
 
 export interface CheatMod {
@@ -26,6 +29,8 @@ export interface CheatMod {
   /** A one-shot cheat: applied each time, it has no on/off state. */
   button: boolean;
   on: boolean;
+  /** An XML game patch made for another game version than the installed one. */
+  otherVersion?: boolean;
 }
 
 export interface CheatList {
@@ -48,6 +53,8 @@ export interface CheatsState {
   busy: number | null;
   /** The last toggle's failure, one translated line. */
   message: string | null;
+  /** The engine switch is being set. */
+  engineBusy: boolean;
 }
 
 export type CheatsPhase =
@@ -66,6 +73,7 @@ export const EMPTY_STATE: CheatsState = {
   listError: null,
   busy: null,
   message: null,
+  engineBusy: false,
 };
 
 /** What the section shows for `s`. Never a stale list: only the running game's own cheats. */
@@ -98,6 +106,7 @@ export function toggleErrorText(err: unknown): string | null {
     if (isOffline(err)) return t("cw_home_err_offline");
     if (err.code === "module_missing") return t("cw_cheats_err_module");
     if (err.code === "game_busy") return t("cw_cheats_err_busy");
+    if (err.code === "wrong_version") return t("cw_cheats_err_version");
     if (err.code === "bad_index" || err.code === "no_cheats") return t("cw_cheats_err_changed");
     return t("cw_cheats_err_toggle", { code: err.code });
   }
@@ -109,9 +118,10 @@ const str = (v: unknown): string => (typeof v === "string" ? v : "");
 /** The status reply, checked (a helper that answered nonsense reads as "no game"). */
 export function readStatus(r: unknown): CheatsStatus {
   const o = (r ?? {}) as { engine?: unknown; game?: unknown };
-  const g = o.game as { title_id?: unknown } | null | undefined;
+  const g = o.game as { title_id?: unknown; held?: unknown } | null | undefined;
   const title = g && typeof g.title_id === "string" && g.title_id ? g.title_id : null;
-  return { engine: o.engine === true, game: title ? { title_id: title } : null };
+  const game = title ? (g?.held === true ? { title_id: title, held: true } : { title_id: title }) : null;
+  return { engine: o.engine === true, game };
 }
 
 /** The list reply, checked: entries without an index or a name are dropped. */
@@ -121,7 +131,14 @@ export function readList(title: string, r: unknown): CheatList {
   if (Array.isArray(o.mods)) {
     for (const m of o.mods as Record<string, unknown>[]) {
       if (!m || typeof m.index !== "number" || !Number.isInteger(m.index) || !str(m.name)) continue;
-      mods.push({ index: m.index, name: str(m.name), desc: str(m.desc), button: m.button === true, on: m.on === true });
+      mods.push({
+        index: m.index,
+        name: str(m.name),
+        desc: str(m.desc),
+        button: m.button === true,
+        on: m.on === true,
+        ...(m.other_version === true ? { otherVersion: true } : {}),
+      });
     }
   }
   return { title, mods, truncated: o.truncated === true };
@@ -134,6 +151,8 @@ export interface CheatsController {
   loadList(): Promise<void>;
   /** Switch `mod` (a one-shot cheat is applied); ignored while another switch runs. */
   toggle(mod: CheatMod): Promise<void>;
+  /** Turn the helper's cheat engine on or off (it remembers it across restarts). */
+  setEngine(on: boolean): Promise<void>;
   /** Create / coming back: the status and the cheats again. */
   refresh(): Promise<void>;
   /** Stop reporting (the section closed). */
@@ -220,10 +239,23 @@ export function createCheatsController(onChange: (s: CheatsState) => void): Chea
     else await loadList();
   };
 
+  const setEngine = async (on: boolean) => {
+    if (s.engineBusy) return;
+    set({ engineBusy: true, message: null });
+    try {
+      await call("/api/cheats/engine", { enabled: on });
+    } catch (e) {
+      set({ message: toggleErrorText(e) });
+    }
+    set({ engineBusy: false });
+    await loadStatus();
+  };
+
   return {
     loadStatus,
     loadList,
     toggle,
+    setEngine,
     refresh: async () => {
       const before = title();
       await loadStatus();

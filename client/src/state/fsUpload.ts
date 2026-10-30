@@ -189,6 +189,8 @@ export interface FsUploadDeps {
   sleep: (ms: number) => Promise<void>;
   /** Told the raw error when a run fails (not when it is cancelled). */
   onFailed?: (raw: string) => void;
+  /** Told when a run has put everything on the console (not when it fails or is stopped). */
+  onDone?: () => void;
   /** Whether a failed item is worth trying again unasked (a dropped connection is; a full
    *  drive is not). `host` is the console the run goes to. Absent: never. */
   shouldRetry?: (reason: string | undefined, error: string, host: string) => boolean;
@@ -571,7 +573,10 @@ export async function runFsUpload(
   }
   const wasCancelled = cancelled();
   if (wasCancelled) task.fail(new Error("Cancelled"));
-  else task.done();
+  else {
+    task.done();
+    deps.onDone?.();
+  }
   // Stopped on purpose is resumable too: the console kept what landed.
   ended(wasCancelled && at < steps.length ? left("user", "", null) : null);
   return { ok: !wasCancelled };

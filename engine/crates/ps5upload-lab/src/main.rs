@@ -19,6 +19,7 @@ use ps5upload_core::volumes::list_volumes;
 use std::path::Path;
 
 mod bench;
+mod rp_stream_cmd;
 
 const DEFAULT_ADDR: &str = "192.168.137.2";
 
@@ -215,6 +216,43 @@ fn do_fan_raw(addr: &str) -> Result<()> {
     Ok(())
 }
 
+/// HW_TEMPS "cd" as the helper writes it: the GPU clock (soc_clock_mhz), the eight core clocks,
+/// and the raw /dev/mp1 words (mp1_clk_raw, mp1_core_raw) for mapping the rest of the table.
+/// Read-only on the console, and the helper stops trying for good after one refusal.
+fn do_clocks_raw(addr: &str) -> Result<()> {
+    let body = ps5upload_core::mgmt::call(addr, ps5upload_core::mgmt::m::HW_TEMPS, b"cd")?;
+    print!("{}", String::from_utf8_lossy(&body));
+    Ok(())
+}
+
+/// One ShadowMount+ read-write edit session end to end: open it, write and remove a small file
+/// at the image root, close it. Shows which path opened it (SMP's API or the config rule).
+fn do_smp_image_rw_test(addr: &str, title_id: &str) -> Result<()> {
+    use ps5upload_core::smp_image_rw;
+    let t = std::time::Instant::now();
+    let s = smp_image_rw::begin(addr, title_id)?;
+    println!(
+        "open: via_api={} mount_point={} ({} ms)",
+        s.via_api,
+        s.mount_point,
+        t.elapsed().as_millis()
+    );
+    let probe = format!("{}/.ps5upload-rw-probe", s.mount_point);
+    let wrote = ps5upload_core::diagnostics::fs_write_bytes(addr, &probe, b"rw", false);
+    println!("write probe: {:?}", wrote.as_ref().map(|_| "ok"));
+    if wrote.is_ok() {
+        println!(
+            "remove probe: {:?}",
+            ps5upload_core::fs_ops::fs_delete(addr, &probe).map(|_| "ok")
+        );
+    }
+    let t = std::time::Instant::now();
+    let f = smp_image_rw::finish(addr)?;
+    println!("closed {} ({} ms)", f.title_id, t.elapsed().as_millis());
+    println!("journal left: {:?}", smp_image_rw::read_state(addr)?);
+    wrote.map(|_| ())
+}
+
 fn do_shutdown(addr: &str) -> Result<()> {
     let body = ps5upload_core::mgmt::call(addr, ps5upload_core::mgmt::m::NODE_SHUTDOWN, b"")?;
     println!("{}", String::from_utf8_lossy(&body));
@@ -367,7 +405,7 @@ mod ava1_cmds {
         let port = std::env::var("AVA1_PORT")
             .ok()
             .and_then(|p| p.parse::<u16>().ok())
-            .unwrap_or(ava1::gen::DEFAULT_PORT);
+            .unwrap_or(ps5upload_ava1::gen::DEFAULT_PORT);
         format!("{host}:{port}")
     }
 
@@ -475,12 +513,14 @@ mod ava1_cmds {
     pub async fn cryptobench(addr: &str, mib: u16) -> Result<()> {
         use ava1::wire::Message;
         let s = session(addr).await?;
-        let body = ava1::gen::CryptoBench { mib }.to_bytes()?;
-        let r = s.rpc(ava1::gen::METHOD_CRYPTO_BENCH, &body).await?;
-        if r.status != ava1::gen::STATUS_OK {
+        let body = ps5upload_ava1::gen::CryptoBench { mib }.to_bytes()?;
+        let r = s
+            .rpc(ps5upload_ava1::gen::METHOD_CRYPTO_BENCH, &body)
+            .await?;
+        if r.status != ps5upload_ava1::gen::STATUS_OK {
             bail!("crypto.bench failed with status {}", r.status);
         }
-        let res = ava1::gen::CryptoBenchResult::decode(&r.body)?;
+        let res = ps5upload_ava1::gen::CryptoBenchResult::decode(&r.body)?;
         let rate = |micros: u64| res.bytes as f64 / micros.max(1) as f64; // bytes per µs = MB/s
         let seal = rate(res.micros);
         println!(
@@ -550,7 +590,7 @@ mod ava1_cmds {
         // cannot be kept is not stamped — the key alone still works, with a code.
         let tokens = LaunchTokens::at(&ava_dir().join("launch_tokens"));
         let mut failure = None;
-        let outcome = ava1::trust::stamp_helper(&mut b, Some(&key), || match tokens.issue() {
+        let outcome = ava1::trust::stamp_program(&mut b, Some(&key), || match tokens.issue() {
             Ok(t) => Some(t),
             Err(e) => {
                 failure = Some(e.to_string());
@@ -738,7 +778,7 @@ fn calibration_record(
     dir: &str,
     files: u32,
     size: u32,
-    points: &[ava1::gen::CalPoint],
+    points: &[ps5upload_ava1::gen::CalPoint],
 ) -> serde_json::Value {
     let mut record = bench::record_envelope("calibrate", None, None, "ava1");
     let object = record
@@ -860,6 +900,7 @@ fn usage() -> ! {
     eprintln!("  register     SRC_PATH      register a game folder");
     eprintln!("  unregister   TITLE_ID      reverse registration");
     eprintln!("  launch       TITLE_ID      sceLncUtilLaunchApp");
+    eprintln!("  dump TITLE_ID DEST [--decrypt] [--fself] [--no-dlc]  dump a running title to DEST on the console");
     eprintln!("  power        tick|standby|reboot|shutdown  (tick = keep-awake)");
     eprintln!("  apps                       list titles present in app.db");
     eprintln!(
@@ -869,6 +910,11 @@ fn usage() -> ! {
     eprintln!("  saves                      list save-data folders + sizes");
     eprintln!("  fan-raw                    the helper's fan lines (HW_TEMPS \"f\"), servo profile hex included");
     eprintln!("  fan-set C                  set the fan target (45-85 C; 0 = the console's own)");
+    eprintln!("  clocks-raw                 GPU + per-core CPU clock with the raw /dev/mp1 words (HW_TEMPS \"cd\")");
+    eprintln!("  smp-image-rw-test TITLE    open a ShadowMount+ read-write edit session, write+remove a probe file, close it");
+    eprintln!("  cheats-status              the helper's cheat engine status (JSON)");
+    eprintln!("  cheats-engine on|off       set the cheat engine switch (the helper remembers it)");
+    eprintln!("  fs-cat PATH | fs-put PATH TEXT | fs-rm PATH   read, write or delete a small console file");
     eprintln!("  profile-info                       foreground user + account name slots");
     eprintln!("  profile-set-username SLOT NAME     rename an account-name slot");
     eprintln!("  profile-rename-user  UID_HEX NAME  rename a local console user");
@@ -975,6 +1021,56 @@ fn do_processes(addr: &str) -> Result<()> {
     Ok(())
 }
 
+/// `dump TITLE_ID DEST [--decrypt] [--fself] [--no-dlc]`: JOB_OP_APP_DUMP, its progress polled
+/// once a second by op id while the job runs; Ctrl-C leaves the job running on the console.
+fn do_dump(addr: &str, title_id: &str, dest: &str, flags: &[String]) -> Result<()> {
+    let mut req = ps5upload_core::fs_ops::AppDumpRequest {
+        title_id: title_id.to_string(),
+        dest: dest.to_string(),
+        decrypt: false,
+        fself: false,
+        dlc: true,
+    };
+    for f in flags {
+        match f.as_str() {
+            "--decrypt" => req.decrypt = true,
+            "--fself" => req.fself = true,
+            "--no-dlc" => req.dlc = false,
+            other => bail!("dump: unknown flag {other}"),
+        }
+    }
+    let op_id = (u64::from(std::process::id()) << 16) | 0xd0;
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let poller = {
+        let done = done.clone();
+        let addr = addr.to_string();
+        std::thread::spawn(move || {
+            while !done.load(std::sync::atomic::Ordering::Relaxed) {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                if let Ok(Some(Some(p))) = ps5upload_core::mgmt::op_progress(&addr, op_id) {
+                    println!(
+                        "progress: files {}/{} bytes {}/{} MiB",
+                        p.files_done,
+                        p.files_total,
+                        p.bytes_done >> 20,
+                        p.bytes_total >> 20
+                    );
+                }
+            }
+        })
+    };
+    let res = ps5upload_core::fs_ops::app_dump(
+        addr,
+        &req,
+        op_id,
+        std::time::Duration::from_secs(24 * 3600),
+    );
+    done.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = poller.join();
+    println!("{}", serde_json::to_string_pretty(&res?)?);
+    Ok(())
+}
+
 fn do_process_kill(addr: &str, pid: i32) -> Result<()> {
     let ack = ps5upload_core::process_mgr::process_kill(addr, pid)?;
     println!("kill ack: ok={} pid={}", ack.ok, ack.pid);
@@ -1016,6 +1112,11 @@ fn main() -> Result<()> {
     }
 
     match rest[0].as_str() {
+        // Remote Play stream spike: rp-stream <creds.json> <out.264> [seconds] [h264|h265] [WxH]
+        // creds.json = {"<host>": {"regist_key": hex32, "rp_key": hex32}}; keys never printed.
+        "rp-stream" => rp_stream_cmd::run(addr, &rest[1..]),
+        "rp-ddp" => rp_stream_cmd::ddp_raw(addr),
+        "app-running" | "app-kill" | "app-close" => rp_stream_cmd::app_cmd(addr, rest),
         "save-open" => {
             let image = rest.get(1).map(String::as_str).unwrap_or("");
             let r = ps5upload_core::saves::save_open(addr, image)?;
@@ -1133,6 +1234,12 @@ fn main() -> Result<()> {
             let title_id = rest.get(1).map(|s| s.as_str()).unwrap_or_else(|| usage());
             do_launch(addr, title_id)
         }
+        "dump" => {
+            if rest.len() < 3 {
+                usage();
+            }
+            do_dump(addr, &rest[1], &rest[2], &rest[3..])
+        }
         "apps" => do_apps(addr),
         // processes: detailed process manager enumerate (pid/comm/title/mem/
         // threads/kind). process-kill <pid>: SIGKILL one pid (guarded payload-
@@ -1184,6 +1291,51 @@ fn main() -> Result<()> {
         "hw-temps" => do_hw_temps(addr, false),
         "hw-temps-x" => do_hw_temps(addr, true),
         "fan-raw" => do_fan_raw(addr),
+        "clocks-raw" => do_clocks_raw(addr),
+        // The cheat engine's remembered switch and crash guard (#550): read the status, set the
+        // switch, and look at or plant the files the helper keeps.
+        "cheats-status" => {
+            let st = ps5upload_core::cheats::cheats_status(addr)?;
+            println!("{}", serde_json::to_string(&st)?);
+            Ok(())
+        }
+        "cheats-engine" => {
+            let on = match rest.get(1).map(|s| s.as_str()) {
+                Some("on") => true,
+                Some("off") => false,
+                _ => anyhow::bail!("cheats-engine needs on or off"),
+            };
+            let r = ps5upload_core::cheats::cheats_engine_set(addr, on)?;
+            println!("ok={} enabled={}", r.ok, r.enabled);
+            Ok(())
+        }
+        "fs-cat" => {
+            let path = rest.get(1).context("fs-cat needs a path")?;
+            match ps5upload_core::fs_ops::fs_read(addr, path, 0, 64 * 1024) {
+                Ok(b) => println!("{}", String::from_utf8_lossy(&b)),
+                Err(e) => println!("(unreadable: {e})"),
+            }
+            Ok(())
+        }
+        "fs-put" => {
+            let path = rest.get(1).context("fs-put needs a path")?;
+            let text = rest.get(2).context("fs-put needs the text")?;
+            ps5upload_core::diagnostics::fs_write_bytes(addr, path, text.as_bytes(), false)?;
+            println!("wrote {path}");
+            Ok(())
+        }
+        "fs-rm" => {
+            let path = rest.get(1).context("fs-rm needs a path")?;
+            println!(
+                "{:?}",
+                ps5upload_core::fs_ops::fs_delete(addr, path).map(|_| "removed")
+            );
+            Ok(())
+        }
+        "smp-image-rw-test" => do_smp_image_rw_test(
+            addr,
+            rest.get(1).context("smp-image-rw-test needs a title id")?,
+        ),
         "fan-set" => {
             let c: u8 = rest
                 .get(1)
@@ -1322,7 +1474,7 @@ fn main() -> Result<()> {
 mod tests {
     #[test]
     fn calibration_record_keeps_the_frozen_units_and_identity_fields() {
-        let point = ava1::gen::CalPoint {
+        let point = ps5upload_ava1::gen::CalPoint {
             workers: 4,
             files_per_s: 123,
             create_us: 2500,

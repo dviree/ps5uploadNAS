@@ -385,8 +385,11 @@ fn rar_nonsolid_resume_skips_done_entries() {
         Keep::All
     };
     let mut rec = Rec::default();
+    // Non-solid: the pass seeks past what it does not want, so nothing is discarded.
+    assert_eq!(src.bytes_to_skip(restart, &mut |_, _| Keep::Skip), Some(0));
     src.pass(restart, &mut want, &mut rec, &AtomicBool::new(false))
         .unwrap();
+    assert_eq!(src.bytes_skipped(), 0);
     assert_eq!(
         asked, missing,
         "earlier entries were seeked past, not decoded"
@@ -412,11 +415,13 @@ fn rar_solid_resume_still_correct() {
         }
     };
     let mut rec = Rec::default();
+    let held: u64 = f.0[..7].iter().map(|(_, d)| d.len() as u64).sum();
+    // Told before the pass, so the sender can show "skipping N of M".
+    assert_eq!(src.bytes_to_skip(Restart::START, &mut want), Some(held));
     src.pass(Restart::START, &mut want, &mut rec, &AtomicBool::new(false))
         .unwrap();
     assert_eq!(rec.got, f.0[7..].to_vec());
     // The held prefix was decoded to be discarded: the sender reports it as SkipProgress.
-    let held: u64 = f.0[..7].iter().map(|(_, d)| d.len() as u64).sum();
     assert_eq!(src.bytes_skipped(), held);
     assert_eq!(SeqSource::bytes_skipped(&src), held);
 }
@@ -712,13 +717,24 @@ fn rar_cancel_ends_a_long_excluded_solid_skip_promptly() {
         };
         (r, t.elapsed())
     };
+    // The excluded entry is part of what a solid pass discards, and is told up front.
+    let told = src.bytes_to_skip(Restart::START, &mut |_, _| Keep::All);
+    assert_eq!(told, Some(big.len() as u64));
     let (full, t_full) = run(false);
     full.unwrap();
+    assert_eq!(src.bytes_skipped(), big.len() as u64);
+    let before = src.bytes_skipped();
     let (stopped, t_stop) = run(true);
     assert_eq!(stopped.unwrap_err().kind(), std::io::ErrorKind::Interrupted);
+    // The cancel lands partway through the excluded entry: less than all of it was decoded. (By
+    // bytes, not time: the whole decode takes tens of milliseconds, about what starting and
+    // stopping the RAR helper process costs, so a timing ratio measured the process, not the poll.)
+    let partial = src.bytes_skipped() - before;
     assert!(
-        t_stop < t_full / 2,
-        "stopping took {t_stop:?}, a full decode {t_full:?}: the excluded decode did not poll"
+        partial < big.len() as u64,
+        "the stopped pass discarded {partial} of {} bytes in {t_stop:?} (a full decode took \
+         {t_full:?}): the excluded decode did not poll",
+        big.len()
     );
 }
 
