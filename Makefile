@@ -1290,6 +1290,7 @@ test-payload: payload
 		-o /tmp/ps5upload-installer-loopback-selftest \
 		$(PAYLOAD_DIR)/tests/installer_loopback_selftest.c \
 		$(PAYLOAD_DIR)/installer/loopback.c \
+		$(PAYLOAD_DIR)/installer/listen_guard.c \
 		$(PAYLOAD_DIR)/installer/http_range.c \
 		$(PAYLOAD_DIR)/installer/pathsafe.c \
 		$(PAYLOAD_DIR)/installer/jobs.c
@@ -1302,6 +1303,14 @@ test-payload: payload
 		$(PAYLOAD_DIR)/installer/hints.c
 	@$(RUN_LIMITED) /tmp/ps5upload-installer-hints-selftest
 	@echo "✓ installer hint table maps known Sony codes without third-party names"
+	@echo "Running installer listener/stop/init-bound self-test (host build)..."
+	@cc -O2 -Wall -Wextra -Werror -pthread -I$(PAYLOAD_DIR)/installer \
+		-o /tmp/ps5upload-installer-guard-selftest \
+		$(PAYLOAD_DIR)/tests/installer_guard_selftest.c \
+		$(PAYLOAD_DIR)/installer/listen_guard.c \
+		$(PAYLOAD_DIR)/installer/jobs.c
+	@$(RUN_LIMITED) /tmp/ps5upload-installer-guard-selftest
+	@echo "✓ installer accept loops back off, stop waits for installs, init bound is monotonic"
 	@echo "Running param.json SDK-rewrite self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -o /tmp/ps5upload-sdk-param-selftest \
 		$(PAYLOAD_DIR)/tests/sdk_param_selftest.c
@@ -1441,6 +1450,7 @@ _check-tauri-system-deps:
 	      pkg-config --exists gtk+-3.0    2>/dev/null || missing="$$missing libgtk-3-dev"; \
 	      pkg-config --exists librsvg-2.0 2>/dev/null || missing="$$missing librsvg2-dev"; \
 	      pkg-config --exists ayatana-appindicator3-0.1 2>/dev/null || missing="$$missing libayatana-appindicator3-dev"; \
+	      pkg-config --exists alsa 2>/dev/null || missing="$$missing libasound2-dev"; \
 	    fi; \
 	    if [ -n "$$missing" ]; then \
 	      echo "ERROR: Tauri requires Linux system libraries that are not installed."; \
@@ -1451,16 +1461,16 @@ _check-tauri-system-deps:
 	        echo "    sudo apt update && sudo apt install -y \\"; \
 	        echo "      libwebkit2gtk-4.1-dev build-essential curl wget file \\"; \
 	        echo "      libxdo-dev libssl-dev libayatana-appindicator3-dev \\"; \
-	        echo "      librsvg2-dev pkg-config"; \
+	        echo "      librsvg2-dev libasound2-dev pkg-config"; \
 	      elif command -v dnf >/dev/null 2>&1; then \
 	        echo "  Install (Fedora / RHEL):"; \
 	        echo "    sudo dnf install -y webkit2gtk4.1-devel openssl-devel \\"; \
-	        echo "      curl wget file libappindicator-gtk3-devel librsvg2-devel \\"; \
+	        echo "      curl wget file libappindicator-gtk3-devel librsvg2-devel alsa-lib-devel \\"; \
 	        echo "      pkgconf-pkg-config @development-tools"; \
 	      elif command -v pacman >/dev/null 2>&1; then \
 	        echo "  Install (Arch / Manjaro):"; \
 	        echo "    sudo pacman -S --needed webkit2gtk-4.1 base-devel curl wget \\"; \
-	        echo "      file openssl libappindicator-gtk3 librsvg pkgconf"; \
+	        echo "      file openssl libappindicator-gtk3 librsvg alsa-lib pkgconf"; \
 	      else \
 	        echo "  See https://tauri.app/start/prerequisites/ for your distro."; \
 	      fi; \

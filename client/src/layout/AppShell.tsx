@@ -58,6 +58,7 @@ import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { isTauriEnv, safeUnlisten } from "../lib/tauriEnv";
 import { engineIsOnThisDevice } from "../state/engine";
 import { trStatic } from "../lib/trStatic";
+import { useRemotePlayStore } from "../state/remotePlay";
 import { useDocumentVisible } from "../lib/visibility";
 import { runScheduleAction, useScheduleRunner } from "../state/schedules";
 import {
@@ -131,6 +132,7 @@ import { IncomingShareSheet } from "../components/IncomingShareSheet";
 import { dropTarget, usePackageViewer } from "../state/packageViewer";
 import { installConvertRunner } from "../lib/convertQueueRunner";
 import { recordAppEvent } from "../lib/appJournal";
+import { engineProbeVerdict } from "../lib/engineUnreachable";
 
 // The Convert queue builds through the Convert pipeline wherever the user is in the app.
 installConvertRunner();
@@ -306,10 +308,17 @@ function useStatusPolling() {
     if (!visible) return;
     let cancelled = false;
     let timer: ReturnType<typeof setTimeout> | undefined;
+    let misses = 0;
     const tick = async () => {
       const up = await engineApi.ping();
       if (cancelled) return;
       const before = useConnectionStore.getState().engineStatus;
+      misses = up ? 0 : misses + 1;
+      // One slow probe is not an engine that went away: ask again in a second first.
+      if (engineProbeVerdict(before, up, misses) === null) {
+        timer = setTimeout(tick, 1000);
+        return;
+      }
       // The engine starts with the window and can take a few seconds (Windows, many consoles):
       // until it has answered once, a miss inside the grace period is "starting", not "down"
       // (#515: the red banner flashed on every launch). A failed start or a crash is reported
@@ -1132,6 +1141,8 @@ function usePkgAutoRoute() {
     const p = getCurrentWebview().onDragDropEvent((e) => {
       if (cancelled) return;
       if (e.payload.type !== "drop") return;
+      // A stream playing on the Play screen takes its own drops (install on that console).
+      if (location.pathname === "/play" && useRemotePlayStore.getState().stream) return;
       // The first viewable thing ANYWHERE in the drop, not just paths[0]: a mixed drop like
       // [game.elf, patch.pkg] still finds the package.
       // A copy Files made for a drag out, dropped back on the window, opens nothing.
@@ -1540,8 +1551,10 @@ function AndroidLocalNetworkBanner() {
   );
 }
 
-/** How long after the app opened an engine that has not answered yet is still "starting". */
-export const ENGINE_STARTUP_GRACE_MS = 20_000;
+/** How long after the app opened an engine that has not answered yet is still "starting": longer
+ *  than the shell's own 30 s readiness wait (engine.rs READINESS_TIMEOUT), so a slow first start
+ *  (a fresh binary being scanned after an update) isn't shown as stopped while it still comes up. */
+export const ENGINE_STARTUP_GRACE_MS = 35_000;
 const appOpenedAt = Date.now();
 export function engineStartupGrace(now = Date.now()): boolean {
   return now - appOpenedAt < ENGINE_STARTUP_GRACE_MS;

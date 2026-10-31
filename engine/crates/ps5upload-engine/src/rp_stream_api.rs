@@ -5,8 +5,9 @@
 //! AGPL-3.0):
 //!
 //! * client → engine, text JSON: first `{"host", "regist_key", "rp_key",
-//!   "width"?, "height"?, "fps"?, "bitrate_kbps"?, "codec"?, "keep_alive_s"?,
-//!   "attach_only"?, "low_latency"?, "mic"?}`, then `{"pad": {"buttons", "l2", "r2",
+//!   "width"?, "height"?, "fps"?, "bitrate_kbps"?, "codec"? ("h264", "h265",
+//!   or "h265_hdr": HEVC Main10 in HDR), "keep_alive_s"?,
+//!   "attach_only"?, "low_latency"?, "mic"?, "dualsense"?}`, then `{"pad": {"buttons", "l2", "r2",
 //!   "lx", "ly", "rx", "ry"}}` whenever the pad changes, `{"keyframe": true}`,
 //!   `{"ping": t}` (answered at once with `{"pong": t}`, for the page to time
 //!   the round trip), or `{"stop": true}`.
@@ -17,8 +18,11 @@
 //!   mic counts, and the mic goes off whenever the page changes.
 //! * engine → client, binary `[u8 kind][payload]`: 0 = video codec header
 //!   (Annex-B parameter sets), 1 = video access unit, 3 = audio header,
-//!   4 = audio frame (Opus). Text JSON = status (`{"stage": …}`), rumble
-//!   (`{"rumble": [strong, weak]}`) and light bar (`{"light": [r, g, b]}`).
+//!   4 = audio frame (Opus), 6 = DualSense haptics frame (10 ms of 3 kHz stereo s16le PCM).
+//!   Text JSON = status (`{"stage": …}`), rumble (`{"rumble": [strong, weak]}`), light bar
+//!   (`{"light": [r, g, b]}`) and, for a session started with `"dualsense": true`, adaptive
+//!   triggers (`{"triggers": {"left": [mode, 10 bytes…], "right": […]}}`) and the console's
+//!   effect strengths (`{"ds_intensity": [haptics, triggers]}`, 0 off 1 strong 2 medium 3 weak).
 //!
 //! The session belongs to the engine, not to the socket. The console serves
 //! one session at a time and holds its slot for 12-30 s after one ends, so a
@@ -59,6 +63,8 @@ const VIDEO_QUEUE_LOW_LATENCY: usize = 2;
 const CTL_QUEUE: usize = 512;
 const DEFAULT_KEEP_ALIVE: Duration = Duration::from_secs(60);
 const MAX_KEEP_ALIVE: Duration = Duration::from_secs(600);
+/// Engine → page binary kind: one DualSense haptics frame (rp_stream `StreamSink::haptics`).
+const KIND_HAPTICS: u8 = 6;
 /// Page → engine binary kind: one microphone Opus packet.
 const KIND_MIC: u8 = 5;
 /// Mic frames waiting for the stream thread (10 ms each): a stalled thread
@@ -90,9 +96,16 @@ struct StartReq {
     /// `{"mic": …}` and mic frames used; without it the session is as before.
     #[serde(default)]
     mic: bool,
+    /// A DualSense is attached to the page's computer: the console is told the pad is one and
+    /// sends adaptive triggers and haptics. Without it the session is as before.
+    #[serde(default)]
+    dualsense: bool,
     /// A shorter video queue for this page (see VIDEO_QUEUE_LOW_LATENCY).
     #[serde(default)]
     low_latency: bool,
+    /// Instant replay: keep the last this-many seconds (15, 30 or 60; 0 / none = off).
+    #[serde(default)]
+    replay_s: Option<u64>,
 }
 
 impl StartReq {
@@ -115,6 +128,9 @@ struct ClientMsg {
     keyframe: bool,
     #[serde(default)]
     mic: Option<bool>,
+    /// Instant replay switched on (seconds) or off (0) during the session.
+    #[serde(default)]
+    replay_s: Option<u64>,
     /// The page's clock, echoed back as `{"pong": …}`.
     #[serde(default)]
     ping: Option<serde_json::Value>,
@@ -161,7 +177,22 @@ struct Live {
     /// The microphone: on/off and Opus frames for the stream, in order.
     mic: Mutex<std::collections::VecDeque<MicInput>>,
     mic_on: AtomicBool,
+    /// Instant replay's frames, while it is on (rp_replay.rs).
+    replay: Mutex<Option<crate::rp_replay::Replay>>,
+    /// Watchers (pad_link.rs, watch party): each gets its own copy of the picture and sound.
+    spectators: Mutex<Vec<Spectator>>,
 }
+
+/// A watcher's queue. `need_key`: it cannot use a frame until the next keyframe (it just
+/// joined, or fell behind and was skipped ahead).
+struct Spectator {
+    id: u64,
+    tx: mpsc::Sender<Message>,
+    need_key: bool,
+}
+
+/// Frames queued for a watcher before it is skipped to the next keyframe (about 2 s at 60 fps).
+const SPECTATOR_QUEUE: usize = 120;
 
 /// The console serves one Remote Play session at a time; so do we.
 static LIVE: Mutex<Option<Arc<Live>>> = Mutex::new(None);
@@ -177,6 +208,38 @@ fn live() -> Option<Arc<Live>> {
 pub(crate) fn push_pad(source: u64, state: Option<ControllerState>) {
     if let Some(l) = live() {
         l.push_pad(source, state);
+    }
+}
+
+/// A watcher joins the session: its queue, with the codec headers already in it, and a
+/// keyframe asked for. None when no session runs.
+pub(crate) fn add_spectator(id: u64) -> Option<mpsc::Receiver<Message>> {
+    let l = live()?;
+    let (tx, rx) = mpsc::channel(SPECTATOR_QUEUE);
+    let vh = l.video_header.lock().ok().and_then(|g| g.clone());
+    let ah = l.audio_header.lock().ok().and_then(|g| g.clone());
+    let _ = tx.try_send(text(serde_json::json!({ "watch": { "hevc": l.hevc } })));
+    if let Some(h) = vh {
+        let _ = tx.try_send(bin(0, &h));
+    }
+    if let Some(h) = ah {
+        let _ = tx.try_send(bin(3, &h));
+    }
+    l.spectators.lock().ok()?.push(Spectator {
+        id,
+        tx,
+        need_key: true,
+    });
+    l.want_key.store(true, Ordering::Relaxed);
+    Some(rx)
+}
+
+/// A watcher left.
+pub(crate) fn remove_spectator(id: u64) {
+    if let Some(l) = live() {
+        if let Ok(mut g) = l.spectators.lock() {
+            g.retain(|s| s.id != id);
+        }
     }
 }
 
@@ -232,6 +295,63 @@ fn is_keyframe(au: &[u8], hevc: bool) -> bool {
 }
 
 impl Live {
+    /// Every watcher gets `kind`'s message; a video access unit only from a keyframe on, and a
+    /// watcher that fell behind skips to the next keyframe (it never slows the session).
+    fn to_spectators(&self, kind: u8, data: &[u8], key: bool) {
+        let Ok(mut g) = self.spectators.lock() else {
+            return;
+        };
+        if g.is_empty() {
+            return;
+        }
+        let mut lagging = false;
+        for sp in g.iter_mut() {
+            if kind == 1 {
+                if sp.need_key && !key {
+                    continue;
+                }
+                sp.need_key = false;
+            }
+            if let Err(mpsc::error::TrySendError::Full(_)) = sp.tx.try_send(bin(kind, data)) {
+                if kind == 1 {
+                    sp.need_key = true;
+                    lagging = true;
+                }
+            }
+        }
+        if lagging {
+            self.want_key.store(true, Ordering::Relaxed);
+        }
+    }
+
+    /// Instant replay on (with that window) or off; a new window starts over.
+    fn set_replay(&self, seconds: Option<u64>) {
+        let want = crate::rp_replay::window_s(seconds);
+        if let Ok(mut g) = self.replay.lock() {
+            if g.as_ref().map(|r| r.window_s()) != want {
+                *g = want.map(crate::rp_replay::Replay::new);
+            }
+        }
+    }
+
+    fn record(&self, kind: u8, t_us: u64, key: bool, data: &[u8]) {
+        if let Ok(mut g) = self.replay.lock() {
+            if let Some(r) = g.as_mut() {
+                r.push(kind, t_us, key, data);
+            }
+        }
+    }
+
+    /// The replay as the page reads it, or None when it is off or holds nothing yet.
+    fn replay_snapshot(&self) -> Option<Vec<u8>> {
+        let vh = self.video_header.lock().ok()?.clone()?;
+        let ah = self.audio_header.lock().ok().and_then(|g| g.clone());
+        let g = self.replay.lock().ok()?;
+        let r = g.as_ref()?;
+        r.frames().next()?;
+        Some(crate::rp_replay::encode(&vh, ah.as_deref(), r))
+    }
+
     fn new(host: String, hevc: bool, keep_alive: Duration) -> Self {
         Live {
             host,
@@ -252,6 +372,8 @@ impl Live {
             mic_enabled: AtomicBool::new(false),
             mic: Default::default(),
             mic_on: AtomicBool::new(false),
+            replay: Mutex::new(None),
+            spectators: Mutex::new(Vec::new()),
         }
     }
 
@@ -414,8 +536,17 @@ impl StreamSink for Sink {
                 *h = Some(au.to_vec());
             }
             live.send_ctl(bin(0, au));
+            live.to_spectators(0, au, false);
             return true;
         }
+        let key = is_keyframe(au, live.hevc);
+        live.record(
+            crate::rp_replay::KIND_VIDEO,
+            self.t0.elapsed().as_micros() as u64,
+            key,
+            au,
+        );
+        live.to_spectators(1, au, key);
         let Some(tx) = live.video_tx() else {
             return true; // nobody watching: the session waits for a page
         };
@@ -439,8 +570,17 @@ impl StreamSink for Sink {
             if let Ok(mut h) = self.live.audio_header.lock() {
                 *h = Some(frame.to_vec());
             }
+        } else {
+            self.live.record(
+                crate::rp_replay::KIND_AUDIO,
+                self.t0.elapsed().as_micros() as u64,
+                false,
+                frame,
+            );
         }
         self.live.send_ctl(bin(if header { 3 } else { 4 }, frame));
+        self.live
+            .to_spectators(if header { 3 } else { 4 }, frame, false);
         true
     }
     fn rumble(&mut self, left: u8, right: u8) {
@@ -452,6 +592,24 @@ impl StreamSink for Sink {
         let v = serde_json::json!({"light": rgb});
         crate::pad_link::broadcast(&v.to_string());
         self.live.send_ctl(text(v));
+    }
+    fn trigger_effects(&mut self, left: (u8, [u8; 10]), right: (u8, [u8; 10])) {
+        let side = |(mode, p): (u8, [u8; 10])| {
+            let mut v = vec![mode];
+            v.extend_from_slice(&p);
+            v
+        };
+        self.live.send_ctl(text(
+            serde_json::json!({"triggers": {"left": side(left), "right": side(right)}}),
+        ));
+    }
+    fn dualsense_intensity(&mut self, haptics: u8, triggers: u8) {
+        self.live.send_ctl(text(
+            serde_json::json!({"ds_intensity": [haptics, triggers]}),
+        ));
+    }
+    fn haptics(&mut self, pcm: &[u8]) {
+        self.live.send_ctl(bin(KIND_HAPTICS, pcm));
     }
     fn input(&mut self) -> Option<ControllerState> {
         self.live.pad.lock().ok()?.pop_front()
@@ -468,7 +626,17 @@ impl StreamSink for Sink {
             .is_some_and(|t| t.elapsed() > self.live.keep_alive)
     }
     fn wants_keyframe(&mut self) -> bool {
-        self.live.want_key.swap(false, Ordering::Relaxed)
+        let page = self.live.want_key.swap(false, Ordering::Relaxed);
+        // Instant replay needs a keyframe every few seconds (a clip can only start at one).
+        let now = self.t0.elapsed().as_micros() as u64;
+        let replay = self
+            .live
+            .replay
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|r| r.wants_keyframe(now)))
+            .unwrap_or(false);
+        page || replay
     }
     fn mic(&mut self) -> Option<MicInput> {
         self.live.mic.lock().ok()?.pop_front()
@@ -485,9 +653,17 @@ fn error_status(e: &anyhow::Error) -> serde_json::Value {
         Some(NotReady::Standby) => ("asleep", None),
         Some(NotReady::Unreachable) => ("unreachable", None),
         None if text.contains("refused the control session") => ("keys", None),
+        // Session init answers 80108b12 while the console's own Remote Play switch is off.
+        None if text.contains("80108b12") => ("rp_off", None),
         None if text.contains("did not wake") => ("wake_failed", None),
         None if text.contains("login passcode") => ("passcode", None),
         None if text.contains("Nagare") || text.contains("AvCap") => ("video_refused", None),
+        // Mid-stream: the console went quiet or closed the control connection.
+        None if text.contains("console stopped sending")
+            || text.contains("closed the Remote Play control connection") =>
+        {
+            ("lost", None)
+        }
         None => ("other", None),
     };
     serde_json::json!({"stage": "error", "code": code, "retry_s": retry_s, "error": text})
@@ -504,6 +680,24 @@ pub async fn current() -> Json<serde_json::Value> {
         Some(l) => l.snapshot(),
         None => serde_json::json!({"host": null}),
     })
+}
+
+/// `GET /api/ps5/rp/replay`: the instant replay's frames (rp_replay.rs), for the page to save as
+/// a clip. 404 when no session runs, replay is off, or nothing is held yet.
+pub async fn replay() -> Response {
+    let snap = live().and_then(|l| l.replay_snapshot());
+    match snap {
+        Some(b) => (
+            [(axum::http::header::CONTENT_TYPE, "application/octet-stream")],
+            Bytes::from(b),
+        )
+            .into_response(),
+        None => (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "no replay: start one, or wait for the first keyframe"})),
+        )
+            .into_response(),
+    }
 }
 
 async fn close(socket: &mut WebSocket, reason: &'static str) {
@@ -534,13 +728,14 @@ fn begin(start: &StartReq, creds: ps5upload_core::rp_session::SessionCreds) -> A
     if let Some(b) = start.bitrate_kbps {
         cfg.bitrate_kbps = b;
     }
-    if start.codec.as_deref() == Some("h265") {
-        cfg.codec = Codec::H265;
+    if let Some(c) = start.codec.as_deref().and_then(Codec::from_name) {
+        cfg.codec = c;
     }
     cfg.mic = start.mic;
+    cfg.dualsense = start.dualsense;
     let live = Arc::new(Live::new(
         start.host.clone(),
-        cfg.codec == Codec::H265,
+        cfg.codec.is_hevc(),
         start
             .keep_alive_s
             .map(Duration::from_secs)
@@ -548,19 +743,30 @@ fn begin(start: &StartReq, creds: ps5upload_core::rp_session::SessionCreds) -> A
             .min(MAX_KEEP_ALIVE),
     ));
     live.mic_enabled.store(cfg.mic, Ordering::Relaxed);
+    live.set_replay(start.replay_s);
     let l = live.clone();
     tokio::task::spawn_blocking(move || {
         let mut sink = Sink {
             live: l.clone(),
             t0: Instant::now(),
         };
-        let r = run_stream(
-            &l.host,
-            &creds,
-            cfg,
-            Duration::from_secs(4 * 3600),
-            &mut sink,
-        );
+        // A panic must still end the session: left in LIVE, it would turn every later start
+        // for this console into a join of a dead stream.
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            run_stream(
+                &l.host,
+                &creds,
+                cfg,
+                Duration::from_secs(4 * 3600),
+                &mut sink,
+            )
+        }))
+        .unwrap_or_else(|p| {
+            Err(anyhow::anyhow!(
+                "the stream stopped on an internal error: {}",
+                panic_text(&p)
+            ))
+        });
         let end = match r {
             Ok(rep) => serde_json::json!({
                 "stage": "ended",
@@ -573,12 +779,17 @@ fn begin(start: &StartReq, creds: ps5upload_core::rp_session::SessionCreds) -> A
                 "loss_reported": rep.loss_reported,
                 "video_mb": rep.video.bytes as f64 / 1e6,
                 "bad_mac": rep.av_bad_mac,
+                "data_resent": rep.data_resent,
+                "data_given_up": rep.data_given_up,
+                "io_soft_errors": rep.io_soft_errors,
                 "ws_dropped": l.dropped.load(Ordering::Relaxed),
                 "reason": rep.disconnect_reason,
             }),
             Err(e) => error_status(&e),
         };
         crate::log_info!("rp_stream: {end}");
+        // A fan boost for this console ends with its session.
+        crate::fan_boost::session_ended(&l.host);
         if let Ok(mut g) = LIVE.lock() {
             if g.as_ref().is_some_and(|x| Arc::ptr_eq(x, &l)) {
                 *g = None;
@@ -591,6 +802,14 @@ fn begin(start: &StartReq, creds: ps5upload_core::rp_session::SessionCreds) -> A
         }
     });
     live
+}
+
+/// A panic's message, when it has one.
+fn panic_text(p: &Box<dyn std::any::Any + Send>) -> String {
+    p.downcast_ref::<&str>()
+        .map(|s| s.to_string())
+        .or_else(|| p.downcast_ref::<String>().cloned())
+        .unwrap_or_else(|| "panic".into())
 }
 
 async fn session(mut socket: WebSocket) {
@@ -730,6 +949,9 @@ async fn session(mut socket: WebSocket) {
                         if let Some(on) = m.mic {
                             live.set_mic(id, on);
                         }
+                        if m.replay_s.is_some() {
+                            live.set_replay(m.replay_s);
+                        }
                     }
                 }
                 Some(Ok(Message::Binary(b))) if b.first() == Some(&KIND_MIC) => {
@@ -755,6 +977,46 @@ pub async fn player() -> impl IntoResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn watchers_start_at_a_keyframe_and_a_slow_one_skips_ahead() {
+        let live = Live::new("10.0.0.9".into(), false, Duration::from_secs(60));
+        let (fast_tx, mut fast) = mpsc::channel(8);
+        let (slow_tx, mut slow) = mpsc::channel(1);
+        live.spectators.lock().unwrap().extend([
+            Spectator {
+                id: 1,
+                tx: fast_tx,
+                need_key: true,
+            },
+            Spectator {
+                id: 2,
+                tx: slow_tx,
+                need_key: true,
+            },
+        ]);
+        // A delta frame before any keyframe is useless to a new watcher: not sent.
+        live.to_spectators(1, b"delta", false);
+        assert!(fast.try_recv().is_err());
+        // The keyframe goes to both; the slow one's queue is now full.
+        live.to_spectators(1, b"key", true);
+        assert!(fast.try_recv().is_ok());
+        // Sound goes along; the full one just misses it.
+        live.to_spectators(4, b"opus", false);
+        assert!(fast.try_recv().is_ok());
+        // The next frame overflows the slow one: it waits for a keyframe, one is asked for, and
+        // the fast one is not held back.
+        live.want_key.store(false, Ordering::Relaxed);
+        live.to_spectators(1, b"delta2", false);
+        assert!(fast.try_recv().is_ok());
+        assert!(live.spectators.lock().unwrap()[1].need_key);
+        assert!(live.want_key.load(Ordering::Relaxed));
+        let _ = slow.try_recv(); // the keyframe it had
+        live.to_spectators(1, b"delta3", false);
+        assert!(slow.try_recv().is_err());
+        live.to_spectators(1, b"key2", true);
+        assert!(slow.try_recv().is_ok());
+    }
 
     const KEY: &[u8] = &[0, 0, 0, 1, 0x65, 1, 2]; // H.264 IDR slice
     const DELTA: &[u8] = &[0, 0, 0, 1, 0x41, 1, 2]; // H.264 non-IDR slice
@@ -814,6 +1076,32 @@ mod tests {
     }
 
     #[test]
+    fn a_stream_lost_midway_has_its_own_code() {
+        for msg in [
+            "the console stopped sending: nothing for 15 s (the network dropped, or the console ended the stream)",
+            "the console closed the Remote Play control connection",
+        ] {
+            assert_eq!(error_status(&anyhow::anyhow!(msg))["code"], "lost", "{msg}");
+        }
+        assert_eq!(
+            error_status(&anyhow::anyhow!("something else"))["code"],
+            "other"
+        );
+    }
+
+    #[test]
+    fn remote_play_switched_off_has_its_own_code() {
+        let e = anyhow::anyhow!("session init refused (HTTP 403): 80108b12");
+        assert_eq!(error_status(&e)["code"], "rp_off");
+    }
+
+    #[test]
+    fn a_panic_has_its_message() {
+        let p = std::panic::catch_unwind(|| panic!("index out of bounds")).unwrap_err();
+        assert_eq!(panic_text(&p), "index out of bounds");
+    }
+
+    #[test]
     fn a_page_that_joins_gets_headers_and_waits_for_a_keyframe() {
         let live = Arc::new(Live::new("h".into(), false, DEFAULT_KEEP_ALIVE));
         let mut sink = Sink {
@@ -850,6 +1138,35 @@ mod tests {
         // The first page leaving afterwards does not detach the second.
         live.detach(first);
         assert!(live.viewer.lock().unwrap().is_some());
+    }
+
+    #[test]
+    fn dualsense_effects_reach_the_page() {
+        let live = Arc::new(Live::new("h".into(), false, Duration::from_secs(60)));
+        let mut sink = Sink {
+            live: live.clone(),
+            t0: Instant::now(),
+        };
+        let (vt, _vr, ct, mut cr) = page();
+        live.attach(vt, ct);
+        let _ = kinds(&mut cr);
+        sink.trigger_effects((0x21, [1; 10]), (0x05, [0; 10]));
+        sink.dualsense_intensity(1, 2);
+        sink.haptics(&[0u8; 120]);
+        assert_eq!(
+            kinds(&mut cr),
+            vec![
+                r#"{"triggers":{"left":[33,1,1,1,1,1,1,1,1,1,1],"right":[5,0,0,0,0,0,0,0,0,0,0]}}"#
+                    .to_string(),
+                r#"{"ds_intensity":[1,2]}"#.to_string(),
+                "bin6".to_string(),
+            ]
+        );
+        let s: StartReq = serde_json::from_str(
+            r##"{"host": "h", "regist_key": "", "rp_key": "", "dualsense": true}"##,
+        )
+        .unwrap();
+        assert!(s.dualsense);
     }
 
     #[test]

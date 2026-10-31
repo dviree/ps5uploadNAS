@@ -633,6 +633,29 @@ const CATALOGUE: &[CatalogueEntry] = &[
         homepage: "https://github.com/X-F1REBALL-X/HearBridge-PS5",
     },
     CatalogueEntry {
+        // disco-trooper/hush (GPL-3) — turns off the console's continuous "recent gameplay"
+        // recording by pointing SceAvCapture's sceVencStartEncode import at a stub. Remote
+        // Play encodes through the same call, so while Hush is on a stream gets no picture
+        // (#561): Play pauses it (enabled=0 in /data/hush/config.ini) and turns it back on.
+        // Releases ship `hush.elf` and a `SHA256SUMS` the download is checked against
+        // (CHECKSUM_FILES). Hush does not rename its process (elfldr calls it payload.elf),
+        // so the client tells it running by the pid in /data/hush/pid.lock.
+        id: "hush",
+        display_name: "Hush",
+        role: "Turn off the console's background gameplay recording",
+        description: "Stops the PS5 from continuously recording the last minutes of gameplay to its internal drive (several GB written per hour of play). The Create menu then answers \"Gameplay isn't being recorded\". Settings live in /data/hush/config.ini; enabled=0 restores recording within about 20 seconds. Remote Play uses the same video encoder, so while Hush is on a stream has no picture: Play can pause Hush for the stream and turn it back on afterwards. By disco-trooper.",
+        repo_host: "github.com",
+        repo_owner: "disco-trooper",
+        repo_name: "hush",
+        asset_name_hint: "hush.elf",
+        on_console_marker_path: Some("/data/hush/config.ini"),
+        process_name_hint: Some("hush.elf"),
+        ports: &[],
+        autoload_priority: 5,
+        autoload_delay_ms: 300,
+        homepage: "https://github.com/disco-trooper/hush",
+    },
+    CatalogueEntry {
         // Pharaoh2k/ps5debug-NG — a debugger for jailbroken PS5s (GPL-3). The
         // payload is an installer: it loads the debugger into the console's own
         // SceShellCore process and exits, so there is no process of its own to
@@ -1610,6 +1633,92 @@ fn read_stale_cached_release(path: &std::path::Path) -> Option<(GithubRelease, u
     Some((release, age))
 }
 
+// ─── Release checksums ──────────────────────────────────────────────
+
+/// Catalogue payloads whose releases publish a `sha256sum`-style list beside the ELF:
+/// (catalogue id, the list's asset name). A download of one of these is refused unless its
+/// SHA-256 matches the list's line for the asset.
+const CHECKSUM_FILES: &[(&str, &str)] = &[("hush", "SHA256SUMS")];
+
+/// Largest checksum list accepted (a few lines in practice).
+const CHECKSUM_FILE_MAX_BYTES: usize = 64 * 1024;
+
+fn checksum_file_for(id: &str) -> Option<&'static str> {
+    CHECKSUM_FILES
+        .iter()
+        .find(|(i, _)| *i == id)
+        .map(|(_, name)| *name)
+}
+
+/// The asset's file name, the last segment of its download URL.
+fn asset_file_name(asset_url: &str) -> Option<String> {
+    let u = reqwest::Url::parse(asset_url).ok()?;
+    let name = u.path_segments()?.next_back()?.to_string();
+    (!name.is_empty()).then_some(name)
+}
+
+/// Another asset of the same release: the asset URL with its file name swapped
+/// (`…/releases/download/v1.0.0/hush.elf` → `…/v1.0.0/SHA256SUMS`).
+fn sibling_asset_url(asset_url: &str, name: &str) -> Option<String> {
+    let mut u = reqwest::Url::parse(asset_url).ok()?;
+    {
+        let mut segs = u.path_segments_mut().ok()?;
+        segs.pop();
+        segs.push(name);
+    }
+    u.set_query(None);
+    u.set_fragment(None);
+    Some(u.to_string())
+}
+
+/// The lowercase hex SHA-256 a `sha256sum` list gives `file` (`<hex>  <name>`, or
+/// `<hex> *<name>` in binary mode). None when the list has no well-formed line for it.
+fn sha256_for(sums: &str, file: &str) -> Option<String> {
+    sums.lines().find_map(|line| {
+        let line = line.trim();
+        let (hex, rest) = line.split_once(char::is_whitespace)?;
+        let name = rest.trim_start().trim_start_matches('*');
+        let name = name.rsplit('/').next().unwrap_or(name);
+        (name == file && hex.len() == 64 && hex.chars().all(|c| c.is_ascii_hexdigit()))
+            .then(|| hex.to_ascii_lowercase())
+    })
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// Fetch the release's checksum list and return the SHA-256 it gives the asset.
+async fn expected_sha256(
+    client: &reqwest::Client,
+    asset_url: &str,
+    sums_name: &str,
+) -> Result<String, String> {
+    let file = asset_file_name(asset_url).ok_or_else(|| format!("no file name in {asset_url}"))?;
+    let url = sibling_asset_url(asset_url, sums_name)
+        .ok_or_else(|| format!("no {sums_name} url for {asset_url}"))?;
+    let resp = client
+        .get(&url)
+        .send()
+        .await
+        .map_err(|e| format!("fetch {sums_name}: {e}"))?;
+    if !resp.status().is_success() {
+        return Err(format!(
+            "fetch {sums_name}: HTTP {} (the release must publish it)",
+            resp.status().as_u16()
+        ));
+    }
+    let body = resp
+        .bytes()
+        .await
+        .map_err(|e| format!("read {sums_name}: {e}"))?;
+    if body.len() > CHECKSUM_FILE_MAX_BYTES {
+        return Err(format!("{sums_name} is too large ({} bytes)", body.len()));
+    }
+    sha256_for(&String::from_utf8_lossy(&body), &file)
+        .ok_or_else(|| format!("{sums_name} has no checksum for {file}"))
+}
+
 // ─── On-disk inventory & download ───────────────────────────────────
 
 #[derive(Serialize)]
@@ -1625,24 +1734,44 @@ pub struct LocalInventoryEntry {
     mtime: i64,
 }
 
-/// The file name a downloaded payload is cached under: the asset hint when it is a
-/// plain name, else `<id>.elf`. A custom repo's hint is user text, so anything that
-/// could name a path (`/`, `..`, `:`) falls back to the id instead of being joined.
-fn cached_elf_name(id: &str, asset_name_hint: &str) -> String {
-    let base = asset_name_hint
-        .trim()
-        .trim_end_matches(".elf")
-        .trim_matches(|c: char| !c.is_alphanumeric());
-    let plain = !base.is_empty()
-        && base
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-        && !base.contains("..");
-    if plain {
-        format!("{base}.elf")
-    } else {
-        format!("{id}.elf")
+/// The file name a downloaded payload is cached under, which is also the name Store in
+/// Payload Manager gives it: the asset hint when it is a plain name; with no hint (a custom
+/// repo), the release asset's own file name (`<name>.elf`, or a `.zip`'s stem); else
+/// `<id>.elf`. A hint and an asset name are outside text, so anything that could name a path
+/// (`/`, `..`, `:`, `%`) falls back to the id instead of being joined. Without the asset name a
+/// custom repo's payload was cached, and stored in Payload Manager, as `custom-<hex>.elf`
+/// (shown there as "Custom <hex>").
+fn cached_elf_name(id: &str, asset_name_hint: &str, asset_url: &str) -> String {
+    let plain_base = |name: &str| -> Option<String> {
+        let base = name
+            .trim()
+            .trim_end_matches(".elf")
+            .trim_end_matches(".zip")
+            .trim_matches(|c: char| !c.is_alphanumeric());
+        let plain = !base.is_empty()
+            && base
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+            && !base.contains("..");
+        plain.then(|| format!("{base}.elf"))
+    };
+    if !asset_name_hint.trim().is_empty() {
+        return plain_base(asset_name_hint).unwrap_or_else(|| format!("{id}.elf"));
     }
+    let asset_file = asset_url
+        .split(['?', '#'])
+        .next()
+        .unwrap_or("")
+        .rsplit('/')
+        .next()
+        .unwrap_or("");
+    let lower = asset_file.to_ascii_lowercase();
+    if lower.ends_with(".elf") || lower.ends_with(".zip") {
+        if let Some(name) = plain_base(asset_file) {
+            return name;
+        }
+    }
+    format!("{id}.elf")
 }
 
 /// Per-payload cache root. `~/.../payloads/<id>/` holds the latest
@@ -1797,16 +1926,25 @@ pub async fn payloads_download(
     // We can't ELF-check the first chunk inline anymore (a zip starts
     // with "PK\x03\x04"), so buffer fully — assets are well under the
     // few-MB cap — and branch on the magic.
-    let final_name = cached_elf_name(&entry.id, &entry.asset_name_hint);
+    let final_name = cached_elf_name(&entry.id, &entry.asset_name_hint, &asset_url);
     let final_path = dir.join(&final_name);
     let dl_tmp = final_path.with_extension("download.tmp");
     let elf_tmp = final_path.with_extension("elf.tmp");
+
+    // A release that publishes checksums: read the expected one first, so a missing or
+    // malformed list fails before the download.
+    let expected = match checksum_file_for(&entry.id) {
+        Some(sums) => Some(expected_sha256(&client, &asset_url, sums).await?),
+        None => None,
+    };
+    let mut hasher = <sha2::Sha256 as sha2::Digest>::new();
 
     {
         let mut tmp = std::fs::File::create(&dl_tmp)
             .map_err(|e| format!("create {}: {e}", dl_tmp.display()))?;
         let mut total_written: u64 = 0;
         while let Some(chunk) = resp.chunk().await.map_err(|e| format!("read chunk: {e}"))? {
+            sha2::Digest::update(&mut hasher, &chunk);
             total_written = total_written.saturating_add(chunk.len() as u64);
             if total_written > PAYLOAD_DOWNLOAD_MAX_BYTES {
                 let _ = std::fs::remove_file(&dl_tmp);
@@ -1819,6 +1957,17 @@ pub async fn payloads_download(
         }
         tmp.sync_all()
             .map_err(|e| format!("fsync {}: {e}", dl_tmp.display()))?;
+    }
+
+    if let Some(want) = expected {
+        let got = hex_lower(&sha2::Digest::finalize(hasher));
+        if got != want {
+            let _ = std::fs::remove_file(&dl_tmp);
+            return Err(format!(
+                "downloaded {} does not match the release's checksum (got {got}, expected {want})",
+                entry.id
+            ));
+        }
     }
 
     // Sniff the leading bytes to tell ELF from zip from junk (a 404 HTML
@@ -1958,23 +2107,42 @@ mod cache_name_tests {
 
     #[test]
     fn a_custom_hint_cannot_name_a_path() {
-        assert_eq!(cached_elf_name("custom-0a", "kstuff"), "kstuff.elf");
-        assert_eq!(
-            cached_elf_name("custom-0a", "elfldr-ps5.elf"),
-            "elfldr-ps5.elf"
-        );
-        assert_eq!(
-            cached_elf_name("custom-0a", "HearBridge-"),
-            "HearBridge.elf"
-        );
-        assert_eq!(cached_elf_name("custom-0a", ""), "custom-0a.elf");
+        let n = |hint: &str| cached_elf_name("custom-0a", hint, "");
+        assert_eq!(n("kstuff"), "kstuff.elf");
+        assert_eq!(n("elfldr-ps5.elf"), "elfldr-ps5.elf");
+        assert_eq!(n("HearBridge-"), "HearBridge.elf");
+        assert_eq!(n(""), "custom-0a.elf");
         // Leading and trailing punctuation is trimmed as before; only interior path text falls back.
-        assert_eq!(cached_elf_name("custom-0a", "..\\x"), "x.elf");
+        assert_eq!(n("..\\x"), "x.elf");
         for hint in ["a/../../b", "C:evil", "sub/dir", "a..b", "a\\b"] {
+            assert_eq!(n(hint), "custom-0a.elf", "{hint}");
+        }
+    }
+
+    #[test]
+    fn a_custom_repo_payload_keeps_its_release_asset_name() {
+        let n = |url: &str| cached_elf_name("custom-3fa9c21b04de", "", url);
+        let gh = "https://github.com/someone/thing/releases/download/v1.2";
+        // Was "custom-3fa9c21b04de.elf", which Payload Manager showed as "Custom 3fa9c21b04de".
+        assert_eq!(n(&format!("{gh}/MyPayload_v1.2.elf")), "MyPayload_v1.2.elf");
+        assert_eq!(n(&format!("{gh}/MyPayload-1.2.zip")), "MyPayload-1.2.elf");
+        assert_eq!(n(&format!("{gh}/thing.elf?raw=1")), "thing.elf");
+        // A hint still wins (the catalogue's stable names), and odd asset names fall back.
+        assert_eq!(
+            cached_elf_name("custom-0a", "kstuff", &format!("{gh}/kstuff_v1.elf")),
+            "kstuff.elf"
+        );
+        for bad in [
+            "My%20Payload.elf",
+            "a..b.elf",
+            "notes.txt",
+            "",
+            "https://x/",
+        ] {
             assert_eq!(
-                cached_elf_name("custom-0a", hint),
-                "custom-0a.elf",
-                "{hint}"
+                n(&format!("{gh}/{bad}")),
+                "custom-3fa9c21b04de.elf",
+                "{bad}"
             );
         }
     }
@@ -2005,6 +2173,50 @@ mod tests {
         assert_eq!(lz4.repo_host, "theghostonline.dev");
         let loader = find_entry("elfldr").unwrap();
         assert_eq!(loader.asset_name_hint, "elfldr-ps5.elf");
+    }
+
+    #[test]
+    fn hush_is_checked_against_its_sha256sums() {
+        let hush = find_entry("hush").expect("Hush catalogue entry");
+        assert_eq!(hush.asset_name_hint, "hush.elf");
+        assert_eq!(hush.on_console_marker_path, Some("/data/hush/config.ini"));
+        assert_eq!(checksum_file_for("hush"), Some("SHA256SUMS"));
+        assert_eq!(checksum_file_for("nanodns"), None);
+        // Every checksummed id is a catalogue entry.
+        for (id, _) in CHECKSUM_FILES {
+            assert!(find_entry(id).is_some(), "{id}");
+        }
+    }
+
+    #[test]
+    fn checksum_list_parsing() {
+        let url = "https://github.com/disco-trooper/hush/releases/download/v1.0.0/hush.elf";
+        assert_eq!(asset_file_name(url).as_deref(), Some("hush.elf"));
+        assert_eq!(
+            sibling_asset_url(url, "SHA256SUMS").as_deref(),
+            Some("https://github.com/disco-trooper/hush/releases/download/v1.0.0/SHA256SUMS")
+        );
+        let hex = "5c98dd0881b64eb00e90d58d90056a66193ef8ee50e2d9906a1e298b5a34c352";
+        // The release's own list (text mode, two spaces).
+        assert_eq!(
+            sha256_for(&format!("{hex}  hush.elf\n"), "hush.elf").as_deref(),
+            Some(hex)
+        );
+        // Binary mode, a path, upper case, CRLF and other files around it.
+        let list = format!(
+            "{}  other.elf\r\n{} *dist/hush.elf\r\n",
+            "a".repeat(64),
+            hex.to_uppercase()
+        );
+        assert_eq!(sha256_for(&list, "hush.elf").as_deref(), Some(hex));
+        assert_eq!(sha256_for(&list, "missing.elf"), None);
+        // A short or non-hex digest is not a checksum.
+        assert_eq!(sha256_for("abc  hush.elf", "hush.elf"), None);
+        assert_eq!(
+            sha256_for(&format!("{}  hush.elf", "z".repeat(64)), "hush.elf"),
+            None
+        );
+        assert_eq!(hex_lower(&[0x00, 0xab, 0x0f]), "00ab0f");
     }
 
     #[test]

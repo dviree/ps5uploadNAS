@@ -139,6 +139,10 @@ pub fn run() {
     // yet), so set_var is sound; edition 2021 keeps it safe (non-unsafe).
     // Only ever set when unset, so an explicit user choice wins in either
     // direction — including forcing a rescue back OFF.
+    // The bare AppImage on Wayland + NVIDIA: restart once with the system's libwayland-client
+    // (what the .zip's PS5Upload.sh does before launch). Before anything else starts.
+    #[cfg(target_os = "linux")]
+    linux_gpu::reexec_with_system_wayland();
     #[cfg(target_os = "linux")]
     for (key, value) in linux_gpu::webkit_workarounds(linux_gpu::probe()) {
         if std::env::var_os(key).is_none() {
@@ -519,6 +523,7 @@ pub fn run() {
             commands::save_text_file,
             // Remote Play screenshots and clips (raw bytes, not text).
             commands::save_binary_file,
+            commands::save_to_photos,
             commands::dragout_stage_dir,
             commands::read_text_file,
             // ── Automatic crash/error report collection ─────────────
@@ -602,6 +607,15 @@ pub fn run() {
             commands::focus_webview,
             // Remote Play playing: the OS's game mode where an app can ask for one.
             commands::game_mode_set,
+            // Remote Play playing: a DualSense's touchpad, which the Gamepad API never gives.
+            commands::pad_touchpad_set,
+            // ...and in DualSense mode its adaptive triggers and haptics.
+            commands::pad_dualsense_info,
+            commands::pad_dualsense_triggers,
+            commands::pad_dualsense_intensity,
+            commands::pad_dualsense_reset,
+            commands::pad_haptics_set,
+            commands::pad_haptics_push,
             commands::user_config_load, // ~/.ps5upload/settings.json read
             commands::user_config_save, // ~/.ps5upload/settings.json atomic write
             commands::user_config_path_resolved, // show-the-path for the Settings UI
@@ -691,6 +705,10 @@ pub fn run() {
             };
             // Desktop: never wait on it without a limit (exit_guard.rs: an 8.1.1 Mac froze
             // here after "Install and restart"). Past the limit the children are killed.
+            // A DualSense left with a game's trigger resistance: let it go.
+            commands::pad_touchpad_stop_on_exit();
+            #[cfg(not(any(target_os = "android", target_os = "ios")))]
+            exit_guard::set_exiting();
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             exit_guard::run_bounded(exit_guard::CLEANUP_LIMIT, cleanup);
             #[cfg(any(target_os = "android", target_os = "ios"))]

@@ -18,7 +18,7 @@ export default function BrowserFilePicker({ onFiles }: { onFiles: (paths: string
     const paths: string[] = [];
     try {
       for (const [i, file] of files.entries()) {
-        if (/\.(zip|7z|rar|r\d{2})$/i.test(file.name)) throw new Error(tr("browserFile.archive", "Archive uploads require the native app. Choose a plain file or disk image."));
+        if (/\.(zip|7z|rar|[r-y]\d{2})$/i.test(file.name)) throw new Error(tr("browserFile.archive", "Archive uploads require the native app. Choose a plain file or disk image."));
         const count = files.length > 1 ? `${i + 1}/${files.length} · ` : "";
         setProgress(`${count}0%`);
         const staged = await stageBrowserFile(file, (sent, total) =>

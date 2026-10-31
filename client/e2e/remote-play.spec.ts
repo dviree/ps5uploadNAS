@@ -54,7 +54,7 @@ test("Remote Play survives leaving the screen and a dropped socket", async ({ pa
   });
 
   await page.goto("/play", { waitUntil: "domcontentloaded" });
-  await expect(page.getByRole("heading", { name: "Remote Play" })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("heading", { name: "Play", exact: true })).toBeVisible({ timeout: 30_000 });
   await page.getByTestId("rp-start").click();
   const toolbar = page.getByTestId("rp-toolbar");
   await expect(toolbar).toContainText("Living room");
@@ -147,14 +147,14 @@ test("Remote Play shows the selected console while another one streams", async (
   });
 
   await page.goto("/play", { waitUntil: "domcontentloaded" });
-  await expect(page.getByRole("heading", { name: "Remote Play" })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("heading", { name: "Play", exact: true })).toBeVisible({ timeout: 30_000 });
   await page.getByTestId("rp-start").click();
   const visible = (id: string) => page.getByTestId(id).filter({ visible: true });
   await expect(visible("rp-toolbar")).toContainText("Living room");
 
   // Select the other console in the app: its own Start, with the running stream offered.
   await page.getByRole("button", { name: /Bedroom/ }).first().click();
-  await expect(page.getByText("Remote Play is streaming Living room")).toBeVisible();
+  await expect(page.getByText("Play is streaming Living room")).toBeVisible();
   // Each console keeps its own (hidden) copy of the screen: only the shown one counts.
   await expect(visible("rp-toolbar")).toHaveCount(0);
   const start = visible("rp-start");
@@ -223,7 +223,7 @@ test("Remote Play moves into picture in picture and back", async ({ page }) => {
   });
 
   await page.goto("/play", { waitUntil: "domcontentloaded" });
-  await expect(page.getByRole("heading", { name: "Remote Play" })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("heading", { name: "Play", exact: true })).toBeVisible({ timeout: 30_000 });
   await page.getByTestId("rp-start").click();
   const stage = page.getByTestId("rp-stage").filter({ visible: true });
   await expect(stage.getByTestId("rp-canvas")).toHaveCount(1);
@@ -234,7 +234,33 @@ test("Remote Play moves into picture in picture and back", async ({ page }) => {
   const popup = await popupP;
   await expect(popup.getByTestId("rp-pip-player")).toBeVisible();
   await expect(popup.getByTestId("rp-canvas")).toHaveCount(1);
-  await expect(popup).toHaveTitle("Living room · Remote Play");
+  await expect(popup).toHaveTitle("Living room · Play");
+  // The whole picture in the small window, whatever its shape: a 1080p picture, 16:9, inside it.
+  const popCanvas = popup.getByTestId("rp-canvas");
+  // Sized against the window's picture box, never a viewport the browser picks (#566).
+  expect(await popCanvas.evaluate((c) => getComputedStyle(c.parentElement!).containerType)).toBe("size");
+  await popCanvas.evaluate((c: HTMLCanvasElement) => {
+    c.width = 1920;
+    c.height = 1080;
+    c.style.setProperty("--rp-shape", String(1920 / 1080));
+  });
+  for (const [w, h] of [
+    [640, 480],
+    [900, 380],
+  ]) {
+    await popup.setViewportSize({ width: w, height: h });
+    await expect
+      .poll(() =>
+        popCanvas.evaluate((c) => {
+          const r = c.getBoundingClientRect();
+          const inside = r.left >= -0.5 && r.top >= -0.5 && r.right <= innerWidth + 0.5 && r.bottom <= innerHeight + 0.5;
+          const shape = Math.abs(r.width / r.height - 16 / 9) < 0.01;
+          const full = Math.abs(r.width - innerWidth) < 1 || Math.abs(r.height - innerHeight) < 1;
+          return inside && shape && full;
+        }),
+      )
+      .toBe(true);
+  }
   await expect(stage.getByTestId("rp-pip-on")).toBeVisible();
   await expect(stage.getByTestId("rp-canvas")).toHaveCount(0);
   await expect(page.getByTestId("rp-pip")).toHaveAttribute("aria-pressed", "true");
@@ -307,7 +333,7 @@ test("Remote Play: Esc is Circle in full screen, held it leaves", async ({ page 
   });
 
   await page.goto("/play", { waitUntil: "domcontentloaded" });
-  await expect(page.getByRole("heading", { name: "Remote Play" })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("heading", { name: "Play", exact: true })).toBeVisible({ timeout: 30_000 });
   await page.getByTestId("rp-start").click();
   const stage = page.getByTestId("rp-stage");
   await expect(page.getByTestId("rp-toolbar")).toBeVisible();
@@ -372,7 +398,7 @@ test("Remote Play without an H.264 decoder says what to install and never starts
   });
 
   await page.goto("/play", { waitUntil: "domcontentloaded" });
-  await expect(page.getByRole("heading", { name: "Remote Play" })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("heading", { name: "Play", exact: true })).toBeVisible({ timeout: 30_000 });
   await page.getByTestId("rp-start").click();
   await expect(page.getByText("This device has no H.264 video decoder")).toBeVisible();
   await expect(page.getByText("sudo pacman -S gst-libav", { exact: false })).toBeVisible();
@@ -424,13 +450,16 @@ test("Remote Play: picture size changes in full screen and applies there", async
   await page.setViewportSize({ width: 1600, height: 1000 }); // 16:10, not the picture's 16:9
   await playableConsole(page);
   await page.goto("/play", { waitUntil: "domcontentloaded" });
-  await expect(page.getByRole("heading", { name: "Remote Play" })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("heading", { name: "Play", exact: true })).toBeVisible({ timeout: 30_000 });
   await page.getByTestId("rp-start").click();
   const stage = page.getByTestId("rp-stage");
   await expect(page.getByTestId("rp-toolbar")).toBeVisible();
   await page.getByTestId("rp-toolbar").hover();
   await page.getByTestId("rp-fullscreen").click();
   await expect(stage).toHaveAttribute("data-full", "bar");
+  // As where object-fit on a canvas is ignored: each size must still differ, so the stream lays
+  // out the canvas for all three.
+  await page.addStyleTag({ content: "canvas { object-fit: fill !important }" });
 
   // A 1080p picture, as the decoder sizes the canvas.
   const canvas = stage.locator("canvas");
@@ -441,25 +470,41 @@ test("Remote Play: picture size changes in full screen and applies there", async
   const look = () =>
     canvas.evaluate((c: HTMLCanvasElement) => {
       const r = c.getBoundingClientRect();
-      return { fit: c.dataset.fit, objectFit: getComputedStyle(c).objectFit, w: Math.round(r.width), h: Math.round(r.height) };
+      return { fit: c.dataset.fit, w: Math.round(r.width), h: Math.round(r.height) };
     });
   // Fit: the canvas is the whole picture's shape inside the screen (bars above and below).
-  await expect.poll(look).toEqual({ fit: "fit", objectFit: "contain", w: 1600, h: 900 });
+  await expect.poll(look).toEqual({ fit: "fit", w: 1600, h: 900 });
 
   await page.getByTestId("rp-toolbar").hover();
-  const cycle = page.getByTestId("rp-fit-cycle");
-  await expect(cycle).toHaveAttribute("title", "Picture size: Fit");
-  await cycle.click();
-  await expect.poll(look).toEqual({ fit: "fill", objectFit: "cover", w: 1600, h: 1000 });
+  const menu = page.getByTestId("rp-fit-menu");
+  await expect(menu).toHaveAttribute("aria-label", "Picture size: Fit");
+  const pick = async (f: string) => {
+    await page.getByTestId("rp-toolbar").hover();
+    await menu.click();
+    await expect(page.getByTestId(`rp-fit-option-${f}`)).toBeVisible();
+    await page.getByTestId(`rp-fit-option-${f}`).click();
+    await expect(page.getByTestId("rp-fit-options")).toHaveCount(0); // closes on a pick
+  };
+  // Fill: the picture's shape over the whole screen, its sides cut.
+  await pick("fill");
+  await expect.poll(look).toEqual({ fit: "fill", w: 1778, h: 1000 });
   await expect(stage).toHaveAttribute("data-full", "bar"); // still full screen
-  await cycle.click();
-  await expect.poll(look).toEqual({ fit: "stretch", objectFit: "fill", w: 1600, h: 1000 });
+  // Stretch: the whole screen, the picture squeezed to it.
+  await pick("stretch");
+  await expect.poll(look).toEqual({ fit: "stretch", w: 1600, h: 1000 });
   // Remembered with the other settings.
   await expect
     .poll(() => page.evaluate(() => JSON.parse(localStorage.getItem("ps5upload.rp_prefs.v1") ?? "{}").fit))
     .toBe("stretch");
-  await cycle.click();
-  await expect.poll(look).toMatchObject({ fit: "fit", objectFit: "contain" });
+  await pick("fit");
+  await expect.poll(look).toEqual({ fit: "fit", w: 1600, h: 900 });
+  // A press elsewhere closes the menu without changing the size.
+  await page.getByTestId("rp-toolbar").hover();
+  await menu.click();
+  await expect(page.getByTestId("rp-fit-options")).toBeVisible();
+  await page.mouse.click(800, 600);
+  await expect(page.getByTestId("rp-fit-options")).toHaveCount(0);
+  await expect.poll(look).toEqual({ fit: "fit", w: 1600, h: 900 });
 });
 
 // The web UI in a browser Remote Play is not made for says which one is, and what this one misses.
@@ -472,22 +517,22 @@ test("Remote Play in Firefox names the browser it is made for", async ({ page })
   });
   await playableConsole(page);
   await page.goto("/play", { waitUntil: "domcontentloaded" });
-  await expect(page.getByRole("heading", { name: "Remote Play" })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("heading", { name: "Play", exact: true })).toBeVisible({ timeout: 30_000 });
   const advice = page.getByTestId("rp-browser-advice");
-  await expect(advice).toContainText("Remote Play works best in Chrome or Edge");
+  await expect(advice).toContainText("Play works best in Chrome or Edge");
   await expect(advice).toContainText("In Firefox, Esc always leaves full screen");
   // Dismissed, it stays away.
   await advice.getByRole("button").click();
   await expect(advice).toHaveCount(0);
   await page.reload({ waitUntil: "domcontentloaded" });
-  await expect(page.getByRole("heading", { name: "Remote Play" })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("heading", { name: "Play", exact: true })).toBeVisible({ timeout: 30_000 });
   await expect(page.getByTestId("rp-browser-advice")).toHaveCount(0);
 });
 
 test("Remote Play in Chrome shows no browser advice", async ({ page }) => {
   await playableConsole(page);
   await page.goto("/play", { waitUntil: "domcontentloaded" });
-  await expect(page.getByRole("heading", { name: "Remote Play" })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("heading", { name: "Play", exact: true })).toBeVisible({ timeout: 30_000 });
   await expect(page.getByTestId("rp-start")).toBeVisible();
   await expect(page.getByTestId("rp-browser-advice")).toHaveCount(0);
 });
@@ -601,7 +646,7 @@ test("Remote Play saves a screenshot and a clip, shows its latency and asks for 
   await rpPage(page, { res: "1280x720", showStats: true });
   const engine = await rpEngine(page);
   await page.goto("/play", { waitUntil: "domcontentloaded" });
-  await expect(page.getByRole("heading", { name: "Remote Play" })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("heading", { name: "Play", exact: true })).toBeVisible({ timeout: 30_000 });
 
   // Low latency is a setting, off until chosen; the start says so to the engine.
   await page.getByRole("button", { name: "Settings", exact: true }).click();
@@ -670,7 +715,7 @@ test("Remote Play offers 720p when a 1080p stream keeps losing frames, and switc
     }
   });
   await page.goto("/play", { waitUntil: "domcontentloaded" });
-  await expect(page.getByRole("heading", { name: "Remote Play" })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("heading", { name: "Play", exact: true })).toBeVisible({ timeout: 30_000 });
   await page.getByTestId("rp-start").click();
   await expect.poll(() => engine.starts.length).toBe(1);
   expect(engine.starts[0]).toMatchObject({ height: 1080, low_latency: false });
@@ -764,7 +809,7 @@ test("Remote Play: the microphone sends mic on, Opus frames, and mic off", async
     });
   });
   await page.goto("/play", { waitUntil: "domcontentloaded" });
-  await expect(page.getByRole("heading", { name: "Remote Play" })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("heading", { name: "Play", exact: true })).toBeVisible({ timeout: 30_000 });
   await page.getByTestId("rp-start").click();
   await page.getByTestId("rp-toolbar").hover();
   // The session is set up for the mic only because the setting is on.
@@ -816,7 +861,7 @@ test("Remote Play without the microphone setting has no mic and asks for none", 
     });
   });
   await page.goto("/play", { waitUntil: "domcontentloaded" });
-  await expect(page.getByRole("heading", { name: "Remote Play" })).toBeVisible({ timeout: 30_000 });
+  await expect(page.getByRole("heading", { name: "Play", exact: true })).toBeVisible({ timeout: 30_000 });
   await page.getByTestId("rp-start").click();
   await expect(page.getByTestId("rp-toolbar")).toBeVisible();
   await expect.poll(() => starts.length).toBe(1);
@@ -826,7 +871,7 @@ test("Remote Play without the microphone setting has no mic and asks for none", 
   await expect(page.getByTestId("rp-mic")).toHaveCount(0);
 });
 
-// Fit never cuts the picture, whatever shape the screen is: the stream sizes the canvas to the
+// Fit never cuts the picture, whatever shape the screen is: the browser sizes the canvas to the
 // whole picture itself, so it holds even where object-fit on a canvas misbehaves (#538) and with a
 // scrollbar on the page (100vw counted it, and the right edge went under it).
 for (const [w, h] of [
@@ -850,7 +895,7 @@ for (const [w, h] of [
     });
     await rpEngine(page);
     await page.goto("/play", { waitUntil: "domcontentloaded" });
-    await expect(page.getByRole("heading", { name: "Remote Play" })).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByRole("heading", { name: "Play", exact: true })).toBeVisible({ timeout: 30_000 });
     await page.getByTestId("rp-start").click();
     await expect(page.getByTestId("rp-toolbar")).toBeVisible();
     await page.getByTestId("rp-toolbar").hover();
@@ -880,3 +925,71 @@ for (const [w, h] of [
       .toBe(true);
   });
 }
+
+test.describe("Remote Play in a phone's browser", () => {
+  test.use({
+    viewport: { width: 844, height: 390 },
+    hasTouch: true,
+    isMobile: true,
+    userAgent:
+      "Mozilla/5.0 (Linux; Android 15; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0.0.0 Mobile Safari/537.36",
+  });
+
+  test("a screenshot waits for a tap: Save to Photos opens the share sheet, Download downloads", async ({ page }) => {
+    test.setTimeout(90_000);
+    await page.addInitScript(() => {
+      const shared: Array<{ name: string; type: string; size: number }> = [];
+      (window as unknown as { __shared: typeof shared }).__shared = shared;
+      let first = true;
+      Object.defineProperty(navigator, "canShare", { value: (d: ShareData) => !!d.files?.length, configurable: true });
+      Object.defineProperty(navigator, "share", {
+        configurable: true,
+        value: async (d: ShareData) => {
+          // The first time the player closes the sheet without choosing.
+          if (first) {
+            first = false;
+            throw new DOMException("closed", "AbortError");
+          }
+          for (const f of d.files ?? []) shared.push({ name: f.name, type: f.type, size: f.size });
+        },
+      });
+    });
+    await rpPage(page, { res: "1280x720", touchControls: "off" });
+    await rpEngine(page);
+    await page.goto("/play", { waitUntil: "domcontentloaded" });
+    await expect(page.getByRole("heading", { name: "Play", exact: true })).toBeVisible({ timeout: 30_000 });
+
+    // The setting is there on a phone, on by default.
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await expect(page.getByRole("switch", { name: "Save screenshots and clips to Photos" })).toHaveAttribute(
+      "aria-checked",
+      "true",
+    );
+    await page.getByTestId("rp-start").click();
+    await expect(page.getByTestId("rp-menu-handle")).toBeVisible({ timeout: 30_000 });
+
+    // Sideways on a phone the bar is behind the handle.
+    const shoot = async () => {
+      await page.getByTestId("rp-menu-handle").tap();
+      await page.getByTestId("rp-screenshot").tap();
+    };
+    const shared = () => page.evaluate(() => (window as unknown as { __shared: unknown[] }).__shared);
+
+    await shoot();
+    const ready = page.getByTestId("rp-capture-ready");
+    await expect(ready).toContainText("Screenshot taken");
+    // Closing the sheet keeps the notice for another try.
+    await page.getByTestId("rp-capture-share").click();
+    await expect(ready).toBeVisible();
+    await page.getByTestId("rp-capture-share").click();
+    await expect.poll(shared).toEqual([expect.objectContaining({ type: "image/png", name: expect.stringMatching(/^PS5 Living room .+\.png$/) })]);
+    await expect(ready).toHaveCount(0);
+
+    // Or a download.
+    await shoot();
+    const dl = page.waitForEvent("download");
+    await page.getByTestId("rp-capture-download").click();
+    expect((await dl).suggestedFilename()).toMatch(/\.png$/);
+    await expect(page.getByTestId("rp-capture-notice")).toContainText("Screenshot saved");
+  });
+});

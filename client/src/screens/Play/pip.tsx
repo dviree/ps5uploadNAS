@@ -26,6 +26,8 @@ import { useTr } from "../../state/lang";
 import { rpInput, useRemotePlayStore, type PipKind } from "../../state/remotePlay";
 import { isMobile } from "../../lib/platform";
 import { isTauriEnv, safeUnlisten } from "../../lib/tauriEnv";
+import { log } from "../../state/logs";
+import { visibleArea } from "./pipArea";
 import { phaseText } from "./StreamPanel";
 
 const PIP_WIDTH = 480;
@@ -180,7 +182,9 @@ export async function openPip(opts: { title: string; onBack: () => void }): Prom
     win =
       kind === "document"
         ? await documentPip()!.requestWindow({ width: PIP_WIDTH, height: PIP_HEIGHT })
-        : window.open("", "_blank", `width=${PIP_WIDTH},height=${PIP_HEIGHT}`);
+        : // "about:blank", not "": the Linux app's WebKitGTK reports "" as the new window's
+          // address, which Tauri cannot parse, and it then refuses the window.
+          window.open("about:blank", "_blank", `width=${PIP_WIDTH},height=${PIP_HEIGHT}`);
   } catch (e) {
     console.warn(`[pip] the ${kind} window did not open:`, e);
     win = null;
@@ -221,6 +225,7 @@ export async function openPip(opts: { title: string; onBack: () => void }): Prom
       dropped = true;
       if (unlisten) safeUnlisten(unlisten);
     });
+    void keepToVisibleArea(win, host, cur.cleanups);
   }
   store.setPip(kind, win);
   cur.root.render(
@@ -235,6 +240,66 @@ export async function openPip(opts: { title: string; onBack: () => void }): Prom
   );
   watchStreamEnd(cur);
   return true;
+}
+
+/**
+ * Windows (#566, #575): the desktop app's popup can lay its page out bigger than the window it
+ * shows it in, so the picture, sized against the page, showed only its top-left part in every
+ * picture size. Where the window says it is smaller than the page, the player is laid out in
+ * the part that shows; everywhere else (sizes agree) this changes nothing. Logged, so a report
+ * says when it happened.
+ */
+async function keepToVisibleArea(win: Window, host: HTMLElement, cleanups: Array<() => void>): Promise<void> {
+  let gone = false;
+  cleanups.push(() => {
+    gone = true;
+  });
+  try {
+    const { getAllWebviewWindows } = await import("@tauri-apps/api/webviewWindow");
+    const n = (label: string) => Number(label.slice(TAURI_PIP_PREFIX.length)) || 0;
+    const tw = (await getAllWebviewWindows())
+      .filter((w) => w.label.startsWith(TAURI_PIP_PREFIX))
+      .sort((a, b) => n(b.label) - n(a.label))[0];
+    if (!tw || gone) return;
+    let logged = false;
+    const apply = async () => {
+      if (gone) return;
+      try {
+        const size = await tw.innerSize();
+        const page = { width: win.innerWidth, height: win.innerHeight };
+        const area = visibleArea(size, win.devicePixelRatio, page);
+        if (!area) {
+          host.style.cssText = "position:fixed;inset:0;";
+          return;
+        }
+        host.style.cssText = `position:fixed;left:0;top:0;width:${area.width}px;height:${area.height}px;`;
+        if (!logged) {
+          logged = true;
+          log.warn(
+            "remote-play",
+            `pop-out page ${page.width}x${page.height} but its window shows ${area.width.toFixed(0)}x${area.height.toFixed(0)} ` +
+              `(window ${size.width}x${size.height} device px, ratio ${win.devicePixelRatio}): fitting the picture to what shows`,
+          );
+        }
+      } catch {
+        // The window is going.
+      }
+    };
+    const onResize = () => void apply();
+    win.addEventListener("resize", onResize);
+    cleanups.push(() => win.removeEventListener("resize", onResize));
+    const unlistens = await Promise.all([tw.onResized(onResize), tw.onScaleChanged(onResize)]);
+    if (gone) unlistens.forEach((u) => safeUnlisten(u));
+    else cleanups.push(() => unlistens.forEach((u) => safeUnlisten(u)));
+    await apply();
+    // The webview may settle its size a moment after the window opens.
+    for (const ms of [250, 1000]) {
+      const t = window.setTimeout(onResize, ms);
+      cleanups.push(() => window.clearTimeout(t));
+    }
+  } catch (e) {
+    console.warn("[pip] could not read the window's size:", e);
+  }
 }
 
 /** A window of its own did not open (the desktop app on macOS, a browser that refused it): the
@@ -336,7 +401,10 @@ function MiniPlayer({ win, onBack }: { win: Window; onBack: () => void }) {
       className="group relative h-full w-full overflow-hidden bg-black outline-none"
       data-testid="rp-pip-player"
     >
-      <div ref={canvasHost} className="pointer-events-none absolute inset-0 z-0 flex items-center justify-center" />
+      {/* rp-place: the picture sizes itself against this box (index.css), as on the stream's own
+          screen. Without it the browser picks the box (a viewport), and the Windows app's picked
+          one larger than this window: the picture was cut on the right and bottom (#566). */}
+      <div ref={canvasHost} className="rp-place pointer-events-none absolute inset-0 z-0 flex items-center justify-center" />
       {waiting && (
         <div className="absolute inset-0 flex items-center justify-center gap-2 bg-black/40 text-sm text-white/85">
           <Spinner size={16} tone="inherit" />

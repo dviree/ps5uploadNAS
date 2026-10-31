@@ -1,8 +1,12 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { DEFAULT_PICTURE, type Enhance, type PictureTools } from "../../lib/rpPicture";
+import { hdrScreen, hdrSupport, type HdrSupport } from "../../lib/rpHdr";
 import { createPortal } from "react-dom";
 import { useNavigate } from "react-router";
 import {
   BarChart3,
+  Check,
+  ChevronDown,
   Expand,
   Gamepad2,
   Minimize,
@@ -24,6 +28,7 @@ import { useRosterStore } from "../../state/roster";
 import { deviceName, meshFor, othersRemotePlaying, remotePlayPads, useMeshStore } from "../../state/mesh";
 import { isTauriEnv } from "../../lib/tauriEnv";
 import { isLinuxDesktop, isMobile } from "../../lib/platform";
+import { appSavesToPhotos } from "../../lib/rpCapture";
 import { setScreenWakeReason } from "../../lib/androidScreenWake";
 import { gameModeKind } from "../../lib/gameMode";
 import {
@@ -33,7 +38,8 @@ import {
   stopEngineSession,
   touchAt,
   PAD_ACTIONS,
-  nextFit,
+  FIT_ORDER,
+  type PictureFit,
   type KeyAction,
   type StreamError,
   type StreamPhase,
@@ -65,12 +71,26 @@ import { MicBarButton, MicSetting } from "./MicControl";
 import { fitName, PlayMenu, VolumeSlider } from "./PlayMenu";
 import { rpBrowserAdvice } from "./browserAdvice";
 import { askMotion, motionAvailable, startMotion } from "../../lib/motion";
+import { dualSenseCapable } from "../../lib/dualSense";
 import { ControllerSetup } from "./ControllerSetup";
+import { ButtonRemap } from "./ButtonRemap";
+import { connectWebHidTouchpad, webHidTouchpadAvailable, webHidTouchpadConnected } from "../../lib/padTouchpad";
 import { PadAsks, PhonePadsPanel, usePadLink } from "./PhonePads";
+import { GamePanel } from "./game/GamePanel";
+import { LaunchStatus } from "./game/LaunchStatus";
+import { DropChoice, DropZone, useStreamDropZone } from "./game/DropToInstall";
+import { useStreamLaunchRunner } from "./game/streamLaunch";
+import { rpControls, useGameControlsStore } from "../../state/gameControls";
+import { mouseMoved } from "../../lib/gameControls";
+import { useRunningTitleIds } from "../../state/runningApps";
+import { useGameLaunch } from "../../lib/useGameLaunch";
+import { hostOf } from "../../lib/addr";
 import { safeGetItem, safeSetItem } from "../../lib/safeStorage";
 import { closePip, openPip, pipPadsInBackground, pipSupport } from "./pip";
 import { CaptureBarButtons, CaptureOverlay } from "./CaptureControls";
 import { LatencyLine, QualityNotice, RpNetworkSettings } from "./NetworkExtras";
+import { RpBlockerNotice, RpBlockerPhase, RpBlockerSetting } from "./RpBlockers";
+import { beforeRemotePlay } from "../../state/rpBlockers";
 import { useRpQualityStore } from "../../state/rpQuality";
 
 type Tr = ReturnType<typeof useTr>;
@@ -114,6 +134,12 @@ export function streamErrorMessage(tr: Tr, e: StreamError): string {
         undefined,
         "The PS5 did not accept this app's pairing. Set up Wake & sign in again for this console.",
       );
+    case "rp_off":
+      return tr(
+        "rp_err_rp_off",
+        undefined,
+        "Remote Play is switched off on the PS5. On the console, open Settings › System › Remote Play and turn on Enable Remote Play (if it already shows on, turn it off and on again), then press Start.",
+      );
     case "passcode":
       return tr(
         "rp_err_passcode",
@@ -131,6 +157,12 @@ export function streamErrorMessage(tr: Tr, e: StreamError): string {
         "rp_err_busy_other",
         { host: e.host ?? "" },
         `Remote Play is already streaming ${e.host ?? "another console"}. Stop that stream first.`,
+      );
+    case "lost":
+      return tr(
+        "rp_err_lost",
+        undefined,
+        "The connection to the PS5 dropped during the stream. Start it again; if it keeps happening, connect the PS5 or this device by cable.",
       );
     case "socket":
       return tr(
@@ -246,7 +278,7 @@ function StatsLine({
     fps: stats.fps,
     mbps: stats.mbps.toFixed(1),
     ms: stats.decodeMs.toFixed(1),
-    codec: stats.codec.startsWith("hev") || stats.codec.startsWith("hvc") ? "HEVC" : "H.264",
+    codec: stats.codec.startsWith("hev") || stats.codec.startsWith("hvc") ? (stats.hdr ? "HEVC HDR" : "HEVC") : "H.264",
     loss: stats.lossPct.toFixed(2),
     audio: Math.round(stats.audioMs),
   };
@@ -308,6 +340,179 @@ function BarButton({
   );
 }
 
+/** The picture-size menu on the full-screen bar: the current size, and a list to pick another. */
+function FitMenu({
+  fit,
+  open,
+  onOpen,
+  onPick,
+}: {
+  fit: PictureFit;
+  open: boolean;
+  onOpen: (open: boolean) => void;
+  onPick: (fit: PictureFit) => void;
+}) {
+  const tr = useTr();
+  const box = useRef<HTMLDivElement>(null);
+  // A press anywhere else, or Escape, closes it.
+  useEffect(() => {
+    if (!open) return;
+    const away = (e: PointerEvent) => {
+      if (!box.current?.contains(e.target as Node)) onOpen(false);
+    };
+    const esc = (e: KeyboardEvent) => {
+      if (e.key !== "Escape") return;
+      e.preventDefault();
+      e.stopPropagation();
+      onOpen(false);
+    };
+    document.addEventListener("pointerdown", away, true);
+    document.addEventListener("keydown", esc, true);
+    return () => {
+      document.removeEventListener("pointerdown", away, true);
+      document.removeEventListener("keydown", esc, true);
+    };
+  }, [open, onOpen]);
+  const label = tr("rp_fit", undefined, "Picture size");
+  const names: Record<PictureFit, string> = {
+    fit: tr("rp_fit_fit", undefined, "Fit (whole picture)"),
+    fill: tr("rp_fit_fill", undefined, "Fill (crop the edges)"),
+    stretch: tr("rp_fit_stretch", undefined, "Stretch"),
+  };
+  return (
+    <div ref={box} className="relative" onClick={(e) => e.stopPropagation()} onDoubleClick={(e) => e.stopPropagation()}>
+      <button
+        type="button"
+        aria-label={`${label}: ${fitName(tr, fit)}`}
+        title={label}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        data-testid="rp-fit-menu"
+        onClick={() => onOpen(!open)}
+        className={`flex h-9 items-center gap-1.5 rounded-full px-3 text-sm text-white transition-colors hover:bg-white/20 ${open ? "bg-white/25" : "bg-black/40"}`}
+      >
+        <Scaling size={16} aria-hidden />
+        <span>{fitName(tr, fit)}</span>
+        <ChevronDown size={14} aria-hidden className={`transition-transform ${open ? "rotate-180" : ""}`} />
+      </button>
+      {open && (
+        <div
+          role="menu"
+          aria-label={label}
+          className="absolute right-0 top-full z-30 mt-2 min-w-52 rounded-xl bg-black/85 p-1 shadow-[var(--shadow-2)] ring-1 ring-white/15 backdrop-blur"
+          data-testid="rp-fit-options"
+        >
+          {FIT_ORDER.map((f) => (
+            <button
+              key={f}
+              type="button"
+              role="menuitemradio"
+              aria-checked={fit === f}
+              onClick={() => onPick(f)}
+              className={`flex w-full items-center gap-2 rounded-lg px-3 py-2 text-start text-sm text-white transition-colors hover:bg-white/15 ${fit === f ? "bg-white/10" : ""}`}
+              data-testid={`rp-fit-option-${f}`}
+            >
+              <Check size={14} aria-hidden className={fit === f ? "opacity-100" : "opacity-0"} />
+              {names[f]}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Settings › Picture: sharpening and upscaling, colour, a 21:9 crop and sharp pixels
+ *  (lib/rpPicture.ts). They apply at once; with all of them off the picture is drawn exactly as
+ *  the console sends it. */
+function PictureToolsSetting() {
+  const tr = useTr();
+  const pic = useRemotePlayStore((s) => s.prefs.picture);
+  const hdr = useRemotePlayStore((s) => s.prefs.codec === "hdr");
+  const setPrefs = useRemotePlayStore((s) => s.setPrefs);
+  const set = (p: Partial<PictureTools>) => setPrefs({ picture: { ...pic, ...p } });
+  const slider = (key: "sharpen" | "brightness" | "contrast" | "saturation", label: string, min: number) => (
+    <label className="flex items-center gap-3 text-sm">
+      <span className="w-28 shrink-0">{label}</span>
+      <input
+        type="range"
+        min={min}
+        max={min === 0 ? 100 : 50}
+        value={pic[key]}
+        onChange={(e) => set({ [key]: Number(e.target.value) })}
+        className="w-40 accent-[var(--color-accent)]"
+        aria-label={label}
+        data-testid={`rp-picture-${key}`}
+      />
+      <span className="w-8 text-xs tabular-nums text-[var(--color-muted)]">{pic[key]}</span>
+    </label>
+  );
+  return (
+    <fieldset className="space-y-2" data-testid="rp-picture">
+      <legend className="mb-1 text-sm font-medium">{tr("rp_picture_title", undefined, "Picture")}</legend>
+      <div className="space-y-1">
+        <Select
+          label={tr("rp_picture_enhance", undefined, "Sharpening and upscaling")}
+          block={false}
+          className="w-64"
+          value={pic.enhance}
+          onChange={(e) => set({ enhance: e.target.value as Enhance })}
+          data-testid="rp-picture-enhance"
+          options={[
+            { value: "off", label: tr("rp_picture_enhance_off", undefined, "Off") },
+            { value: "sharpen", label: tr("rp_picture_enhance_sharpen", undefined, "Sharpen (AMD FidelityFX RCAS)") },
+            { value: "fsr", label: tr("rp_picture_enhance_fsr", undefined, "Upscale to the screen (AMD FSR 1)") },
+          ]}
+        />
+        <p className="text-xs text-[var(--color-muted)]">
+          {tr(
+            "rp_picture_enhance_hint",
+            undefined,
+            "Done on the graphics card, on any GPU. Sharpen makes the picture crisper. Upscale also brings it up to your screen's own resolution: best on a big or 4K screen. Off with Sharp pixels.",
+          )}
+        </p>
+      </div>
+      {pic.enhance !== "off" && slider("sharpen", tr("rp_picture_sharpen", undefined, "Sharpen"), 0)}
+      {slider("brightness", tr("rp_picture_brightness", undefined, "Brightness"), -50)}
+      {slider("contrast", tr("rp_picture_contrast", undefined, "Contrast"), -50)}
+      {slider("saturation", tr("rp_picture_saturation", undefined, "Colour"), -50)}
+      <Toggle
+        checked={pic.crop219}
+        onChange={(v) => set({ crop219: v })}
+        label={tr("rp_picture_crop", undefined, "Crop to 21:9")}
+        hint={tr(
+          "rp_picture_crop_hint",
+          undefined,
+          "Cuts the black bars off a game made for ultrawide screens, so it fills an ultrawide screen.",
+        )}
+      />
+      <Toggle
+        checked={pic.pixelated}
+        onChange={(v) => set({ pixelated: v })}
+        label={tr("rp_picture_pixelated", undefined, "Sharp pixels")}
+        hint={tr("rp_picture_pixelated_hint", undefined, "Scales with hard edges instead of smoothing: for retro games.")}
+      />
+      {hdr && (
+        <p className="text-xs text-[var(--color-muted)]">
+          {tr(
+            "rp_picture_hdr_note",
+            undefined,
+            "In HDR only Crop to 21:9 and Sharp pixels apply: the other tools work on SDR pictures.",
+          )}
+        </p>
+      )}
+      <button
+        type="button"
+        onClick={() => setPrefs({ picture: DEFAULT_PICTURE })}
+        className="text-xs text-[var(--color-muted)] underline-offset-2 hover:underline"
+        data-testid="rp-picture-reset"
+      >
+        {tr("rp_picture_reset", undefined, "Reset the picture")}
+      </button>
+    </fieldset>
+  );
+}
+
 /** What the app asks of this device's OS while a stream plays (only the app can ask). */
 function GameModeNote() {
   const tr = useTr();
@@ -347,10 +552,48 @@ function GameModeNote() {
   );
 }
 
+/** Whether HDR can be offered here (lib/rpHdr.ts), once checked; null until then. */
+function useHdrSupport(): HdrSupport | null {
+  const [v, setV] = useState<HdrSupport | null>(null);
+  useEffect(() => {
+    let live = true;
+    void hdrSupport().then((r) => live && setV(r));
+    return () => {
+      live = false;
+    };
+  }, []);
+  return v;
+}
+
+/** What HDR does here, or why it is not offered (said only to someone who chose it, or who
+ *  has an HDR screen and so might look for it). */
+function HdrNote({ support, chosen }: { support: HdrSupport | null; chosen: boolean }) {
+  const tr = useTr();
+  if (!support) return null;
+  let text: string | null = null;
+  if (support.ok) {
+    if (chosen)
+      text = tr(
+        "rp_codec_hdr_hint",
+        undefined,
+        "The PS5 sends HDR; it shows in HDR on this screen. Experimental: if the picture looks dull or too bright, go back to Auto.",
+      );
+  } else if (chosen || hdrScreen()) {
+    text =
+      support.why === "decoder"
+        ? tr("rp_codec_hdr_no_decoder", undefined, "HDR is not offered: this device cannot decode the PS5's HDR video (HEVC Main10).")
+        : support.why === "screen"
+          ? tr("rp_codec_hdr_no_screen", undefined, "HDR is not offered: this screen is not an HDR screen, or HDR is off in the system's settings.")
+          : tr("rp_codec_hdr_no_display", undefined, "HDR is not offered: this browser cannot draw HDR (it needs WebGPU with HDR, as in Chrome or Edge).");
+  }
+  return text ? <p className="text-xs text-[var(--color-muted)]" data-testid="rp-hdr-note">{text}</p> : null;
+}
+
 /** Everything that can be set, in one place: picture, sound, session, controls, keys. */
 function SettingsPanel({ running }: { running: boolean }) {
   const tr = useTr();
   const prefs = useRemotePlayStore((s) => s.prefs);
+  const hdr = useHdrSupport();
   const setPrefs = useRemotePlayStore((s) => s.setPrefs);
   const keymap = useRemotePlayStore((s) => s.keymap);
   const setKeymap = useRemotePlayStore((s) => s.setKeymap);
@@ -400,7 +643,45 @@ function SettingsPanel({ running }: { running: boolean }) {
               { value: "stretch", label: tr("rp_fit_stretch", undefined, "Stretch") },
             ]}
           />
+          <Select
+            label={tr("rp_decoding", undefined, "Video decoding")}
+            block={false}
+            className="w-48"
+            value={prefs.decoding}
+            disabled={running}
+            onChange={(e) => setPrefs({ decoding: e.target.value as RpPrefs["decoding"] })}
+            data-testid="rp-decoding"
+            options={[
+              { value: "auto", label: tr("rp_decoding_auto", undefined, "Graphics card (auto)") },
+              { value: "software", label: tr("rp_decoding_software", undefined, "Software") },
+            ]}
+          />
+          <Select
+            label={tr("rp_codec", undefined, "Video format")}
+            block={false}
+            className="w-48"
+            value={prefs.codec}
+            disabled={running}
+            onChange={(e) => setPrefs({ codec: e.target.value as RpPrefs["codec"] })}
+            data-testid="rp-codec"
+            options={[
+              { value: "auto", label: tr("rp_codec_auto", undefined, "Auto (HEVC where it works)") },
+              { value: "h264", label: "H.264" },
+              // Only where it can be shown in HDR (or already chosen, to show what is set).
+              ...(hdr?.ok || prefs.codec === "hdr"
+                ? [{ value: "hdr", label: tr("rp_codec_hdr", undefined, "HDR (HEVC, experimental)") }]
+                : []),
+            ]}
+          />
         </div>
+        <HdrNote support={hdr} chosen={prefs.codec === "hdr"} />
+        <p className="text-xs text-[var(--color-muted)]">
+          {tr(
+            "rp_decoding_hint",
+            undefined,
+            "If the picture shows cut off or wrong on this device, try Software or H.264. They apply the next time you start.",
+          )}
+        </p>
         {running && (
           <p className="text-xs text-[var(--color-muted)]">
             {tr(
@@ -417,6 +698,7 @@ function SettingsPanel({ running }: { running: boolean }) {
           hint={tr("rp_show_stats_hint", undefined, "Frame rate, bitrate, decode time, loss and sound delay.")}
         />
         <RpNetworkSettings />
+        <RpBlockerSetting />
       </section>
 
       <section className="space-y-2">
@@ -494,6 +776,18 @@ function SettingsPanel({ running }: { running: boolean }) {
           onChange={(v) => setPrefs({ rumble: v })}
           label={tr("rp_rumble", undefined, "Controller vibration")}
         />
+        {dualSenseCapable() && (
+          <Toggle
+            checked={prefs.dualSense}
+            onChange={(v) => setPrefs({ dualSense: v })}
+            label={tr("rp_dualsense", undefined, "DualSense effects")}
+            hint={tr(
+              "rp_dualsense_hint",
+              undefined,
+              "With a DualSense connected to this computer: adaptive triggers, and haptics when it is plugged in with USB. Applies from the next start.",
+            )}
+          />
+        )}
         {motionAvailable() && typeof window !== "undefined" && !!window.matchMedia?.("(pointer: coarse)").matches && (
           <Toggle
             checked={prefs.motion}
@@ -505,11 +799,56 @@ function SettingsPanel({ running }: { running: boolean }) {
             hint={tr(
               "rp_motion_hint",
               undefined,
-              "Tilting and turning the phone moves the controller's motion sensors, for games with gyro aiming. Not yet tried on a PS5.",
+              "Tilting and turning the phone moves the controller's motion sensors, for games with gyro aiming.",
             )}
           />
         )}
         <MicSetting />
+        <PictureToolsSetting />
+        <div className="space-y-1">
+          <Select
+            label={tr("rp_replay_setting", undefined, "Instant replay")}
+            block={false}
+            className="w-56"
+            value={String(prefs.replayS)}
+            onChange={(e) => setPrefs({ replayS: Number(e.target.value) })}
+            data-testid="rp-replay-setting"
+            options={[
+              { value: "0", label: tr("rp_replay_off", undefined, "Off") },
+              ...[15, 30, 60].map((n) => ({
+                value: String(n),
+                label: tr("rp_replay_last", { n }, `Keep the last ${n} seconds`),
+              })),
+            ]}
+          />
+          <p className="text-xs text-[var(--color-muted)]">
+            {tr(
+              "rp_replay_hint",
+              undefined,
+              "While you play, the last seconds are kept on this computer; Save replay (on the bar) saves them as a video. Nothing is saved until you press it.",
+            )}
+          </p>
+        </div>
+        {isMobile() && (
+          <Toggle
+            checked={prefs.toPhotos}
+            onChange={(v) => setPrefs({ toPhotos: v })}
+            label={tr("rp_to_photos", undefined, "Save screenshots and clips to Photos")}
+            hint={
+              appSavesToPhotos()
+                ? tr(
+                    "rp_to_photos_hint_app",
+                    undefined,
+                    "Straight into Photos (on Android, the gallery's PS5Upload album). Off, they go to Downloads.",
+                  )
+                : tr(
+                    "rp_to_photos_hint_web",
+                    undefined,
+                    "After each one, tap Save to Photos and choose Save Image or Save Video. Off, they download.",
+                  )
+            }
+          />
+        )}
         <Select
           label={tr("rp_touch_controls", undefined, "On-screen controller")}
           block={false}
@@ -540,7 +879,7 @@ function SettingsPanel({ running }: { running: boolean }) {
               {tr("rp_touch_opacity", undefined, "Controller opacity")}
               <input
                 type="range"
-                min={30}
+                min={25}
                 max={100}
                 step={5}
                 value={Math.round(prefs.touchOpacity * 100)}
@@ -563,6 +902,12 @@ function SettingsPanel({ running }: { running: boolean }) {
       <section className="space-y-2">
         <h3 className="text-sm font-semibold">{tr("rp_pads_title", undefined, "Controllers")}</h3>
         <ControllerSetup />
+        <WebHidTouchpad />
+      </section>
+
+      <section className="space-y-2">
+        <h3 className="text-sm font-semibold">{tr("rp_buttons_title", undefined, "Controller buttons")}</h3>
+        <ButtonRemap />
       </section>
 
       <section className="space-y-2">
@@ -601,12 +946,19 @@ export function StreamPanel() {
   const [pipFailed, setPipFailed] = useState(false);
   const [profileId, setProfileId] = useState<string>(activeId ?? profiles[0]?.id ?? "");
   const [settingsOpen, setSettingsOpen] = useState(false);
+  /** The Game panel over the picture (or under it, on a phone's page). */
+  const [gameOpen, setGameOpen] = useState(false);
   const [phonesOpen, setPhonesOpen] = useState(false);
   useEffect(() => {
     if (settingsOpen) settingsBox.current?.scrollIntoView?.({ block: "nearest", behavior: "smooth" });
   }, [settingsOpen]);
   const [full, setFull] = useState(false);
   const [chrome, setChrome] = useState(true);
+  const [fitOpen, setFitOpen] = useState(false);
+  // The picture-size menu is only on the full-screen bar.
+  useEffect(() => {
+    if (!full) setFitOpen(false);
+  }, [full]);
   // Touch-sized player (phones, tablets, a narrow window): the bar under the picture and, in
   // full screen, one small menu handle instead of a bar of buttons over the picture.
   const compact = useMedia(COMPACT_QUERY);
@@ -661,6 +1013,50 @@ export function StreamPanel() {
     };
   }, [running, prefs.motion]);
   const playing = running && phase === "playing";
+  // Play a title on the stream (from a game's page, or the Game panel): stream, helper, launch.
+  const launcher = useGameLaunch();
+  // The running game, for its controls (turbo, mouse aim, macros): from the shared running-games
+  // watch, nothing polled for it here.
+  const runningTitles = useRunningTitleIds(running ? (target?.host ?? null) : null);
+  const setControlsTitle = useGameControlsStore((s) => s.setTitle);
+  useEffect(() => {
+    setControlsTitle(running ? ([...runningTitles][0] ?? null) : null);
+  }, [running, runningTitles, setControlsTitle]);
+  const mouseAim = useGameControlsStore((s) => (s.title ? !!s.byTitle[s.title]?.mouse : false));
+  // Mouse aim: while the pointer is captured on the picture, its movement and buttons are the
+  // right stick and the triggers.
+  useEffect(() => {
+    if (!running || !mouseAim) return;
+    const locked = () => !!stage.current && document.pointerLockElement === stage.current;
+    const move = (e: MouseEvent) => {
+      if (locked()) mouseMoved(rpControls.mouse, e.movementX, e.movementY);
+    };
+    const button = (e: MouseEvent, down: boolean) => {
+      if (!locked() && down) return;
+      if (e.button === 0) rpControls.mouse.left = down;
+      if (e.button === 2) rpControls.mouse.right = down;
+    };
+    const down = (e: MouseEvent) => button(e, true);
+    const up = (e: MouseEvent) => button(e, false);
+    const lost = () => {
+      if (!locked()) rpControls.mouse.left = rpControls.mouse.right = false;
+    };
+    document.addEventListener("mousemove", move);
+    document.addEventListener("mousedown", down);
+    document.addEventListener("mouseup", up);
+    document.addEventListener("pointerlockchange", lost);
+    return () => {
+      document.removeEventListener("mousemove", move);
+      document.removeEventListener("mousedown", down);
+      document.removeEventListener("mouseup", up);
+      document.removeEventListener("pointerlockchange", lost);
+      rpControls.mouse.left = rpControls.mouse.right = false;
+    };
+  }, [running, mouseAim]);
+
+  // A package dropped on the picture is installed on this console (when the stream ends, by
+  // default).
+  const dropZone = useStreamDropZone(running ? (target?.host ?? null) : null, running);
   // Another device (a phone, another computer) playing this console: the PS5 takes one at a time.
   const meshState = useMeshStore((s) => (profile ? meshFor(s, profile.host).state : null));
   const otherDevices = useMemo(() => othersRemotePlaying(meshState).map(deviceName), [meshState]);
@@ -849,12 +1245,17 @@ export function StreamPanel() {
     async (attach = false, host?: string) => {
       const p = host ? profiles.find((x) => x.host === host) : profile;
       if (!p?.wake_regist_key || !p.wake_rp_key) return;
-      await startStream(
-        { host: p.host, name: p.name, registKey: p.wake_regist_key, rpKey: p.wake_rp_key },
-        { attach },
-      );
-      stage.current?.focus();
-      if (compact) stage.current?.scrollIntoView?.({ block: "start", behavior: "smooth" });
+      const go = async () => {
+        await startStream(
+          { host: p.host, name: p.name, registKey: p.wake_regist_key!, rpKey: p.wake_rp_key! },
+          { attach },
+        );
+        stage.current?.focus();
+        if (compact) stage.current?.scrollIntoView?.({ block: "start", behavior: "smooth" });
+      };
+      // A payload that blocks the picture (Hush) is asked about, or paused, first.
+      if (attach) await go();
+      else await beforeRemotePlay(p.host, go);
     },
     [profile, profiles, startStream, compact],
   );
@@ -868,6 +1269,32 @@ export function StreamPanel() {
     }
     if (!useRemotePlayStore.getState().stream) await start();
   }, [start, stopStream]);
+
+  useStreamLaunchRunner({
+    playingHost: playing && profile ? hostOf(profile.host) : null,
+    streamingHost: streaming && target ? hostOf(target.host) : null,
+    // The console asked for is the selected one (the runner checks it is the connected one).
+    startStream: async () => {
+      if (streaming && !running) await switchHere();
+      else if (!streaming) await start();
+    },
+    launch: launcher.launch,
+    messages: {
+      notConnected: (h) => {
+        const name = profiles.find((p) => hostOf(p.host) === h)?.name || h;
+        return tr(
+          "rp_launch_not_connected",
+          { name },
+          `Connect to ${name} first (the console list at the top), then press Play again.`,
+        );
+      },
+      noHelper: tr(
+        "rp_launch_no_helper",
+        undefined,
+        "The PS5 is on, but PS5Upload's helper is not running on it, so the game can't be started from here. Send the helper (Connection), then press Play again.",
+      ),
+    },
+  });
 
   // Esc in full screen: a quick press is its button (Circle), held it leaves full screen. Its
   // button is sent on release, so holding to leave never presses Circle in the game.
@@ -975,7 +1402,7 @@ export function StreamPanel() {
   }
 
   const elsewhereProfile = elsewhere ? profiles.find((p) => p.host === elsewhere) : null;
-  const showBar = !playing || chrome || settingsOpen;
+  const showBar = !playing || chrome || settingsOpen || fitOpen || gameOpen;
   const muted = prefs.muted || prefs.volume === 0;
   // Full screen on an upright phone: the picture across the top, the controller below it.
   const portraitFull = compact && full && portrait;
@@ -988,6 +1415,8 @@ export function StreamPanel() {
   const touchLayout: TouchLayout = !compact ? "overlay-bar" : portraitFull ? "deck" : "overlay";
   const touchHere = showTouch && (!compact || full);
   const touchOverPicture = touchHere && touchLayout !== "deck";
+  // Sideways in full screen the controller has the menu button (bottom middle), not the handle.
+  const touchMenu = compact && full && touchHere && touchLayout === "overlay";
   const openSettings = () => {
     if (full) exitFull();
     setMenuOpen(false);
@@ -1011,6 +1440,10 @@ export function StreamPanel() {
     },
     onSettings: openSettings,
     onStop: stopHere,
+    onGame: () => {
+      setMenuOpen(false);
+      setGameOpen(true);
+    },
   };
 
   const stageView = (
@@ -1041,22 +1474,23 @@ export function StreamPanel() {
           onPointerMove={(e) => onPointer(e, "move")}
           onPointerUp={(e) => onPointer(e, "up")}
           onPointerLeave={(e) => onPointer(e, "up")}
-          className={`group relative overflow-hidden bg-black outline-none ${
+          className={`group overflow-hidden bg-black outline-none ${
             full
-              ? // Across: inset-x-0, the visible width (100vw counts a scrollbar's width, and the
-                // right edge went under it). Down: 100dvh, a phone's visible height (its layout
-                // viewport can be taller than the screen).
-                "fixed inset-x-0 top-0 z-[200] h-[100dvh] touch-none select-none overscroll-none [-webkit-touch-callout:none]"
-              : "mx-auto aspect-video w-full max-w-[calc((100dvh_-_12rem)*16/9)] rounded-[var(--radius-card)] shadow-[var(--shadow-2)] focus-visible:ring-2 focus-visible:ring-[var(--color-accent)]"
+              ? // Pinned to the window's own edges (fixed inset-0; with `relative` also on it,
+                // relative won and the stage sat in the page, cut at the top and bottom), as a
+                // video player's full screen is; never taller than a phone's visible height.
+                "fixed inset-0 z-[200] max-h-[100dvh] touch-none select-none overscroll-none [-webkit-touch-callout:none]"
+              : "relative mx-auto aspect-video w-full max-w-[calc((100dvh_-_12rem)*16/9)] rounded-[var(--radius-card)] shadow-[var(--shadow-2)] focus-visible:ring-2 focus-visible:ring-[var(--color-accent)]"
           } ${playing && !chrome && !(compact && full) ? "cursor-none" : ""}`}
           data-full={full ? (compact ? "immersive" : "bar") : undefined}
           data-testid="rp-stage"
+          {...dropZone.webProps}
         >
           <div
             ref={canvasHost}
             // The picture layer, under everything drawn over it. It never takes a pointer: the
             // stage's handlers get every press, and controls over it are hit first everywhere.
-            className="pointer-events-none absolute inset-0 z-0 flex items-center justify-center"
+            className="rp-place pointer-events-none absolute inset-0 z-0 flex items-center justify-center"
             style={
               portraitFull
                 ? { top: PICTURE_TOP, bottom: "auto", height: "56.25vw" }
@@ -1071,6 +1505,10 @@ export function StreamPanel() {
             }
           />
 
+          <LaunchStatus />
+          <RpBlockerPhase host={profile?.host ?? null} />
+          <DropZone active={dropZone.active} />
+          <DropChoice consoleName={target?.name ?? ""} />
           {running && phase !== "playing" && phase !== "moved" && (
             <div className="absolute inset-0 z-10 flex items-center justify-center gap-2 bg-black/40 text-sm text-white/85">
               <Spinner size={16} tone="inherit" />
@@ -1179,13 +1617,15 @@ export function StreamPanel() {
               {full && (
                 // Picture size where it shows: in full screen (on the page the box is the
                 // picture's own shape, so every size looks the same). Settings would leave it.
-                <BarButton
-                  label={`${tr("rp_fit", undefined, "Picture size")}: ${fitName(tr, prefs.fit)}`}
-                  onClick={() => setPrefs({ fit: nextFit(prefs.fit) })}
-                  testId="rp-fit-cycle"
-                >
-                  <Scaling size={16} />
-                </BarButton>
+                <FitMenu
+                  fit={prefs.fit}
+                  open={fitOpen}
+                  onOpen={setFitOpen}
+                  onPick={(fit) => {
+                    setPrefs({ fit });
+                    setFitOpen(false);
+                  }}
+                />
               )}
               {!compact && (
                 <BarButton
@@ -1200,6 +1640,14 @@ export function StreamPanel() {
                   <Smartphone size={16} />
                 </BarButton>
               )}
+              <BarButton
+                label={tr("rp_game_button", undefined, "Game")}
+                active={gameOpen}
+                onClick={() => setGameOpen((v) => !v)}
+                testId="rp-game"
+              >
+                <Gamepad2 size={16} />
+              </BarButton>
               <BarButton
                 label={tr("rp_settings", undefined, "Settings")}
                 active={settingsOpen}
@@ -1256,12 +1704,13 @@ export function StreamPanel() {
               opacity={prefs.touchOpacity}
               size={prefs.touchSize}
               deckTop={`calc(${PICTURE_TOP} + 56.25vw)`}
+              onMenu={touchMenu ? () => setMenuOpen(true) : undefined}
             />
           )}
 
           {/* Full screen on a touch-sized player: one small handle, top middle, opens the menu.
               Nothing else on the picture leaves full screen or stops the stream. */}
-          {compact && full && !menuOpen && (
+          {compact && full && !menuOpen && !touchMenu && (
             <button
               type="button"
               onClick={(e) => {
@@ -1313,21 +1762,36 @@ export function StreamPanel() {
               </div>
             </>
           )}
+          {launcher.dialogs}
+          {/* Over the picture: in full screen, and on a computer's page. */}
+          {(full || !compact) && (
+            <GamePanel
+              host={target?.host ?? null}
+              open={gameOpen && running}
+              onClose={() => setGameOpen(false)}
+              variant={compact ? "sheet" : "side"}
+            />
+          )}
         </div>
   );
 
   return (
     <div className="space-y-3">
       {!running && (
+        // Start first (10.0.1); the console is the one selected in the app (no picker of its own).
         <div className="flex flex-wrap items-end gap-2">
-          <Select
-            label={tr("rp_console", undefined, "Console")}
-            block={false}
-            className="w-full sm:w-72"
-            value={profileId}
-            onChange={(e) => setProfileId(e.target.value)}
-            options={profiles.map((p) => ({ value: p.id, label: `${p.name} (${p.host})` }))}
-          />
+          <Button
+            variant="primary"
+            size="md"
+            onClick={() => void (otherStream ? switchHere() : start())}
+            disabled={!paired}
+            data-testid="rp-start"
+          >
+            <Play size={14} />
+            {otherStream
+              ? tr("rp_switch_start", undefined, "Stop the other stream and start")
+              : tr("rp_start", undefined, "Start")}
+          </Button>
           <Select
             label={tr("rp_quality", undefined, "Picture")}
             block={false}
@@ -1350,18 +1814,6 @@ export function StreamPanel() {
               { value: "30", label: "30 fps" },
             ]}
           />
-          <Button
-            variant="primary"
-            size="md"
-            onClick={() => void (otherStream ? switchHere() : start())}
-            disabled={!paired}
-            data-testid="rp-start"
-          >
-            <Play size={14} />
-            {otherStream
-              ? tr("rp_switch_start", undefined, "Stop the other stream and start")
-              : tr("rp_start", undefined, "Start")}
-          </Button>
           <Button
             variant="ghost"
             size="md"
@@ -1510,22 +1962,17 @@ export function StreamPanel() {
       {profile && !paired && !running && (
         <Callout
           tone="info"
-          title={tr("rp_not_paired", undefined, "Set up Wake & sign in for this console first")}
+          title={tr("play_not_ready", undefined, "Set up Play for this console first")}
           action={
-            <div className="flex gap-2">
-              <Button size="sm" variant="primary" onClick={() => navigate("/connection")}>
-                {tr("rp_open_connection", undefined, "Open Connection")}
-              </Button>
-              <Button size="sm" onClick={() => navigate("/accounts#remote-play")}>
-                {tr("rp_setup_guide", undefined, "Setup guide")}
-              </Button>
-            </div>
+            <Button size="sm" variant="primary" onClick={() => navigate("/play/setup")} data-testid="play-open-setup">
+              {tr("play_setup_title", undefined, "Set up Play")}
+            </Button>
           }
         >
           {tr(
-            "rp_not_paired_body",
+            "play_not_ready_body",
             undefined,
-            "That pairs this app with the PS5 once. The same keys then start a stream; nothing else is needed.",
+            "A few steps, once per console: the checklist does what it can for you and ticks each step as it's done.",
           )}
         </Callout>
       )}
@@ -1535,6 +1982,7 @@ export function StreamPanel() {
           {streamErrorHelp(tr, error) ?? error.detail}
         </Callout>
       )}
+      <RpBlockerNotice host={profile?.host ?? null} error={error} running={running} />
       {pipFailed && (
         <Callout tone="warn" title={tr("rp_pip_failed", undefined, "Picture in picture did not open.")}>
           {tr(
@@ -1612,6 +2060,13 @@ export function StreamPanel() {
               <PlayMenu inFull={false} {...menuProps} />
             </div>
           )}
+          {/* The Game panel: under the picture and its bar, where there is room. */}
+          <GamePanel
+            host={target?.host ?? null}
+            open={gameOpen}
+            onClose={() => setGameOpen(false)}
+            variant="inline"
+          />
           {showTouch && (
             <p className="flex items-center gap-2 px-1 text-xs text-[var(--color-muted)]" data-testid="rp-touch-in-full">
               <Gamepad2 size={14} className="shrink-0" />
@@ -1644,6 +2099,32 @@ export function StreamPanel() {
           )}
         </p>
       )}
+    </div>
+  );
+}
+
+/** In a browser with WebHID (Chrome, Edge): let it read a DualSense's touchpad, which the
+ *  Gamepad API never gives. The browser asks which controller first, so this needs a click.
+ *  The app reads the touchpad by itself and shows nothing here. */
+function WebHidTouchpad() {
+  const tr = useTr();
+  const [on, setOn] = useState(webHidTouchpadConnected);
+  if (!webHidTouchpadAvailable()) return null;
+  if (on) {
+    return (
+      <p className="text-xs text-[var(--color-muted)]" data-testid="rp-hid-touchpad-on">
+        {tr("rp_hid_touchpad_on", undefined, "The DualSense touchpad is read in this browser.")}
+      </p>
+    );
+  }
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <Button size="sm" onClick={() => void connectWebHidTouchpad().then(setOn)} data-testid="rp-hid-touchpad">
+        {tr("rp_hid_touchpad", undefined, "Use the DualSense touchpad")}
+      </Button>
+      <span className="text-xs text-[var(--color-muted)]">
+        {tr("rp_hid_touchpad_hint", undefined, "The browser asks which controller: pick the DualSense.")}
+      </span>
     </div>
   );
 }

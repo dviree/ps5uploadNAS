@@ -116,6 +116,11 @@ export default defineConfig({
           // Exact package names: a bare "react" substring also caught
           // lucide-react and anything else with react in its path.
           if (REACT_PACKAGES.test(id)) return "vendor-react";
+          // mediabunny (instant replay's MP4 writer) has BigInt literals, which safari13 cannot
+          // take: in the shared vendor chunk they would stop every screen loading on an old
+          // WebView. Its own chunk is fetched only when a replay is saved, so there only that
+          // fails.
+          if (/[\\/]node_modules[\\/]mediabunny[\\/]/.test(id)) return "mediabunny";
           return "vendor";
         },
       },
@@ -127,6 +132,6 @@ export default defineConfig({
     setupFiles: ["./src/test-setup.ts"],
     // Playwright owns real-browser journeys; Vitest must not import those
     // files into its jsdom/node runner.
-    exclude: ["e2e/**", "**/node_modules/**", "**/.git/**"],
+    exclude: ["e2e/**", "site-shots/**", "**/node_modules/**", "**/.git/**"],
   },
 });

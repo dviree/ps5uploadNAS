@@ -4,6 +4,323 @@ What's new in ps5upload, written for humans.
 
 ---
 
+## 10.1.0
+
+- **Remap controller buttons in Play.** Settings › Controller buttons: choose which PS5 button each
+  button on your controller sends (swap ✕ and ○, turn a button off, put Create on L3...). It works
+  for every controller, and Reset to defaults puts it back.
+- **Sharpening and upscaling is one choice in Play's picture settings:** Off, Sharpen (AMD
+  FidelityFX RCAS) or Upscale to the screen (AMD FSR 1), with Sharpen setting how strong. Your
+  earlier Sharpen and Upscale settings carry over.
+- **The picture is drawn on the graphics card (WebGL) all the time**, so turning a picture tool on
+  or off no longer changes how it is drawn. With every tool off it looks exactly as before. A
+  device without WebGL keeps the old way.
+- **HDR in Play (experimental).** Settings › Video format › HDR asks the PS5 for its HDR stream
+  and shows it in HDR. It is offered only where it can work: an HDR screen, a device that decodes
+  HEVC Main10, and a browser that draws HDR (WebGPU, as in Chrome or Edge). If HDR doesn't work,
+  the app tells you and goes back to Auto. Sharpening, upscaling and colour stay off in HDR.
+- **Play: a DualSense's adaptive triggers** (desktop app). With a DualSense connected to the
+  computer, the console is told it is one, and games set the triggers' resistance as on the PS5.
+  They are let go when the stream ends or the app quits. Settings › Controls › *DualSense effects*.
+- **Play: DualSense haptics over USB** (desktop app). PS5 games' haptics play on the controller
+  plugged in with a cable; over Bluetooth they become rumble instead. On a Mac, set the
+  controller to 4 channels in Audio MIDI Setup for haptics.
+- **Play: motion controls with a DualSense** (desktop app): its gyro and accelerometer reach the
+  console, for gyro aiming and tilt.
+- **A new look for the on-screen controller in Remote Play:** thin light outlines with a faint
+  fill over the game, so the picture shows through. Shoulders stacked in the top corners, a
+  four-key D-pad and the face buttons at mid height, the sticks lower toward your thumbs,
+  Create and Options in the bottom corners. A key fills in while you press it.
+- **The controller fits the screen:** bigger keys on a tablet, smaller on a small phone, and
+  every key stays at least finger-sized. Size (Small, Medium, Large) and opacity (now down to
+  25%) are in Remote Play settings.
+- **Phone held sideways in full screen:** the menu button is at the bottom middle, under PS.
+- **Hush is in the Payloads catalogue:** it turns off the PS5's background gameplay recording
+  (by disco-trooper). The download is checked against the release's SHA256SUMS.
+- **Hush has a card on "On your PS5"** that shows whether it runs, whether it is on, its mode and
+  the newest lines of its log, with an On/Off switch that changes only `enabled=` in its config.
+- **Play works with Hush (#561):** Hush also turns off the encoder Remote Play needs, so a stream
+  had no picture. Start now asks to pause Hush while you play (about 20 s) and turns it back on
+  when the stream ends; Settings › Always pause Hush for Remote Play skips the question. If the
+  app closes mid-stream, Hush's card offers to turn it back on. A stream that fails while Hush
+  was on names it as the cause and suggests restarting the console.
+- **Play › Set up has a new step, No payload blocks Remote Play,** that ticks by itself when Hush
+  is off or not loaded.
+- **"Remote Play is switched off" is said plainly.** When the PS5's own Remote Play switch is off,
+  Start showed "session init refused (HTTP 403): 80108b12". It now says to turn on Settings ›
+  System › Remote Play › Enable Remote Play on the console, and the setup guide says that
+  switch is the one that counts.
+- **Fixed: Download couldn't be tapped in the Files ⋮ menu on a phone.** With the menu opened
+  upwards, its first item sat under the status bar, where Android takes the tap. The menu now
+  stays between the status and navigation bars.
+- **Details on "Update available" shows what's new.** It opened Settings, where the release
+  notes were far down the page as raw text; it now opens the notes, with a link to the release
+  on GitHub.
+- **"Helper updated" in plain words.** The notice says which version the PS5 starts after its
+  next restart, without file paths, and only once per console and version.
+
+## 10.0.3
+
+- **Fixed: after waking the PS5 from rest mode, the app said the helper was down (#593)**, and
+  sending it again left two copies running. The helper survived rest mode but stopped listening;
+  it now listens again right after the wake, and sending it again always leaves exactly one copy.
+- **The helper shows as `ps5upload.elf` in Payload Manager**, never `payload.elf` (the name the
+  loader gives anything sent to it) or one of its own thread names.
+- **The helper is steadier when it is replaced:** a running backported game keeps its fakelib
+  overlay, a Sony call in progress is finished instead of cut off, cheats applied just before
+  aren't paused, and a crash can no longer leave it spinning with its port held.
+- **Clearer delete and copy errors:** they name the file or folder and the reason ("Permission
+  denied"), and deleting a folder removes everything it can instead of refusing the whole folder.
+- **PS5Upload Minion can open on Cheats (#584):** Settings › Start page. With a game running you
+  land on its cheats.
+- **Linux app: Play shows the picture in H.264**, which stayed black. The Linux app's video
+  decoder takes H.264 only in the form MP4 files use, so the stream is now handed over that way
+  (on every system, which changes nothing elsewhere).
+- **Linux app: Picture in picture opens.** It said it couldn't, because the Linux webview refused
+  to open the small window.
+- **Linux app: game icons show, and the microphone works in Play.**
+- **Back up saves to a network share (#592).** Saves › *Backups to a network share*: pick a folder
+  on an SMB server (or any server under Connections), then back up every few hours or each time
+  you close a game, for the consoles and users you choose. Each copy is read back from the share
+  and checked before it counts, and a bad one is deleted. Restore any version from the game's
+  page; the current save is backed up first.
+- **The DualSense touchpad works in Play (#589)**, finger and click, in the desktop app on macOS,
+  Windows and Linux (read straight from the controller), and in Chrome or Edge with
+  Settings › Controllers › *Use the DualSense touchpad*.
+- **Remote Play holds up better on Windows and Wi-Fi.** A passing network error no longer ends
+  the stream, Windows gets the same larger video buffer other systems had, and lost control
+  messages are sent again. A stream whose connection really dies now says so instead of freezing
+  on the last picture, and one slow check no longer flashes "engine unreachable".
+- **RAR sets past `.r99` extract (`.s00`, `.t00` …).** Old-style sets go `.rar`, `.r00`…`.r99`,
+  then `.s00`…; only the `.r` part was picked up, so extraction stopped a third of the way. A
+  failed extraction no longer leaves temporary files on the computer (Windows kept them when a
+  file was still locked for a moment); leftovers from earlier runs are cleared at start.
+- **Installer: updating it no longer fails the first install afterwards.** The old installer
+  could not let go of its port in time. It also can't be stopped in the middle of an install any
+  more, recovers by itself when its connection breaks instead of using a whole CPU core, and
+  shows in the console's process list as `ps5u-installer`.
+- **Fixed: a payload from a repo you added was stored in Payload Manager as "Custom <code>".**
+  Store in Payload Manager uses the name the app caches a download under, and with no name
+  given for a custom repo that was its internal id (`custom-3fa9c21b04de.elf`). It now keeps the
+  release's own file name (`MyPayload_v1.2.elf`). Download it again to get the new name.
+
+## 10.0.2
+
+- **Fixed: watching the stream on a phone never showed the picture** ("The picture could not be
+  played here."), in H.264 and HEVC alike. A phone opens the watch link as plain `http://`, and
+  browsers offer the video decoder the page used only on secure pages, so it worked on the
+  computer itself and nowhere else. Phones and tablets now play it through the browser's own
+  video player, sound included, a fraction of a second behind the computer.
+- **The phone link doesn't open on Android 17?** Android now asks before a browser may reach
+  devices on your network: allow your browser **Nearby devices** (Settings › Apps › Chrome ›
+  Permissions). The phone panel says so under the link.
+
+## 10.0.1
+
+- **Share a save with a friend (experimental).** Saves › **Share** saves a PS5 save's contents as
+  a `.zip`; on another PS5, **Use a shared save** puts it into that user's own save of the game,
+  so the console keeps it as theirs: no account ID change needed. Your save is backed up first and
+  put back if anything fails. Both consoles need PS5Upload; PS5 saves only.
+- **Stream & install is back for several packages at once, and leads for one.** Since 8.7.0
+  (when Upload and Install Package became one screen), packages picked or dropped together could
+  only be uploaded first. The list's main button is now **Stream & install** with how many
+  packages there are: they install one after another, a game before its update and DLC whatever
+  order they were picked in (as before 8.7.0), and anything else in the list uploads in the same
+  click. One package's main button is **Stream & install** as well, with
+  **Upload & install** next to it as the fallback.
+- **AppImage downloads.** Each release now also has the bare `.AppImage` (x64 and ARM64) next to
+  the Linux `.zip`, for AppImage managers. On Wayland with an NVIDIA card it restarts itself with
+  the system Wayland library, as the zip's `PS5Upload.sh` does.
+- **Play:** the Console picker is gone from the stream bar (Play uses the console you have
+  selected), **Start** is first in the row, and **Set up Play** stands out with its progress until
+  it's done.
+- **Fixed: on Windows, Play showed the picture enlarged and cut off on the right and bottom,**
+  in every picture size, in the app and in Chromium browsers (Edge, Opera GX). Their hardware
+  HEVC decoding on Windows reports each frame's visible picture smaller than it is, so only its
+  top-left part was drawn (720p was fine; 1080p, coded 1920×1088, was not). The app now reads
+  the real picture size from the stream itself and draws all of it; where a decoder's picture
+  cannot be put right, it switches to software decoding by itself.
+- **Play › Settings: Video decoding (Graphics card / Software) and Video format (Auto / H.264).**
+  A way out if a graphics driver's decoder shows the picture wrong on some device.
+- **Play picture:** with Upscale on, turning Crop to 21:9 on or off now reshapes the picture
+  right away (it kept the old shape). The logs now say how the picture is laid out against what
+  it draws, so a report of a picture cut off on Windows shows which it is.
+- **Fixed: on macOS the engine could stop after an update and stay stopped** ("Connection refused"
+  on 127.0.0.1:19113). The engine program is now replaced in one step instead of rewritten in
+  place, the app restarts an engine that stopped on its own, and the notice says why it stopped.
+
+## 10.0.0
+
+- **Remote Play is now Play, at the centre of the app.** It sits right under Home in the sidebar
+  and in the phone tab bar (Activity moved to More), with a **Play** card at the top of Home:
+  one press to play (it wakes the console if it's resting), **Continue** the last game, or
+  **Set up Play** with how far along you are. The card can be hidden; nothing else needs Play.
+- **Play › Set up: a checklist that ticks itself.** Connect, sign in to a user, an account ID,
+  the offline sign-in (np-fake-signin, run from the list; it ticks once the restarted console
+  is back), Remote Play on, rest-mode settings, pairing (one button, right there) and the first
+  picture. The console is read every few seconds, so each step ticks by itself and the next one
+  opens. It replaces the guide that was in Accounts.
+- **Play wherever a game is.** A game's page has **Play** (start it and stream it here) next to
+  **Launch on PS5**; without Play set up, **Play here** opens the setup. Search has
+  "Play {game}" for what the console has installed, and an install's notification opens the
+  game with Play ready. "Remote Play" stays the name of Sony's own setting and app.
+- **Fixed: one odd health-check answer could crash Home.** A report without its list of checks
+  took the whole app down; it now counts as nothing to report.
+
+## 9.11.0
+
+- **Per-game controls in Remote Play.** The Game panel's new **Controls** tab sets the running
+  game's own controls, kept per game on this device and switched by themselves with the game:
+  **turbo** on any face button, shoulder, trigger or arrow (2–30 presses a second while held),
+  **mouse aim** (with the pointer captured, the mouse moves the right stick, left click is R2 and
+  right click L2; sensitivity and invert), and **macros** (a key plays a few presses in a row;
+  pressing one of its buttons yourself stops it).
+- **Picture tools in Remote Play.** Remote Play › Settings › **Picture**: sharpen, brightness,
+  contrast, colour, **Crop to 21:9** (cuts the black bars off a game made for ultrawide screens)
+  and **Sharp pixels** (hard-edged scaling for retro games). They apply at once, on the GPU, and
+  screenshots and replays show them; with all of them off the picture is drawn exactly as before.
+  A device that cannot keep up, or has no WebGL 2, gets the plain picture back with a notice.
+
+- **Watch party in Remote Play.** The phone panel on the stream's bar now has a second code,
+  **To watch**: anyone on your network scans it and watches the stream on a phone, tablet or
+  computer browser, with sound after a tap (up to four). Watchers only watch until you press
+  **Hand the controller** next to one of them; **Take the controller back** returns it. Each
+  watcher gets its own copy of the stream, so on a busy network fewer watchers keep your own
+  picture smooth.
+
+- **Remote Play screenshots and clips go to Photos on a phone.** The iPhone and iPad app adds them
+  to Photos (it asks once, for adding only), the Android app to the gallery's PS5Upload album, and
+  a phone's browser offers **Save to Photos** (the share sheet's Save Image / Save Video) or a
+  plain download. Remote Play › Settings › **Save screenshots and clips to Photos** turns it off;
+  if Photos access is refused, they still save to Downloads and the app says so.
+- **Fixed: an SFTP or FTP server's start folder outside your home folder said "No such file".**
+  Paths were taken as inside the folder the server signs you in to, so `/mnt/games` was looked
+  for as `/home/you/mnt/games`, and nothing above home could be browsed, even as root. New SFTP
+  and FTP servers now use the server's own paths (**Browse the whole server**, on by default)
+  and open in your home folder when no start folder is given. A server saved before keeps the old
+  paths until you edit it and turn that on (re-add any games or favorites saved from it then).
+- **Upscale the Remote Play picture to your screen (experimental).** Remote Play › Settings ›
+  Picture › **Upscale to the screen (FSR 1)** brings the 720p/1080p stream up to the picture's
+  own size on your screen, on the graphics card, with AMD FidelityFX Super Resolution 1:
+  edge-aware upscaling, then sharpening (Sharpen sets how much). It is plain shader code, so it
+  works the same on AMD, NVIDIA, Intel and Apple GPUs and on phones. Measured against plain
+  smoothing it comes clearly closer to the original picture, with crisper edges. A device that
+  can't keep up gets the plain picture back with a notice.
+- **Remote Play pop-out on Windows: the picture showed only its top-left part.** The desktop
+  app's pop-out window could lay its page out bigger than the window, so every picture size
+  looked the same and the picture was cut. The pop-out now fits the player to the part of the
+  window that shows. If it still happens for you, a bug report now includes the sizes involved.
+- **Security: moving saves from a PS4 reads only from the save backup folder.** The engine took
+  the folder to copy from straight from the request, so something on your network could have
+  pointed it at any folder on this computer and had its files copied onto the PS5 (found by code
+  scanning). It now has to be inside the save backup folder, where the wizard puts the PS4's
+  files, with links and `..` resolved first.
+
+## 9.9.0
+
+- **Move saves from a PS4 (experimental).** Saves › **Move saves from a PS4** reads a jailbroken
+  PS4's saves over its FTP server (GoldHEN's, usually port 2121), copies the games you pick to
+  this computer, then puts them into a PS5 user's PS4 save folders. It is built to be safe:
+  - The PS4 is only read; nothing is written, renamed or deleted there.
+  - Everything is copied to your save-backups folder first and checked against the PS4's sizes;
+    nothing reaches the PS5 until that is done.
+  - On the PS5 only saves are written, only for the games you pick, and only into a save folder
+    the console already made (start the game once on the PS5 and save, if a game is not ready).
+    No users, system files, folder names or trophies are touched.
+  - Each game's PS5 save is backed up first (marked "Before a PS4 save"), a running game is
+    refused, and anything that does not look like a PS4 save is refused.
+  - A save follows the account ID: the wizard shows the PS5 user's ID and stops if you enter a
+    PS4 account ID that differs.
+  PS4-format saves on a PS5 have mixed reports, so try one game first.
+
+## 9.8.0
+
+- **Instant replay in Remote Play.** Turn it on in Remote Play › Settings › **Instant replay**
+  (the last 15, 30 or 60 seconds), and **Save replay** on the stream's bar (and in the phone's
+  menu) saves what just happened as an MP4, with sound. The picture is saved exactly as the PS5
+  sent it, never re-encoded; the sound is turned into AAC where the device can (so Apple's Photos
+  takes it), Opus elsewhere. While it is on, the console is asked for a fresh keyframe every few
+  seconds so a replay starts close to where you want it; nothing is saved until you press the
+  button, and it works the same in the desktop apps, on phones and in the web UI.
+
+## 9.7.0
+
+- **Play any game on Remote Play, in one press.** A game's page has **Play on Remote Play** next
+  to Play (for the connected console, once it is set up for Remote Play): the stream starts,
+  waking the console and signing you in, the app waits for its helper to come back, then starts
+  the game on the stream. Each step shows on the picture, with a Cancel. In the stream, the Game
+  panel's **Play something else** lists the console's games (with a search) and starts the one
+  you pick, closing the running one first with your say-so. Anything the console has installed
+  or registered can be started: PS5 and PS4 games, folder games and fake packages.
+- **Drop a package on the stream to install it.** Drag a .pkg or .fpkg onto the picture (the
+  desktop app, or the web UI in a browser): it is installed on the streamed console **when you
+  stop playing** (an install shares the network with the stream and can make it stutter), or at
+  once with **Install now**.
+- **The on-screen controller's touchpad can be pressed.** A finger held on the touchpad strip is
+  now the DualSense's touchpad button, so combos like L1 + R1 + touchpad (to get back to an
+  emulator's menu) work; a finger that slides is still a swipe only.
+
+## 9.6.0
+
+**Remote Play gets a Game panel.** A **Game** button on the stream bar (and in the phone's **⋯**
+menu) opens a panel over the picture without stopping the game. It reads the console only while
+it is open.
+
+- **Game**: what is running, with a **Snapshot save now** button that backs up the game's save
+  while you play. It waits for a moment when the save is not being written and checks the copy did
+  not change mid-way, then keeps it with the game's save backups, marked **Taken while playing**.
+  Snapshots are kept apart from the automatic backups (five of each), so they never push the
+  automatic history out. Choose a folder in Saves › Automatic backups first.
+- **Cheats**: the running game's cheats with their switches, the cheat engine switch, and the
+  paused notice when a game closed right after its cheats were applied.
+- **Console**: CPU and system chip temperatures (and the expansion SSD's), what the fan works to,
+  the fan speed on request, and **Fan boost**: the fan keeps the console at 55 °C for 30 minutes.
+  The boost always undoes itself: when you turn it off, when the stream ends, after 30 minutes, or,
+  if the app closed in between, as soon as the console answers again. It never makes the fan
+  quieter than it was.
+
+**Fixes**
+
+- **Restoring a save while its game runs is refused.** The game would overwrite it (or mix its
+  next save with it); close the game, then restore.
+- **Remote Play's microphone starts in the apps.** In every app (macOS, Windows, Linux, Android,
+  iOS) pressing the mic ended in an amber dot: the apps' security rules refused how the mic loaded
+  a part of itself. It now starts, and if it ever cannot, the button says why.
+- **The Remote Play pop-out shows the whole picture (#566).** On Windows the small always-on-top
+  window cut the picture on the right and bottom in every picture size.
+- **Phone controller QR code on a computer with two networks.** When the PS5 is on one network
+  and the phone's Wi-Fi on another, the link pointed at an address the phone could not reach.
+  The panel now lists each of the computer's networks under the code: pick the phone's.
+- Remote Play's Microphone and Motion controls are marked experimental, without "not yet tried"
+  notes.
+
+## 9.5.3
+
+- **Back up your users' information (Accounts).** A new **Back up user information** card
+  downloads a text file with every user on the PS5: their names, user IDs, account IDs (in hex,
+  decimal and the base64 form Remote Play uses), how each account is activated, its sign-in
+  details (online ID, date of birth, age), and step-by-step instructions for giving a new user
+  an old account ID. Saves are tied to the account ID, so after a console reset, or a crash that
+  loses a user, the file is what you need to get your saves back. It holds no passwords or
+  Remote Play keys; keep it private all the same.
+- **Phone screens scroll all the way down.** Payloads, Tasks and Help (FAQ, About, What's new)
+  now leave room under their last row, so nothing stays stuck behind the bottom tab bar.
+
+## 9.5.2
+
+- **Remote Play full screen fits the screen, on every app.** Full screen now sits exactly on the
+  window's edges. Before, it was placed in the page instead, so the top and bottom of the picture
+  could be cut off even with **Fit**. The picture is now sized the way a video player sizes
+  its video: **Fit** shows the whole picture at its own shape, with black bars where the screen's
+  shape differs; **Fill** covers the whole screen and crops the edges; **Stretch** stretches the
+  picture to the whole screen. Each one now looks different on every app (Fill and Stretch
+  could look the same before).
+- **Picture size is a menu in full screen.** The button on the full-screen bar now shows the
+  current size and opens a list (Fit, Fill, Stretch), instead of stepping through them.
+  On phones, the Fit / Fill / Stretch row in the **⋯** menu is unchanged.
+- On a screen the same shape as the picture (16:9), the three look the same: there is nothing
+  to add bars to, crop or stretch.
+
 ## 9.5.1
 
 - **Remote Play full screen shows the whole picture.** With **Fit** (the default), the picture is
@@ -38,8 +355,7 @@ What's new in ps5upload, written for humans.
   **Microphone** button on the picture's bar (and **Mic** in the phone **⋯** menu) sends your voice to the PS5 for party and game
   chat. It's off until you press it, asks for permission the first time, shows a red dot while it's
   on, and turns off when you press it again or the stream ends. It follows chiaki-ng's microphone
-  code and is tested on our side, but has not been tried on a real PS5 yet, so it's marked
-  experimental.
+  code.
 - **Game Mode for Remote Play.** In full screen the Mac app turns on Game Mode, and so do the iPhone
   and iPad apps (iOS 18 and later). While you play, the desktop app keeps the computer and screen
   awake, on Linux it turns on GameMode (`gamemoded`) if it's installed, and the Android app asks for

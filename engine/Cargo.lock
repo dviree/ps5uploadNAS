@@ -900,7 +900,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -1792,9 +1792,9 @@ dependencies = [
 
 [[package]]
 name = "pageant"
-version = "0.2.3"
+version = "0.2.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6d8eab09a361a4afe0b1668be978cd97e4f052e927a92b0b608cf902965d49ce"
+checksum = "e0bc922d9aa8cfcf598de27b3c6122cb2eeda9d6fe71527a22ebcb7f633540ff"
 dependencies = [
  "base16ct",
  "byteorder",
@@ -2053,7 +2053,7 @@ dependencies = [
 
 [[package]]
 name = "ps5-dump-forge-pfs"
-version = "9.5.1"
+version = "10.1.0"
 dependencies = [
  "flate2",
  "ps5-dump-forge-ufs2",
@@ -2062,7 +2062,7 @@ dependencies = [
 
 [[package]]
 name = "ps5-dump-forge-ufs2"
-version = "9.5.1"
+version = "10.1.0"
 dependencies = [
  "ps5upload-fpkg",
  "ps5upload-pkg",
@@ -2071,7 +2071,7 @@ dependencies = [
 
 [[package]]
 name = "ps5upload-ava1"
-version = "9.5.1"
+version = "10.1.0"
 dependencies = [
  "anyhow",
  "ava1",
@@ -2092,7 +2092,7 @@ dependencies = [
 
 [[package]]
 name = "ps5upload-core"
-version = "9.5.1"
+version = "10.1.0"
 dependencies = [
  "aes 0.9.3",
  "aes-gcm 0.11.1",
@@ -2109,13 +2109,14 @@ dependencies = [
  "serde_json",
  "sevenz-rust2",
  "sha2 0.11.1",
+ "socket2",
  "ureq",
  "zip",
 ]
 
 [[package]]
 name = "ps5upload-ctest"
-version = "9.5.1"
+version = "10.1.0"
 dependencies = [
  "anyhow",
  "ava1",
@@ -2131,7 +2132,7 @@ dependencies = [
 
 [[package]]
 name = "ps5upload-engine"
-version = "9.5.1"
+version = "10.1.0"
 dependencies = [
  "aes-gcm 0.11.1",
  "anyhow",
@@ -2177,7 +2178,7 @@ dependencies = [
 
 [[package]]
 name = "ps5upload-fpkg"
-version = "9.5.1"
+version = "10.1.0"
 dependencies = [
  "aes 0.9.3",
  "blake3",
@@ -2200,7 +2201,7 @@ dependencies = [
 
 [[package]]
 name = "ps5upload-lab"
-version = "9.5.1"
+version = "10.1.0"
 dependencies = [
  "anyhow",
  "ava1",
@@ -2218,7 +2219,7 @@ dependencies = [
 
 [[package]]
 name = "ps5upload-pkg"
-version = "9.5.1"
+version = "10.1.0"
 dependencies = [
  "aes 0.9.3",
  "blake3",
@@ -2230,7 +2231,7 @@ dependencies = [
 
 [[package]]
 name = "ps5upload-tests"
-version = "9.5.1"
+version = "10.1.0"
 dependencies = [
  "anyhow",
  "ava1",
@@ -2248,7 +2249,7 @@ dependencies = [
 
 [[package]]
 name = "ps5upload-unrar"
-version = "9.5.1"
+version = "10.1.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3611,7 +3612,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]

@@ -49,6 +49,7 @@ const FileSystemScreen = lazyWithReload(() => import("./screens/FileSystem"));
 const HardwareScreen = lazyWithReload(() => import("./screens/Hardware"));
 const AccountsScreen = lazyWithReload(() => import("./screens/Accounts"));
 const PlayScreen = lazyWithReload(() => import("./screens/Play"));
+const PlaySetupScreen = lazyWithReload(() => import("./screens/Play/setup"));
 const PadRemoteScreen = lazyWithReload(() => import("./screens/Play/PadRemote"));
 const HealthScreen = lazyWithReload(() => import("./screens/Health"));
 const NotificationsScreen = lazyWithReload(() => import("./screens/Notifications"));
@@ -363,12 +364,21 @@ function AppRoutes({ location }: { location: Location }) {
         />
         {/* Profile and Remote Play are one Accounts screen now. */}
         <Route path="/profile" element={<Navigate to="/accounts" replace />} />
-        <Route path="/remote-play" element={<Navigate to="/accounts#remote-play" replace />} />
+        <Route path="/remote-play" element={<Navigate to="/play/setup" replace />} />
         <Route
           path="/play"
           element={
             <Suspense fallback={<ScreenLoader />}>
               <PlayScreen />
+            </Suspense>
+          }
+        />
+        {/* Setting up Play, step by step (10.0.0). */}
+        <Route
+          path="/play/setup"
+          element={
+            <Suspense fallback={<ScreenLoader />}>
+              <PlaySetupScreen />
             </Suspense>
           }
         />

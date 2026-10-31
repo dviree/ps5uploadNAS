@@ -45,7 +45,7 @@
   `.ffpfsc`) that ShadowMount+ mounts. A queue makes games one after another and hands each to
   Upload & Install to install or upload.
 - **Browse and manage.** Files, games, disk images (mount, edit in place), saves, screenshots
-  and video clips; register, launch, stop and uninstall games; copy, move (Move to…),
+  and video clips; share a save with a friend (it loads on their PS5 as their own); register, launch, stop and uninstall games; copy, move (Move to…),
   delete, set permissions.
 - **Remote Play.** Play the PS5 from your computer, phone or browser, no PS Remote Play app
   needed:
@@ -101,6 +101,7 @@ Pre-built downloads land on the
 | Linux — Debian / Ubuntu (x64 / ARM64) | `PS5Upload-<ver>-linux-{x64,arm64}.deb` | `sudo apt install ./PS5Upload-<ver>-linux-<arch>.deb` — installs a normal app with a menu entry; pulls in the WebKitGTK deps automatically. |
 | Linux — Fedora / RHEL / Bazzite (x64 / ARM64) | `PS5Upload-<ver>-linux-{x64,arm64}.rpm` | `sudo dnf install ./PS5Upload-<ver>-linux-<arch>.rpm` (Bazzite/Silverblue: `rpm-ostree install`; to update, `rpm-ostree uninstall ps5-upload --install ./<new>.rpm` and reboot, which Settings → Updates shows ready to copy) — menu entry + auto deps. |
 | Linux — any distro (x64 / ARM64) | `PS5Upload-<ver>-linux-{x64,arm64}.zip` | Universal fallback (no install). Unzip, then `chmod +x PS5Upload.sh PS5Upload.AppImage` and run **`./PS5Upload.sh`** (the wrapper — handles the FUSE-less and WebKit white-screen cases for you). Running `./PS5Upload.AppImage` directly also works if your system has libfuse2 and a happy WebKitGTK. |
+| Linux — AppImage (x64 / ARM64) | `PS5Upload-<ver>-linux-{x64,arm64}.AppImage` | The bare AppImage, for AppImage managers (Gear Lever, AppImageLauncher). `chmod +x` and run it. On Wayland with an NVIDIA card it restarts itself once with the system `libwayland-client`, which is what the `.zip`'s `PS5Upload.sh` does. |
 | Linux — NixOS (x64 / ARM64) | no release artifact | Packaged in [NUR](https://github.com/GriefNorth/nur-packages) as `ps5upload` — see **NixOS** below. |
 | Android | `PS5Upload-<ver>-android.apk` (older 32-bit phones: `-android-armv7.apk`) | Enable "install unknown apps" for your browser/file manager, then open the `.apk`. Same interface, mobile-friendly; connects to and manages your PS5 over Wi-Fi. On Android 17, allow local network access ("nearby devices") when asked. |
 | iPhone | `PS5Upload-<ver>-ios-unsigned.ipa` | Sideload with AltStore or Sideloadly and an Apple ID (a free one works; it is re-signed every 7 days). AltStore, SideStore and Feather can also add the source `https://github.com/phantomptr/ps5upload/releases/latest/download/altstore.json` and update the app from there. Turn on Developer Mode and trust your Apple ID on the iPhone; see the FAQ. Copy games into the app's folder with the Files app. |
@@ -235,7 +236,7 @@ make run-client    # launch the Tauri dev app
 
 - **`make install-ubuntu`** — Debian / Ubuntu / WSL2: `apt` deps for Tauri
   (`libwebkit2gtk-4.1-dev`, `libgtk-3-dev`, `librsvg2-dev`,
-  `libayatana-appindicator3-dev`, `libxdo-dev`, `libssl-dev`,
+  `libayatana-appindicator3-dev`, `libxdo-dev`, `libasound2-dev`, `libssl-dev`,
   `build-essential`), Node.js 22 LTS via NodeSource (only if missing),
   Rust via rustup, and checksum-verified PS5 Payload SDK v0.45 →
   `~/ps5-payload-sdk`.
@@ -470,11 +471,13 @@ adapted file by file), **library** (a dependency the build pulls in), **fetched 
 
 **Libraries:**
 * Desktop client: [Tauri](https://tauri.app/), [React](https://react.dev/), [react-router](https://reactrouter.com/), [Zustand](https://github.com/pmndrs/zustand), [lucide-react](https://lucide.dev/) icons, built with [Vite](https://vitejs.dev/) and [Tailwind CSS](https://tailwindcss.com/)
+* Remote Play instant replay: [Mediabunny](https://mediabunny.dev/) (MPL-2.0, used unmodified from npm) writes the saved clip as MP4
+* Remote Play upscaling: [AMD FidelityFX Super Resolution 1](https://github.com/GPUOpen-Effects/FidelityFX-FSR) (MIT) — **ported**: its EASU and RCAS shaders rewritten as WebGL 2 GLSL in `client/src/lib/rpPicture.ts`
 * Engine: [tokio](https://tokio.rs/), [axum](https://github.com/tokio-rs/axum), [serde](https://serde.rs/), [anyhow](https://github.com/dtolnay/anyhow), [uuid](https://github.com/uuid-rs/uuid), [zip](https://github.com/zip-rs/zip2), and the other crates in the `Cargo.lock` files
 * [UnRAR](https://www.rarlab.com/) (Alexander Roshal) — `.rar` extraction on **desktop**, compiled from the source the `unrar_sys` crate bundles into its own program, `ps5upload-unrar`, which holds only ps5upload's own code and UnRAR and which the engine runs over pipes (UnRAR is never linked into the engine); used to *extract only*, never to compress.
 
 **Fetched at runtime:**
-* The Payloads catalogue — kstuff-lite (EchoStretch, drakmor), [ShadowMountPlus](https://github.com/drakmor/ShadowMountPlus) and nanoDNS (drakmor), etaHEN and Itemzflow (LightningMods), ftpsrv, websrv, shsrv and klogsrv (ps5-payload-dev), ps5-app-dumper, CheatRunner, BackPork, itsPLK's Payload Manager and WebKit Autoloader, earthonion's tools, Ghostpad, HearBridge, ps5debug-NG and more — each downloaded from its own releases when you choose it
+* The Payloads catalogue — kstuff-lite (EchoStretch, drakmor), [ShadowMountPlus](https://github.com/drakmor/ShadowMountPlus) and nanoDNS (drakmor), etaHEN and Itemzflow (LightningMods), ftpsrv, websrv, shsrv and klogsrv (ps5-payload-dev), ps5-app-dumper, CheatRunner, BackPork, itsPLK's Payload Manager and WebKit Autoloader, earthonion's tools, Ghostpad, HearBridge, Hush (disco-trooper), ps5debug-NG and more — each downloaded from its own releases when you choose it
 * ampr_emu's debug build (drakmor) — downloaded for "Measure how it plays"
 * [etaHEN PS5_Cheats](https://github.com/etaHEN/PS5_Cheats), [GoldHEN Cheat Repository](https://github.com/GoldHEN/GoldHEN_Cheat_Repository) and [HEN-Cheats-Collection](https://github.com/TeeKay87/HEN-Cheats-Collection) (TeeKay87) — cheat files
 * [PROSPEROPatches](https://prosperopatches.com/) and [ORBISPatches](https://orbispatches.com/) — game details and artwork

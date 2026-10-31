@@ -43,6 +43,8 @@ jobs:
           node-version: 22
           # Always the newest 22.x (security releases; the runner image can lag).
           check-latest: true
+      - name: Every language has every string and its screenshots
+        run: node scripts/site-i18n.mjs
       - name: Snapshot the releases (fallback for the page)
         run: node scripts/site-releases.mjs
         env:

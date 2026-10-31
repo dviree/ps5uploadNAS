@@ -58,6 +58,7 @@ mod elfldr_guard;
 mod engine_log;
 mod event_journal;
 mod fakelibs_api;
+mod fan_boost;
 mod folder_build;
 mod fpkg_api;
 mod fpkg_firmware;
@@ -92,8 +93,10 @@ mod profile_image;
 mod remote;
 mod remote_download;
 mod remote_pkg;
+mod rp_replay;
 mod rp_stream_api;
 mod save_backup;
+mod save_backup_server;
 mod settings_backup;
 mod shared_state;
 mod state_io;
@@ -11071,8 +11074,39 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
             get(save_backup::get_view).put(save_backup::put_settings),
         )
         .route("/api/save-backup/run", post(save_backup::post_run))
+        .route(
+            "/api/save-backup/server",
+            get(save_backup_server::get_view).put(save_backup_server::put_settings),
+        )
+        .route(
+            "/api/save-backup/server/run",
+            post(save_backup_server::post_run),
+        )
+        .route(
+            "/api/save-backup/server/list",
+            get(save_backup_server::get_list),
+        )
+        .route(
+            "/api/save-backup/server/restore",
+            post(save_backup_server::post_restore),
+        )
         .route("/api/save-backup/list", get(save_backup::get_list))
         .route("/api/save-backup/restore", post(save_backup::post_restore))
+        .route(
+            "/api/save-backup/snapshot",
+            post(save_backup::post_snapshot),
+        )
+        .route(
+            "/api/save-backup/import-ps4",
+            post(save_backup::post_import_ps4),
+        )
+        .route("/api/save-backup/share", post(save_backup::post_share))
+        // A shared save's zip comes as the body: saves run from a few KB to a few hundred MB.
+        .route(
+            "/api/save-backup/use-shared",
+            post(save_backup::post_use_shared)
+                .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024 * 1024)),
+        )
         .route(
             "/api/shared/{name}",
             get(shared_state::get_doc).put(shared_state::put_doc),
@@ -11280,6 +11314,7 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
         // Remote Play stream spike (rp_stream_api).
         .route("/api/ps5/rp/ws", get(rp_stream_api::ws))
         .route("/api/ps5/rp/session", get(rp_stream_api::current))
+        .route("/api/ps5/rp/replay", get(rp_stream_api::replay))
         .route("/rp-player", get(rp_stream_api::player))
         .route("/pad", get(pad_link::page))
         .route("/api/pad/ws", get(pad_link::ws))
@@ -11289,6 +11324,7 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
         )
         .route("/api/ps5/rp/pad-link/decide", post(pad_link::decide))
         .route("/api/ps5/rp/pad-link/kick", post(pad_link::kick))
+        .route("/api/ps5/rp/pad-link/control", post(pad_link::control))
         .route("/api/ps5/rp/pad-relay", get(pad_link::relay))
         .route("/api/ps5/power/ddp-status", get(ps5_power_ddp_status))
         .route("/api/ps5/power/pair", post(ps5_power_pair))
@@ -11396,6 +11432,10 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
             post(ps5_smp_image_rw_finish),
         )
         .route("/api/ps5/hw/fan-threshold", post(ps5_hw_set_fan_threshold))
+        .route(
+            "/api/ps5/fan-boost",
+            get(fan_boost::get).post(fan_boost::post),
+        )
         .route("/api/ps5/peripheral", post(ps5_peripheral))
         .route(
             "/api/ps5/cheats/import",
@@ -11654,13 +11694,20 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
     // whether the engine was actually listening.
     println!("[ps5upload-engine] listening on http://{bind}  (ps5={ps5_addr})");
     crate::log_info!("listening on http://{bind}  (ps5={ps5_addr})");
+    // Fan boosts end on time and are undone even if the app closed in between.
+    fan_boost::spawn_sweeper();
     // Automatic save backups run here, not in a window: they carry on with no app open.
     save_backup::spawn(
         &bind,
         &std::env::var("PS5UPLOAD_BASE_URL").unwrap_or_default(),
     );
+    // Save backups to a network share: on an interval, or when a game is closed (#592).
+    save_backup_server::spawn();
     // Mesh Drive folders are kept in sync here too, app open or not.
     mesh_drive::spawn();
+    // Server copies an earlier run left behind (an extract that failed, then the app closed)
+    // are removed here: nothing else knows them after a restart.
+    tokio::task::spawn_blocking(remote::fetch::sweep_stale_copies);
     // Graceful shutdown: when the parent-watcher fires (stdin EOF), the
     // SHUTDOWN Notify wakes this future, axum stops
     // accepting new connections, drains in-flight ones, then returns.
