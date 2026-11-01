@@ -88,9 +88,9 @@ pub(crate) fn done_key(host: &str, path: &str) -> String {
     format!("{host}|{path}")
 }
 
-/// The saves that need a backup: a game's (not the console's own `sce_backup*` folders, which it
-/// lists among the saves, empty), changed since the last one, and not written to in the last few
-/// minutes. A save never backed up counts as changed.
+/// The saves that need a backup: a game's (a PS5 game's or one in the Switch emulator, not the
+/// console's own `sce_backup*` folders, which it lists among the saves, empty), changed since the
+/// last one, and not written to in the last few minutes. A save never backed up counts as changed.
 pub fn needing_backup<'a>(
     host: &str,
     saves: &'a [SaveEntry],
@@ -100,7 +100,7 @@ pub fn needing_backup<'a>(
     saves
         .iter()
         .filter(|e| {
-            crate::looks_like_title_id(&e.title_id)
+            crate::emulator_saves::backs_up(e)
                 && e.mtime > 0
                 && now_secs - e.mtime >= SETTLE_SECS
                 && e.mtime > done.get(&done_key(host, &e.path)).copied().unwrap_or(0)
@@ -306,10 +306,15 @@ pub fn mentions_host(text: &str, host: &str) -> bool {
         })
 }
 
+/// The console's saves, and the Switch emulator's (files of its own, which the console's list
+/// leaves out).
 pub(crate) fn list_saves(host: &str) -> Result<Vec<SaveEntry>, String> {
     let v = get(&format!("/api/ps5/saves/list?addr={}", enc(host)))?;
-    serde_json::from_value(v.get("saves").cloned().unwrap_or(Value::Array(vec![])))
-        .map_err(|e| format!("saves list: {e}"))
+    let mut saves: Vec<SaveEntry> =
+        serde_json::from_value(v.get("saves").cloned().unwrap_or(Value::Array(vec![])))
+            .map_err(|e| format!("saves list: {e}"))?;
+    saves.extend(crate::emulator_saves::list(host));
+    Ok(saves)
 }
 
 // ── backup ──────────────────────────────────────────────────────────────
@@ -365,7 +370,10 @@ pub(crate) fn download_save(
         .ok_or("download did not start")?;
     wait_job(job)?;
     verify()?;
-    backup_finalize(&tmp.join(&entry.title_id)).map_err(|e| format!("{e:#}"))?;
+    // The emulator's saves are plain files: kept as they are.
+    if !crate::emulator_saves::is_emulator_save(entry) {
+        backup_finalize(&tmp.join(&entry.title_id)).map_err(|e| format!("{e:#}"))?;
+    }
     Ok(())
 }
 
@@ -443,11 +451,11 @@ pub(crate) fn title_running(host: &str, title_id: &str) -> Result<bool, String> 
         .any(|p| p.kind == "app" && p.title_id.eq_ignore_ascii_case(title_id)))
 }
 
-/// Every file of a save folder (two levels, as the saves list measures it) with its size and
-/// time, sorted: two equal fingerprints mean nothing was written between them. The console's
-/// own times, compared with each other only, so the two machines' clocks never matter.
-fn fingerprint(host: &str, path: &str) -> Result<Vec<(String, u64, i64)>, String> {
-    let mut out = Vec::new();
+/// Every file of a save folder with its size and time, sorted: two equal fingerprints mean
+/// nothing was written between them. The console's own times, compared with each other only, so
+/// the two machines' clocks never matter. A PS5 save is looked at two levels deep, as the saves
+/// list measures it; one of the Switch emulator as deep as its saves are measured.
+fn fingerprint(host: &str, entry: &SaveEntry) -> Result<Vec<(String, u64, i64)>, String> {
     let list = |p: &str| -> Result<Vec<Value>, String> {
         let v = get(&format!(
             "/api/ps5/list-dir?addr={}&path={}&offset=0&limit=512",
@@ -459,35 +467,48 @@ fn fingerprint(host: &str, path: &str) -> Result<Vec<(String, u64, i64)>, String
             .cloned()
             .unwrap_or_default())
     };
+    let depth = if crate::emulator_saves::is_emulator_save(entry) {
+        crate::emulator_saves::DEPTH
+    } else {
+        1
+    };
+    let mut out = Vec::new();
+    fingerprint_in(&list, &entry.path, "", depth, &mut out)?;
+    out.sort();
+    Ok(out)
+}
+
+/// [`fingerprint`] of the folder `path` (`rel` its place in the save), `depth` folders further.
+fn fingerprint_in(
+    list: &dyn Fn(&str) -> Result<Vec<Value>, String>,
+    path: &str,
+    rel: &str,
+    depth: u32,
+    out: &mut Vec<(String, u64, i64)>,
+) -> Result<(), String> {
     for e in list(path)? {
-        let name = e
-            .get("name")
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_string();
+        let name = e.get("name").and_then(Value::as_str).unwrap_or_default();
         if name.is_empty() || name == "." || name == ".." {
             continue;
         }
-        let size = e.get("size").and_then(Value::as_u64).unwrap_or(0);
-        let mtime = e.get("mtime").and_then(Value::as_i64).unwrap_or(0);
-        if e.get("kind").and_then(Value::as_str) == Some("dir") {
-            for c in list(&format!("{path}/{name}"))? {
-                let cn = c.get("name").and_then(Value::as_str).unwrap_or_default();
-                if cn.is_empty() || cn == "." || cn == ".." {
-                    continue;
-                }
-                out.push((
-                    format!("{name}/{cn}"),
-                    c.get("size").and_then(Value::as_u64).unwrap_or(0),
-                    c.get("mtime").and_then(Value::as_i64).unwrap_or(0),
-                ));
-            }
+        let here = format!("{rel}{name}");
+        if depth > 0 && e.get("kind").and_then(Value::as_str) == Some("dir") {
+            fingerprint_in(
+                list,
+                &format!("{path}/{name}"),
+                &format!("{here}/"),
+                depth - 1,
+                out,
+            )?;
         } else {
-            out.push((name, size, mtime));
+            out.push((
+                here,
+                e.get("size").and_then(Value::as_u64).unwrap_or(0),
+                e.get("mtime").and_then(Value::as_i64).unwrap_or(0),
+            ));
         }
     }
-    out.sort();
-    Ok(out)
+    Ok(())
 }
 
 /// How long a save must stay unwritten before a snapshot copies it, and how often to try.
@@ -515,13 +536,13 @@ pub fn snapshot(host: &str, title_id: &str) -> Result<Vec<PathBuf>, String> {
         let mut last = String::new();
         let mut done = false;
         for _ in 0..SNAP_TRIES {
-            let before = fingerprint(host, &entry.path)?;
+            let before = fingerprint(host, entry)?;
             std::thread::sleep(SNAP_QUIET);
-            if fingerprint(host, &entry.path)? != before {
+            if fingerprint(host, entry)? != before {
                 last = "the game was saving".into();
                 continue;
             }
-            let check = || match fingerprint(host, &entry.path) {
+            let check = || match fingerprint(host, entry) {
                 Ok(after) if after == before => Ok(()),
                 Ok(_) => Err("the game saved while it was copied".to_string()),
                 Err(e) => Err(e),
@@ -665,19 +686,30 @@ pub(crate) fn restore_zip(
     if !save_path.ends_with(&format!("/{title_id}")) {
         return Err(format!("{save_path} is not the save folder of {title_id}"));
     }
+    // A save of the Switch emulator is written by the emulator, and its files go back as they are.
+    let emulator = crate::emulator_saves::is_save_path(save_path);
+    let app = if emulator {
+        crate::emulator_saves::APP
+    } else {
+        title_id
+    };
     // The game writes its save while it runs: one put back underneath it is overwritten, or
     // worse, mixed with what the game writes next.
-    if title_running(host, title_id)? {
-        return Err(format!(
-            "{title_id} is running on the PS5. Close the game, then restore."
-        ));
+    if title_running(host, app)? {
+        return Err(if emulator {
+            format!("ProsperoEden ({app}) is running on the PS5. Close it, then restore.")
+        } else {
+            format!("{app} is running on the PS5. Close the game, then restore.")
+        });
     }
     let tmp = make_temp_dir(title_id)?;
     let tmp_s = tmp.to_string_lossy().into_owned();
     let result = (|| {
         // Check and unpack the backup before anything on the console changes.
         unzip_strict(zip, &tmp, title_id).map_err(|e| format!("unzip: {e:#}"))?;
-        restore_prepare(&tmp.join(title_id)).map_err(|e| format!("prepare: {e:#}"))?;
+        if !emulator {
+            restore_prepare(&tmp.join(title_id)).map_err(|e| format!("prepare: {e:#}"))?;
+        }
         put_in_place(
             host,
             title_id,
@@ -690,6 +722,32 @@ pub(crate) fn restore_zip(
     })();
     let _ = cleanup_temp_dir(&tmp_s);
     result
+}
+
+/// The most entries one `list-dir` page carries (the payload's own ceiling).
+const LIST_PAGE: u64 = 256;
+
+/// Every entry of a folder, page by page: `page(offset)` is one `list-dir` answer. A full page
+/// (or one cut short because its buffer filled) means there may be more; a short or empty one is
+/// the end.
+pub(crate) fn all_entries(
+    page: &dyn Fn(u64) -> Result<Value, String>,
+) -> Result<Vec<Value>, String> {
+    let mut out = Vec::new();
+    loop {
+        let v = page(out.len() as u64)?;
+        let entries = v
+            .get("entries")
+            .and_then(Value::as_array)
+            .cloned()
+            .unwrap_or_default();
+        let truncated = v.get("truncated").and_then(Value::as_bool).unwrap_or(false);
+        let n = entries.len() as u64;
+        out.extend(entries);
+        if n == 0 || (!truncated && n < LIST_PAGE) {
+            return Ok(out);
+        }
+    }
 }
 
 /// Replace what is in the console's save folder `save_path` with the files of the local folder
@@ -713,7 +771,11 @@ fn put_in_place(
         path: save_path.to_string(),
         size: 0,
         mtime: 0,
-        kind: String::new(),
+        kind: if crate::emulator_saves::is_save_path(save_path) {
+            crate::emulator_saves::KIND.into()
+        } else {
+            String::new()
+        },
     };
     if !s.dir.trim().is_empty() {
         back_up_one(host, &current, &s.dir, s.keep, tag, &|| Ok(()))
@@ -722,17 +784,15 @@ fn put_in_place(
         crate::save_backup_server::back_up_before_restore(host, &current)
             .map_err(|e| format!("could not back up the current save first: {e}"))?;
     }
-    let listing = get(&format!(
-        "/api/ps5/list-dir?addr={}&path={}&offset=0&limit=256",
-        enc(host),
-        enc(save_path)
-    ))?;
-    for e in listing
-        .get("entries")
-        .and_then(Value::as_array)
-        .cloned()
-        .unwrap_or_default()
-    {
+    // Every name first, then the deletes: a page asked for after a delete would skip some.
+    let names = all_entries(&|offset| {
+        get(&format!(
+            "/api/ps5/list-dir?addr={}&path={}&offset={offset}&limit={LIST_PAGE}",
+            enc(host),
+            enc(save_path)
+        ))
+    })?;
+    for e in names {
         let Some(name) = e.get("name").and_then(Value::as_str) else {
             continue;
         };
@@ -1543,6 +1603,91 @@ mod tests {
         let due = needing_backup("h", &saves, &Done::new(), 2000);
         assert_eq!(due.len(), 1);
         assert_eq!(due[0].title_id, "PPSA01234");
+    }
+
+    /// A save folder with more entries than one page holds is listed whole, so a restore
+    /// empties all of it, not only the first page.
+    #[test]
+    fn a_folder_is_listed_page_by_page() {
+        let names = |n: usize| -> Vec<Value> {
+            (0..n)
+                .map(|i| json!({ "name": format!("f{i}"), "kind": "file" }))
+                .collect()
+        };
+        let pager = |all: Vec<Value>, cut: Option<u64>| {
+            let asked = std::cell::RefCell::new(Vec::new());
+            let got = all_entries(&|offset| {
+                asked.borrow_mut().push(offset);
+                let size = cut.unwrap_or(LIST_PAGE);
+                let page: Vec<Value> = all
+                    .iter()
+                    .skip(offset as usize)
+                    .take(size as usize)
+                    .cloned()
+                    .collect();
+                let truncated = cut.is_some() && (offset as usize + page.len()) < all.len();
+                Ok(json!({ "entries": page, "truncated": truncated }))
+            })
+            .unwrap();
+            (got.len(), asked.into_inner())
+        };
+        // Fewer than a page: one look, as before.
+        assert_eq!(pager(names(3), None), (3, vec![0]));
+        // More than a page.
+        assert_eq!(pager(names(300), None), (300, vec![0, 256]));
+        // Exactly a page: the empty one after it ends the listing.
+        assert_eq!(pager(names(256), None), (256, vec![0, 256]));
+        // A page cut short by its buffer still asks for the rest.
+        assert_eq!(pager(names(10), Some(4)), (10, vec![0, 4, 8]));
+        // A failing page fails the whole listing.
+        assert!(all_entries(&|_| Err("gone".to_string())).is_err());
+    }
+
+    /// A PS5 save's fingerprint looks two levels down, as before; a Switch save's further, so a
+    /// file the emulator writes deep in it still counts as a change.
+    #[test]
+    fn a_fingerprint_looks_as_deep_as_asked() {
+        let fs: BTreeMap<&str, Value> = [
+            ("/s", json!([{"name": "a", "kind": "file", "size": 1, "mtime": 1}, {"name": "d", "kind": "dir"}])),
+            ("/s/d", json!([{"name": "b", "kind": "file", "size": 2, "mtime": 2}, {"name": "e", "kind": "dir", "size": 0, "mtime": 3}])),
+            ("/s/d/e", json!([{"name": "c", "kind": "file", "size": 4, "mtime": 4}])),
+        ]
+        .into();
+        let list = |p: &str| -> Result<Vec<Value>, String> {
+            fs.get(p)
+                .and_then(Value::as_array)
+                .cloned()
+                .ok_or_else(|| p.to_string())
+        };
+        let names = |depth| {
+            let mut out = Vec::new();
+            fingerprint_in(&list, "/s", "", depth, &mut out).unwrap();
+            out.into_iter().map(|(n, _, _)| n).collect::<Vec<_>>()
+        };
+        assert_eq!(names(1), ["a", "d/b", "d/e"]);
+        assert_eq!(names(4), ["a", "d/b", "d/e/c"]);
+    }
+
+    #[test]
+    fn the_switch_emulators_saves_are_backed_up_too() {
+        let mut sw = save(
+            "/data/prosperoeden/user/nand/user/save/0000000000000000/P/0100F2C0115B6000",
+            1000,
+        );
+        sw.title_id = "0100F2C0115B6000".into();
+        sw.kind = crate::emulator_saves::KIND.into();
+        let due = needing_backup("h", std::slice::from_ref(&sw), &Done::new(), 2000);
+        assert_eq!(due.len(), 1);
+        // Its backup is named, kept and listed as a PS5 save's is.
+        let name = format!(
+            "{}{}.zip",
+            auto_backup_stem(&sw.title_id, sw.user_id as u32),
+            stamp(0)
+        );
+        assert_eq!(
+            parse_backup_name(&sw.title_id, &name),
+            Some((sw.user_id as u32, "1970-01-01_000000".to_string()))
+        );
     }
 
     #[test]

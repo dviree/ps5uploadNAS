@@ -55,7 +55,9 @@ mod convert_source;
 mod disk_usage;
 mod download_relay;
 mod elfldr_guard;
+mod emulator_saves;
 mod engine_log;
+mod engine_update;
 mod event_journal;
 mod fakelibs_api;
 mod fan_boost;
@@ -11091,6 +11093,7 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
             post(save_backup_server::post_restore),
         )
         .route("/api/save-backup/list", get(save_backup::get_list))
+        .route("/api/save-backup/switch", get(emulator_saves::get_switch))
         .route("/api/save-backup/restore", post(save_backup::post_restore))
         .route(
             "/api/save-backup/snapshot",
@@ -11523,6 +11526,7 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
             post(transfer_dir_diff_preview_handler),
         )
         .route("/api/version", get(engine_version))
+        .route("/api/engine/update", get(engine_update::check))
         .route("/api/jobs", get(list_jobs))
         .route("/api/jobs/summaries", get(telemetry::summaries_handler))
         .route("/api/jobs/{id}/summary", get(telemetry::summary_handler))

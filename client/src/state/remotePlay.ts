@@ -178,6 +178,9 @@ export const rpInput = {
   touchPad: IDLE_PAD as PadState,
   /** A controller is being mapped: its presses are answers, not play. */
   mapping: false,
+  /** Remote Play's settings are open over the stream: keys, controllers and touch are the
+   *  settings', and the console gets an idle pad until they close. */
+  paused: false,
   /** The phone's latest motion reading, while motion controls are on. */
   motion: null as MotionReading | null,
 };
@@ -201,6 +204,7 @@ export function rpGamepads(): Array<Gamepad | null> {
 }
 
 function readPad(): PadState {
+  if (rpInput.paused) return IDLE_PAD;
   const s = useRemotePlayStore.getState();
   const controls = currentControls();
   // A macro's key plays the macro, not whatever button the key map gives it.
@@ -281,7 +285,12 @@ export const useRemotePlayStore = create<RpState>((set, get) => ({
           "warning",
           why === "slow"
             ? trStatic("rp_picture_off_slow", "Picture tools turned off: this device could not keep up.")
-            : trStatic("rp_picture_off_failed", "Picture tools turned off: this device has no WebGL 2."),
+            : why === "linux"
+              ? trStatic(
+                  "rp_picture_off_linux",
+                  "Sharpen and upscaling are off: with the Linux app's safe graphics, drawing them makes the stream lag. Chrome on Linux has them.",
+                )
+              : trStatic("rp_picture_off_failed", "Picture tools turned off: this device has no WebGL 2."),
         ),
       onHdrOff: (_why, started) => {
         // HDR did not work here: back to Auto so the next start is plain HEVC (the reason is in
