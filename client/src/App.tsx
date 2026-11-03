@@ -41,6 +41,8 @@ const SettingsScreen = lazyWithReload(() => import("./screens/Settings"));
 
 const MoreScreen = lazyWithReload(() => import("./screens/More"));
 const SendScreen = lazyWithReload(() => import("./screens/Send"));
+// This fork: every package in the server's folders, each with Install (More › PKG Installer).
+const PkgInstallerScreen = lazyWithReload(() => import("./screens/PkgInstaller"));
 // This fork: the Workshop is Convert Games, with My games, the converter (upstream's Workshop)
 // and Compatibility a tab each.
 const WorkshopScreen = lazyWithReload(() => import("./screens/Convert"));
@@ -280,6 +282,14 @@ function AppRoutes({ location }: { location: Location }) {
           element={
             <Suspense fallback={<ScreenLoader />}>
               <SendScreen />
+            </Suspense>
+          }
+        />
+        <Route
+          path="/pkg-installer"
+          element={
+            <Suspense fallback={<ScreenLoader />}>
+              <PkgInstallerScreen />
             </Suspense>
           }
         />

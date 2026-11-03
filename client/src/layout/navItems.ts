@@ -16,6 +16,7 @@ import type { LucideIcon } from "lucide-react";
 import {
   Cable,
   Send as SendIcon,
+  Package,
   Gamepad2,
   FolderTree,
   Cpu,
@@ -90,6 +91,13 @@ export const NAV_ITEMS: NavItem[] = [
     key: "send_title_v2",
     fallback: "Upload & Install",
     icon: SendIcon,
+  },
+  // This fork: every package in the server's folders (NAS shares in Docker), each with Install.
+  {
+    to: "/pkg-installer",
+    key: "pkginst.title",
+    fallback: "PKG Installer",
+    icon: Package,
   },
   // Everything done to a game on this computer: convert it (package, image, folder), look
   // inside an image or package and edit it, or open an image as a drive. Offered everywhere:

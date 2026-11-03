@@ -87,7 +87,17 @@
       "lz4mine.stage_verify",
       "lz4mine.stage_write",
       "lz4mine.subtitle",
-      "lz4mine.tab"
+      "lz4mine.tab",
+      "pkginst.count",
+      "pkginst.install",
+      "pkginst.no_ps5",
+      "pkginst.none",
+      "pkginst.none_body",
+      "pkginst.rescan",
+      "pkginst.scanning",
+      "pkginst.search",
+      "pkginst.subtitle",
+      "pkginst.title"
     ],
     "stale": [],
     "untranslated": [
@@ -97,8 +107,6 @@
       "cw_settings_app_name",
       "ffpkg_inspect_sce_sys",
       "helper_copy_place_pldmgr",
-      "play_title",
-      "rp_pip_title",
       "smp_meta_json"
     ]
   },
@@ -190,7 +198,17 @@
       "lz4mine.stage_verify",
       "lz4mine.stage_write",
       "lz4mine.subtitle",
-      "lz4mine.tab"
+      "lz4mine.tab",
+      "pkginst.count",
+      "pkginst.install",
+      "pkginst.no_ps5",
+      "pkginst.none",
+      "pkginst.none_body",
+      "pkginst.rescan",
+      "pkginst.scanning",
+      "pkginst.search",
+      "pkginst.subtitle",
+      "pkginst.title"
     ],
     "stale": [],
     "untranslated": [
@@ -200,9 +218,7 @@
       "cw_settings_app_name",
       "ffpkg_inspect_sce_sys",
       "helper_copy_place_pldmgr",
-      "play_title",
       "processes_pid",
-      "rp_pip_title",
       "screenshots_png_hdr",
       "screenshots_png_sdr",
       "smp_meta_json"
@@ -296,7 +312,17 @@
       "lz4mine.stage_verify",
       "lz4mine.stage_write",
       "lz4mine.subtitle",
-      "lz4mine.tab"
+      "lz4mine.tab",
+      "pkginst.count",
+      "pkginst.install",
+      "pkginst.no_ps5",
+      "pkginst.none",
+      "pkginst.none_body",
+      "pkginst.rescan",
+      "pkginst.scanning",
+      "pkginst.search",
+      "pkginst.subtitle",
+      "pkginst.title"
     ],
     "stale": [],
     "untranslated": [
@@ -310,12 +336,10 @@
       "game_hub_addons",
       "health_cat_remoteplay",
       "helper_copy_place_pldmgr",
-      "play_title",
       "power_wake_signin_rpkey",
       "processes_pid",
       "remotePlay_slot",
       "remote_play",
-      "rp_pip_title",
       "smp_meta_json"
     ]
   },
@@ -407,7 +431,17 @@
       "lz4mine.stage_verify",
       "lz4mine.stage_write",
       "lz4mine.subtitle",
-      "lz4mine.tab"
+      "lz4mine.tab",
+      "pkginst.count",
+      "pkginst.install",
+      "pkginst.no_ps5",
+      "pkginst.none",
+      "pkginst.none_body",
+      "pkginst.rescan",
+      "pkginst.scanning",
+      "pkginst.search",
+      "pkginst.subtitle",
+      "pkginst.title"
     ],
     "stale": [],
     "untranslated": [
@@ -418,11 +452,9 @@
       "ffpkg_inspect_sce_sys",
       "health_cat_remoteplay",
       "helper_copy_place_pldmgr",
-      "play_title",
       "power_wake_signin_rpkey",
       "processes_pid",
       "remote_play",
-      "rp_pip_title",
       "smp_meta_json"
     ]
   },
@@ -514,7 +546,17 @@
       "lz4mine.stage_verify",
       "lz4mine.stage_write",
       "lz4mine.subtitle",
-      "lz4mine.tab"
+      "lz4mine.tab",
+      "pkginst.count",
+      "pkginst.install",
+      "pkginst.no_ps5",
+      "pkginst.none",
+      "pkginst.none_body",
+      "pkginst.rescan",
+      "pkginst.scanning",
+      "pkginst.search",
+      "pkginst.subtitle",
+      "pkginst.title"
     ],
     "stale": [],
     "untranslated": [
@@ -524,9 +566,7 @@
       "cw_settings_app_name",
       "health_cat_remoteplay",
       "helper_copy_place_pldmgr",
-      "play_title",
-      "remote_play",
-      "rp_pip_title"
+      "remote_play"
     ]
   },
   "fr": {
@@ -617,7 +657,17 @@
       "lz4mine.stage_verify",
       "lz4mine.stage_write",
       "lz4mine.subtitle",
-      "lz4mine.tab"
+      "lz4mine.tab",
+      "pkginst.count",
+      "pkginst.install",
+      "pkginst.no_ps5",
+      "pkginst.none",
+      "pkginst.none_body",
+      "pkginst.rescan",
+      "pkginst.scanning",
+      "pkginst.search",
+      "pkginst.subtitle",
+      "pkginst.title"
     ],
     "stale": [],
     "untranslated": [
@@ -722,7 +772,17 @@
       "lz4mine.stage_verify",
       "lz4mine.stage_write",
       "lz4mine.subtitle",
-      "lz4mine.tab"
+      "lz4mine.tab",
+      "pkginst.count",
+      "pkginst.install",
+      "pkginst.no_ps5",
+      "pkginst.none",
+      "pkginst.none_body",
+      "pkginst.rescan",
+      "pkginst.scanning",
+      "pkginst.search",
+      "pkginst.subtitle",
+      "pkginst.title"
     ],
     "stale": [],
     "untranslated": [
@@ -732,9 +792,7 @@
       "cw_settings_app_name",
       "ffpkg_inspect_sce_sys",
       "helper_copy_place_pldmgr",
-      "play_title",
       "processes_pid",
-      "rp_pip_title",
       "screenshots_png_hdr",
       "screenshots_png_sdr",
       "smp_meta_json"
@@ -828,7 +886,17 @@
       "lz4mine.stage_verify",
       "lz4mine.stage_write",
       "lz4mine.subtitle",
-      "lz4mine.tab"
+      "lz4mine.tab",
+      "pkginst.count",
+      "pkginst.install",
+      "pkginst.no_ps5",
+      "pkginst.none",
+      "pkginst.none_body",
+      "pkginst.rescan",
+      "pkginst.scanning",
+      "pkginst.search",
+      "pkginst.subtitle",
+      "pkginst.title"
     ],
     "stale": [],
     "untranslated": [
@@ -840,11 +908,9 @@
       "health_cat_remoteplay",
       "helper_copy_place_pldmgr",
       "pkglib.auth.fake",
-      "play_title",
       "power_wake_signin_rpkey",
       "processes_pid",
       "remote_play",
-      "rp_pip_title",
       "screenshots_png_hdr",
       "screenshots_png_sdr",
       "smp_meta_json"
@@ -938,7 +1004,17 @@
       "lz4mine.stage_verify",
       "lz4mine.stage_write",
       "lz4mine.subtitle",
-      "lz4mine.tab"
+      "lz4mine.tab",
+      "pkginst.count",
+      "pkginst.install",
+      "pkginst.no_ps5",
+      "pkginst.none",
+      "pkginst.none_body",
+      "pkginst.rescan",
+      "pkginst.scanning",
+      "pkginst.search",
+      "pkginst.subtitle",
+      "pkginst.title"
     ],
     "stale": [],
     "untranslated": [
@@ -950,11 +1026,9 @@
       "fs_item_one",
       "health_cat_remoteplay",
       "helper_copy_place_pldmgr",
-      "play_title",
       "processes_pid",
       "remotePlay_slot",
       "remote_play",
-      "rp_pip_title",
       "smp_meta_json",
       "status_helper_version"
     ]
@@ -1047,7 +1121,17 @@
       "lz4mine.stage_verify",
       "lz4mine.stage_write",
       "lz4mine.subtitle",
-      "lz4mine.tab"
+      "lz4mine.tab",
+      "pkginst.count",
+      "pkginst.install",
+      "pkginst.no_ps5",
+      "pkginst.none",
+      "pkginst.none_body",
+      "pkginst.rescan",
+      "pkginst.scanning",
+      "pkginst.search",
+      "pkginst.subtitle",
+      "pkginst.title"
     ],
     "stale": [],
     "untranslated": [
@@ -1059,12 +1143,10 @@
       "health_cat_remoteplay",
       "helper_copy_place_pldmgr",
       "hw_cpu_core_clock",
-      "play_title",
       "processes_pid",
       "remotePlay_slot",
       "remote_play",
       "rp_pip",
-      "rp_pip_title",
       "shortcuts_sec_filesystem",
       "smp_meta_json",
       "status_helper_version"
@@ -1158,7 +1240,17 @@
       "lz4mine.stage_verify",
       "lz4mine.stage_write",
       "lz4mine.subtitle",
-      "lz4mine.tab"
+      "lz4mine.tab",
+      "pkginst.count",
+      "pkginst.install",
+      "pkginst.no_ps5",
+      "pkginst.none",
+      "pkginst.none_body",
+      "pkginst.rescan",
+      "pkginst.scanning",
+      "pkginst.search",
+      "pkginst.subtitle",
+      "pkginst.title"
     ],
     "stale": [],
     "untranslated": [
@@ -1261,7 +1353,17 @@
       "lz4mine.stage_verify",
       "lz4mine.stage_write",
       "lz4mine.subtitle",
-      "lz4mine.tab"
+      "lz4mine.tab",
+      "pkginst.count",
+      "pkginst.install",
+      "pkginst.no_ps5",
+      "pkginst.none",
+      "pkginst.none_body",
+      "pkginst.rescan",
+      "pkginst.scanning",
+      "pkginst.search",
+      "pkginst.subtitle",
+      "pkginst.title"
     ],
     "stale": [],
     "untranslated": [
@@ -1365,7 +1467,17 @@
       "lz4mine.stage_verify",
       "lz4mine.stage_write",
       "lz4mine.subtitle",
-      "lz4mine.tab"
+      "lz4mine.tab",
+      "pkginst.count",
+      "pkginst.install",
+      "pkginst.no_ps5",
+      "pkginst.none",
+      "pkginst.none_body",
+      "pkginst.rescan",
+      "pkginst.scanning",
+      "pkginst.search",
+      "pkginst.subtitle",
+      "pkginst.title"
     ],
     "stale": [],
     "untranslated": [
@@ -1376,11 +1488,9 @@
       "ffpkg_inspect_sce_sys",
       "health_cat_remoteplay",
       "helper_copy_place_pldmgr",
-      "play_title",
       "power_wake_signin_rpkey",
       "processes_pid",
       "remote_play",
-      "rp_pip_title",
       "smp_meta_json"
     ]
   },
@@ -1472,7 +1582,17 @@
       "lz4mine.stage_verify",
       "lz4mine.stage_write",
       "lz4mine.subtitle",
-      "lz4mine.tab"
+      "lz4mine.tab",
+      "pkginst.count",
+      "pkginst.install",
+      "pkginst.no_ps5",
+      "pkginst.none",
+      "pkginst.none_body",
+      "pkginst.rescan",
+      "pkginst.scanning",
+      "pkginst.search",
+      "pkginst.subtitle",
+      "pkginst.title"
     ],
     "stale": [],
     "untranslated": [
@@ -1579,7 +1699,17 @@
       "lz4mine.stage_verify",
       "lz4mine.stage_write",
       "lz4mine.subtitle",
-      "lz4mine.tab"
+      "lz4mine.tab",
+      "pkginst.count",
+      "pkginst.install",
+      "pkginst.no_ps5",
+      "pkginst.none",
+      "pkginst.none_body",
+      "pkginst.rescan",
+      "pkginst.scanning",
+      "pkginst.search",
+      "pkginst.subtitle",
+      "pkginst.title"
     ],
     "stale": [],
     "untranslated": [
@@ -1590,11 +1720,9 @@
       "ffpkg_inspect_sce_sys",
       "health_cat_remoteplay",
       "helper_copy_place_pldmgr",
-      "play_title",
       "power_wake_signin_rpkey",
       "processes_pid",
       "remote_play",
-      "rp_pip_title",
       "screenshots_png_hdr",
       "screenshots_png_sdr",
       "smp_meta_json"
@@ -1688,7 +1816,17 @@
       "lz4mine.stage_verify",
       "lz4mine.stage_write",
       "lz4mine.subtitle",
-      "lz4mine.tab"
+      "lz4mine.tab",
+      "pkginst.count",
+      "pkginst.install",
+      "pkginst.no_ps5",
+      "pkginst.none",
+      "pkginst.none_body",
+      "pkginst.rescan",
+      "pkginst.scanning",
+      "pkginst.search",
+      "pkginst.subtitle",
+      "pkginst.title"
     ],
     "stale": [],
     "untranslated": [
@@ -1699,10 +1837,8 @@
       "ffpkg_inspect_sce_sys",
       "health_cat_remoteplay",
       "helper_copy_place_pldmgr",
-      "play_title",
       "processes_pid",
       "remote_play",
-      "rp_pip_title",
       "smp_meta_json"
     ]
   },
@@ -1794,7 +1930,17 @@
       "lz4mine.stage_verify",
       "lz4mine.stage_write",
       "lz4mine.subtitle",
-      "lz4mine.tab"
+      "lz4mine.tab",
+      "pkginst.count",
+      "pkginst.install",
+      "pkginst.no_ps5",
+      "pkginst.none",
+      "pkginst.none_body",
+      "pkginst.rescan",
+      "pkginst.scanning",
+      "pkginst.search",
+      "pkginst.subtitle",
+      "pkginst.title"
     ],
     "stale": [],
     "untranslated": [
@@ -1805,11 +1951,9 @@
       "ffpkg_inspect_sce_sys",
       "health_cat_remoteplay",
       "helper_copy_place_pldmgr",
-      "play_title",
       "power_wake_signin_rpkey",
       "processes_pid",
       "remote_play",
-      "rp_pip_title",
       "screenshots_png_hdr",
       "screenshots_png_sdr",
       "smp_meta_json"
@@ -1903,7 +2047,17 @@
       "lz4mine.stage_verify",
       "lz4mine.stage_write",
       "lz4mine.subtitle",
-      "lz4mine.tab"
+      "lz4mine.tab",
+      "pkginst.count",
+      "pkginst.install",
+      "pkginst.no_ps5",
+      "pkginst.none",
+      "pkginst.none_body",
+      "pkginst.rescan",
+      "pkginst.scanning",
+      "pkginst.search",
+      "pkginst.subtitle",
+      "pkginst.title"
     ],
     "stale": [],
     "untranslated": [
@@ -1914,11 +2068,9 @@
       "ffpkg_inspect_sce_sys",
       "health_cat_remoteplay",
       "helper_copy_place_pldmgr",
-      "play_title",
       "power_wake_signin_rpkey",
       "processes_pid",
       "remote_play",
-      "rp_pip_title",
       "smp_meta_json"
     ]
   },
@@ -2010,7 +2162,17 @@
       "lz4mine.stage_verify",
       "lz4mine.stage_write",
       "lz4mine.subtitle",
-      "lz4mine.tab"
+      "lz4mine.tab",
+      "pkginst.count",
+      "pkginst.install",
+      "pkginst.no_ps5",
+      "pkginst.none",
+      "pkginst.none_body",
+      "pkginst.rescan",
+      "pkginst.scanning",
+      "pkginst.search",
+      "pkginst.subtitle",
+      "pkginst.title"
     ],
     "stale": [],
     "untranslated": [
@@ -2113,7 +2275,17 @@
       "lz4mine.stage_verify",
       "lz4mine.stage_write",
       "lz4mine.subtitle",
-      "lz4mine.tab"
+      "lz4mine.tab",
+      "pkginst.count",
+      "pkginst.install",
+      "pkginst.no_ps5",
+      "pkginst.none",
+      "pkginst.none_body",
+      "pkginst.rescan",
+      "pkginst.scanning",
+      "pkginst.search",
+      "pkginst.subtitle",
+      "pkginst.title"
     ],
     "stale": [],
     "untranslated": [
