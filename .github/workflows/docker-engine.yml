@@ -253,9 +253,20 @@ jobs:
             return 1
           }
           apt_retry update
-          # llvm-22 is not in Ubuntu 24.04's default repos.
-          curl -fsSL --retry 3 --retry-delay 5 https://apt.llvm.org/llvm.sh | sudo bash -s -- 22
-          apt_retry install -y clang-22 llvm-22-dev lld-22 unzip python3
+          # llvm-22 is not in Ubuntu 24.04's default repos. This fork: when apt.llvm.org cannot
+          # be reached (it was down for hours), build with Ubuntu's own LLVM 18, as ps5-lz4
+          # builds its payload: the PS5 payload SDK v0.45 supports LLVM 16 to 23.
+          if curl -fsSL --retry 3 --retry-delay 5 https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh \
+             && sudo bash /tmp/llvm.sh 22 \
+             && apt_retry install -y clang-22 llvm-22-dev lld-22 unzip python3; then
+            echo "LLVM_CONFIG=/usr/bin/llvm-config-22" >> "$GITHUB_ENV"
+          else
+            echo "::warning::apt.llvm.org unreachable: building the payload with Ubuntu's LLVM 18"
+            sudo rm -f /etc/apt/sources.list.d/*llvm* /tmp/llvm.sh
+            apt_retry update
+            apt_retry install -y clang-18 llvm-18-dev lld-18 unzip python3
+            echo "LLVM_CONFIG=/usr/bin/llvm-config-18" >> "$GITHUB_ENV"
+          fi
 
       - name: Install pinned PS5 Payload SDK
         run: sudo env PS5_SDK_INSTALL_DIR=/opt/ps5-payload-sdk bash scripts/install-ps5-sdk.sh
@@ -263,9 +274,8 @@ jobs:
       - name: Build payload ELFs
         env:
           PS5_PAYLOAD_SDK: /opt/ps5-payload-sdk
-          # SDK v0.42's prospero-llvm-config candidate search maxes at 21,
-          # so point it at the CI-installed LLVM 22 explicitly.
-          LLVM_CONFIG: /usr/bin/llvm-config-22
+          # LLVM_CONFIG comes from the toolchain step (LLVM 22, or Ubuntu's 18 when
+          # apt.llvm.org is down): an env here would override it.
         run: make payload
 
       - name: Sanity-check ELF shape
