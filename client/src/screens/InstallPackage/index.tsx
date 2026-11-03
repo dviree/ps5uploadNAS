@@ -722,6 +722,9 @@ export default function InstallPackageScreen({
   // in an effect (not during render) per the rules-of-hooks ref rule.
   const uploadRef = useRef<(p: string) => void>(() => {});
   const dropRef = useRef<(p: string) => void>(() => {});
+  // Several packages handed over at once (PKG Installer's Install all): one queue run, with the
+  // list confirmed first, as picking several.
+  const dropManyRef = useRef<(paths: string[]) => void>(() => {});
   const recentPkgDrops = useRef(new Map<string, number>());
   useEffect(() => {
     // The window-level drop listener is registered outside JSX, so the
@@ -746,6 +749,9 @@ export default function InstallPackageScreen({
       ) {
         void runStreamInstall(p, p.split(/[\\/]/).pop() ?? p);
       }
+    };
+    dropManyRef.current = (paths: string[]) => {
+      if (hostReady && payloadStatus === "up") void queueStreamPaths(paths);
     };
   });
 
@@ -831,11 +837,16 @@ export default function InstallPackageScreen({
   useEffect(() => {
     const state = location.state as {
       droppedPath?: string;
+      droppedPaths?: string[];
       sharedLink?: string;
     } | null;
     const dropped = state?.droppedPath;
     if (dropped) {
       dropRef.current(dropped);
+      window.history.replaceState({}, "");
+    }
+    if (state?.droppedPaths?.length) {
+      dropManyRef.current(state.droppedPaths);
       window.history.replaceState({}, "");
     }
     if (state?.sharedLink) {
