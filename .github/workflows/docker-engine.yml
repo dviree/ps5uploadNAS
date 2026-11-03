@@ -233,6 +233,9 @@ jobs:
 
       - name: Install payload toolchain
         timeout-minutes: 12
+        env:
+          # gh reads LLVM's releases when apt.llvm.org is down (see below).
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           # apt has no default network timeout, so a stalled mirror hangs
@@ -254,20 +257,32 @@ jobs:
           }
           apt_retry update
           # llvm-22 is not in Ubuntu 24.04's default repos. This fork: when apt.llvm.org cannot
-          # be reached (it was down for hours), build with Ubuntu's own LLVM 20 (noble-updates),
-          # as ps5-lz4 builds its payload with Ubuntu's LLVM: the PS5 payload SDK v0.45 supports
-          # LLVM 16 to 23. Not 18: its PS5 driver leaves -nostartfiles unused, which -Werror
-          # turns into an error in the installer daemon's build.
+          # be reached (it was down for hours), take LLVM 22 from LLVM's own GitHub release
+          # instead (github.com is always reachable here). Not Ubuntu's LLVM: 18's PS5 driver
+          # leaves -nostartfiles unused (an error under -Werror) and 20's headers lack the AVX
+          # AES intrinsics 7-Zip's AesOpt.c uses, so the payload needs 22.
           if curl -fsSL --retry 3 --retry-delay 5 https://apt.llvm.org/llvm.sh -o /tmp/llvm.sh \
              && sudo bash /tmp/llvm.sh 22 \
              && apt_retry install -y clang-22 llvm-22-dev lld-22 unzip python3; then
             echo "LLVM_CONFIG=/usr/bin/llvm-config-22" >> "$GITHUB_ENV"
           else
-            echo "::warning::apt.llvm.org unreachable: building the payload with Ubuntu's LLVM 20"
+            echo "::warning::apt.llvm.org unreachable: using LLVM 22 from LLVM's GitHub release"
             sudo rm -f /etc/apt/sources.list.d/*llvm* /tmp/llvm.sh
             apt_retry update
-            apt_retry install -y clang-20 llvm-20-dev lld-20 unzip python3
-            echo "LLVM_CONFIG=/usr/bin/llvm-config-20" >> "$GITHUB_ENV"
+            apt_retry install -y unzip python3 xz-utils
+            tag=$(gh release list -R llvm/llvm-project --limit 60 --json tagName,isPrerelease \
+              --jq '[.[] | select(.tagName | test("^llvmorg-22\\.[0-9]+\\.[0-9]+$")) | select(.isPrerelease | not) | .tagName][0] // empty')
+            [ -n "$tag" ] || tag=$(gh release list -R llvm/llvm-project --limit 60 --json tagName \
+              --jq '[.[] | select(.tagName | test("^llvmorg-22\\.")) | .tagName][0] // empty')
+            [ -n "$tag" ] || { echo "no LLVM 22 release found" >&2; exit 1; }
+            echo "LLVM release: $tag"
+            mkdir -p /tmp/llvm-dl
+            gh release download "$tag" -R llvm/llvm-project -D /tmp/llvm-dl --pattern 'LLVM-*-Linux-X64.tar.xz'
+            sudo mkdir -p /opt/llvm-22
+            sudo tar -xJf /tmp/llvm-dl/LLVM-*-Linux-X64.tar.xz -C /opt/llvm-22 --strip-components=1
+            rm -rf /tmp/llvm-dl
+            /opt/llvm-22/bin/llvm-config --version
+            echo "LLVM_CONFIG=/opt/llvm-22/bin/llvm-config" >> "$GITHUB_ENV"
           fi
 
       - name: Install pinned PS5 Payload SDK
@@ -276,8 +291,8 @@ jobs:
       - name: Build payload ELFs
         env:
           PS5_PAYLOAD_SDK: /opt/ps5-payload-sdk
-          # LLVM_CONFIG comes from the toolchain step (LLVM 22, or Ubuntu's 20 when
-          # apt.llvm.org is down): an env here would override it.
+          # LLVM_CONFIG comes from the toolchain step (LLVM 22, from apt.llvm.org or from
+          # LLVM's GitHub release when that is down): an env here would override it.
         run: make payload
 
       - name: Sanity-check ELF shape
