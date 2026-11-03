@@ -4,6 +4,403 @@ What's new in ps5upload, written for humans.
 
 ---
 
+## 10.7.6
+
+- **Saved cheats and patches are applied the moment a game starts (For #627).** Some patches only
+  work if they are in place before the game reads the setting they change, which it does once in
+  its first seconds: Red Dead Redemption 2's "Unlock FPS" patch is one. The helper used to look
+  for a running game every 3 seconds, so it wrote such a patch 3 to 9 seconds in: it read back as
+  applied and did nothing. Now the helper hears the game start and, for its first minute, tries
+  the cheats still waiting for the game's code every few milliseconds, so they land as soon as the
+  code is there. With the engine on and no game running, it also looks for a game every half
+  second, in case it missed a start.
+- **A cheat that landed late says so.** When a saved cheat was applied more than about 3 seconds
+  after the game started, or after a start the helper didn't see (it was sent while the game was
+  already running, or the engine was turned on mid-game), the line under its switch says "Applied
+  N s after the game started — if it has no effect, restart the game with it on." In the apps and
+  on Minion's Cheats page.
+- **Timings in the helper's log**, for a bug report: when the game started, when its eboot.bin
+  loaded, each cheat's waits, and "applied 180 ms after launch (code ready at 150 ms)".
+- **A PS4 game's DLC is no longer listed as a second copy of the game.** For #638. Some DLC
+  packages, mostly the small ones that only unlock something already in the game, have no
+  data of their own, and the library did not recognise that kind of package, so it counted it
+  as the game itself and marked the game as a duplicate. These are now recognised as DLC, a
+  package's own "this is DLC" note is believed even when its header says otherwise, and two
+  items only count as the same game stored twice when they are the same release (the same
+  content ID): a game and its DLC, or two DLCs, never are. Libraries are re-read once, so
+  games marked as duplicates by mistake are cleared on the next scan.
+- **Remote Play keeps showing while you use other screens, and over other apps on Android (For
+  #637).** Leave Play while a stream runs and the picture stays in a small mini player in a
+  corner of the app, on the desktop, phone and tablet apps and in the browser: drag it to any
+  corner (remembered), tap it to go back, mute it, or hide it with ×. The controller and keyboard
+  still play only while Play is in front, so they work the app's menus elsewhere. In the Android
+  app, going to the home screen while you play shrinks the stream into Android's
+  picture-in-picture window, which floats over other apps with its sound; tap it to come back.
+  Both can be turned off in Play › Settings › Session.
+- **Remote Play sound the browser held back starts on the next click or key.** A session that
+  did not start right after a click (a launch that first woke the console or started the game)
+  could play no sound at all, the stats reading "sound 0 ms": the browser holds sound back
+  until you click. Now any click or key in the app starts it, also when the browser stops it
+  later, and the picture shows a **Turn on sound** button meanwhile.
+
+## 10.7.5
+
+- **Remote Play sound no longer turns to static after the app has been open a long time.** In
+  the desktop and phone apps the game's sound was played 10 ms at a time from the app's page
+  itself (its sound player could not load under the apps' security settings), so anything that
+  kept the page busy broke it up into crackles, and restarting PS5Upload only helped for a
+  while. The sound now plays from its own buffer, decoded in the background, and stays clean
+  while the page is busy.
+- **Each Remote Play session gives back its graphics memory when it ends.** Every session kept
+  its picture's graphics context (and its sound player) until PS5Upload was restarted, so an app
+  left open through many sessions held more and more of them.
+- **Smoother sound when the PS5 and this computer keep slightly different time.** Instead of
+  skipping single samples to catch up, the sound now plays a hair faster or slower (under 0.5 %,
+  too little to hear) until its buffer is back to size. It also starts at the buffer size you set
+  instead of catching up for the first seconds.
+- **Picture in picture as a video stops copying the picture when it closes.**
+- **Sound in the stats and the logs.** With stats on, the line on the picture says how many times
+  the sound ran dry. The line logged at the end of a session now says how the sound was played,
+  how full its buffer was on average and at its lowest, how long its speed was corrected, and how
+  many lost frames were covered: handy in a bug report.
+
+## 10.7.4
+
+- **Updates install when you quit, with no click (For #611).** On Windows, macOS and the Linux
+  AppImage, a new release is now downloaded in the background (never while something is
+  transferring) and installed as you quit PS5Upload. The update bar then just says "v10.7.4 ready ·
+  installs when you quit", with **Restart now** if you'd rather not wait. This needs **Check for
+  updates automatically** and **Install updates when I quit** (both on unless you turned them off)
+  in Settings › Updates. A `.deb` / `.rpm` install, which asks for your password, still waits for you.
+- **Fewer update notices.** Releases sometimes come several in a day; the notification center now
+  says "update available" at most once a day. A newer release inside that day only updates the
+  update bar and the sidebar dot.
+- **"What's new" covers every version you skipped.** Going from 10.7.1 straight to 10.7.3 now shows
+  the notes of 10.7.2 too, newest first, with a link to the full changelog when there are many.
+- **Closed to the tray with an update waiting.** With "close to tray" on, closing the window doesn't
+  quit, so the update doesn't install yet. The first time that happens for a release, PS5Upload
+  tells you to quit from the tray icon (or choose Restart now) to install it.
+- **Open update log (For #611).** Settings › Updates has a button that opens the updater's own log,
+  which now keeps what the last installs did, including the ones that worked. Bug reports include it.
+
+## 10.7.3
+
+- **Pause a conversion, and the queue with it (For #631).** Workshop's ④ now has **Pause** beside
+  **Cancel** while a game is being made: a package, a game image (`.ffpkg`, `.ffpfs`, `.exfat`), a
+  compressed `.ffpfsc`, LZ4 asset packs, a game folder, or an archive being unpacked. Paused, the
+  work stops at its next chunk and uses no processor or disk until you press **Resume**; **Cancel**
+  still works while paused. The queue waits for it (⑤ says **Paused — the queue waits**), and the
+  speed and time left leave the paused time out. Over the API: `POST /api/jobs/{id}/pause` and
+  `/resume`.
+- **Use less of this computer (For #632).** One switch, in Settings › Workshop and under ④: while it
+  is on, converting uses about half your processor and runs at low priority, which also puts
+  its disk reads and writes behind other apps'. Your computer stays quick for other things; the
+  conversion takes longer. It applies to a conversion that is already running, and it is kept by the
+  engine, so the web UI and Docker follow it too. This is used instead of a "use N% of my CPU" slider,
+  which Windows, macOS and Linux can't hold to the same way.
+- **Load a save file: clearer, and more files work (For #633).** Picking a save *backup* (the zip that
+  sits beside a save file and looks alike) said only "this is not a shared save (no manifest)"; it
+  now says it is a backup, which only works on the PS5 that made it, and how to make a save file to
+  move a save to another PS5. The error also names the file you picked. A save file that was
+  unpacked and zipped again still loads: by its parts' folder names when its manifest was lost, and
+  with the extra folder Windows' "Send to › Compressed folder" puts around it.
+- **SMB: a share typed with folders now connects.** `Media/Games/PS5` (or a pasted
+  `\\nas\Media\Games`) in **Share** gave `STATUS_BAD_NETWORK_NAME`: the server only knows the share's
+  own name. Now the first name is the share and the rest is where browsing starts, for new and
+  already saved connections, and a wrong share name gets a plain explanation.
+
+## 10.7.2
+
+- **Switched-on cheats now apply once the game is ready, and stay applied (For #627).** The helper
+  used to try a game's saved cheats once, right when the game started. When the game's code was not
+  loaded yet, that try failed quietly and nothing tried again, so a switch could read On while
+  nothing was applied, until you switched it Off and On. Now each switched-on cheat is tried again
+  every few seconds until the game is ready for it, checked after it is written, and put back if the
+  game undoes it (a loading screen or coming back from rest mode; at most 5 times in 2 minutes).
+  Cheats that don't match the game version, or that the game changed itself, are left alone; a game
+  patch whose code isn't found gives up after about a minute. The crash guard now also watches a
+  cheat that only applies later in the game, and paused games and the engine switch work as before.
+  A cheat its file switches on by itself now stays Off once you turn it off.
+- **See what actually happened to each cheat.** Under each switched-on cheat (Cheats, the game's
+  page, Play's Game panel and Minion › Cheats) a short line says **Applied ✓**, **Waiting for the
+  game to load…**, **Couldn't apply:** and why, or **The game changed this; not touched**. The TV
+  shows one notification when the game's cheats are applied and one for each cheat that couldn't
+  be, with the reason, and the helper's log says why too.
+- Thanks to jass4l for the very detailed report, down to the exact patch, the code path and the logs
+  from the console.
+
+## 10.7.1
+
+- **Pairing with the PIN shown on the PS5 tries again by itself (#609).** On a PS5 Pro with FW
+  11.60 the console dropped the connection on the first try (sometimes showing CE-110024-8
+  "Something went wrong") and accepted the same PIN on the next. The app now retries a dropped
+  connection twice, two seconds apart; a refused PIN is never retried. If it still fails, the
+  message says to press Pair again, since the same PIN works while the PS5 shows it.
+- Tested by the #609 reporter on FW 11.60: native keyboard & mouse devices start and stop
+  cleanly there too.
+
+## 10.7.0
+
+- **Add games to Workshop's queue while one converts (For #621).** While a game is being made,
+  games picked or dropped under **① Game**, picked **On the PS5…** or sent with **Convert first**
+  now go into **⑤ Queue** (dropping and the PS5 picker did nothing before) and are made after it,
+  one at a time and in order, without pressing Start. A dropped folder of games adds each game in
+  it, and the game being made is not added again. The first queued game starts once you put the
+  finished game's result away (**Convert another game**), so its Install, Launch and Delete
+  buttons stay until then; after a build that failed, the queue waits for you. This follows
+  **Start the queue when you add something**; with it off they wait for **Convert N queued**.
+  Installs still go on to Upload & Install's queue as before.
+- **Rebuild AMPR index (For #621).** A backported game that reads its files through libSceAmpr
+  needs an `ampr_emu.index` that matches its files, or it can crash or stop at start. Workshop's
+  new **Rebuild AMPR index** makes it again from the game's files, without converting: a folder on
+  this computer or on the PS5 gets it in place (the old one kept once as `ampr_emu.index.bak`,
+  and you are told how many files it lists and whether the old one differed); an `.exfat`,
+  `.ffpkg` or `.ffpfs` image gets an edited copy with it (the image is not changed); a `.ffpfsc`
+  is compressed and read-only, so it offers to convert it again (rebuilding the same image again
+  makes `-edited (2)`). A folder on the PS5 that is a mounted image is refused, so the image is
+  never changed by it. It is only offered for a game that uses libSceAmpr. Thanks to
+  Constantine-HD for both ideas.
+
+## 10.6.0
+
+- **Remote Play Unlock (earthonion) in the payload catalogue.** Lets Remote Play stream games
+  and apps that forbid it (refused at start, a "can't be streamed" notice, or a black picture) by
+  patching the PS5's Remote Play service in memory. Firmware 3.20, 10.01, 12.00, 12.70 and 13.60;
+  load it again after every reboot, or add it to your autoloader. Payloads whose only release is a
+  pre-release (like its rolling `latest`) now download too.
+- **Save Data is laid out around what you do with a save.** Each game shows one row per user
+  with when it was last backed up ("Backed up 2 hours ago", or "Not backed up yet" in amber) and
+  four actions: **Back up now**, **Restore…** (the game's backups, newest first), **Copy to…**
+  and **Open**. A short "How saves work here" card explains them once; dismiss it when you know.
+  Backing up to a `.zip` on this computer and the USB actions are under **More** (desktop app).
+- **Copy a save to another user on the same PS5 (For #612).** **Copy to… › Another user on this
+  PS5** lists the console's other users: those with a save of the game can be picked, the others
+  say what to do first (start the game once as them and save). The engine shares the save and
+  puts it into theirs in one go, so no file lands in your Downloads; their save is backed up
+  first and put back if anything fails, and it is refused while the game runs. A console with
+  two or more users shows a tip pointing to it.
+- **Restore a backup to another user (For #612).** **Restore… › Restore to another user…** puts a
+  backup of one account's save into another account's save of the game on the same PS5, with the
+  same rules.
+- **A game's save is one thing.** Many games keep several parts (`sdimg_STARBOARD`,
+  `sdimg_sce_sdmemory`, …). Share (now **Copy to… › Save as a file for a friend or another
+  PS5**) puts every part in one `.zip`, and **Load a save file** puts each part into the part of
+  the same name, all backed up first and all put back on failure. If the target lacks a part,
+  nothing changes and the message names it ("…'s STARBOARD isn't on Ben yet: start the game once
+  as Ben and save"). No more picking a raw image name. Files shared by earlier versions still
+  load; a file saved by 10.6.0 needs 10.6.0 or later.
+- **Fixed: picking a save in "Which save of PPSA…?" did nothing**, and it listed the console's own
+  backup copies (`sdimg_sce_bu_…`). The picker is gone from sharing and loading; Open, the only
+  place a single part is still chosen, names the parts ("STARBOARD", "main save") and never
+  offers the console's backup copies.
+- **A restore that fails part way puts the save back** as it was, from the backup taken just
+  before it.
+- **A failed save copy never leaves the old save under one still open.** Closing the save is
+  tried again a few times (a dropped connection included); if the PS5 still holds it open, the
+  save there before is not put back over it, and the message names the backup to restore with
+  **Restore…** once the PS5 can be reached.
+- **A save too big for the other user's save is refused before anything changes.** A PS5 save
+  has a fixed size; the message gives both sizes and what to do.
+- **Backups made on another PS5 are refused.** An encrypted save only opens on the PS5 that made
+  it, so new backups note their console and **Restore…** refuses one from another PS5 up front
+  (use **Save as a file** on that PS5). Older backups are not checked.
+- **Automatic backups wait for the game to close.** A running game's save is skipped and backed
+  up on the next pass after it closes, never copied while the game may be writing it.
+- **PS1 emulator saves.** PSSwanStation's (PPSA99248) memory cards and saved states are listed,
+  backed up and restored in Save Data like the PS2 emulators'. Thanks to EnriqueWood (#618).
+- **Save Data rows wrap instead of squeezing.** A save's buttons move to a new line when they
+  don't fit, instead of crushing its details to one letter per line. Thanks to EnriqueWood
+  (#619).
+- **Scripts and AI agents can see and play Remote Play without taking it over (#615).** On the
+  engine's computer, `GET /api/ps5/rp/frame` returns the picture the app shows now (PNG or JPEG,
+  with its size and age), `POST /api/ps5/rp/input` holds buttons, sticks and triggers for up to
+  5 seconds as one more controller next to yours, and `/api/ps5/rp/input/release` lets go.
+  `GET /api/ps5/rp/session` now gives the session's id, and a request naming an old session is
+  refused. Nothing on screen changes, no second stream starts, and none of it is reachable from
+  other machines. See [AUTOMATION.md](https://github.com/phantomptr/ps5upload/blob/main/AUTOMATION.md); not a
+  stable API yet (#430).
+- **Local-only endpoints refuse requests that don't address localhost.** The automation routes
+  and the keyboard & mouse socket answer only requests to `localhost`, `127.0.0.1` or `[::1]`, so
+  a web page can't reach them by pointing its own name at this computer.
+- **The Remote Play microphone no longer switches off when a button is pressed.** Any controller
+  change (yours, a phone's) turned the experimental mic off; now only leaving the stream does.
+- **Save Data shows the games' names and covers.** A game is named the way Games names it (the
+  console's own name, then the online one), in the list and in every dialog and message. A cover
+  that can't load shows the game's initials (or a controller) instead of a broken image, and the
+  name no longer shrinks to a few letters on a phone.
+- **No more "changed Dec 31, 1969".** A save the console gives no date for shows none, in Save
+  Data and in the PS1, PS2 and Switch emulator saves.
+- Contributors' tests now also run on Windows (#620). Thanks to EnriqueWood.
+
+## 10.5.1
+
+- **Pressing Play no longer crashes the Linux app (#610).** On WebKitGTK 2.54 (Fedora 44 and other
+  current distros) the whole window died the moment Play checked which video formats it can
+  decode, whenever WebKit's DMA-BUF renderer was off, which the app does on most AMD and Intel
+  machines. WebKit wanted a graphics display the page had not made yet; the app now makes it
+  first.
+- **If Play ever crashes while the picture starts, the next launch recovers (Linux).** The app
+  notices, decodes the picture without the graphics card from then on, and says so once.
+- **Settings › Window › Graphics › Hardware video decoding (Linux).** Off decodes Remote Play's
+  picture in software (GStreamer's graphics-card decoders are ranked out; applies after a
+  restart). Safe graphics mode turns it off too, and `PS5UPLOAD_SOFTWARE_VIDEO=1` does for one
+  launch. The startup log says which is used (`[linux] video decoding: …`).
+- **Updating the Windows zip copy works again, and leaves nothing behind (#611).** "Install and
+  restart" (and installing updates automatically) closed the app without installing anything and
+  without opening it again, and every launch downloaded the same update once more. The install
+  ran in a hidden PowerShell script after the app had quit, the same pattern the Windows setup
+  stopped using in 9.0.1 because security software and policies can block it. PS5Upload now puts
+  the new PS5Upload.exe in place itself before it closes, starts the new version, and the new
+  version tidies up. If anything goes wrong the app stays open on the old version and says why.
+- **Updates no longer pile up in Downloads (#611).** An update the app installs itself is
+  downloaded into its own folder, reused if it's already there, and deleted once the new version
+  starts. Only a download you install by hand still goes to Downloads. Old update downloads that
+  earlier versions left there are listed in Settings → Updates with a **Remove** button; nothing
+  is deleted without asking.
+- **A failed update is said once and not retried in a loop.** If an install didn't take (on any
+  system), the next launch says so with the reason, and that version isn't installed by itself
+  again. Settings → Updates and the update bar offer **Try again** and **Download page**.
+
+## 10.5.0
+
+- **Home's Recent games shows more games, at a sensible size.** The covers keep about the size of
+  a console's home screen instead of three filling the whole width, so a wide window shows six or
+  seven; up to twelve of your newest games are there, the row scrolls sideways, and with a mouse
+  the arrow buttons beside it page through.
+- **Pause an upload, send something else, carry on.** A running upload has a **Pause** button,
+  on the Upload & Install queue and on the Files screen alike. It stops the upload keeping what
+  already reached the PS5, marks it **Paused**, and the next item goes. **Resume** puts it back in
+  line where it was and it continues from where it stopped (nothing is sent twice); with nothing
+  else running it starts at once. Paused stays paused after you leave the screen or restart the
+  app. Asked for by Marc.
+- **Send now.** A waiting item has **Send now**: the upload running on that console pauses, this
+  item goes, and the paused upload carries on by itself when it's done (or fails). Several Send
+  nows run in the order you clicked them, and the paused upload continues after the last one. An
+  upload you paused yourself is never resumed for you. Still one transfer at a time per console.
+- **Remote Play asks for your PS5 passcode instead of giving up (#608).** If the user you play as
+  has a sign-in passcode, a box over the stream asks for its four digits when you press Start (a
+  number pad on phones), and asks again if it was wrong. It goes straight to the console and is
+  never saved. Cancel ends the start. Wake & sign in asks the same way (Cancel leaves the PS5 at
+  its sign-in screen); automatic wakes for uploads don't ask and just wake the console. After five
+  wrong passcodes the app stops asking and says to enter it on the PS5.
+- **"The PS5 is waiting at sign-in" (#608).** Playing a game, the native keyboard & mouse or a new
+  avatar with nobody signed in now says so once, with a **Sign in** button (Wake & sign in, and
+  the passcode box if the user has one). Nothing changes while a user is signed in.
+- **The passcode stays on the device that started the stream (#608).** A phone used as a
+  controller or watching shows "Waiting for the passcode on <computer>" instead; watchers never
+  get the box or the code. The FAQ has a short "My PS5 profile has a passcode" answer.
+- **Pair with the PIN shown on the PS5 (#609).** Play › Set up's pairing step (and Wake & sign in,
+  when pairing fails) can now pair the way PS Remote Play and chiaki-ng do: open Settings › System
+  › Remote Play › Link Device on the PS5 and type the 8-digit number it shows. It needs no helper,
+  so it works on any firmware, including ones where the app can't make a pairing PIN itself.
+- **A failed pairing says why (#609).** Instead of "the Remote Play request failed on-console",
+  you see the console's own reason and code (for example "sceRemoteplayGeneratePinCode failed:
+  0x…"), with the PIN pairing offered right there.
+
+## 10.4.1
+
+- **Keyboard & mouse in Remote Play now works on every firmware**, not only FW 13.60 (still the
+  one it's tested on). A firmware without the PS5's virtual keyboard and mouse says it isn't
+  available and keeps Controller. If it doesn't start on your console, it isn't tried again on its
+  own: turn Keyboard & mouse (or Mixed) on again to retry, and tell us your firmware.
+
+## 10.4.0
+
+- **Your computer's keyboard and mouse as the PS5's own, in Remote Play (FW 13.60).** Settings ›
+  Controls has three modes, kept per game: **Controller** (the keys and mouse act as a controller,
+  exactly as before, and the default), **Keyboard & mouse** (the PS5 gets a real keyboard and
+  mouse, for games and apps that support them) and **Mixed** (a real mouse; the keys act as a
+  controller, WASD moves). A button on the stream bar shows the mode and switches it, and
+  Ctrl+Option+M (Ctrl+Alt+M on Windows and Linux) does too. Tested end to end on FW 13.60; other
+  firmwares say it isn't available yet and keep Controller.
+- **Click the picture to give the PS5 your keyboard and mouse; press and let go of Ctrl+Option
+  (Ctrl+Alt) to get them back.** Ctrl+Option with another key still goes to the PS5. They also
+  come back when the window loses focus, Settings or the text box opens, or the stream stops, and
+  everything held on the PS5 is let go first. While they're released, keys work in the app again.
+- **Hard to miss the way out.** The first capture shows a card with the keys to press; a faint
+  "⌃ ⌥ to release" stays at the top while captured, and the card comes back when you seem to be
+  trying to get out (Esc twice, ⌘ or the Windows key, pushing against an edge, clicking where the
+  bar is).
+- **Both shortcuts can be changed** in Settings › Controls › Shortcuts: press the new keys, or
+  Reset. A shortcut the app already uses, a single letter, or Esc alone is refused. Hold Esc to
+  release is an option there too.
+- **Phones and tablets as the PS5's touchpad and keyboard.** A Controller / Touchpad switch over
+  the picture: drag moves the pointer, tap clicks, a two-finger tap right-clicks, a two-finger
+  drag scrolls, tap then drag selects. ⌨ opens the phone's keyboard and types on the PS5. The
+  phone-as-controller page has a Touchpad & keyboard tab as well.
+- How it works: the console side is a small companion process the helper starts through the
+  PS5's payload loader (port 9021), so a problem there never takes the helper down. The PS5 lets
+  go of every key and button by itself if the computer goes quiet for 2 seconds. To turn it off on
+  a console, create `/data/ps5upload/vinput.disable`.
+- **Type into the PS5's on-screen keyboard during Remote Play (experimental).** When a game or
+  the PS5 opens its keyboard, a text box shows over the stream (in full screen too) with the
+  console's text in it, ready to type, and a phone opens its own keyboard. What you type reaches
+  the PS5 as you go; Enter or Done keeps it, Esc or Cancel drops it, and the box closes when the
+  PS5 closes its keyboard. The game gets no keys or controller presses while you type. Needs the
+  engine from this version; not yet tried on a console.
+- **Fixed: play time went to the wrong game.** The helper credited the first game it found
+  running, so a game left in the background collected the hours of the one being played, and
+  the one being played showed minutes. It now counts only the game that is actually running in
+  front, nothing while the console sleeps, and bringing a game back to the front is not a new
+  launch. Times recorded before stay as they were; Reset play time on the Games tab clears them.
+- **After an AppImage update the app starts again through PS5Upload.sh** when it sits beside the
+  AppImage, so its rescues for FUSE and the picture apply to the new version too.
+- **Workshop: save each next to its source.** A new option under Options puts every package,
+  image or folder in the folder that holds its game or image (never inside a game folder),
+  instead of the one Output folder. It is remembered. If the name is taken there, " (2)" is
+  added; nothing is overwritten. Games on a server or the PS5 still go to the Output folder.
+- **Workshop: Convert to folder.** A game image (.exfat, .ffpkg, .ffpfs, .ffpfsc) or a debug
+  package now shows a Convert to folder button under ① Game. Pick where it goes; the run shows
+  its progress and Cancel under ④, and it stops before writing when that drive is short of room.
+- **Workshop is more compact.** Smaller drop area, one-line choices under ② What to make,
+  compression levels in one row on a wide window, and tighter spacing. While ④ is scrolled out
+  of view, a slim bar at the bottom keeps its main button in reach.
+- **Remote Play on Linux: the picture arrives sooner.** The engine held each frame back until
+  the app acknowledged the one before, and Linux delays that while the app is sending your
+  presses: about 10-30 ms more delay, the high "net" figure in the stats on Linux. Frames now go
+  out at once.
+- **Remote Play's stats estimate input delay:** "input ≈ X ms, plus the game's own time", from
+  the round trip to the engine, the engine's round trip to the PS5 and the picture's own delay.
+  Hover it for what is and is not counted.
+- **Fixed: Remote Play reported sound loss that never happened.** A late or repeated sound packet
+  made a whole moment's sound count as lost, which can make the PS5 lower the picture's bitrate, and
+  could bring up the 720p offer on a good network.
+- **Drag to reorder the queue.** Hold the grip at the left of a waiting row and drop it where it
+  should go, with a mouse, pen or finger. The same rules as the arrow buttons apply: a row moves
+  only among the waiting rows of its own console and kind (base game, update, DLC). The arrows
+  stay for the keyboard; Esc cancels a drag.
+- **Archive installs say where they unpack, and check the space first.** Before you start, the
+  card shows the PS5 folder the packages go to, how much they need and how much is free on that
+  drive. When they certainly cannot fit, Install is refused with a clear message; when they may
+  not fit, it warns.
+- **The unpacked packages are deleted after a fully successful run.** When any install fails the
+  folder stays, so a retry works, and the message says where it is.
+- **Leftovers from earlier runs can be removed.** The card shows "N leftover unpacked folder(s)"
+  with their size and a Remove button; folders a queued install still reads are never touched.
+- **A more compact Upload & Install.** The drop area is shorter (a small icon beside its title,
+  what each kind becomes in two columns), so Choose file and Choose folder are on screen without
+  scrolling. Once something is chosen it shrinks to one slim row that still takes drops and adds
+  more. Cards are tighter, and the Upload / Stream & install buttons stay at the bottom of the
+  window however long the options above them are.
+
+- **Fixed: "Install and restart" did nothing in the Linux AppImage on some systems.** The update
+  script inherited the AppImage's own library paths, so on Arch the system shell loaded the
+  bundled, older readline and quit at once: the app closed and the update was never installed.
+  The script now starts with the system's own libraries. Thanks to aypro (#604).
+- **PS2 saves are backed up.** The memory cards and saved states of the PS2 emulators Crux2
+  (PPSA99249) and PS5SX2 (PPSA99203) are backed up with the PS5 saves, locally and to a server,
+  each as one save under the emulator's title; "after a game closes" means after the emulator
+  closes. Where PS5SX2 keeps them loose in `/data/PCSX2`, only its `.ps2` and `.p2s` files are
+  taken, never its BIOS, games or caches. Thanks to EnriqueWood (#602).
+- **PS2 saves in Saves.** "PS2 emulators (Crux2, PS5SX2)" lists each emulator's memory cards and
+  saved states with Back up now and their backups, so you can restore them in the app. Close the
+  emulator first: a restore is refused while it runs, and a restore into `/data/PCSX2` is refused
+  if the backup holds anything other than that save's own files.
+- **Short guides** in the FAQ and on the website: using PS5Upload from a phone (the app, a
+  browser, the console's own page) and getting started on iPhone, playing away from home over a
+  VPN such as Tailscale (and what doesn't work that way), waking the PS5 without the TV turning on
+  (HDMI-CEC), and reading Play's delay stats (net · queue · decode · screen).
+
 ## 10.3.0
 
 - **Remote Play's Settings open over the stream.** Every Settings button (on the picture's bar,

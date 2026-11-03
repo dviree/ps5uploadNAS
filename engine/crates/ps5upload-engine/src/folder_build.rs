@@ -34,6 +34,23 @@ pub(crate) fn partial_of(target: &Path) -> PathBuf {
     PathBuf::from(format!("{}.partial", target.display()))
 }
 
+/// The first of `stem`, `stem (2)`, `stem (3)`, … that `taken` says is free: how a build asked
+/// to keep both (Convert's "Save each next to its source") names its output when the name is
+/// already used, instead of refusing. `None` when every try up to `(999)` is taken.
+pub(crate) fn keep_both_stem(stem: &str, taken: impl Fn(&str) -> bool) -> Option<String> {
+    if !taken(stem) {
+        return Some(stem.to_string());
+    }
+    (2..=999)
+        .map(|n| format!("{stem} ({n})"))
+        .find(|candidate| !taken(candidate))
+}
+
+/// True when `path` or its `.partial` (an unfinished build's) exists: the name is in use.
+pub(crate) fn name_in_use(path: &Path) -> bool {
+    path.exists() || partial_of(path).exists()
+}
+
 /// True when `dir` is an unfinished folder build of ours (it holds [`MARKER`]).
 pub(crate) fn is_our_partial_dir(dir: &Path) -> bool {
     dir.file_name()
@@ -220,7 +237,7 @@ fn copy_file(
         .map_err(|e| format!("{path}: {e}"))?;
     let mut at = 0u64;
     while at < size {
-        if cancel.load(Ordering::Relaxed) {
+        if ps5upload_fpkg::workshop::checkpoint(cancel) {
             return Err("cancelled".into());
         }
         let want = CHUNK.min(size - at) as usize;
@@ -250,7 +267,7 @@ fn hash_source(
     let mut h = Sha256::new();
     let mut at = 0u64;
     while at < len {
-        if cancel.load(Ordering::Relaxed) {
+        if ps5upload_fpkg::workshop::checkpoint(cancel) {
             return Err("cancelled".into());
         }
         let want = CHUNK.min(len - at) as usize;
@@ -280,7 +297,7 @@ fn hash_written(
     let mut buf = vec![0u8; CHUNK.min(len.max(1)) as usize];
     let mut left = len;
     while left > 0 {
-        if cancel.load(Ordering::Relaxed) {
+        if ps5upload_fpkg::workshop::checkpoint(cancel) {
             return Err("cancelled".into());
         }
         let n = buf.len().min(left as usize);
@@ -412,7 +429,7 @@ pub(crate) fn build(
                 stage("write", written, total);
             })?;
         }
-        if cancel.load(Ordering::Relaxed) {
+        if ps5upload_fpkg::workshop::checkpoint(cancel) {
             return Err("cancelled".into());
         }
 
@@ -485,7 +502,7 @@ pub(crate) fn extract_file(
             written += n;
             stage("write", written, size);
         })?;
-        if cancel.load(Ordering::Relaxed) {
+        if ps5upload_fpkg::workshop::checkpoint(cancel) {
             return Err("cancelled".into());
         }
         let got_len = std::fs::metadata(&partial)
@@ -531,6 +548,29 @@ mod tests {
     use super::*;
     use crate::image_build::{self, ImageFormat};
     use ps5upload_fpkg::source::{FolderSource, SourceFile};
+
+    #[test]
+    fn keep_both_numbers_a_taken_name() {
+        assert_eq!(keep_both_stem("Game", |_| false).as_deref(), Some("Game"));
+        let used = ["Game", "Game (2)"];
+        assert_eq!(
+            keep_both_stem("Game", |s| used.contains(&s)).as_deref(),
+            Some("Game (3)")
+        );
+        assert_eq!(keep_both_stem("Game", |_| true), None);
+    }
+
+    #[test]
+    fn a_partial_counts_as_in_use() {
+        let dir = scratch("inuse");
+        let target = dir.join("Game");
+        assert!(!name_in_use(&target));
+        std::fs::create_dir(partial_of(&target)).unwrap();
+        assert!(name_in_use(&target));
+        std::fs::write(dir.join("Other.pkg"), b"x").unwrap();
+        assert!(name_in_use(&dir.join("Other.pkg")));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn game(root: &Path) -> PathBuf {
         let game = root.join("PPSA99999-app");

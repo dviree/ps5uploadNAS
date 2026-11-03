@@ -32,8 +32,9 @@ the app over **AVA1**, one encrypted connection on port 9120.
 
 **Q: What does it actually do?**
 - **Upload** files, folders, disk images and `.zip` / `.7z` / `.rar` archives, verified end to
-  end. Uploads resume after a dropped connection or a helper restart. RAR handles multi-part and
-  password-protected archives (desktop only).
+  end. Uploads resume after a dropped connection or a helper restart, and can be paused, resumed
+  or overtaken with **Send now**. RAR handles multi-part and password-protected archives
+  (desktop only).
 - **Install packages**: PS4 `.pkg` and PS5 fake packages (base, update, DLC) through ps5upload's
   own on-console installer, from your computer (**Stream & install** or **Upload & install**),
   a NAS, a USB drive or a link.
@@ -46,7 +47,10 @@ the app over **AVA1**, one encrypted connection on port 9120.
   each game's page mounts images, adds games to the home screen, plays, closes and uninstalls
   them. Browse and manage files.
 - **Remote Play**: stream the PS5 into the app and play it with a controller, the keyboard or
-  touch.
+  touch, or give the PS5 your keyboard and mouse as its own. It asks for a user's PS5 passcode
+  when the console wants one. Local scripts can watch and play too ([AUTOMATION.md](https://github.com/phantomptr/ps5upload/blob/main/AUTOMATION.md)).
+- **Save Data**: automatic and on-demand backups, restore, copy a save to another user on the
+  same PS5, or as a file for a friend or another PS5; PS1, PS2 and Switch emulator saves too.
 - **Cheats, fan curve, hardware view, power and wake, payload sender and backport tools.**
 
 **Q: What does it NOT do?**
@@ -107,6 +111,78 @@ running.
 7. Open **Games** to see it, and open the game for its actions (**On the PS5's drives** on its
    page). A `.pkg` goes in the same drop zone: choose **Stream & install** or **Upload &
    install** on its card. If it will not launch, see "My uploaded game won't launch".
+
+## Short guides: phone, away from home, TV, delay
+
+**Q: How do I use PS5Upload from my phone?**
+Three ways, easiest first:
+
+- **The app on the phone.** Android: the `.apk` from Releases. iPhone: the `.ipa`, sideloaded with
+  AltStore or Sideloadly and an Apple ID (a free one works); "How do I install it with AltStore?"
+  under iPhone has the steps. The app has its own engine and talks to the PS5 directly: open
+  **Connection**, enter the PS5's IP, press **Check**, and send the helper. This is also the way
+  to **Play** on a phone.
+- **A browser, with a computer at home running the web UI.** Run the
+  `ps5upload-engine-webui` Docker image on a computer or NAS and open `http://<its IP>:19113/` on
+  the same Wi-Fi ("How do I use PS5Upload from my phone or another computer?" walks through it).
+  The desktop app can't be used this way: its engine refuses other devices. Play in a browser
+  needs a secure page (`https://`, or the computer itself): over plain `http://<IP>:19113/` a
+  phone's browser says it cannot play a stream, so play with the app.
+- **The console's own page (PS5Upload Minion).** No computer needed: with the helper running,
+  turn on **Settings → Allow other devices on the network** on the console's page, then open
+  `http://<PS5's IP>:9180/` on the phone. It has no password while that is on, so turn it off
+  when you're done.
+
+**Q: Can I play, or use the app, away from home?**
+Not over the internet by itself. PS5Upload talks to the PS5 on your home network, and the engine
+has no password, so never forward its ports on your router. Away from home, join your home network
+with a VPN; Tailscale is the easy one.
+
+- **The phone or laptop app:** install Tailscale on that device, and on a computer at home that
+  stays on, set Tailscale up as a *subnet router* for your home network (and approve the route in
+  Tailscale's admin page). The app then reaches the PS5 at its usual home address. Or run the
+  [ps5-tailscale](https://github.com/holdmysocks/ps5-tailscale) payload, so the PS5 joins your
+  Tailscale network itself, and connect to its Tailscale address.
+- **The web UI:** if a computer at home runs it, open `http://<its Tailscale address>:19113/`
+  with Tailscale on (add `100.64.0.0/10`, Tailscale's addresses, to `PS5UPLOAD_ALLOW_IP` if the
+  page refuses you). The engine is at home, so waking the console and Stream & install work as
+  usual; Play in the browser still needs an `https://` page.
+
+Through a VPN from the app, these don't work: **Stream & install and installs from a link** (the
+PS5 downloads from your device, which it can't reach; use Upload & install), and **waking the PS5
+from rest mode** may not (it drops off Tailscale in rest mode with ps5-tailscale, and we haven't
+tested it through a subnet router), so leave it on or wake it before you go. Play runs only as
+well as your home connection's upload speed allows; if it keeps dropping frames, take 720p. We
+haven't tested Play over Tailscale ourselves.
+
+**Q: Can the app wake the PS5 without turning on the TV?**
+Yes. The TV comes on because of HDMI-CEC: a PS5 that wakes up tells the TV to turn on and switch
+to it. Turn that off on either side:
+
+- **On the PS5:** Settings › System › HDMI › **Enable HDMI Device Link** off (or only **Enable
+  One-Touch Play** under it, where your firmware shows it).
+- **On the TV:** its CEC setting off (Samsung **Anynet+**, LG **SIMPLINK**, Sony **BRAVIA Sync**,
+  Philips **EasyLink**, or simply **HDMI-CEC**).
+
+Wake and Play then bring the console up with the TV left off; Play doesn't need the TV. The other
+side of it: picking up the controller won't turn the TV on any more either.
+
+**Q: Play feels delayed. Where does the delay come from?**
+Turn on **Stats** (on the picture's bar, or in the **⋯** menu on a phone). Under the Latency line,
+`net · queue · decode · screen` shows each stage of a frame, in ms (the median of the last two
+seconds):
+
+- **net**: the engine had the frame from the PS5 → this device got it. Near zero in the desktop
+  app (the engine is on the same computer); on a phone or in the web UI it's your Wi-Fi.
+- **queue**: waiting to be handed to the video decoder.
+- **decode**: the device's video decoder.
+- **screen**: from decoded to shown by the browser, about one refresh of the screen.
+
+Not counted: the PS5 itself and its leg to the engine (the two share no clock, so it can't be
+measured honestly), and your TV or monitor's own delay (use its game mode). A big **net** means
+the network: a cable for the PS5 and 5 GHz Wi-Fi help most. A big **decode** means the device is
+slow to decode; 720p eases it. **Play › Settings › Low latency** trims the queue and the sound
+buffer (see "How much delay does Remote Play have, and what does Low latency do?").
 
 ---
 
@@ -248,16 +324,42 @@ ten minutes the engine copies each console's saves that changed since their last
 written in the last few minutes waits for the next round). In the desktop app this runs while the
 app runs; in Docker it runs all the time, with no browser open. Use a folder the container keeps,
 such as `/data/save-backups`, or a NAS share you mount into the container. To restore, close the
-game, open its page in PS5Upload, go to Saves and press Restore on the version you want. The save
-on the PS5 is backed up first, so you can go back.
+game, then in Save Data press **Restore…** on the game's save (or open its page in PS5Upload and
+go to Saves) and press Restore on the version you want. The save on the PS5 is backed up first,
+so you can go back. A backup holds every part of the game's save, and a restore puts them all
+back. **Restore to another user…** puts a backup into another account's save of the game on the
+same PS5 instead (that account must have a save of the game; its current save is backed up
+first).
 
-The saves of ProsperoEden, the Switch emulator (PPSA99008), are backed up too, locally and to a
-server, and "after a game closes" means after ProsperoEden closes. Each game's save of each
+The saves of ProsperoEden, the Switch emulator (PPSA99008, or PPSA99016 for "ProsperoEden
+(Mirror)" on ProsperoStore), are backed up too, locally and to a server, and "after a game
+closes" means after ProsperoEden closes. Each game's save of each
 profile is its own backup, in a folder named after the game's 16-character title ID. They are
 listed under Saves, in "Switch games (ProsperoEden)": each game by its title ID (no names are
 known), per profile ("Console" is the console's own save), with Back up now and its backups. To
 put one back, close ProsperoEden and press Restore on the version you want; the save there now is
 backed up first. A restore is refused while ProsperoEden runs.
+
+The saves of the PS2 emulators Crux2 (PPSA99249) and PS5SX2 (PPSA99203) are backed up the same
+way, after the emulator closes: its memory cards folder and its saved states folder, each as one
+save under the emulator's own title ID (user 0 the cards, user 1 the saved states). Crux2 keeps
+them in `memcards` and `sstates` of `/data/crux2` when you made that folder, of `crux2-data` at
+the top of a USB drive, or of Crux2's own folder; PS5SX2 in `/data/PCSX2/memcards` and
+`/data/PCSX2/savestates` when those folders are there, else loose in `/data/PCSX2` (as installed
+from the Prospero Store), where only its `.ps2` and `.p2s` files are taken, never its BIOS, games
+or caches. The backups are in the backup folder under the emulator's title ID. **Saves** lists
+them under **PS2 emulators (Crux2, PS5SX2)**, each emulator's cards and saved states with their
+backups, **Back up now** and **Restore**. A restore puts back all the emulator's cards, or all its
+saved states, and is refused while the emulator runs. A restore into `/data/PCSX2` itself is
+refused if the backup holds anything other than that save's own files, so it never overwrites the
+emulator's BIOS, games or settings.
+
+The PS1 emulator PSSwanStation (PPSA99248) is backed up the same way: its memory cards
+(`data/saves`, with the copies of each card it keeps in `data/saves/backups`) as user 0 and its
+saved states (`data/states`) as user 1, under its own title ID. They are in the folder its files
+are kept in: its own folder, wherever it is installed, or `/data/psswanstation` or
+`PSSwanStation` at the top of a USB drive when "Where my files are kept" says so. **Saves** lists
+them under **PS1 emulator (PSSwanStation)**, with the same **Back up now** and **Restore**.
 
 **Q: How do I make room for a big game?**
 Open Clean up and press Make room, or follow "Plan space" when an install says there isn't enough
@@ -700,6 +802,43 @@ new bug. If you have already done it:
 sudo chown -R "$USER:$USER" ~/.ps5upload
 ```
 
+**Q: Pressing Play crashes the whole app on Linux (#610).**
+
+A: Fixed in 10.5.1. On WebKitGTK 2.54 (Fedora 44 and other current
+distros) the app's window died the moment Play checked which video
+formats it can decode, whenever WebKit's DMA-BUF renderer was off — which
+the app does on most AMD and Intel machines, and `PS5Upload.sh` does for
+everyone. The app now prepares what WebKit needs first. Update the app.
+
+If Play still crashes while the picture starts, the app notices at the
+next launch, decodes the picture without the graphics card from then on,
+and says so once. You can switch that yourself: **Settings › Window ›
+Graphics › Hardware video decoding** (off = software; applies after a
+restart; Safe graphics mode turns it off too). For one launch:
+
+```sh
+PS5UPLOAD_SOFTWARE_VIDEO=1 ./PS5Upload.sh         # .zip / AppImage
+PS5UPLOAD_SOFTWARE_VIDEO=1 ps5upload-desktop      # .deb / .rpm
+```
+
+(`=0` uses the graphics card for one launch even with the setting off.)
+The setting is the file `~/.config/com.phantomptr.ps5upload/software-video`.
+Software decoding ranks GStreamer's graphics-card decoders out
+(`GST_PLUGIN_FEATURE_RANK=vah264dec:NONE,vah265dec:NONE,…`, added after
+any value you set), so it needs a software decoder in GStreamer: on
+Fedora `gstreamer1-plugin-openh264` for H.264, or RPM Fusion's
+`gstreamer1-plugin-libav` for HEVC too. The startup log says which is
+used: `[linux] video decoding: …`.
+
+On 10.4.x, before updating, starting the app with the DMA-BUF renderer
+on avoids the crash, if the window then shows (it is what the app uses
+on NVIDIA 555+ with Wayland):
+
+```sh
+WEBKIT_DISABLE_DMABUF_RENDERER=0 ./PS5Upload.sh         # .zip / AppImage
+WEBKIT_DISABLE_DMABUF_RENDERER=0 ps5upload-desktop      # .deb / .rpm
+```
+
 ---
 
 ## Android
@@ -1111,8 +1250,16 @@ screen turns on Remote Play, reads your account from the console and registers, 
 awake. After that the button is **Wake & sign in** and brings the console up straight on your
 user's home screen — the same thing the official Remote Play app does. Only if a console refuses
 to pair, **Enter keys manually** takes a **wake code** (wakes to the user-select screen) and the
-two Remote Play **session keys** (also signs your user in). (If your user has a login passcode,
-the console will stop to ask for it, so sign-in needs a passcode-free user.)
+two Remote Play **session keys** (also signs your user in). If your user has a login passcode,
+the app asks for it (see "My PS5 profile has a passcode").
+
+**Q: My PS5 profile has a passcode.**
+The app asks for it when the PS5 does: after **Wake & sign in**, after **Start** in Remote Play,
+and after **Sign in** on "The PS5 is waiting at sign-in". Type the four digits; a wrong one asks
+again, and after five wrong ones you enter it on the PS5 itself. **Cancel** leaves the PS5 at its
+sign-in screen. The box shows on the device that started it; phones used as controllers and
+watchers only see that the PS5 is waiting. The passcode goes straight to the console and is never
+saved or logged. Waking the PS5 for an upload never asks: uploads work at the sign-in screen.
 
 **Q: Do I still have to "Register" a game after uploading it?**
 Not anymore. When you upload a game folder, **"Add to PS5 home screen
@@ -1221,6 +1368,15 @@ what Install, Upload now and Send do: on (the default), they start the console's
 from the top, in order, not only what you just added; off, they only add to the queue and nothing
 runs until you press **Start queue**. Something added while the queue runs waits its turn at the
 end. **Add to queue** never starts anything.
+
+**Q: Can I pause an upload, or send something else first?**
+Yes, from 10.5.0. A running upload has **Pause** (on the Upload & Install queue and in Files): it
+stops, keeping what already reached the PS5, shows **Paused**, and the next item goes. **Resume**
+puts it back in line where it was and it carries on from where it stopped (nothing is sent twice);
+with nothing else running it starts at once. Paused stays paused when you leave the screen or
+restart the app. A waiting item has **Send now**: the upload running on that console pauses, this
+one goes, and the paused upload carries on by itself when it is done (or fails). An upload you
+paused yourself is never resumed for you. It is still one transfer at a time per console.
 
 **Q: How do I jump between volumes in the File System screen?**
 The **Volume** dropdown above the breadcrumb lists every writable volume with its free space.
@@ -1791,6 +1947,42 @@ ShadowMount+ 1.7, a game image made by the app in each of `.exfat`, `.ffpkg`, `.
 compressed `.ffpfsc` mounted, registered and ran its game. A folder that is on the console or on
 a saved server cannot be made into an image from here; copy it to this computer first.
 
+**Q: Can I add games to Workshop's queue while one is converting?**
+Yes. While a game is being made, pick or drop more under **① Game** (also **On the PS5…**, or
+**Convert first** from elsewhere): they go into **⑤ Queue** and are made one at a time after it,
+in order. With **Start the queue when you add something** on (Settings › Uploads, the default)
+nothing else is needed; off, they wait until you press **Convert N queued**. A game set to
+install still goes on to **Upload & Install**'s queue once it is made.
+
+**Q: Can I pause a conversion, or make it use less of my computer?**
+Yes, both. While a game is being made (or an archive unpacked) in Workshop, ④ has **Pause** beside
+**Cancel**. Paused, the work stops where it is and uses no processor or disk until you press
+**Resume**; the games waiting in ⑤ wait for it, and **Cancel** still works while paused.
+To keep your computer quick while converting, turn on **Use less of this computer** (under ④, or
+Settings › Workshop). Converting then uses about half your processor and lets other apps go first,
+for the processor and the disk. It takes longer. You can switch it on or off while a conversion runs.
+There is no "use 60% of my CPU" slider on purpose: Windows, macOS and Linux don't keep to a
+percentage the same way, while fewer cores at background priority gives the computer back at once
+whenever anything else needs it.
+
+**Q: What does "Rebuild AMPR index" do?**
+A backported game whose `eboot.bin` reads its files through libSceAmpr is served by `ampr_emu`,
+which looks every file up in `ampr_emu.index` and trusts the sizes there. If the folder changed
+since the index was made (trimmed, patched, dumped again), the game can crash or stop at start.
+Packages and images Workshop builds always carry a fresh index; **Rebuild AMPR index** (under
+① once the game is checked) makes one for a game you play as it is:
+
+- **A folder on this computer or on the PS5**: the index is written again at the game's root,
+  from its files. The game's own index is kept once as `ampr_emu.index.bak`. It says how many
+  files it lists and whether the old one was different.
+- **An `.exfat`, `.ffpkg` or `.ffpfs` image on this computer**: an edited copy
+  (`<name>-edited`) with the new index; the image itself is not changed. An image on the PS5 has
+  to be copied here first.
+- **A `.ffpfsc`**: compressed and read-only, so it is not edited. **Convert again** makes a fresh
+  `.ffpfsc` with a new index.
+
+It is only offered for a game that uses libSceAmpr, and says so otherwise.
+
 **Q: Can I install a package that is already on a USB drive?**
 Yes. Plug the drive into the PS5; packages on it show in **Upload & Install → Already on the PS5**
 (or **On the PS5 or USB** under the drop zone) with an **Install** button. The app first copies the package to internal storage on the console
@@ -1877,30 +2069,73 @@ The PS4 is never written to, and no users, system files or trophies are changed.
 on a PS5 have mixed reports: try one game first. Moving trophies is not offered: it needs
 renaming system folders and rebuilding the database, which can leave a user unusable.
 
+**Q: Saves: what can I do in Save Data?**
+Save Data shows one row per game and user, with a line saying when it was last backed up. What
+people do there, most common first:
+
+- **Don't lose progress** (a crash that damages a save, a reinstall, a firmware update or a new
+  jailbreak): turn on **Automatic backups** (a folder on this computer) and the engine keeps
+  copies of every game's save. **Back up now** makes one at once (while the game runs it waits
+  for the save to sit still). **Restore…** lists the game's backups; Restore puts one back.
+- **Put a save on another account on this PS5**: **Copy to… › Another user on this PS5** (see
+  below).
+- **Take a save to another PS5, or give it to a friend**: **Copy to… › Save as a file for a
+  friend or another PS5**, then on the other PS5 **Copy to… › Load a save file**.
+- **Use a save you downloaded** (a 100% save, say): **Copy to… › Load a save file**, if it was
+  shared from PS5Upload. A save folder copied off another console as it is can't be used this way.
+- **Look inside or edit a save** (save editors): **Open** mounts it on the PS5 and shows it in
+  Files; **Close & write back** puts your changes into the save.
+
+A game's save is often several parts (files such as `sdimg_STARBOARD` and `sdimg_sce_sdmemory`
+in its folder, which the app names "STARBOARD" and "main save"). Back up, Restore, Copy, Save as
+a file and Load a save file always take every part together. The console also keeps its own
+backup copy of each part (`sdimg_sce_bu_…`); those are never offered as saves. Open works on one
+part at a time and asks which when there are several.
+
+After a save is loaded, copied or restored, the console's own backup copy (`sce_bu`) still holds the
+old save until the game saves again, so the PS5's own "restore from backup" (offered when it finds
+a save damaged) could bring the old one back. Start the game and save once to bring it up to date.
+
+**Q: Move a save to another account on the same PS5**
+From 10.6.0, PS5 saves only. On the save, **Copy to… › Another user on this PS5** lists the
+console's other users. Those with a save of the game can be picked; for the others it says what to
+do first: start the game once as that user and save, then come back (the PS5 has to make that
+account's own save; PS5Upload only puts files into one). Confirm, and every part of the save is
+put into theirs, which the PS5 then keeps as theirs. Their current save is backed up first (set a
+folder in Automatic backups) and put back if anything fails. Close the game first. If the other
+user's save lacks a part this one has (the game hasn't made it for them yet), nothing is changed
+and the message names the part: play on as that user until the game saves it, then try again.
+To take a save to another PS5 instead, use **Save as a file for a friend or another PS5**.
+
 **Q: Can a friend's save work on my PS5 under my account?**
-Experimental, from 10.0.1, PS5 saves only. A save is tied to the account that made it, so copying
-your friend's save files over, or switching to their account ID, doesn't work. Instead your
-friend opens the save in PS5Upload and presses **Share** (Saves, on the game): the app saves the
-save's contents, decrypted, as a `.zip` without the owner's account details. On your PS5, start the
-game once and save so you have a save of your own, close it, then press **Use a shared save** on
-that game and pick the `.zip`. The contents go into your own save, and the PS5 encrypts it again
-as yours: no account ID change needed. Your save is backed up first (set a folder in Saves ›
-Automatic backups) and put back if anything fails. Both consoles need PS5Upload, and the game
-must be the same title ID (same region). Some games check more inside the save itself; if one
-won't load it, restore your backup from the game's save backups.
+Experimental, from 10.0.1, PS5 saves only. A save is encrypted for the PS5 that made it and records
+the account it belongs to, so copying your friend's save files over, or switching to their account
+ID, doesn't work. Instead your
+friend picks **Copy to… › Save as a file for a friend or another PS5** on the save in Save Data:
+the app saves every part of the save, decrypted, as one `.zip` without the owner's account
+details. On your PS5, start the game once and save so you have a save of your own, close it, then
+pick **Copy to… › Load a save file** on that game and choose the `.zip`. Each part goes into your
+save's part of the same name, and the PS5 encrypts it again as yours: no account ID change needed.
+Your save is backed up first (set a folder in Saves › Automatic backups) and put back if anything
+fails. Both consoles need PS5Upload, and the game must be the same title ID (same region). Some
+games check more inside the save itself; if one won't load it, restore your backup with
+**Restore…**. A file saved by 10.6.0 or later needs 10.6.0 or later to load; files from earlier
+versions still load.
 
 **Q: Can I move a save between consoles, profiles or game regions?**
 
 Saves backup and restore copies the existing encrypted save files (to give a save to another
-account, see **Share** above). It does **not**
+account, see **Copy to…** above). It does **not**
 re-sign saves, change their owning account, or convert title IDs/regions. A backup
-must match the target title and account, and the target environment must accept
-its encryption. Renaming a GTA V (or other game's) title folder does not convert it.
-Cross-console compatibility is not guaranteed, even with matching title IDs.
+must match the target title and account. Renaming a GTA V (or other game's) title folder does not
+convert it. A PS5 save's encryption key is sealed for the console that made it, so an encrypted
+backup only opens on that PS5. From 10.6.0 a backup notes the PS5 it was made on (when Remote Play
+is on), and restoring one made on another PS5 is refused before anything changes; to take a save
+to another PS5, use **Copy to… › Save as a file for a friend or another PS5** on the PS5 that has it.
 
 Download a backup of the target save before trying a restore. The target must
-already list a save for that title: launch the game once to create it. Restore
-wipes the current save first, with no automatic rollback if an upload is interrupted.
+already list a save for that title: launch the game once to create it. From 10.6.0 a restore
+from the backup folder puts the save back as it was if the upload fails part way.
 
 PS4-format restore has unresolved reliability reports. Closing the game or
 restarting the console may help some cases, but is not a verified fix. If a restore
@@ -2069,7 +2304,8 @@ that to us.
 
 **Q: What is the Cheats screen?**
 It applies memory patches to a **running** game. A watcher polls every few seconds for a game
-process, applies always-on patches and re-applies the ones you toggled. Cheat files download from
+process, applies always-on patches and the ones you switched on once the game is ready for them,
+and keeps them applied. Cheat files download from
 community repositories inside the screen. Native JSON, SHN trainer XML and encrypted MC4 files all
 work, with game names, filters and a notification when cheats load. Cheats change nothing on disk
 and stop when the game does.
@@ -2088,6 +2324,34 @@ helper stops during those 30 seconds, the helper pauses that game's cheats and s
 a cheat that crashes a game can't do it again on every start. Switch any of that game's cheats to
 resume.
 
+**Q: My cheat is On but doesn't seem to work.**
+Look at the small line under its switch (Cheats, the game's page, Play's Game panel, Minion ›
+Cheats); it shows what happened in the running game, not only the saved switch. From 10.7.2:
+- **Applied ✓**: the helper wrote it and read it back.
+- **Waiting for the game to load…**: the game's code (or the part the cheat patches) is not loaded
+  yet. The helper tries again every few seconds for as long as the game runs and applies it as soon
+  as it can. Before 10.7.2 it tried once, right when the game started, so a cheat could stay On
+  without being applied until you switched it Off and On (#627).
+- **Couldn't apply: …** with the reason, such as a cheat made for another game version. It is not
+  tried again until the game restarts, or you switch it Off and On.
+- **The game changed this; not touched**: the game wrote something else there, so the helper leaves
+  it alone.
+- **Applied N s after the game started — if it has no effect, restart the game with it on** (from
+  10.7.6): it is applied, but late. Some patches change a setting the game reads only once, in its
+  first seconds: Red Dead Redemption 2's "Unlock FPS" is one. Written after that read, the patch
+  reads back as applied and does nothing, and switching it Off and On can't help, because the game
+  doesn't read the setting again. Leave it On and restart the game: the helper hears the game start
+  and writes saved cheats as soon as the game's code is loaded, usually well under a second in.
+  Before 10.7.6 it looked only every 3 seconds, so such a patch landed 3 to 9 seconds in and worked
+  only by luck. The line also says this when the helper didn't see the game start (it was sent, or
+  the cheat engine turned on, while the game was already running).
+
+While the game runs, the helper also re-reads what it applied. If the game puts its original code
+back (a loading screen, coming back from rest mode), the cheat is applied again; if that keeps
+happening (more than 5 times in 2 minutes) it stops and says so. The TV shows one notification when
+a game's cheats are applied, and one for each cheat that couldn't be applied or that the game
+changed.
+
 **Q: What is Play? Where did Remote Play go?**
 From 10.0.0, Remote Play is called **Play** and sits right under Home in the sidebar (and in the phone tab bar). It is the same thing: your PS5's screen streamed into the app, played with a controller, the keyboard or touch, and it wakes the console from rest mode on its own. Home shows a **Play** card (Play, or Continue the last game); a game's page has **Play** (start the game and stream it here) next to **Launch on PS5** (start it on the TV only); search has "Play {game}". Everything else in the app works without it, and the Home card can be hidden (Play › Set up brings it back). "Remote Play" is still the name of Sony's feature underneath, so the console's own setting and Sony's PS Remote Play app keep that name.
 
@@ -2103,6 +2367,9 @@ goes full screen by itself (turn it back to return to the page); the only contro
 full screen or stop the stream. Back leaves full screen and keeps playing; **Stop** is in the ⋯
 menu. The screen stays awake while you play, and Settings has the controller's size and opacity.
 In the Android app, full screen hides the status and navigation bars (swipe from an edge to see them) and holds the phone in landscape.
+
+**Q: A game says Remote Play isn't available, or the picture goes black.**
+Some games and apps forbid Remote Play: the stream is refused when they start, a "can't be streamed" notice appears during the stream, or the picture turns black. That is the game's own setting, not a fault in the app. **Remote Play Unlock** (by earthonion) patches the PS5's Remote Play service so those games stream: open **Payloads**, find Remote Play Unlock and load it; the PS5 shows "Remote Play prohibition patch applied". It works on firmware 3.20, 10.01, 12.00, 12.70 and 13.60 and refuses others by itself. The patch lives in memory only, so load it again after every reboot (it is not needed per game); to have it loaded each boot, add it to your autoloader (in Payload Manager, **Load at boot**). It runs once and exits, so it never shows as running. A black picture with every game is something else: see Hush, which turns off the encoder Remote Play needs.
 
 **Q: Part of the Remote Play picture is cut off, or it looks stretched.**
 **Picture size** decides how the picture fits the screen: **Fit** shows the whole picture with black bars where the shapes differ (the default), **Fill** fills the screen and crops the edges, **Stretch** stretches the picture to the whole screen. It shows in full screen: on the page the picture's box is the picture's own shape, so all three look the same there. **Fit** never cuts anything off: like a video player, the whole picture always shows, with black bars at the sides or top and bottom when the shapes differ. On a 16:9 screen (the picture's own shape) all three look the same. Change it in full screen without leaving it: the **Picture size** menu on the bar (desktop), or the Fit / Fill / Stretch row in the **⋯** menu (phones). It's also in Play › Settings, and it applies at once. Before 9.2.0, the Windows app could show the picture enlarged with its right and bottom cut off (#538); update to fix it.
@@ -2136,6 +2403,15 @@ panel's **Play something else** starts another of the console's games (the runni
 first, after you say so). If the helper does not come back after a wake, send it from
 Connection and press Play again.
 
+**Q: Can a script or AI agent see and control Remote Play?**
+Yes, from 10.6.0, on the computer the engine runs on. While Remote Play plays in the app, a local
+script can ask for the picture the app shows (PNG or JPEG), hold controller buttons, sticks and
+triggers for a moment, and ask for a newer picture to see what happened. You keep watching and
+playing: nothing on screen changes and the script is one more controller next to yours. It never
+starts a stream, and nothing is reachable from other machines. The endpoints, with curl and
+Python examples, are in [Remote Play automation](https://github.com/phantomptr/ps5upload/blob/main/AUTOMATION.md).
+They are not a stable API yet and can change between versions.
+
 **Q: Can I install a package while I play?**
 Drop the .pkg or .fpkg on the Remote Play picture. By default it installs when you stop playing,
 because an install shares the network with the stream and can make it stutter; **Install now**
@@ -2165,6 +2441,18 @@ Yes, from 9.11.0, per game: open the **Game** panel on the stream bar › **Cont
 game runs. Turbo repeats chosen buttons while you hold them; Mouse aim moves the right stick with
 the mouse once you click the picture (Esc lets the pointer go); a macro plays a few presses from
 one key. Each game keeps its own, on this device. The PS5 sees an ordinary controller.
+
+**Q: Can the PS5 get my computer's keyboard and mouse as a real keyboard and mouse?**
+Yes, from 10.4.0, on every firmware since 10.4.1 (tested on 13.60). **Settings › Controls** has
+three modes, kept per game: **Controller** (keys and mouse act as a controller, the default),
+**Keyboard & mouse** (the PS5 gets a real keyboard and mouse, for games and apps that support
+them) and **Mixed** (a real mouse; the keys act as a controller). The button on the stream bar, or
+Ctrl+Option+M (Ctrl+Alt+M on Windows and Linux), switches it. Click the picture to give the PS5
+your keyboard and mouse; press and let go of Ctrl+Option (Ctrl+Alt) to get them back. Both
+shortcuts can be changed in Settings › Controls › Shortcuts. If your console can't do it, the app
+says it isn't available and keeps Controller; turn the mode on again to retry, and tell us your
+firmware. On a phone or tablet, the **Controller / Touchpad** switch over the picture makes it the
+PS5's touchpad, and ⌨ types on the PS5.
 
 **Q: Can I sharpen the Remote Play picture or crop an ultrawide game?**
 Play › Settings › **Picture**: Sharpen, Brightness, Contrast, Colour, Crop to 21:9 and
@@ -2203,7 +2491,7 @@ macOS: System Settings › Privacy & Security › Microphone; on Android and iPh
 permission prompt). If you said no once, allow it there and press the button again.
 
 **Q: Which browser should I use for Remote Play in the web UI?**
-Chrome or Edge (on Android, Chrome). Remote Play is made and tested for them. In Firefox and Safari, Esc always leaves full screen, so it can't be the controller's ○ there; Firefox has no picture in picture, and Safari's shows the picture only. The web UI says so on the Remote Play page in those browsers. On iPhone and iPad every browser is Safari underneath, and Remote Play works there. The desktop and Android apps don't depend on your browser.
+Chrome or Edge (on Android, Chrome). Remote Play is made and tested for them. In Firefox and Safari, Esc always leaves full screen, so it can't be the controller's ○ there; Firefox has no picture in picture, and Safari's shows the picture only. The web UI says so on the Remote Play page in those browsers. On iPhone and iPad every browser is Safari underneath, and Remote Play works there on a secure page (`https://`, or the computer itself): browsers keep the video decoder Play uses for secure pages, so over a plain `http://<IP>:19113/` address a phone's browser says it cannot play a stream; use the Android or iPhone app to play on a phone. The desktop and Android apps don't depend on your browser.
 
 **Q: Does Remote Play turn on Game Mode?**
 Where the system lets an app ask for it, yes, and only while the picture plays:
@@ -2233,8 +2521,8 @@ signs your user in on its own, and keeps playing while you use other screens. On
 at a time. **Play › Set up** has the same steps as a checklist that ticks itself and does what it
 can (see "How do I set Play up?"):
 
-1. **Sign in to a user on the PS5.** Use a user without a login passcode; a passcode stops the
-   automatic sign-in after a wake.
+1. **Sign in to a user on the PS5.** If the user has a login passcode, the app asks for it when
+   the PS5 does (see "My PS5 profile has a passcode").
 2. **Give that user an account ID.** A PSN-linked user has one; an offline user gets one in
    Accounts › Users (write it down: saves made afterwards are tied to it).
 3. **Sign the account in to PlayStation Network (offline)** if the console's own Remote Play
@@ -2245,7 +2533,13 @@ can (see "How do I set Play up?"):
    Stay Connected to the Internet and Enable Turning On PS5 from Network.
 6. **Pair the app**: the Pair button in Play › Set up (or Connection › Wake & sign in › Set up).
    One click; the keys stay on this computer. Do it again after resetting the console or
-   changing the user.
+   changing the user. If it fails, the message gives the console's reason, and **Pair with the
+   PIN shown on the PS5** pairs the way PS Remote Play does: on the PS5 open Settings › System ›
+   Remote Play › Link Device and type the 8-digit number it shows. That needs no helper, so it
+   works on any firmware. Some consoles drop the first try (one on FW 11.60 also showed
+   CE-110024-8 "Something went wrong"): the app tries again by itself, and if it still fails,
+   press Pair again; the same PIN works while the PS5 shows it. Closing the CE-110024-8 dialog
+   is harmless.
 7. **Play**: Play › Start.
 
 If the picture stays black or stutters, use a wired connection or 5 GHz Wi-Fi, try 720p or 30 fps,
@@ -2268,8 +2562,8 @@ leaves full screen (so backing out of a game menu never drops you out of full sc
 and Firefox the browser itself leaves full screen on any Esc; use Backspace for Circle there.
 
 On a phone or tablet the Remote Play page is view only: the picture shows, but taps never reach
-the console. **Full screen** is where the on-screen controller is. A controller or keyboard
-connected to the phone or tablet plays on the page too.
+the console. **Full screen** is where the on-screen controller is (and the Controller / Touchpad
+switch). A controller or keyboard connected to the phone or tablet plays on the page too.
 
 **Picture in picture** puts the stream in a small window that stays on top while you use other
 apps. The desktop app opens its own small always-on-top window; Chrome and Edge use the
@@ -2277,6 +2571,20 @@ browser's picture-in-picture window. Safari's picture in picture shows the pictu
 keyboard and controller play it while the app's window is in front. Firefox and phones do not
 offer it. A controller keeps playing the small window while another app is in front in the
 Windows app and in Chrome and Edge; in the macOS and Linux apps, click the small window first.
+
+**Q: Can I keep watching the stream while I use other screens, or other apps on Android?**
+Yes. While a stream plays, opening any other screen of PS5Upload (Games, Files, Settings…) keeps
+the picture in a small **mini player** in a corner: drag it to any corner (it stays there next
+time), tap it to go back to Play, use the speaker button to mute, and × to hide it until you open
+Play again (the stream keeps running either way; Stop is on the bar at the top). The controller
+and keyboard play the console only while Play is in front, so they work the app's menus as usual
+on other screens. Turn it off in Play › Settings › Session › **Mini player on other screens**.
+In the **Android app**, going to the home screen while a stream plays shrinks it into Android's
+picture-in-picture window, which floats over other apps with the sound still playing; tap it to
+come back, or drag it away to close it (the stream then waits for you as when you leave the app).
+Turn that off with **Keep the picture floating when you leave the app** in the same place. It
+needs Android 8 or newer, and the phone's own setting for PS5Upload (Settings › Apps › Special
+app access › Picture-in-picture) must allow it.
 
 **Q: How do I change a user's avatar, name or account ID?**
 In **Accounts › Users**. Each user on the PS5 is one row: click the picture to change the avatar
@@ -2694,13 +3002,23 @@ single vendor's flag is a false positive; please report it to that vendor (and t
 
 **Q: How do updates work?**
 The app checks GitHub once per launch and shows a dot on the Settings entry when a newer version
-exists. **Settings → Updates → Download** saves it to your Downloads folder. Where the app can
-replace itself (Windows, macOS when the app's folder is writable, a Linux AppImage) the button
-becomes **Install and restart**: the app quits, the new version takes its place and opens. On
-Windows the setup itself starts (9.1.0): it shows a progress bar, closes the app, installs over
-it and starts the new version, and if something goes wrong it says so. A `.deb` / `.rpm` shows
-the command to run instead. Then press **Send helper** in the banner if
-the app says the helper is older.
+exists. Where the app can replace itself (Windows, macOS when the app's folder is writable, a
+Linux AppImage) **Settings → Updates** offers **Install and restart**: the app downloads the
+update into its own folder (not Downloads), quits, the new version takes its place and opens, and
+the download is deleted once it starts. On Windows the installed app runs the setup itself (9.1.0):
+it shows a progress bar, closes the app, installs over it and starts the new version. The Windows
+`.zip` copy puts the new PS5Upload.exe in place itself before it closes (10.5.1). If anything
+goes wrong the app stays on the old version and says why; a failed update is said once at the
+next launch, with **Try again** and **Download page**, and is not retried in a loop. Elsewhere
+**Download** saves it to your Downloads folder, and a `.deb` / `.rpm` shows the command to run.
+Then press **Send helper** in the banner if the app says the helper is older.
+
+**Q: On Windows (the .zip copy), "Install and restart" closed the app and nothing was installed (#611).**
+Fixed in 10.5.1. The update ran in a hidden PowerShell script after the app had quit, which
+security software and policies can block, and every launch downloaded the same update again.
+Install 10.5.1 by hand once (unzip it over the old copy); from then on the app updates itself.
+Update downloads earlier versions left in Downloads are listed in Settings → Updates with
+**Remove**; nothing is deleted without asking.
 
 **Q: On Windows, "Install and restart" closed the app and nothing was installed.**
 Fixed in 9.1.0 (#533). From 8.6.1 to 9.0.1 the update ran the setup through a hidden PowerShell

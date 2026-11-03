@@ -25,6 +25,7 @@
 //!   POST /api/transfer/file-list      → start multi-file transfer from explicit list
 //!   GET  /api/jobs/{id}               → poll job status/result
 //!   GET  /api/jobs                    → list all jobs (summary)
+//!   POST /api/jobs/{id}/pause|resume  → hold / continue a Workshop job (see `workshop_api`)
 //!   GET  /api/events                  → SSE stream of job state changes
 //!   GET  /api/event-journal           → bug-report event journal (since/until/cat)
 //!   POST /api/ps5/cleanup             → recursively remove a path under PS5 allowlist
@@ -35,6 +36,7 @@
 //!   GET  /api/ps5/console-shares      → the console's own saved network shares (see `console_shares_api`)
 
 mod activity;
+mod ampr_index_api;
 mod ampr_trace;
 mod app_dump_api;
 mod ava1_api;
@@ -92,20 +94,26 @@ mod pkg_install;
 mod pkg_sidecar;
 mod pldmgr_api;
 mod profile_image;
+mod ps2_saves;
 mod remote;
 mod remote_download;
 mod remote_pkg;
+mod rp_keyboard;
 mod rp_replay;
 mod rp_stream_api;
 mod save_backup;
 mod save_backup_server;
+mod save_copy;
 mod settings_backup;
 mod shared_state;
 mod state_io;
 mod telemetry;
+mod vinput_api;
+mod wake_login_api;
 #[cfg(feature = "webui")]
 mod webui;
 mod win_net;
+mod workshop_api;
 
 #[cfg(test)]
 mod ava1_only_tests;
@@ -1523,7 +1531,43 @@ pub(crate) fn with_live_notes(job_id: Uuid, v: serde_json::Value) -> serde_json:
         .unwrap_or_else(|e| e.into_inner())
         .get(&job_id)
         .and_then(|w| w.upgrade());
-    merge_live_notes(notes.as_deref(), v)
+    merge_pause(job_id, merge_live_notes(notes.as_deref(), v))
+}
+
+/// A running Workshop job's pause state: `pausable`, `paused` and `paused_ms` (all its paused
+/// time so far, so a client leaves it out of speed and time left). Other jobs are unchanged.
+fn merge_pause(job_id: Uuid, mut v: serde_json::Value) -> serde_json::Value {
+    let running = v.get("status").and_then(|s| s.as_str()) == Some("running");
+    let Some(flag) = running.then(|| cancel_flag(job_id)).flatten() else {
+        return v;
+    };
+    if let (Some(st), Some(o)) = (ps5upload_fpkg::workshop::status(&flag), v.as_object_mut()) {
+        o.insert("pausable".into(), true.into());
+        o.insert("paused".into(), st.paused.into());
+        o.insert("paused_ms".into(), st.paused_ms.into());
+    }
+    v
+}
+
+/// [`register_transfer_cancel`] for a Workshop job (a conversion or an extraction on this
+/// computer): the same flag, which `POST /api/jobs/{id}/pause` can also hold (#631).
+pub(crate) fn register_workshop_job(job_id: Uuid) -> Arc<AtomicBool> {
+    let flag = register_transfer_cancel(job_id);
+    ps5upload_fpkg::workshop::register(&flag);
+    flag
+}
+
+fn cancel_flag(job_id: Uuid) -> Option<Arc<AtomicBool>> {
+    cancel_registry()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(&job_id)
+        .and_then(Weak::upgrade)
+}
+
+/// Pause or resume a running Workshop job. False when there is none by that id.
+pub(crate) fn set_job_paused(job_id: Uuid, paused: bool) -> bool {
+    cancel_flag(job_id).is_some_and(|f| ps5upload_fpkg::workshop::set_paused(&f, paused))
 }
 
 /// Register a fresh cancel flag for `job_id` and return it to thread into
@@ -1544,6 +1588,8 @@ fn signal_transfer_cancel(job_id: Uuid) -> bool {
         Some(weak) => match weak.upgrade() {
             Some(flag) => {
                 flag.store(true, Ordering::Relaxed);
+                // A paused Workshop job wakes to see it.
+                ps5upload_fpkg::workshop::wake(&flag);
                 true
             }
             None => false,
@@ -4126,6 +4172,11 @@ struct PowerWakeLoginReq {
     /// full session keys, not just the wake credential.
     regist_key: String,
     rp_key: String,
+    /// Someone is there to type the user's login passcode if the console asks: the sign-in is
+    /// held and the passcode asked for (wake_login_api). Otherwise (an automatic wake) a
+    /// passcode request ends it with the console awake at its sign-in screen.
+    #[serde(default)]
+    ask_passcode: bool,
 }
 
 /// POST /api/ps5/power/wake-login — wake the console AND sign its user in.
@@ -4143,7 +4194,7 @@ async fn ps5_power_wake_login(Json(req): Json<PowerWakeLoginReq>) -> impl IntoRe
             Err(e) => return json_err(StatusCode::BAD_REQUEST, format!("{e:#}")).into_response(),
         };
     let regist_key = req.regist_key.clone();
-    let r = tokio::task::spawn_blocking(move || {
+    let job: wake_login_api::SignInJob = Box::new(move |prompt| {
         // The wake credential is the registration key as a number, so derive
         // it from the regist key when the client did not send one — a console
         // with sign-in keys can then always be woken, not just signed in.
@@ -4168,19 +4219,10 @@ async fn ps5_power_wake_login(Json(req): Json<PowerWakeLoginReq>) -> impl IntoRe
                     .and_then(|v| v.parse().ok())
                     .unwrap_or(90),
             ),
+            prompt,
         )
-    })
-    .await
-    .map_err(anyhow::Error::from)
-    .and_then(|r| r);
-    match r {
-        Ok(()) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "ok": true, "signed_in": true })),
-        )
-            .into_response(),
-        Err(e) => json_err(StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
-    }
+    });
+    wake_login_api::start(job, req.ask_passcode).await
 }
 
 async fn ps5_power_wake(Json(req): Json<PowerWakeReq>) -> impl IntoResponse {
@@ -4197,7 +4239,8 @@ async fn ps5_power_wake(Json(req): Json<PowerWakeReq>) -> impl IntoResponse {
     }
 }
 
-#[derive(Debug, serde::Deserialize)]
+// No Debug: the PIN must not reach a log line by accident.
+#[derive(serde::Deserialize)]
 struct PowerPairReq {
     /// The payload's management address. Optional — falls back to the
     /// engine's configured console, like every other payload call.
@@ -4205,6 +4248,13 @@ struct PowerPairReq {
     /// The console's address. Registration and wake use their own ports,
     /// so this is the bare host, not the management address.
     host: String,
+    /// The 8-digit PIN the PS5 shows under Settings › System › Remote Play › Link Device. With
+    /// it the engine registers on its own (no helper, any firmware); never logged.
+    #[serde(default)]
+    pin: Option<String>,
+    /// The PSN account id (base64 of its 8 bytes) to pair, with `pin`.
+    #[serde(default)]
+    account_id: Option<String>,
 }
 
 /// POST /api/ps5/power/pair — pair with a console so it can be woken.
@@ -4212,6 +4262,8 @@ struct PowerPairReq {
 /// One call, nothing asked of the user: the payload supplies the PSN
 /// account id and mints the PIN, and the engine runs the registration
 /// handshake. Returns the wake credential for the client to store.
+/// With `pin` (and `account_id`), the PIN the PS5 shows on its Link Device
+/// screen is used instead, and the helper is not needed.
 ///
 /// The console has to be awake with the payload running. That is not a
 /// limitation worth working around — pairing happens once, and what it
@@ -4222,9 +4274,19 @@ async fn ps5_power_pair(
 ) -> impl IntoResponse {
     let addr = console_addr_or_default(req.addr, &state.default_ps5_addr);
     let host = req.host.clone();
-    crate::log_info!("power_pair: addr={addr} host={host}");
-    let r = tokio::task::spawn_blocking(move || {
-        ps5upload_core::rp_regist::pair_with_console(&addr, &host)
+    let manual = req.pin.filter(|p| !p.trim().is_empty());
+    crate::log_info!(
+        "power_pair: addr={addr} host={host} with={}",
+        if manual.is_some() {
+            "the PS5's PIN"
+        } else {
+            "the helper"
+        }
+    );
+    let account_id = req.account_id.unwrap_or_default();
+    let r = tokio::task::spawn_blocking(move || match manual {
+        Some(pin) => ps5upload_core::rp_regist::pair_with_pin(&host, &account_id, &pin),
+        None => ps5upload_core::rp_regist::pair_with_console(&addr, &host),
     })
     .await
     .map_err(anyhow::Error::from)
@@ -10669,26 +10731,23 @@ async fn bug_report_bundle_handler(Json(req): Json<BugBundleReq>) -> axum::respo
 
 // ─── Entry point ──────────────────────────────────────────────────────────────
 
-/// Spawn the parent-watch thread when running under the desktop shell.
-///
-/// **Why:** the engine binds 19113. If the parent (Tauri shell) dies
-/// abruptly — taskkill /F, segfault, panic, OOM, kernel kill, power
-/// loss recovery — `kill_on_drop(true)` on the parent side never
-/// fires (no `Drop` runs on a crashed process), and the engine is
-/// orphaned holding the port. Next launch can't bind 19113 and the
-/// user is stuck until they manually kill the orphan.
-///
-/// **How:** the parent spawns us with `Stdio::piped()` for stdin and
-/// holds the write end; the OS guarantees that handle is closed when
-/// the parent process dies, however it dies. We park a thread on a
-/// blocking `stdin().read()`. When read returns Ok(0) (EOF), the
-/// parent is gone — exit immediately. No FFI, no per-OS code, no env
-/// crates needed. Works the same on Linux, macOS, Windows.
-///
-/// **Gating:** opt-in via `PS5UPLOAD_PARENT_WATCH=1` so a developer
-/// running the engine standalone (`cargo run -p ps5upload-engine`)
-/// doesn't get auto-killed when their stdin closes (e.g. piping a
-/// file in, or running headless under nohup).
+/// Every connection the engine accepts sends at once (TCP_NODELAY). Without it a small
+/// write waits until the peer acknowledges the last one, and a Linux peer that is also
+/// sending (the Remote Play page's pad input) holds its acks up to 40 ms: Remote Play frames
+/// reached the page ~10-30 ms late on Linux, the "net" figure in its stats. Measured on a
+/// Linux loopback: video frames at 60/s with pad input 20/s took 9 ms (median) and 33 ms (95th
+/// percentile) to arrive; with this, 0.2 and 0.7 ms. Bulk transfers are written in large
+/// chunks, so they lose nothing by it.
+fn no_delay(
+    l: tokio::net::TcpListener,
+) -> axum::serve::TapIo<tokio::net::TcpListener, fn(&mut tokio::net::TcpStream)> {
+    use axum::serve::ListenerExt;
+    fn set(tcp: &mut tokio::net::TcpStream) {
+        let _ = tcp.set_nodelay(true);
+    }
+    l.tap_io(set as fn(&mut tokio::net::TcpStream))
+}
+
 /// Cooperative shutdown signal. Set by either the parent-watcher
 /// thread (stdin EOF when parent died) or a Unix signal handler
 /// (SIGTERM / SIGINT — `kill` from systemd, ^C from a dev terminal).
@@ -10763,6 +10822,26 @@ fn stderr_quiet(msg: &str) {
     let _ = writeln!(std::io::stderr(), "{msg}");
 }
 
+/// Spawn the parent-watch thread when running under the desktop shell.
+///
+/// **Why:** the engine binds 19113. If the parent (Tauri shell) dies
+/// abruptly — taskkill /F, segfault, panic, OOM, kernel kill, power
+/// loss recovery — `kill_on_drop(true)` on the parent side never
+/// fires (no `Drop` runs on a crashed process), and the engine is
+/// orphaned holding the port. Next launch can't bind 19113 and the
+/// user is stuck until they manually kill the orphan.
+///
+/// **How:** the parent spawns us with `Stdio::piped()` for stdin and
+/// holds the write end; the OS guarantees that handle is closed when
+/// the parent process dies, however it dies. We park a thread on a
+/// blocking `stdin().read()`. When read returns Ok(0) (EOF), the
+/// parent is gone — exit immediately. No FFI, no per-OS code, no env
+/// crates needed. Works the same on Linux, macOS, Windows.
+///
+/// **Gating:** opt-in via `PS5UPLOAD_PARENT_WATCH=1` so a developer
+/// running the engine standalone (`cargo run -p ps5upload-engine`)
+/// doesn't get auto-killed when their stdin closes (e.g. piping a
+/// file in, or running headless under nohup).
 fn spawn_parent_watcher() {
     if std::env::var("PS5UPLOAD_PARENT_WATCH").as_deref() != Ok("1") {
         return;
@@ -10901,6 +10980,8 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
         default_ps5_addr: ps5_addr.clone(),
         events_tx,
     };
+    // "Use less of this computer" as it was last set (#632).
+    workshop_api::load();
 
     // The Collection's automatic refresh (a no-op until a folder is added).
     collection_api::spawn_auto_refresh();
@@ -11026,6 +11107,10 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
         .route("/api/lz4/building", get(lz4_api::lz4_building_handler))
         .route("/api/fpkg/build", post(fpkg_api::fpkg_build_handler))
         .route("/api/fpkg/delete", post(fpkg_api::fpkg_delete_handler))
+        .route(
+            "/api/fpkg/ampr-index",
+            post(ampr_index_api::ampr_index_handler),
+        )
         .route("/api/fpkg/estimate", post(fpkg_api::fpkg_estimate_handler))
         .route("/api/fpkg/extract", post(fpkg_api::fpkg_extract_handler))
         .route(
@@ -11094,6 +11179,7 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
         )
         .route("/api/save-backup/list", get(save_backup::get_list))
         .route("/api/save-backup/switch", get(emulator_saves::get_switch))
+        .route("/api/save-backup/ps2", get(ps2_saves::get_ps2))
         .route("/api/save-backup/restore", post(save_backup::post_restore))
         .route(
             "/api/save-backup/snapshot",
@@ -11103,12 +11189,20 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
             "/api/save-backup/import-ps4",
             post(save_backup::post_import_ps4),
         )
-        .route("/api/save-backup/share", post(save_backup::post_share))
+        .route("/api/save-backup/share", post(save_copy::post_share))
         // A shared save's zip comes as the body: saves run from a few KB to a few hundred MB.
         .route(
             "/api/save-backup/use-shared",
-            post(save_backup::post_use_shared)
+            post(save_copy::post_use_shared)
                 .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024 * 1024)),
+        )
+        // Another user's save of the same game on the same console (#612).
+        .route("/api/save-backup/copy", post(save_copy::post_copy))
+        .route("/api/save-backup/now", post(save_backup::post_back_up_now))
+        .route("/api/save-backup/latest", get(save_backup::get_latest))
+        .route(
+            "/api/save-backup/restore-to-user",
+            post(save_copy::post_restore_to_user),
         )
         .route(
             "/api/shared/{name}",
@@ -11314,10 +11408,23 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
         .route("/api/ps5/power/telemetry", get(ps5_power_telemetry))
         .route("/api/ps5/power/wake", post(ps5_power_wake))
         .route("/api/ps5/power/wake-login", post(ps5_power_wake_login))
+        .route(
+            "/api/ps5/power/wake-login/passcode",
+            post(wake_login_api::answer),
+        )
         // Remote Play stream spike (rp_stream_api).
         .route("/api/ps5/rp/ws", get(rp_stream_api::ws))
         .route("/api/ps5/rp/session", get(rp_stream_api::current))
         .route("/api/ps5/rp/replay", get(rp_stream_api::replay))
+        // Remote Play for a local script or agent (#615), this computer only.
+        .route("/api/ps5/rp/frame", get(rp_stream_api::automation::frame))
+        .route("/api/ps5/rp/input", post(rp_stream_api::automation::input))
+        .route(
+            "/api/ps5/rp/input/release",
+            post(rp_stream_api::automation::release),
+        )
+        .route("/api/ps5/vinput/caps", get(vinput_api::caps))
+        .route("/api/ps5/vinput/ws", get(vinput_api::ws))
         .route("/rp-player", get(rp_stream_api::player))
         .route("/pad", get(pad_link::page))
         .route("/api/pad/ws", get(pad_link::ws))
@@ -11535,6 +11642,12 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
         .route("/api/jobs/{id}", get(get_job))
         .route("/api/jobs/{id}/files", get(get_job_files))
         .route("/api/jobs/{id}/cancel", post(cancel_job))
+        .route("/api/jobs/{id}/pause", post(workshop_api::pause_job))
+        .route("/api/jobs/{id}/resume", post(workshop_api::resume_job))
+        .route(
+            "/api/workshop/settings",
+            get(workshop_api::get_settings).post(workshop_api::set_settings),
+        )
         .route("/api/events", get(events_stream))
         .route("/api/engine-logs", get(engine_logs_tail))
         .route("/api/event-journal", get(event_journal::events_handler))
@@ -11724,7 +11837,7 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
     // and the middleware would have to fall back to header-based source
     // detection (less reliable, easier to spoof from a hostile LAN peer).
     let served = axum::serve(
-        listener,
+        no_delay(listener),
         app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
     )
     .with_graceful_shutdown(shutdown_signal())
@@ -12016,6 +12129,9 @@ mod loopback_guard_tests {
             "/api/ps5/rp/pad-link/decide",
             "/api/ps5/rp/pad-relay",
             "/api/ps5/rp/ws",
+            "/api/ps5/rp/frame",
+            "/api/ps5/rp/input",
+            "/api/ps5/rp/input/release",
             "/pad/../api/jobs",
             "/padx",
             "/api/pad/ws/x",
@@ -13637,5 +13753,20 @@ mod avatar_crop_position_tests {
             .await
             .unwrap();
         assert_ne!(top, center, "crop position must change the preview");
+    }
+}
+
+#[cfg(test)]
+mod no_delay_tests {
+    use axum::serve::Listener;
+
+    #[tokio::test]
+    async fn accepted_connections_send_at_once() {
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = l.local_addr().unwrap();
+        let mut l = super::no_delay(l);
+        let _client = tokio::net::TcpStream::connect(addr).await.unwrap();
+        let (io, _) = l.accept().await;
+        assert!(io.nodelay().unwrap());
     }
 }

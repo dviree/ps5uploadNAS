@@ -19,7 +19,7 @@ use uuid::Uuid;
 use ps5upload_fpkg::build::{self, BuildControl, BuildRequest};
 
 use crate::{
-    json_err, now_ms, register_transfer_cancel, set_job, AppState, JobCreated, JobFailOnDropGuard,
+    json_err, now_ms, register_workshop_job, set_job, AppState, JobCreated, JobFailOnDropGuard,
     JobStage, JobState,
 };
 
@@ -69,6 +69,11 @@ pub(crate) struct BuildReq {
     /// in full and a seeded sample of the data blocks.
     #[serde(default)]
     full_verify: bool,
+    /// When the package's name is taken in the output folder, name it `<stem> (2).pkg` (and so
+    /// on) instead of refusing: Convert's "Save each next to its source", where the folder is
+    /// the user's own and may hold anything.
+    #[serde(default)]
+    keep_both: bool,
 }
 
 /// The language a build asked for, trimmed; none when blank.
@@ -78,6 +83,12 @@ fn language_of(v: Option<String>) -> Option<String> {
 
 /// Where packages go when the caller does not say: the user's Downloads folder, which is
 /// where a package is easiest to find afterwards.
+/// Run a Workshop job's work off the async runtime, on a thread of its own that "use less of
+/// this computer" can lower (#632) without touching the shared blocking pool.
+fn spawn_workshop_job(work: impl FnOnce() + Send + 'static) {
+    tokio::task::spawn_blocking(move || ps5upload_fpkg::workshop::on_job_thread(work));
+}
+
 pub(crate) fn default_output_dir() -> PathBuf {
     user_home().join("Downloads").join("fpkgs")
 }
@@ -336,6 +347,16 @@ pub(crate) async fn fpkg_build_handler(
         .filter(|n| !n.trim().is_empty())
         .or_else(|| req.content_id.clone().filter(|c| !c.trim().is_empty()))
         .or_else(|| inspection.content_id.clone());
+    let stem = match stem {
+        Some(s) if req.keep_both => Some(
+            crate::folder_build::keep_both_stem(&s, |c| {
+                crate::folder_build::name_in_use(&out.join(format!("{c}.pkg")))
+            })
+            .unwrap_or(s),
+        ),
+        other => other,
+    };
+    let chosen_name = stem.clone().filter(|_| req.keep_both);
     let partial = match stem.map(|stem| out.join(format!("{stem}.pkg.partial"))) {
         Some(path) => match Writing::claim_off_thread(path.clone()).await {
             Some(w) => Some(w),
@@ -345,7 +366,7 @@ pub(crate) async fn fpkg_build_handler(
     };
 
     let job_id = Uuid::new_v4();
-    let cancel = register_transfer_cancel(job_id);
+    let cancel = register_workshop_job(job_id);
     let bytes = Arc::new(AtomicU64::new(0));
     let total = Arc::new(AtomicU64::new(inspection.planned_size));
     // The stage the build is in, by index (`u64::MAX` before the first).
@@ -403,7 +424,7 @@ pub(crate) async fn fpkg_build_handler(
                         .flatten();
                     drop(g);
                     if let Some(state) = state {
-                        let msg = serde_json::json!({ "job_id": job_id.to_string(), "job": state });
+                        let msg = serde_json::json!({ "job_id": job_id.to_string(), "job": crate::with_live_notes(job_id, state) });
                         let _ = events_tx.send(msg.to_string());
                     }
                 }
@@ -416,7 +437,7 @@ pub(crate) async fn fpkg_build_handler(
     let state_for_job = state.clone();
     let request_source = source_path.clone();
     let ticker = JobTicker(ticker.abort_handle());
-    tokio::task::spawn_blocking(move || {
+    spawn_workshop_job(move || {
         // A panic in the work below must not leave the job "running" forever with its
         // ticker looping: both guards act on any exit, `fail` unless a result was recorded.
         let mut fail = JobFailOnDropGuard::new(
@@ -428,7 +449,7 @@ pub(crate) async fn fpkg_build_handler(
         sweep_output_leftovers(&out);
         let mut request = BuildRequest::new(&request_source, &out);
         request.content_id = req.content_id.filter(|id| !id.trim().is_empty());
-        request.file_name = req.name.filter(|name| !name.trim().is_empty());
+        request.file_name = chosen_name.or(req.name.filter(|name| !name.trim().is_empty()));
         if let Some(passcode) = req.passcode.filter(|p| !p.is_empty()) {
             request.passcode = passcode;
         }
@@ -665,7 +686,7 @@ pub(crate) async fn ffpfsc_compress_handler(
     };
 
     let job_id = Uuid::new_v4();
-    let cancel = register_transfer_cancel(job_id);
+    let cancel = register_workshop_job(job_id);
     let bytes = Arc::new(AtomicU64::new(0));
     let started_at_ms = now_ms();
     set_job(
@@ -702,7 +723,7 @@ pub(crate) async fn ffpfsc_compress_handler(
                         .flatten();
                     drop(g);
                     if let Some(state) = state {
-                        let msg = serde_json::json!({ "job_id": job_id.to_string(), "job": state });
+                        let msg = serde_json::json!({ "job_id": job_id.to_string(), "job": crate::with_live_notes(job_id, state) });
                         let _ = events_tx.send(msg.to_string());
                     }
                 }
@@ -713,7 +734,7 @@ pub(crate) async fn ffpfsc_compress_handler(
 
     let state_for_job = state.clone();
     let ticker = JobTicker(ticker.abort_handle());
-    tokio::task::spawn_blocking(move || {
+    spawn_workshop_job(move || {
         // A panic in the work below must not leave the job "running" forever with its
         // ticker looping: both guards act on any exit, `fail` unless a result was recorded.
         let mut fail = JobFailOnDropGuard::new(
@@ -754,7 +775,7 @@ pub(crate) async fn ffpfsc_compress_handler(
                         report.blocks,
                         completed_at_ms.saturating_sub(started_at_ms),
                         options.level,
-                        std::thread::available_parallelism().map_or(4, |n| n.get()),
+                        ps5upload_fpkg::workshop::workshop_threads(),
                         options.sample.is_none(),
                     ),
                 );
@@ -844,6 +865,15 @@ pub(crate) struct ExfatBuildReq {
     /// otherwise. The source image is only read.
     #[serde(default)]
     edits: Vec<ImageEditReq>,
+    /// When the image's name is taken in the output folder, add ` (2)` (and so on) instead of
+    /// refusing (see `BuildReq::keep_both`).
+    #[serde(default)]
+    keep_both: bool,
+    /// An edited copy of the image `source` whose one change is a regenerated
+    /// `ampr_emu.index` (Workshop's "Rebuild AMPR index", #621): written like an edited copy,
+    /// refused for a compressed image or a game that does not read through libSceAmpr.
+    #[serde(default)]
+    rebuild_ampr_index: bool,
 }
 
 /// One change for an edited copy of an image: `{"op":"delete","path":…}` removes a file or
@@ -1009,7 +1039,7 @@ pub(crate) async fn exfat_build_handler(
     }
     // An edited copy (#479): the image on this computer, opened with the changes applied, is
     // written out again as the same kind of image.
-    let edited = if req.edits.is_empty() {
+    let edited = if req.edits.is_empty() && !req.rebuild_ampr_index {
         None
     } else {
         if remote || !image_file {
@@ -1027,7 +1057,16 @@ pub(crate) async fn exfat_build_handler(
             .into_response();
         }
         let (edit_source, edits) = (source.clone(), std::mem::take(&mut req.edits));
-        match tokio::task::spawn_blocking(move || open_edited(&edit_source, &edits)).await {
+        let index_only = req.rebuild_ampr_index && edits.is_empty();
+        match tokio::task::spawn_blocking(move || {
+            if index_only {
+                crate::ampr_index_api::open_for_index(&edit_source)
+            } else {
+                open_edited(&edit_source, &edits)
+            }
+        })
+        .await
+        {
             Ok(Ok(e)) => Some(e),
             Ok(Err(e)) => return json_err(StatusCode::BAD_REQUEST, e).into_response(),
             Err(e) => {
@@ -1095,6 +1134,16 @@ pub(crate) async fn exfat_build_handler(
             .parent()
             .map_or_else(default_output_dir, Path::to_path_buf),
         _ => output_dir(req.output_dir.as_deref()),
+    };
+    let named = if req.keep_both {
+        let taken = |stem: &str| {
+            let (name, _) = crate::image_build::output_names(Path::new(stem), format, compress);
+            crate::folder_build::name_in_use(&out_dir.join(name))
+        };
+        crate::folder_build::keep_both_stem(&crate::image_build::stem_of(&named), taken)
+            .map_or(named, PathBuf::from)
+    } else {
+        named
     };
     let (out_name, inner_name) = crate::image_build::output_names(&named, format, compress);
     let output = out_dir.join(out_name);
@@ -1175,7 +1224,7 @@ pub(crate) async fn exfat_build_handler(
     };
 
     let job_id = Uuid::new_v4();
-    let cancel = register_transfer_cancel(job_id);
+    let cancel = register_workshop_job(job_id);
     let bytes = Arc::new(AtomicU64::new(0));
     let started_at_ms = now_ms();
     set_job(
@@ -1218,7 +1267,7 @@ pub(crate) async fn exfat_build_handler(
                         .flatten();
                     drop(g);
                     if let Some(state) = state {
-                        let msg = serde_json::json!({ "job_id": job_id.to_string(), "job": state });
+                        let msg = serde_json::json!({ "job_id": job_id.to_string(), "job": crate::with_live_notes(job_id, state) });
                         let _ = events_tx.send(msg.to_string());
                     }
                 }
@@ -1229,7 +1278,7 @@ pub(crate) async fn exfat_build_handler(
 
     let state_for_job = state.clone();
     let ticker = JobTicker(ticker.abort_handle());
-    tokio::task::spawn_blocking(move || {
+    spawn_workshop_job(move || {
         // A panic in the work below must not leave the job "running" forever with its
         // ticker looping: both guards act on any exit, `fail` unless a result was recorded.
         let mut fail = JobFailOnDropGuard::new(
@@ -1395,6 +1444,10 @@ pub(crate) struct FolderBuildReq {
     /// folder too.
     #[serde(default)]
     ampr_lz4: Option<AmprLz4Req>,
+    /// When the folder's name is taken in the output folder, add ` (2)` (and so on) instead of
+    /// refusing (see `BuildReq::keep_both`).
+    #[serde(default)]
+    keep_both: bool,
 }
 
 /// What a folder build reads: the whole image, one folder of it, or one file.
@@ -1507,6 +1560,14 @@ pub(crate) async fn folder_build_handler(
         .into_response();
     }
     let out_dir = output_dir(req.output_dir.as_deref());
+    let name = if req.keep_both {
+        crate::folder_build::keep_both_stem(&name, |c| {
+            crate::folder_build::name_in_use(&out_dir.join(c))
+        })
+        .unwrap_or(name)
+    } else {
+        name
+    };
     let target = out_dir.join(&name);
     if tokio::fs::try_exists(&target).await.unwrap_or(false) {
         return json_err(
@@ -1600,7 +1661,7 @@ pub(crate) async fn folder_build_handler(
     if let Some(b) = &building {
         b.set_job(&job_id.to_string());
     }
-    let cancel = register_transfer_cancel(job_id);
+    let cancel = register_workshop_job(job_id);
     let bytes = Arc::new(AtomicU64::new(0));
     let started_at_ms = now_ms();
     set_job(
@@ -1641,7 +1702,7 @@ pub(crate) async fn folder_build_handler(
                         .flatten();
                     drop(g);
                     if let Some(state) = state {
-                        let msg = serde_json::json!({ "job_id": job_id.to_string(), "job": state });
+                        let msg = serde_json::json!({ "job_id": job_id.to_string(), "job": crate::with_live_notes(job_id, state) });
                         let _ = events_tx.send(msg.to_string());
                     }
                 }
@@ -1652,7 +1713,7 @@ pub(crate) async fn folder_build_handler(
 
     let state_for_job = state.clone();
     let ticker = JobTicker(ticker.abort_handle());
-    tokio::task::spawn_blocking(move || {
+    spawn_workshop_job(move || {
         let _building = building;
         let mut fail = JobFailOnDropGuard::new(
             state_for_job.jobs.clone(),
@@ -2098,7 +2159,7 @@ pub(crate) async fn fpkg_extract_handler(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .insert(dest.clone());
-    let cancel = register_transfer_cancel(job_id);
+    let cancel = register_workshop_job(job_id);
     let bytes = Arc::new(AtomicU64::new(0));
     let started_at_ms = now_ms();
     set_job(
@@ -2135,7 +2196,7 @@ pub(crate) async fn fpkg_extract_handler(
                         .flatten();
                     drop(g);
                     if let Some(state) = state {
-                        let msg = serde_json::json!({ "job_id": job_id.to_string(), "job": state });
+                        let msg = serde_json::json!({ "job_id": job_id.to_string(), "job": crate::with_live_notes(job_id, state) });
                         let _ = events_tx.send(msg.to_string());
                     }
                 }
@@ -2146,7 +2207,7 @@ pub(crate) async fn fpkg_extract_handler(
 
     let state_for_job = state.clone();
     let ticker = JobTicker(ticker.abort_handle());
-    tokio::task::spawn_blocking(move || {
+    spawn_workshop_job(move || {
         // A panic in the work below must not leave the job "running" forever with its
         // ticker looping: both guards act on any exit, `fail` unless a result was recorded.
         let mut fail = JobFailOnDropGuard::new(
@@ -2157,7 +2218,12 @@ pub(crate) async fn fpkg_extract_handler(
         );
         // Until the game is found, the folder is this job's to remove (a panic included).
         let mut unpacking = Unpacking(Some(dest.clone()));
-        let mut progress = |done: u64, _total: u64| bytes.store(done, Ordering::Relaxed);
+        let mut progress = |done: u64, _total: u64| {
+            bytes.store(done, Ordering::Relaxed);
+            // Called every MiB on the unpacking thread: a pause holds it here, and a RAR's
+            // helper process, its pipe full, waits with it (#631). A cancel is seen just after.
+            ps5upload_fpkg::workshop::checkpoint(&cancel);
+        };
         let outcome =
             archive_extract::extract(&source, &dest, password.as_deref(), &mut progress, &cancel)
                 .and_then(|()| archive_extract::find_game(&dest));

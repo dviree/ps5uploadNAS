@@ -60,12 +60,15 @@ import {
   appsInstalled,
   cheatsGet,
   cheatsToggle,
+  profileInfo,
   savesList,
   type InstalledTitle,
   type CheatMod,
+  type ProfileUser,
   type SaveEntry,
 } from "../../api/ps5";
-import { transferAddr, hostOf } from "../../lib/addr";
+import { transferAddr, hostOf, mgmtAddr } from "../../lib/addr";
+import { useTitleInfo } from "../../lib/useTitleInfo";
 import {
   driveOffers,
   gamePath,
@@ -93,6 +96,9 @@ import {
   useTrackedPlay,
 } from "../../lib/trackedPlay";
 import { PlayedLine } from "./PlayedLine";
+import { CheatAppliedLine } from "../Cheats/CheatAppliedLine";
+import { anyWaiting } from "../Cheats/cheatApplied";
+import { useWaitingPoll } from "../Cheats/waitingPoll";
 import { runningOn, useRunningAppsStore } from "../../state/runningApps";
 // Direct import to avoid the barrel's circular-dep warning at build.
 import { useConfirm } from "../../components/ConfirmDialog";
@@ -688,7 +694,12 @@ function useTabFetch<T>(
   host: string | null,
   fetcher: (addr: string) => Promise<T>,
   deps: unknown[],
-): { data: T | null; loading: boolean; error: string | null } {
+): {
+  data: T | null;
+  loading: boolean;
+  error: string | null;
+  setData: (data: T) => void;
+} {
   const payloadStatus = useConnectionStore((s) => s.payloadStatus);
   const [data, setData] = useState<T | null>(null);
   const [loading, setLoading] = useState(false);
@@ -722,7 +733,7 @@ function useTabFetch<T>(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [host, payloadStatus, ...deps]);
 
-  return { data, loading, error };
+  return { data, loading, error, setData };
 }
 
 /** Standard card wrapper for a fetched tab: title, spinner, error, body. */
@@ -793,7 +804,7 @@ function CheatsTab({
   const navigate = useNavigate();
   const payloadStatus = useConnectionStore((s) => s.payloadStatus);
   const connected = !!host?.trim() && payloadStatus === "up";
-  const { data, loading, error } = useTabFetch(
+  const { data, loading, error, setData } = useTabFetch(
     host,
     (addr) => cheatsGet(titleId, addr),
     [titleId],
@@ -820,15 +831,29 @@ function CheatsTab({
       );
       if (!res.ok) throw new Error(res.err || "Toggle rejected by the console");
     } catch (e) {
-      // Roll the switch back — the console didn't accept it.
+      // Roll the switch back — the console didn't accept it — then read what the console
+      // has: an off that went through but could not be saved is still off in the game.
       setOverrides((o) => ({ ...o, [mod.index]: !next }));
       setToggleError(e instanceof Error ? e.message : String(e));
+      void cheatsGet(titleId, transferAddr(host.trim()))
+        .then(setData)
+        .catch(() => {});
     } finally {
       setBusyIndex(null);
     }
   };
 
   const mods = data?.mods ?? [];
+  // A cheat waiting for the game to load (#627): read the list again quietly until it applies,
+  // as the Cheats screen does. Statuses come only for the game running now.
+  const pollHost = connected && host ? transferAddr(host.trim()) : "";
+  useWaitingPoll(
+    !!pollHost && anyWaiting(mods),
+    `${titleId}@${pollHost}`,
+    () => cheatsGet(titleId, pollHost),
+    setData,
+    () => busyIndex !== null,
+  );
   return (
     <TabCard
       icon={Shield}
@@ -884,6 +909,8 @@ function CheatsTab({
                   label={mod.name}
                   hint={mod.desc || undefined}
                 />
+                {/* What happened in the running game (#627); a switch flipped here waits for the next read. */}
+                {overrides[mod.index] === undefined && <CheatAppliedLine mod={mod} className="mt-0.5" />}
               </li>
             ))}
           </ul>
@@ -910,6 +937,19 @@ function SavesTab({ titleId, host }: { titleId: string; host: string | null }) {
     () => (data?.saves ?? []).filter((s: SaveEntry) => s.title_id === titleId),
     [data, titleId],
   );
+  // The console's users, for Restore to another user (#612). Names are a nicety.
+  const [users, setUsers] = useState<ProfileUser[]>([]);
+  useEffect(() => {
+    if (!connected || !host) return;
+    let live = true;
+    profileInfo(mgmtAddr(host))
+      .then((p) => live && setUsers(p.users ?? []))
+      .catch(() => {});
+    return () => {
+      live = false;
+    };
+  }, [connected, host]);
+  const gameName = useTitleInfo(titleId)?.title ?? null;
 
   return (
     <TabCard
@@ -952,7 +992,15 @@ function SavesTab({ titleId, host }: { titleId: string; host: string | null }) {
                       <span>· {formatDate(new Date(s.mtime * 1000))}</span>
                     )}
                   </div>
-                  {host && <SaveBackupsList host={host} save={s} />}
+                  {host && (
+                    <SaveBackupsList
+                      host={host}
+                      save={s}
+                      users={users}
+                      saves={data?.saves ?? []}
+                      game={gameName ?? undefined}
+                    />
+                  )}
                 </div>
               </li>
             ))}

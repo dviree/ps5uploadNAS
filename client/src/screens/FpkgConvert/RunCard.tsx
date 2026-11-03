@@ -4,12 +4,12 @@
 
 import { useEffect, useState } from "react";
 
-import { CheckCircle2, Circle, ListPlus, Loader2, XCircle } from "lucide-react";
+import { CheckCircle2, Circle, ListPlus, Loader2, Pause, Play, XCircle } from "lucide-react";
 
 import { Button, Card, Checkbox, ProgressBar, Toggle } from "../../components";
 import type { ConvertThen } from "../../state/convertQueue";
 import type { MakeKind } from "../../state/convertPrefs";
-import { makesFolder, makesImage } from "../../state/fpkgConversion";
+import { makesFolder, makesImage, pausedSoFar, stagePausedSoFar } from "../../state/fpkgConversion";
 import type { InstallMethod, Pipeline, PipelineStage } from "../../state/fpkgConversion";
 import { useTr } from "../../state/lang";
 import { formatBytes } from "../../lib/format";
@@ -17,6 +17,7 @@ import type { Task } from "../../state/tasks";
 import type { ImageFormat } from "../../api/fpkg";
 import { overallProgress, stageRows, type StageRow } from "./stages";
 import { lz4Active, type Lz4Choice } from "./ImageOptions";
+import { GentleToggle } from "./GentleToggle";
 
 export { lz4Active, type Lz4Choice } from "./ImageOptions";
 
@@ -102,6 +103,9 @@ export interface RunCardProps {
   canQueue?: boolean;
   onCompress: () => void;
   onCancel: () => void;
+  /** Hold the running job where it is (#631); absent where it cannot pause. */
+  onPause?: () => void;
+  onResume?: () => void;
   /** Install the kept package: streamed from this computer, or uploaded to the PS5 first. */
   onInstall: (method: InstallMethod) => void;
   onLaunch: () => void;
@@ -124,7 +128,9 @@ export interface RunCardProps {
   targetLabel?: string | null;
 }
 
-function RowIcon({ state }: { state: StageRow["state"] }) {
+function RowIcon({ state, paused }: { state: StageRow["state"]; paused?: boolean }) {
+  if (state === "active" && paused)
+    return <Pause size={16} className="text-[var(--color-muted)]" aria-hidden />;
   switch (state) {
     case "done":
       return <CheckCircle2 size={16} className="text-[var(--color-good)]" aria-hidden />;
@@ -146,6 +152,34 @@ function useNow(live: boolean): number {
     return () => clearInterval(id);
   }, [live]);
   return now;
+}
+
+type Tr = ReturnType<typeof useTr>;
+
+/** The idle card's main button: what it says and whether it can be pressed. Shared with the
+ *  Workshop's bottom bar, which offers the same button while ④ is scrolled out of view. */
+export function idleRun(
+  props: Pick<RunCardProps, "choice" | "canConvert" | "canFolder" | "canImage" | "replaces">,
+  tr: Tr,
+): { label: string; canRun: boolean } {
+  const c = props.choice;
+  const image = c.make === "image";
+  const folder = c.make === "folder";
+  const packing = image && lz4Active(c.imageFormat, c.lz4);
+  const sends = c.then !== "keep";
+  const canRun = props.canConvert !== false && (folder ? !!props.canFolder : !image || !!props.canImage);
+  const label = folder
+    ? tr("fpkg.folder.make", undefined, "Make game folder")
+    : image
+      ? c.imageCompress && !packing
+        ? tr("fpkg.image.make_compressed", undefined, "Make compressed image")
+        : tr("fpkg.image.make", undefined, "Make game image")
+      : !sends
+        ? tr("fpkg.convertOnly", undefined, "Convert only")
+        : props.replaces
+          ? tr("fpkg.convertReplace", undefined, "Convert & replace")
+          : tr("fpkg.convertInstall", undefined, "Convert & install");
+  return { label, canRun };
 }
 
 export function RunCard(props: RunCardProps) {
@@ -179,7 +213,9 @@ export function RunCard(props: RunCardProps) {
       rate = installTask.rate?.bytesPerSec ?? 0;
       eta = (installTask.eta ?? 0) * 1000;
     } else if (p.phase === "running") {
-      rate = rateOf(r.done ?? 0, now - p.stageStartedMs);
+      if (p.paused) return "";
+      // Paused time is not slow progress: it is left out of the speed.
+      rate = rateOf(r.done ?? 0, now - p.stageStartedMs - stagePausedSoFar(p, now));
       eta = rate > 0 ? (remaining / rate) * 1000 : 0;
     }
     return (
@@ -198,24 +234,11 @@ export function RunCard(props: RunCardProps) {
     const c = props.choice;
     const image = c.make === "image";
     const folder = c.make === "folder";
-    const packing = image && lz4Active(c.imageFormat, c.lz4);
     const sends = c.then !== "keep";
-    const canRun =
-      props.canConvert !== false && (folder ? !!props.canFolder : !image || !!props.canImage);
-    const runLabel = folder
-      ? tr("fpkg.folder.make", undefined, "Make game folder")
-      : image
-        ? c.imageCompress && !packing
-        ? tr("fpkg.image.make_compressed", undefined, "Make compressed image")
-          : tr("fpkg.image.make", undefined, "Make game image")
-        : !sends
-        ? tr("fpkg.convertOnly", undefined, "Convert only")
-        : props.replaces
-          ? tr("fpkg.convertReplace", undefined, "Convert & replace")
-          : tr("fpkg.convertInstall", undefined, "Convert & install");
+    const { label: runLabel, canRun } = idleRun(props, tr);
     return (
-      <Card>
-        <div className="flex flex-col gap-3">
+      <Card padded={false} className="p-3.5 sm:p-4">
+        <div className="flex flex-col gap-2.5">
           {title}
           {props.summary && (
             <div className="text-xs text-[var(--color-muted)]" data-testid="run-summary">
@@ -238,6 +261,7 @@ export function RunCard(props: RunCardProps) {
               </Button>
             )}
           </div>
+          <GentleToggle compact />
           {image && !props.canImage && props.canConvert !== false && (
             <div className="text-xs text-[var(--color-muted)]">
               {tr(
@@ -285,7 +309,7 @@ export function RunCard(props: RunCardProps) {
       {rows.map((r) => (
         <li key={r.stage} className="flex flex-col gap-1">
           <div className="flex items-center gap-2">
-            <RowIcon state={r.state} />
+            <RowIcon state={r.state} paused={p.phase === "running" && !!p.paused} />
             <span className={r.state === "active" ? "font-medium" : ""}>{label(r.stage)}</span>
             {r.ms !== undefined && r.state !== "active" && (
               <span className="text-xs text-[var(--color-muted)]">{prettyDuration(r.ms)}</span>
@@ -337,8 +361,11 @@ export function RunCard(props: RunCardProps) {
 
   if (p.phase === "running") {
     const building = !["send", "install"].includes(p.stage);
+    // The engine's own Workshop work pauses; a copy from a server is a download, not one.
+    const canPause =
+      building && p.stage !== "copy" && p.stage !== "park" && !!p.jobId && !!props.onPause && !!props.onResume;
     return (
-      <Card>
+      <Card padded={false} className="p-3.5 sm:p-4">
         <div className="flex flex-col gap-3">
           {title}
           {p.mode === "convert-install" && props.targetLabel && (
@@ -352,22 +379,38 @@ export function RunCard(props: RunCardProps) {
             label={tr("fpkg.overall", undefined, "Overall")}
           />
           <div className="flex items-center justify-between text-xs text-[var(--color-muted)]">
-            <span>
+            <span data-testid="run-overall">
               {Math.round(overallProgress(rows) * 100)}%
-              {(() => {
-                const f = overallProgress(rows);
-                const elapsed = now - p.startedMs;
-                return f > 0.02 && elapsed > 5000
-                  ? ` · ${tr("fpkg.timeLeft", { time: prettyDuration((elapsed / f) * (1 - f)) }, "{time} left")}`
-                  : "";
-              })()}
+              {p.paused
+                ? ` · ${tr("fpkg.paused_queue_waits", undefined, "Paused — the queue waits")}`
+                : (() => {
+                    const f = overallProgress(rows);
+                    // Paused time is left out, so a pause does not stretch the time left.
+                    const elapsed = now - p.startedMs - pausedSoFar(p, now);
+                    return f > 0.02 && elapsed > 5000
+                      ? ` · ${tr("fpkg.timeLeft", { time: prettyDuration((elapsed / f) * (1 - f)) }, "{time} left")}`
+                      : "";
+                  })()}
             </span>
             {building && p.jobId && (
-              <Button variant="danger" onClick={props.onCancel}>
-                {tr("fpkg.cancel", undefined, "Cancel")}
-              </Button>
+              <div className="flex flex-wrap gap-2">
+                {canPause &&
+                  (p.paused ? (
+                    <Button leftIcon={<Play size={14} />} onClick={props.onResume}>
+                      {tr("fpkg.resume", undefined, "Resume")}
+                    </Button>
+                  ) : (
+                    <Button leftIcon={<Pause size={14} />} onClick={props.onPause}>
+                      {tr("fpkg.pause", undefined, "Pause")}
+                    </Button>
+                  ))}
+                <Button variant="danger" onClick={props.onCancel}>
+                  {tr("fpkg.cancel", undefined, "Cancel")}
+                </Button>
+              </div>
             )}
           </div>
+          {building && <GentleToggle />}
         </div>
       </Card>
     );
@@ -375,7 +418,7 @@ export function RunCard(props: RunCardProps) {
 
   if (p.phase === "failed") {
     return (
-      <Card>
+      <Card padded={false} className="p-3.5 sm:p-4">
         <div className="flex flex-col gap-3">
           {title}
           {stageList}
@@ -400,7 +443,7 @@ export function RunCard(props: RunCardProps) {
 
   const installed = p.mode === "convert-install" || p.mode === "install";
   return (
-    <Card>
+    <Card padded={false} className="p-3.5 sm:p-4">
       <div className="flex flex-col gap-3">
         {title}
         {stageList}

@@ -6,18 +6,14 @@
 //!   1. `update_check` fetches `latest.json` from the GitHub Releases
 //!      endpoint and reports version/notes/asset-url to the renderer.
 //!   2. If the renderer decides to update, it calls `update_download`
-//!      which streams the platform-appropriate archive into the user's
-//!      Downloads folder and opens that folder in the OS file manager.
-//!   3. The user manually closes the running app and replaces the
-//!      existing binary/bundle with the fresh download.
-//!
-//! Why not auto-install:
-//!   - Cross-platform auto-replace is a lot of platform-specific code
-//!     (Windows file-locking dance, macOS .app bundle swapping, etc.)
-//!     with real failure modes.
-//!   - The user asked explicitly for "download + ask user to replace."
-//!   - Without code-signing certs we can't provide the integrity
-//!     guarantees that an auto-installer would imply anyway.
+//!      which streams the platform-appropriate archive into the app's own
+//!      updates folder (`update_files`; since 10.5.1, #611), checked against
+//!      the manifest's SHA-256. An already-downloaded file that matches is
+//!      reused, not downloaded again.
+//!   3. Where this copy can replace itself (`self_install`), "Install and
+//!      restart" does; the next launch deletes the download. Otherwise the
+//!      download goes to the user's Downloads folder, which opens, and the
+//!      user installs it by hand.
 //!
 //! Manifest shape (written by `scripts/gen-updater-manifest.py`):
 //!
@@ -341,7 +337,7 @@ fn preferred_asset_keys() -> Vec<String> {
 ///
 /// Build metadata after `+` is ignored entirely (semver rule).
 /// Returns true iff `latest` is strictly greater than `current`.
-fn is_newer(current: &str, latest: &str) -> bool {
+pub(crate) fn is_newer(current: &str, latest: &str) -> bool {
     /// Returns (numeric_parts, has_prerelease). `2.2.0-rc1` →
     /// (`[2,2,0]`, true). `2.2.0+sha.abc` → (`[2,2,0]`, false).
     /// `2.2.0-rc1+sha.abc` → (`[2,2,0]`, true).
@@ -623,15 +619,9 @@ pub async fn update_check(app: AppHandle, channel: Option<String>) -> Result<Upd
     })
 }
 
-/// Resolve the best "Downloads" folder for the host. We try the
-/// standard one first; if it's missing (CI / sandboxed accounts) we
-/// fall back to the Tauri app's own config dir so we always have
-/// somewhere writeable to land the file.
-/// Where `update_download` saves updates (`update_install` installs only from here).
-pub(crate) fn downloads_dir(app: &AppHandle) -> Result<PathBuf, String> {
-    resolve_downloads_dir(app)
-}
-
+/// The user's Downloads folder, for a download they install by hand. If it is missing
+/// (CI / sandboxed accounts), the app's config dir, so there is always somewhere writeable to
+/// land the file.
 fn resolve_downloads_dir(app: &AppHandle) -> Result<PathBuf, String> {
     if let Ok(p) = app.path().download_dir() {
         if p.exists() || std::fs::create_dir_all(&p).is_ok() {
@@ -646,6 +636,23 @@ fn resolve_downloads_dir(app: &AppHandle) -> Result<PathBuf, String> {
     let out = cfg.join("downloads");
     std::fs::create_dir_all(&out).map_err(|e| format!("mkdir {out:?}: {e}"))?;
     Ok(out)
+}
+
+/// Where an update download goes: the app's updates folder when this copy installs it itself
+/// or the person runs a command on it (`can_install`, `has_command`), the Downloads folder when
+/// they install it by hand and have to find it.
+fn download_dir_for(can_install: bool, has_command: bool) -> DownloadPlace {
+    if can_install || has_command {
+        DownloadPlace::Updates
+    } else {
+        DownloadPlace::Downloads
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DownloadPlace {
+    Updates,
+    Downloads,
 }
 
 #[derive(Serialize)]
@@ -724,8 +731,8 @@ fn install_command(path: &str) -> Option<String> {
 }
 
 /// Download the platform-specific asset from the URL returned by
-/// `update_check` into the user's Downloads folder, then reveal it in
-/// the OS file manager. Skips re-downloading if the target file
+/// `update_check` into the updates folder (or, for an install by hand,
+/// the Downloads folder, which is then revealed in the file manager). Skips re-downloading if the target file
 /// already exists with the same size reported by Content-Length — a
 /// user who closed the app mid-install shouldn't have to wait for the
 /// whole thing again on the next click.
@@ -767,17 +774,16 @@ pub async fn update_download(
     //   - NUL rules out C-string early-terminators (would still fail on
     //     create, but the error would be confusing).
     //   - leading dot rules out hidden-file shenanigans.
-    if filename.is_empty()
-        || filename == "."
-        || filename == ".."
-        || filename.starts_with('.')
-        || filename.contains('/')
-        || filename.contains('\\')
-        || filename.contains('\0')
-    {
+    if !is_plain_file_name(&filename) {
         return Err(format!("invalid filename: {filename:?}"));
     }
-    let dl_dir = resolve_downloads_dir(&app)?;
+    // Whether this copy installs it is known from the name alone (`self_install::plan`), so the
+    // folder is chosen before anything is downloaded.
+    let (can_install_here, _) = super::self_install::install_ability(&filename);
+    let dl_dir = match download_dir_for(can_install_here, install_command(&filename).is_some()) {
+        DownloadPlace::Updates => super::update_files::updates_dir(&app)?,
+        DownloadPlace::Downloads => resolve_downloads_dir(&app)?,
+    };
     let target = dl_dir.join(&filename);
 
     let client = reqwest::Client::builder()
@@ -927,6 +933,10 @@ pub async fn update_download(
     // the already-moved file. (A Drop-safe `rename_if_exists` is
     // another option, but the guard pattern is simpler here.)
     cleanup.armed = false;
+    // In the updates folder this is now the one update waiting: earlier versions' downloads go.
+    if super::update_files::updates_dir(&app).is_ok_and(|d| d == dl_dir) {
+        super::update_files::clean_dir(&dl_dir, Some(&target), None);
+    }
 
     // `reveal` is best-effort. If the OS file manager fails to open
     // (sandboxed session, display server unavailable, exotic DE), the
@@ -948,6 +958,18 @@ pub async fn update_download(
         path,
         bytes: total,
     })
+}
+
+/// A bare file name to save an update as: no path separators, no `.` / `..`, no hidden file,
+/// no NUL (the name comes from the remote manifest; see `update_download`).
+pub(crate) fn is_plain_file_name(name: &str) -> bool {
+    !(name.is_empty()
+        || name == "."
+        || name == ".."
+        || name.starts_with('.')
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains('\0'))
 }
 
 /// Shows the download where the person installs it by hand: the Windows setup is started, else
@@ -1060,6 +1082,16 @@ mod checksum_tests {
     }
 
     #[test]
+    fn downloads_go_to_the_updates_folder_unless_installed_by_hand() {
+        // #611: the copy installs it itself (or runs a command on it): never Downloads.
+        assert_eq!(download_dir_for(true, false), DownloadPlace::Updates);
+        assert_eq!(download_dir_for(true, true), DownloadPlace::Updates);
+        assert_eq!(download_dir_for(false, true), DownloadPlace::Updates);
+        // By hand: where the person can find it.
+        assert_eq!(download_dir_for(false, false), DownloadPlace::Downloads);
+    }
+
+    #[test]
     fn a_manifest_without_checksums_still_parses_and_picks_its_asset() {
         // The shape every release before 10.2 published.
         let m = manifest(
@@ -1132,7 +1164,15 @@ mod checksum_tests {
 
 #[cfg(test)]
 mod tests {
-    use super::is_safe_update_url;
+    use super::{is_plain_file_name, is_safe_update_url};
+
+    #[test]
+    fn update_file_names_are_bare_names() {
+        assert!(is_plain_file_name("PS5Upload-10.7.4-win-x64.zip"));
+        for bad in ["", ".", "..", ".hidden", "a/b.zip", "a\\b.zip", "a\0.zip"] {
+            assert!(!is_plain_file_name(bad), "{bad:?}");
+        }
+    }
 
     #[test]
     fn update_urls_require_https_except_loopback_http() {

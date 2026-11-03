@@ -819,6 +819,7 @@ export async function browserInvoke<T>(
         firmware: args["firmware"],
         language: args["language"],
         full_verify: args["fullVerify"] ?? false,
+        keep_both: args["keepBoth"] ?? false,
       }, true);
     }
     case "ps5_elfldr_health": {
@@ -838,6 +839,9 @@ export async function browserInvoke<T>(
     }
     case "fpkg_delete": {
       return postJson<T>("/api/fpkg/delete", { path: args["path"] });
+    }
+    case "fpkg_ampr_index": {
+      return postJson<T>("/api/fpkg/ampr-index", { source: args["source"] });
     }
     case "fpkg_extract": {
       return postJson<T>("/api/fpkg/extract", {
@@ -875,6 +879,8 @@ export async function browserInvoke<T>(
         name: args["name"],
         ffpfsc_level: args["ffpfscLevel"],
         edits: args["edits"] ?? [],
+        keep_both: args["keepBoth"] ?? false,
+        rebuild_ampr_index: args["rebuildAmprIndex"] ?? false,
       }, true);
     }
     case "folder_build": {
@@ -885,6 +891,7 @@ export async function browserInvoke<T>(
         full_verify: args["fullVerify"] ?? false,
         entry: args["entry"],
         ampr_lz4: args["amprLz4"],
+        keep_both: args["keepBoth"] ?? false,
       }, true);
     }
     case "image_browse": {
@@ -903,6 +910,22 @@ export async function browserInvoke<T>(
       const jobId = args["jobId"] as string;
       return postJson<T>(`/api/jobs/${encodeURIComponent(jobId)}/cancel`, {});
     }
+
+    case "job_pause": {
+      const jobId = args["jobId"] as string;
+      return postJson<T>(`/api/jobs/${encodeURIComponent(jobId)}/pause`, {});
+    }
+
+    case "job_resume": {
+      const jobId = args["jobId"] as string;
+      return postJson<T>(`/api/jobs/${encodeURIComponent(jobId)}/resume`, {});
+    }
+
+    case "workshop_settings_get":
+      return getJson<T>("/api/workshop/settings");
+
+    case "workshop_settings_set":
+      return postJson<T>("/api/workshop/settings", { gentle: args["gentle"] === true });
 
     // ── Engine logs ─────────────────────────────────────────────────────────
 

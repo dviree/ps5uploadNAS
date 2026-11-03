@@ -29,7 +29,7 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use ps5upload_core::save_archive::{
     auto_backup_stem, backup_tag, cleanup_temp_dir, make_temp_dir, tagged_backups_to_prune,
-    zip_folder,
+    zip_folder_noted,
 };
 use ps5upload_core::saves::SaveEntry;
 use serde::{Deserialize, Serialize};
@@ -200,9 +200,10 @@ pub struct Pick<'a> {
 }
 
 /// The saves of `host` that need a backup on the server: a game's, changed since its last one
-/// there, of a chosen user, and (see [`Pick`]) not still being written. A save of the Switch
-/// emulator belongs to none of the console's users, and goes with the emulator: it is due when
-/// the emulator was closed, and waits while it runs.
+/// there, of a chosen user, and (see [`Pick`]) not still being written. An emulator's save (the
+/// Switch emulator's, a PlayStation or PlayStation 2 emulator's cards or states) belongs to none of
+/// the console's users, and goes with the emulator: it is due when the emulator was closed, and
+/// waits while it runs.
 pub fn due_saves<'a>(
     host: &str,
     saves: &'a [SaveEntry],
@@ -213,15 +214,19 @@ pub fn due_saves<'a>(
     saves
         .iter()
         .filter(|e| {
-            let app = emulator_saves::app_of(e);
+            let apps = emulator_saves::titles_of(emulator_saves::app_of(e));
             emulator_saves::backs_up(e)
                 && e.mtime > 0
                 && e.mtime > done.get(&done_key(host, &e.path)).copied().unwrap_or(0)
                 && (pick.users.is_empty()
                     || emulator_saves::is_emulator_save(e)
                     || pick.users.contains(&(e.user_id as u32)))
-                && pick.title.is_none_or(|t| app.eq_ignore_ascii_case(t))
-                && !pick.running.contains(&app.to_ascii_uppercase())
+                && pick
+                    .title
+                    .is_none_or(|t| apps.iter().any(|a| a.eq_ignore_ascii_case(t)))
+                && !apps
+                    .iter()
+                    .any(|a| pick.running.contains(&a.to_ascii_uppercase()))
                 && (!pick.settle || now_secs - e.mtime >= SETTLE_SECS)
         })
         .collect()
@@ -575,7 +580,8 @@ fn back_up_one(
     let result = (|| {
         local::download_save(host, entry, &tmp, &|| Ok(()))?;
         let zip = tmp.join("backup.zip");
-        zip_folder(&tmp, &entry.title_id, &zip).map_err(|e| format!("zip: {e:#}"))?;
+        let note = local::backup_note(local::console_identity(host).as_deref());
+        zip_folder_noted(&tmp, &entry.title_id, &zip, &note).map_err(|e| format!("zip: {e:#}"))?;
         let user = entry.user_id as u32;
         let st = match tag {
             Some(t) => format!("{}_{t}", stamp(now_ms())),
@@ -611,7 +617,7 @@ pub fn back_up_before_restore(host: &str, entry: &SaveEntry) -> Result<(), Strin
 }
 
 /// The titles running on `host`, upper-case; Err when the console does not answer.
-fn running_titles(host: &str) -> Result<BTreeSet<String>, String> {
+pub(crate) fn running_titles(host: &str) -> Result<BTreeSet<String>, String> {
     let list = ps5upload_core::process_mgr::process_list(host).map_err(|e| format!("{e:#}"))?;
     Ok(list
         .processes
@@ -846,6 +852,19 @@ fn restore(
     result
 }
 
+/// Copies the backup `file` of `title_id` off the server into the local file `dest` (restoring
+/// one to another user, `save_copy`).
+pub(crate) fn fetch_to(title_id: &str, file: &str, dest: &Path) -> Result<(), String> {
+    let s = settings();
+    if s.target.trim().is_empty() {
+        return Err("no server is set for save backups".into());
+    }
+    rt().block_on(async {
+        let (fs, folder) = open_target(&s.target).await?;
+        fetch_backup(fs.as_ref(), &folder, title_id, file, dest).await
+    })
+}
+
 // ── HTTP ────────────────────────────────────────────────────────────────
 
 fn view() -> Value {
@@ -1041,6 +1060,7 @@ pub async fn post_restore(Json(b): Json<local::RestoreBody>) -> Response {
 mod tests {
     use super::*;
     use crate::remote::MemFs;
+    use ps5upload_core::save_archive::zip_folder;
 
     fn save(path: &str, title: &str, user: u32, mtime: i64) -> SaveEntry {
         SaveEntry {
@@ -1198,10 +1218,71 @@ mod tests {
             ids(due_saves("h", &saves, &Done::new(), 2000, &busy)),
             ["PPSA00001"]
         );
+        // Its mirror is the same emulator: closing it makes them due, and they wait while it runs.
+        let mirror_closed = Pick {
+            title: Some(emulator_saves::MIRROR),
+            ..all
+        };
+        assert_eq!(
+            ids(due_saves("h", &saves, &Done::new(), 2000, &mirror_closed)),
+            ["0100F2C0115B6000"]
+        );
+        let mirror: BTreeSet<String> = [emulator_saves::MIRROR.to_string()].into();
+        let mirror_busy = Pick {
+            running: &mirror,
+            ..all
+        };
+        assert_eq!(
+            ids(due_saves("h", &saves, &Done::new(), 2000, &mirror_busy)),
+            ["PPSA00001"]
+        );
         // A Switch title ID on a save that is not the emulator's is not a game.
         let mut odd = saves[1].clone();
         odd.kind = "ps5".into();
         assert!(due_saves("h", &[odd], &Done::new(), 2000, &all).is_empty());
+    }
+
+    #[test]
+    fn ps2_saves_go_with_their_emulator() {
+        let ps2 = |path: &str, user| SaveEntry {
+            kind: crate::ps2_saves::KIND.into(),
+            ..save(path, crate::ps2_saves::CRUX2.app, user, 1000)
+        };
+        let saves = [
+            save("/u1/A", "PPSA00001", 1, 1000),
+            ps2("/data/crux2/memcards", 0),
+            ps2("/data/crux2/sstates", 1),
+        ];
+        let none = BTreeSet::new();
+        let ids = |v: Vec<&SaveEntry>| v.iter().map(|e| e.title_id.clone()).collect::<Vec<_>>();
+        let all = Pick {
+            users: &[],
+            title: None,
+            settle: false,
+            running: &none,
+        };
+        // Crux2 was closed: its cards and its saved states are due.
+        let closed = Pick {
+            title: Some(crate::ps2_saves::CRUX2.app),
+            ..all
+        };
+        assert_eq!(
+            ids(due_saves("h", &saves, &Done::new(), 2000, &closed)),
+            [crate::ps2_saves::CRUX2.app; 2]
+        );
+        // They belong to no user of the console (their user number only tells them apart).
+        let user = Pick { users: &[1], ..all };
+        assert_eq!(due_saves("h", &saves, &Done::new(), 2000, &user).len(), 3);
+        // While it runs, they wait.
+        let running: BTreeSet<String> = [crate::ps2_saves::CRUX2.app.to_string()].into();
+        let busy = Pick {
+            running: &running,
+            ..all
+        };
+        assert_eq!(
+            ids(due_saves("h", &saves, &Done::new(), 2000, &busy)),
+            ["PPSA00001"]
+        );
     }
 
     fn scratch(name: &str) -> PathBuf {

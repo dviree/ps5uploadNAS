@@ -80,6 +80,38 @@ describe("Queue panel", () => {
       />,
     );
 
+  it("gives a movable waiting row a drag handle and shows where a dragged row lands", () => {
+    const handle = {
+      onPointerDown: noop,
+      onPointerMove: noop,
+      onPointerUp: noop,
+      onPointerCancel: noop,
+    };
+    const html = renderToStaticMarkup(
+      <QueueRow
+        item={waitingLibrary}
+        position={1}
+        onMoveUp={noop}
+        onMoveDown={noop}
+        dragHandle={handle}
+        dropSide="after"
+        onRemove={noop}
+        onCancel={noop}
+        onRetry={noop}
+        onRetryViaUpload={noop}
+      />,
+    );
+    expect(html).toContain('data-testid="queue-drag-handle"');
+    expect(html).toContain('data-drag-row="c"');
+    expect(html).toMatch(/data-testid="queue-drop-line"[^>]*-bottom-1/);
+    // The arrow buttons stay for the keyboard.
+    expect(html).toContain('aria-label="Move up"');
+    // A row that cannot move gets no handle and no drop line.
+    const fixed = row(waitingLibrary, 1);
+    expect(fixed).not.toContain("queue-drag-handle");
+    expect(fixed).not.toContain("queue-drop-line");
+  });
+
   it("offers Convert first on a waiting game folder, not on a package install", () => {
     const folderRow = item({
       id: "f",
@@ -107,6 +139,22 @@ describe("Queue panel", () => {
     expect(inRouter(waitingLibrary)).not.toContain('data-testid="queue-convert-first"');
     // Outside a router (a bare render) the row still draws, without the button.
     expect(row(folderRow)).not.toContain('data-testid="queue-convert-first"');
+  });
+
+  it("offers Pause on a sending upload, not once its pkg is installing", () => {
+    const pkg = (over: Record<string, unknown>) =>
+      item({
+        id: "p",
+        sourceKind: "pkg",
+        sourcePath: "/g/p.pkg",
+        displayName: "Game P",
+        addr: "10.0.0.2:9113",
+        status: "running",
+        ...over,
+      });
+    expect(row(pkg({}))).toContain('data-testid="queue-pause"');
+    expect(row(pkg({ installPhase: "installing" }))).not.toContain('data-testid="queue-pause"');
+    expect(row(pkg({ uploadDone: true }))).not.toContain('data-testid="queue-pause"');
   });
 
   it("shows only the given console's items", () => {

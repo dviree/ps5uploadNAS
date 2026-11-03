@@ -1,5 +1,6 @@
 import { create } from "zustand";
 
+import { askToSignIn } from "../lib/signInNeeded";
 import { getEngineUrl } from "./engine";
 import {
   DEFAULT_KEYMAP,
@@ -17,6 +18,7 @@ import {
   type StreamError,
   type StreamPhase,
   type StreamStats,
+  type PasscodeAsk,
 } from "../lib/remotePlayStream";
 import type { MotionReading } from "../lib/motion";
 import { gamepadsOf } from "../lib/nativePad";
@@ -29,9 +31,12 @@ import { applyControls } from "../lib/gameControls";
 import { DEFAULT_PICTURE, readPicture, type PictureTools } from "../lib/rpPicture";
 import { DEFAULT_BUTTON_MAP, readButtonMap, remapPad, type ButtonMap } from "../lib/rpButtonMap";
 import type { CodecPref } from "../lib/rpHdr";
+import { nextKeyboard, type RpKeyboardState } from "../lib/rpKeyboard";
 import { pushNotification } from "./notifications";
 import { trStatic } from "../lib/trStatic";
 import { currentControls, rpControls } from "./gameControls";
+import { useKbmStore } from "./kbm";
+import { emitPadKbm, readKbmStatus } from "../lib/kbmInput";
 
 /** How Remote Play looks and behaves on this device. */
 export interface RpPrefs {
@@ -84,6 +89,19 @@ export interface RpPrefs {
   codec: CodecPref;
   /** What each controller button sends (lib/rpButtonMap.ts); empty = each sends itself. */
   buttonMap: ButtonMap;
+  /** While the PS5 has the keyboard and mouse, a small "⌃ ⌥ to release" over the picture. */
+  kbmChip: boolean;
+  /** Holding Esc gives the keyboard and mouse back too (besides the release shortcut). */
+  escHoldRelease: boolean;
+  /** On a touch screen: the on-screen controller, or the screen as the PS5 mouse's touchpad. */
+  touchMode: "controller" | "touchpad";
+  /** How far the PS5's pointer moves for a finger's movement on the touchpad. */
+  touchpadSpeed: number;
+  /** On other screens of the app, the picture in a small floating window (layout/RemotePlayMini). */
+  miniPlayer: boolean;
+  /** Android app: leaving the app while playing keeps the picture floating over other apps
+   *  (Android's picture in picture, lib/androidPip.ts). */
+  systemPip: boolean;
 }
 
 export const DEFAULT_RP_PREFS: RpPrefs = {
@@ -111,6 +129,12 @@ export const DEFAULT_RP_PREFS: RpPrefs = {
   decoding: "auto",
   codec: "auto",
   buttonMap: DEFAULT_BUTTON_MAP,
+  kbmChip: true,
+  escHoldRelease: true,
+  touchMode: "controller",
+  touchpadSpeed: 1.5,
+  miniPlayer: true,
+  systemPip: true,
 };
 
 /** The smallest sound buffer the Sound buffer setting offers. */
@@ -128,7 +152,16 @@ export function loadRpPrefs(): RpPrefs {
     const raw = safeGetItem(PREFS_KEY);
     const p = { ...DEFAULT_RP_PREFS, ...(raw ? (JSON.parse(raw) as Partial<RpPrefs>) : {}) };
     const codec: CodecPref = p.codec === "h264" || p.codec === "hdr" ? p.codec : "auto";
-    return { ...p, codec, picture: readPicture(p.picture), buttonMap: readButtonMap(p.buttonMap) };
+    const touchMode = p.touchMode === "touchpad" ? "touchpad" : "controller";
+    const touchpadSpeed = Number.isFinite(p.touchpadSpeed) ? Math.min(4, Math.max(0.5, p.touchpadSpeed)) : 1.5;
+    return {
+      ...p,
+      codec,
+      touchMode,
+      touchpadSpeed,
+      picture: readPicture(p.picture),
+      buttonMap: readButtonMap(p.buttonMap),
+    };
   } catch {
     return DEFAULT_RP_PREFS;
   }
@@ -149,6 +182,15 @@ interface RpState {
   error: StreamError | null;
   stats: StreamStats | null;
   light: [number, number, number] | null;
+  /** The console's on-screen keyboard is open (lib/rpKeyboard.ts); the stream shows a text box. */
+  keyboard: RpKeyboardState | null;
+  /** The text box is closed here (done or cancelled) before the console says so. */
+  closeKeyboard: () => void;
+  /** The console waits for the user's sign-in passcode (`seq` changes with each ask). Only
+   *  whether it asks lives here: the digits are sent straight on and never kept. */
+  passcode: (PasscodeAsk & { seq: number }) | null;
+  answerPasscode: (digits: string) => void;
+  cancelPasscode: () => void;
   prefs: RpPrefs;
   keymap: Record<string, KeyAction>;
   /** The Remote Play screen is on show: only then do controllers drive the console. */
@@ -242,6 +284,17 @@ export const useRemotePlayStore = create<RpState>((set, get) => ({
   error: null,
   stats: null,
   light: null,
+  keyboard: null,
+  closeKeyboard: () => set({ keyboard: null }),
+  passcode: null,
+  answerPasscode: (digits) => {
+    const st = get();
+    if (st.stream?.sendPasscode(digits)) set({ passcode: null });
+  },
+  cancelPasscode: () => {
+    get().stream?.cancelPasscode();
+    set({ passcode: null });
+  },
   prefs: loadRpPrefs(),
   keymap: loadKeymap(),
   onScreen: false,
@@ -316,17 +369,31 @@ export const useRemotePlayStore = create<RpState>((set, get) => ({
         if (p === "ended") {
           dualSense?.stop();
           rpInput.held.clear();
-          set({ stream: null, light: null });
+          set({ stream: null, light: null, keyboard: null, passcode: null });
         }
       },
       onStats: (st) => get().stream === stream && set({ stats: st }),
       onError: (e) => get().stream === stream && set({ error: e }),
       onLight: (rgb) => get().stream === stream && set({ light: rgb }),
+      onKbm: (v) => {
+        if (get().stream !== stream) return;
+        const kbm = useKbmStore.getState();
+        const next = readKbmStatus(v);
+        // Nobody signed in: the PS5 has no user to give a keyboard to. Said once per change.
+        if (next?.err === "vinput_no_user" && kbm.status?.err !== "vinput_no_user") askToSignIn(t.host);
+        kbm.setStatus(next);
+      },
+      onPadKbm: (v) => get().stream === stream && emitPadKbm(v),
+      onKeyboard: (m) => get().stream === stream && set({ keyboard: nextKeyboard(get().keyboard, m) }),
+      onPasscode: (ask) => {
+        if (get().stream !== stream) return;
+        set({ passcode: ask ? { ...ask, seq: (get().passcode?.seq ?? 0) + 1 } : null });
+      },
       readPad,
       gamepads: rpGamepads,
     });
     stream.setVolume(prefs.muted ? 0 : prefs.volume);
-    set({ stream, target: t, phase: "connecting", error: null, stats: null, light: null });
+    set({ stream, target: t, phase: "connecting", error: null, stats: null, light: null, keyboard: null, passcode: null });
     await stream.start();
   },
 

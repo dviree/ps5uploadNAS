@@ -1,5 +1,11 @@
 {
   "cw_actions": "İşlemler",
+  "cw_cheats_applied_changed": "Oyun bunu değiştirdi; dokunulmadı",
+  "cw_cheats_applied_failed": "Uygulanamadı: {reason}",
+  "cw_cheats_applied_late": "Oyun başladıktan {seconds} sn sonra uygulandı — etkisi yoksa açık bırakıp oyunu yeniden başlatın.",
+  "cw_cheats_applied_late_unseen": "Oyun zaten başlamışken uygulandı — etkisi yoksa açık bırakıp oyunu yeniden başlatın.",
+  "cw_cheats_applied_ok": "Uygulandı ✓",
+  "cw_cheats_applied_waiting": "Oyunun yüklenmesi bekleniyor…",
   "cw_cheats_apply": "Uygula",
   "cw_cheats_engine_off_state": "Hile motoru kapalı: açılan hileler kayıtlı ama uygulanmıyor.",
   "cw_cheats_engine_on_state": "Hile motoru açık: açılan hileler oyun başladığında uygulanır, yeniden başlatmadan sonra da.",

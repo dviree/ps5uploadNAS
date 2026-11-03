@@ -145,6 +145,11 @@ pub fn run() {
     #[cfg(target_os = "linux")]
     linux_gpu::apply();
 
+    // Started by an update (Windows portable): the old version is still on its way out. Wait
+    // for it before anything else, or its single-instance lock sends this launch away.
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    commands::self_install::wait_for_previous_instance();
+
     let builder = tauri::Builder::default();
     // Single-instance MUST run before any other setup (window creation,
     // engine spawn). When a second launch hits, the runtime calls our
@@ -391,6 +396,7 @@ pub fn run() {
             commands::game_inspect_files,
             commands::fpkg_build,
             commands::fpkg_delete,
+            commands::fpkg_ampr_index,
             commands::fpkg_estimate,
             commands::ps5_elfldr_health,
             commands::ps5_elfldr_ensure,
@@ -402,6 +408,10 @@ pub fn run() {
             commands::fpkg_extract_cleanup,
             commands::job_status,
             commands::job_cancel,
+            commands::job_pause,
+            commands::job_resume,
+            commands::workshop_settings_get,
+            commands::workshop_settings_set,
             commands::engine_logs_tail,
             // ── PKG install (parse + host + install via BGFT) ─────────
             // Engine proxies for the new Install Package tab. Single
@@ -638,12 +648,20 @@ pub fn run() {
             commands::update_download,
             commands::update_install,
             commands::update_install_on_quit,
+            commands::update_last_install,
+            commands::update_forget_failure,
+            commands::update_old_downloads,
+            commands::update_remove_old_downloads,
+            commands::update_can_self_install,
+            commands::update_open_log,
             // Android: the APK into the app cache with progress, for the system installer.
             commands::update_download_apk,
             tray::tray_configure,
             // Linux: Safe graphics mode (WebKitGTK's rescues), read at the next launch.
             linux_gpu::linux_graphics_get,
             linux_gpu::linux_graphics_safe_mode_set,
+            linux_gpu::linux_video_software_set,
+            linux_gpu::linux_video_starting,
             // ── Title metadata fetch (cover art + display title) ────
             // Server-side fetch (Rust/reqwest) of the public PS5
             // title-info site, bypassing renderer CSP/CORS. Hostname

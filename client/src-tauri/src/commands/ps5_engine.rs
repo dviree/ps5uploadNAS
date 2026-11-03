@@ -2472,6 +2472,8 @@ pub async fn fpkg_build(
     language: Option<String>,
     // Read everything back to verify; absent means the fast, sampled check.
     full_verify: Option<bool>,
+    // A name already taken in the output folder is numbered instead of refused.
+    keep_both: Option<bool>,
 ) -> Result<JsonValue, String> {
     let base = engine::url();
     let url = format!("{base}/api/fpkg/build");
@@ -2487,6 +2489,7 @@ pub async fn fpkg_build(
             "firmware": firmware,
             "language": language,
             "full_verify": full_verify.unwrap_or(false),
+            "keep_both": keep_both.unwrap_or(false),
         }),
     )
     .await
@@ -2541,6 +2544,15 @@ pub async fn fpkg_delete(path: String) -> Result<JsonValue, String> {
     let base = engine::url();
     let url = format!("{base}/api/fpkg/delete");
     post_json(&url, &serde_json::json!({ "path": path })).await
+}
+
+/// Rebuild a libSceAmpr game folder's `ampr_emu.index` where it is (this computer or a
+/// `ps5://` folder); runs as an engine job. POST /api/fpkg/ampr-index.
+#[tauri::command]
+pub async fn fpkg_ampr_index(source: String) -> Result<JsonValue, String> {
+    let base = engine::url();
+    let url = format!("{base}/api/fpkg/ampr-index");
+    post_json(&url, &serde_json::json!({ "source": source })).await
 }
 
 /// Unpack a game archive into the output folder; runs as an engine job whose `dest` is the
@@ -2614,6 +2626,10 @@ pub async fn exfat_build(
     ffpfsc_level: Option<String>,
     // An edited copy of the image `source`: [{op: "delete"|"put", path, from?}], passed through.
     edits: Option<JsonValue>,
+    // A name already taken in the output folder is numbered instead of refused.
+    keep_both: Option<bool>,
+    // An edited copy whose one change is a regenerated ampr_emu.index (#621).
+    rebuild_ampr_index: Option<bool>,
 ) -> Result<JsonValue, String> {
     let base = engine::url();
     let url = format!("{base}/api/exfat/build");
@@ -2631,6 +2647,8 @@ pub async fn exfat_build(
             "name": name,
             "ffpfsc_level": ffpfsc_level,
             "edits": edits.unwrap_or_else(|| serde_json::json!([])),
+            "keep_both": keep_both.unwrap_or(false),
+            "rebuild_ampr_index": rebuild_ampr_index.unwrap_or(false),
         }),
     )
     .await
@@ -2646,6 +2664,8 @@ pub async fn folder_build(
     // Only this file or folder of the image (the image browser's Save).
     entry: Option<String>,
     ampr_lz4: Option<JsonValue>,
+    // A name already taken in the output folder is numbered instead of refused.
+    keep_both: Option<bool>,
 ) -> Result<JsonValue, String> {
     let base = engine::url();
     let url = format!("{base}/api/folder/build");
@@ -2659,6 +2679,7 @@ pub async fn folder_build(
             "full_verify": full_verify.unwrap_or(false),
             "entry": entry,
             "ampr_lz4": ampr_lz4,
+            "keep_both": keep_both.unwrap_or(false),
         }),
     )
     .await
@@ -2679,6 +2700,38 @@ pub async fn job_cancel(job_id: String) -> Result<JsonValue, String> {
     let base = engine::url();
     let url = format!("{base}/api/jobs/{job_id}/cancel");
     post_json(&url, &serde_json::json!({})).await
+}
+
+/// Hold a running Workshop job (a conversion or an archive extraction) where it is:
+/// POST /api/jobs/{id}/pause. Its workers stop at their next chunk until resumed (#631).
+#[tauri::command]
+pub async fn job_pause(job_id: String) -> Result<JsonValue, String> {
+    let base = engine::url();
+    let url = format!("{base}/api/jobs/{job_id}/pause");
+    post_json(&url, &serde_json::json!({})).await
+}
+
+/// Let a paused Workshop job go on: POST /api/jobs/{id}/resume.
+#[tauri::command]
+pub async fn job_resume(job_id: String) -> Result<JsonValue, String> {
+    let base = engine::url();
+    let url = format!("{base}/api/jobs/{job_id}/resume");
+    post_json(&url, &serde_json::json!({})).await
+}
+
+/// "Use less of this computer" (#632), the engine's own setting: GET /api/workshop/settings.
+#[tauri::command]
+pub async fn workshop_settings_get() -> Result<JsonValue, String> {
+    let base = engine::url();
+    get_json(&format!("{base}/api/workshop/settings")).await
+}
+
+/// Turn "use less of this computer" on or off: POST /api/workshop/settings.
+#[tauri::command]
+pub async fn workshop_settings_set(gentle: bool) -> Result<JsonValue, String> {
+    let base = engine::url();
+    let url = format!("{base}/api/workshop/settings");
+    post_json(&url, &serde_json::json!({ "gentle": gentle })).await
 }
 
 /// Pull recent engine log lines from the sidecar's in-memory ring so the

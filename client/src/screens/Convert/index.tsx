@@ -81,6 +81,7 @@ export default function ConvertScreen() {
       .buildFolder(
         path,
         lz4Dir.trim() || outputDir.trim() || undefined,
+        false,
         { installRuntime: true },
         send,
       );

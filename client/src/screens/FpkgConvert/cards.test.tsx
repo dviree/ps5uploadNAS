@@ -118,6 +118,31 @@ describe("OptionsCard for a folder", () => {
   });
 });
 
+describe("OptionsCard output place", () => {
+  const props = {
+    outputDir: "/out",
+    onChangeOutput: () => {},
+    onOutputTyped: () => {},
+    canBrowse: true,
+    compression: "balanced" as const,
+    onCompression: () => {},
+    estimates: undefined,
+    locked: false,
+  };
+  it("offers Save each next to its source, explained only when on", () => {
+    const off = renderToStaticMarkup(<OptionsCard {...props} outputPlace="folder" onOutputPlace={() => {}} />);
+    expect(off).toContain("Save each next to its source");
+    expect(off).not.toContain("output-beside-hint");
+    const on = renderToStaticMarkup(<OptionsCard {...props} outputPlace="beside" onOutputPlace={() => {}} />);
+    expect(on).toMatch(/data-testid="output-beside"[^>]*checked/);
+    expect(on).toContain("output-beside-hint");
+    expect(on).toContain("(2) is added");
+  });
+  it("hides the choice where it is not wired", () => {
+    expect(renderToStaticMarkup(<OptionsCard {...props} />)).not.toContain("output-beside");
+  });
+});
+
 describe("OptionsCard for an image", () => {
   const props = {
     outputDir: "/out",
@@ -299,7 +324,25 @@ describe("GameCard archive source", () => {
         <GameCard {...props("/games/g")} locked />
       </MemoryRouter>,
     );
-    expect(locked).toContain("games picked now wait in the queue");
+    expect(locked).toContain("wait in the queue until you start it");
+  });
+
+  // #621: while a game is being made, another can still be picked (here, or on the PS5) and
+  // queued; nothing in ① looks switched off.
+  it("lets games be added while one is being made", () => {
+    const html = renderToStaticMarkup(
+      <MemoryRouter>
+        <GameCard {...props("/games/g")} locked queueStarts onBrowseConsole={() => {}} />
+      </MemoryRouter>,
+    );
+    expect(html).toContain("go into the queue and are made after it");
+    const at = html.indexOf("On the PS5…");
+    expect(at).toBeGreaterThan(0);
+    const ps5 = html.slice(html.lastIndexOf("<button", at), at);
+    expect(ps5).not.toContain("disabled=\"\"");
+    expect(html).not.toContain("opacity-60");
+    // The game being made stays put.
+    expect(html).toMatch(/id="fpkg-source"[^>]*disabled|disabled[^>]*id="fpkg-source"/);
   });
 });
 

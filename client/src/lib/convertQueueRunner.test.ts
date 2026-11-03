@@ -51,8 +51,8 @@ describe("the Convert queue's runner (bug: a queued image came out as a .pkg)", 
     await flush();
     expect(calls).toHaveLength(1);
     expect(calls[0].kind).toBe("image");
-    // source, outputDir, compress, format, no upload, no LZ4 packs
-    expect(calls[0].args).toEqual(["/games/Game-app", undefined, true, "ffpfs", undefined, undefined]);
+    // source, outputDir, compress, format, no upload, no LZ4 packs, no password, no keep-both
+    expect(calls[0].args).toEqual(["/games/Game-app", undefined, true, "ffpfs", undefined, undefined, undefined, undefined]);
     const item = useConvertQueue.getState().items[0];
     expect(item.status).toBe("done");
     expect(item.packagePath).toBe("/out/Game.ffpfsc");
@@ -91,5 +91,15 @@ describe("the Convert queue's runner (bug: a queued image came out as a .pkg)", 
     await useConvertQueue.getState().start();
     await flush();
     expect(calls[0].kind).toBe("pkg");
+  });
+
+  it("leaves the next game Waiting while a build started by hand runs", async () => {
+    pipeline = { phase: "running" };
+    useConvertQueue.getState().add({ source: "/games/Next-app", compression: "balanced", then: "keep", host: null });
+    void useConvertQueue.getState().start();
+    await flush();
+    expect(calls).toHaveLength(0);
+    expect(useConvertQueue.getState().items[0].status).toBe("pending");
+    useConvertQueue.getState().stop();
   });
 });

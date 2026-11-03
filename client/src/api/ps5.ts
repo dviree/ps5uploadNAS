@@ -2418,17 +2418,70 @@ export interface PairForWakeResult {
 export async function pairForWake(
   host: string,
   addr?: string,
+  /** Pair with the PIN the PS5 shows (Settings › System › Remote Play › Link Device) instead:
+   *  the engine registers on its own, no helper needed. `accountIdB64`: the user's PSN account
+   *  id, base64 of its 8 bytes. */
+  manual?: { pin: string; accountIdB64: string },
 ): Promise<PairForWakeResult> {
   const res = await fetch(`${getEngineUrl()}/api/ps5/power/pair`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ host, addr }),
+    body: JSON.stringify(
+      manual ? { host, addr, pin: manual.pin, account_id: manual.accountIdB64 } : { host, addr },
+    ),
   });
   const body = (await res.json().catch(() => ({}))) as PairForWakeResult & {
     error?: string;
   };
   if (!res.ok) throw new Error(body.error || `pairing failed (${res.status})`);
   return body;
+}
+
+/** How a Wake & sign in call ended (or paused). */
+export type WakeLoginResult =
+  /** The console signed the user in. */
+  | { state: "signed_in" }
+  /** An automatic wake (no `askPasscode`) met a login passcode: the console is awake at its
+   *  sign-in screen. */
+  | { state: "passcode_needed" }
+  /** The console waits for the user's passcode; answer with `answerWakePasscode(id, …)`.
+   *  `retry`: the last one was wrong. */
+  | { state: "passcode"; id: string; retry: boolean; waitS: number };
+
+/** A failed Wake & sign in. `code`: passcode_cancelled, passcode_timeout, passcode_too_many,
+ *  passcode_expired, or undefined (the console's own reason is the message). */
+export class WakeLoginError extends Error {
+  code?: string;
+  constructor(message: string, code?: string) {
+    super(message);
+    this.name = "WakeLoginError";
+    this.code = code;
+  }
+}
+
+async function wakeLoginCall(path: string, payload: unknown): Promise<WakeLoginResult> {
+  const res = await fetch(`${getEngineUrl()}${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  const body = (await res.json().catch(() => ({}))) as {
+    ok?: boolean;
+    signed_in?: boolean;
+    passcode_needed?: boolean;
+    state?: string;
+    id?: string;
+    retry?: boolean;
+    wait_s?: number;
+    error?: string;
+    code?: string;
+  };
+  if (!res.ok)
+    throw new WakeLoginError(body.error || `wake + sign-in failed (${res.status})`, body.code);
+  if (body.state === "passcode" && body.id)
+    return { state: "passcode", id: body.id, retry: !!body.retry, waitS: body.wait_s ?? 180 };
+  if (body.passcode_needed) return { state: "passcode_needed" };
+  return { state: "signed_in" };
 }
 
 /** Wake a console AND sign its user in.
@@ -2438,31 +2491,34 @@ export async function pairForWake(
  *  screen. Needs the full session keys (regist + rp, both hex) as well as
  *  the wake credential. Long-running — it waits for the console to boot.
  *
- *  Resolves when the user is signed in; rejects with the console's reason
- *  (wrong keys, or a login passcode blocking sign-in). */
-export async function wakeAndSignIn(
+ *  `askPasscode`: someone is there to type the user's login passcode, so a console that asks
+ *  for one resolves `{state: "passcode"}` (#608). Without it the wake just ends at the sign-in
+ *  screen (`passcode_needed`). Rejects with a WakeLoginError otherwise. */
+export function wakeAndSignIn(
   host: string,
   credential: string,
   registKey: string,
   rpKey: string,
-): Promise<{ ok: boolean }> {
-  const res = await fetch(`${getEngineUrl()}/api/ps5/power/wake-login`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      host,
-      credential,
-      regist_key: registKey,
-      rp_key: rpKey,
-    }),
+  opts: { askPasscode?: boolean } = {},
+): Promise<WakeLoginResult> {
+  return wakeLoginCall("/api/ps5/power/wake-login", {
+    host,
+    credential,
+    regist_key: registKey,
+    rp_key: rpKey,
+    ask_passcode: !!opts.askPasscode,
   });
-  const body = (await res.json().catch(() => ({}))) as {
-    ok?: boolean;
-    error?: string;
-  };
-  if (!res.ok)
-    throw new Error(body.error || `wake + sign-in failed (${res.status})`);
-  return { ok: !!body.ok };
+}
+
+/** The user's passcode for a held Wake & sign in. Sent to the console, never kept. Resolves
+ *  with the next step: signed in, or asked again. */
+export function answerWakePasscode(id: string, passcode: string): Promise<WakeLoginResult> {
+  return wakeLoginCall("/api/ps5/power/wake-login/passcode", { id, passcode });
+}
+
+/** Leave the console at its sign-in screen: always rejects (code passcode_cancelled). */
+export function cancelWakePasscode(id: string): Promise<WakeLoginResult> {
+  return wakeLoginCall("/api/ps5/power/wake-login/passcode", { id, cancel: true });
 }
 
 /** Is the console awake, in standby, or not answering?
@@ -2594,8 +2650,10 @@ export interface SaveEntry {
   size: number;
   mtime: number;
   /** "ps5" for native, "ps4" for legacy savedata, "switch" for a save of the Switch emulator
-   *  ProsperoEden (never in the console's saves list; see `saveBackupApi.switchSaves`). */
-  kind: "ps5" | "ps4" | "switch";
+   *  ProsperoEden (never in the console's saves list; see `saveBackupApi.switchSaves`), "ps2" for
+   *  a PS2 emulator's cards or saved states, "ps1" for the PS1 emulator PSSwanStation's (see
+   *  `saveBackupApi.ps2Saves`). */
+  kind: "ps5" | "ps4" | "switch" | "ps2" | "ps1";
 }
 
 export interface SaveList {
@@ -4301,6 +4359,12 @@ export interface JobSnapshot {
   status: JobStatus;
   /** Present on a running job that reports stages (an FPKG build). */
   stage?: JobStageSnapshot;
+  /** A running Workshop job (a conversion or an extraction) can be paused. */
+  pausable?: boolean;
+  /** The Workshop job is paused: its workers wait, using no processor or disk. */
+  paused?: boolean;
+  /** All the time the Workshop job has spent paused so far (ms). */
+  paused_ms?: number;
   /** The job id in hex (an FPKG build reuses the field for its content id). */
   tx_id_hex?: string;
   started_at_ms?: number;
@@ -4722,6 +4786,17 @@ export async function jobCancel(jobId: string): Promise<void> {
   await invoke("job_cancel", { jobId });
 }
 
+/** Hold a running Workshop job (a conversion or an extraction) where it is; its workers stop at
+ *  their next chunk until {@link jobResume}. Rejects when the job is over or cannot pause. */
+export async function jobPause(jobId: string): Promise<void> {
+  await invoke("job_pause", { jobId });
+}
+
+/** Let a paused Workshop job go on. */
+export async function jobResume(jobId: string): Promise<void> {
+  await invoke("job_resume", { jobId });
+}
+
 export async function waitForJob(
   jobId: string,
   intervalMs = 500,
@@ -4878,12 +4953,10 @@ export async function portProbe(
 //
 //   updateCheck()    → fetches latest.json, returns availability +
 //                      release notes + platform-specific download URL
-//   updateDownload() → streams the archive into ~/Downloads, opens
-//                      the folder in the OS file manager so the user
-//                      can finish installing manually
-//
-// Deliberately no auto-install: the user asked for "notify + download
-// + user replaces." See commands/updates.rs for the rationale.
+//   updateDownload() → streams the archive into the app's updates folder
+//                      (or, when it is installed by hand, ~/Downloads,
+//                      which then opens in the file manager)
+//   updateInstall()  → installs it and restarts (commands/self_install.rs)
 
 export interface UpdateCheck {
   available: boolean;
@@ -4933,8 +5006,8 @@ export async function updateCheck(
   return invoke<UpdateCheck>("update_check", { channel });
 }
 
-/** Stream the update archive into the user's Downloads folder and
- *  reveal it in the OS file manager. Re-running with the same URL
+/** Stream the update archive into the app's updates folder (a download
+ *  installed by hand: the Downloads folder, revealed in the file manager). Re-running with the same URL
  *  is idempotent: if the file is already on disk with the expected
  *  size, we skip the download and just re-open the folder. With a
  *  `sha256`, the file must match it or the call rejects (and the file
@@ -4969,18 +5042,68 @@ export async function updateDownloadApk(
   return invoke<ApkDownload>("update_download_apk", { url, filename, sha256: sha256 || null });
 }
 
-/** Install a downloaded update and restart into it (desktop: Windows, macOS, a Linux
- *  AppImage). The app quits once the install has started and comes back as the new version;
- *  a rejection means nothing changed. */
-export async function updateInstall(path: string): Promise<void> {
-  return invoke<void>("update_install", { path });
+/** Install a downloaded update (`version`) and restart into it (desktop: Windows, macOS, a
+ *  Linux AppImage or package). The app quits once the install has started and comes back as
+ *  the new version; a rejection means nothing changed. */
+export async function updateInstall(path: string, version?: string): Promise<void> {
+  return invoke<void>("update_install", { path, version: version ?? null });
 }
 
 /** Arm (a downloaded update's path) or disarm (null) installing it when the app quits,
  *  without starting it again. Resolves whether it is armed: only an update this copy installs
  *  without a password can be. */
-export async function updateInstallOnQuit(path: string | null): Promise<boolean> {
-  return invoke<boolean>("update_install_on_quit", { path });
+export async function updateInstallOnQuit(
+  path: string | null,
+  version?: string | null,
+): Promise<boolean> {
+  return invoke<boolean>("update_install_on_quit", { path, version: version ?? null });
+}
+
+/** What the last install came to, judged on this launch (commands/update_files.rs). */
+export interface LastInstall {
+  /** The version that was being installed. */
+  version: string;
+  /** That version (or a newer one) is running: it worked. */
+  installed: boolean;
+  /** Why it failed; empty when not known. */
+  message: string;
+  /** Not reported before: say so once. */
+  new: boolean;
+}
+
+/** The last install's outcome (null when there was none). Also deletes what a finished
+ *  install left in the app's updates folder. Once per launch. */
+export async function updateLastInstall(): Promise<LastInstall | null> {
+  return invoke<LastInstall | null>("update_last_install");
+}
+
+/** Forget a failed install so that version may be installed by itself again ("Try again"). */
+export async function updateForgetFailure(): Promise<void> {
+  return invoke<void>("update_forget_failure");
+}
+
+/** Update downloads earlier versions left in the Downloads folder (our exact file names, this
+ *  version or older). */
+export async function updateOldDownloads(): Promise<{ count: number; bytes: number }> {
+  return invoke<{ count: number; bytes: number }>("update_old_downloads");
+}
+
+/** Delete them; resolves how many were deleted. */
+export async function updateRemoveOldDownloads(): Promise<number> {
+  return invoke<number>("update_remove_old_downloads");
+}
+
+/** Whether this copy would install the release file `filename` by itself, without a password
+ *  (the same plan as `UpdateDownload.can_install` / `needs_password`), asked before it is
+ *  downloaded: only such an update is downloaded in the background for install on quit. */
+export async function updateCanSelfInstall(filename: string): Promise<boolean> {
+  return invoke<boolean>("update_can_self_install", { filename });
+}
+
+/** Open the updater's log (`update.log` in the app's updates folder) in the system's viewer.
+ *  Resolves false when there is no log yet. */
+export async function updateOpenLog(): Promise<boolean> {
+  return invoke<boolean>("update_open_log");
 }
 
 /** Whether the console's loader on :9021 answers (`healthy`), took the connection and never
@@ -5402,6 +5525,17 @@ export interface CheatMod {
   /** An XML game patch made for another game version than the installed one; the console
    *  refuses to turn it on. */
   other_version?: boolean;
+  /** What happened to this switched-on cheat in the running game (#627): applied, waiting for
+   *  the game to load, failed (see applied_reason) or changed by the game (left alone). Absent
+   *  when the cheat is off, the game is not running, or the helper is older than 10.7.2. */
+  applied?: "applied" | "waiting" | "failed" | "changed";
+  applied_reason?: string;
+  /** For "applied" by the helper on its own: ms after the game started. Absent when the start
+   *  was not seen, when it was switched on by hand, or the helper is older than 10.7.6. */
+  applied_after_ms?: number;
+  /** It landed late (over ~3 s after the start, or the start was not seen): a patch the game
+   *  reads only at start may have missed it (#627). */
+  applied_late?: boolean;
 }
 
 export interface CheatsGetResponse {

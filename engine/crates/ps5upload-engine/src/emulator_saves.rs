@@ -1,6 +1,7 @@
-//! The saves of ProsperoEden, the Switch emulator for the PS5 (PPSA99008), for the automatic save
-//! backups. The emulator keeps them as plain files, not as PS5 save images, one folder per profile
-//! and game: `/data/prosperoeden/user/nand/user/save/0000000000000000/<profile>/<game>/`, the
+//! The saves of ProsperoEden, the Switch emulator for the PS5 (PPSA99008, or PPSA99016 for its
+//! mirror), for the automatic save backups. The emulator keeps them as plain files, not as PS5
+//! save images, one folder per profile and game:
+//! `/data/prosperoeden/user/nand/user/save/0000000000000000/<profile>/<game>/`, the
 //! profile as 32 hex digits (all zeros: a game's save for the whole console) and the game as its
 //! 16-hex-digit title ID. That place is fixed in the emulator: the game files folder chosen in its
 //! settings moves the games, keys and firmware, never the saves.
@@ -9,6 +10,10 @@
 //! `title_id` the game's), so it is backed up, kept and restored as a PS5 save is, with two
 //! differences: its files go as they are (`backup_finalize` and `restore_prepare` shape PS5 save
 //! images), and the app that writes it is the emulator, not the game.
+//!
+//! The PlayStation 2 emulators' memory cards and saved states (`kind` "ps2"), and the PlayStation
+//! emulator PSSwanStation's (`kind` "ps1"), are emulators' saves too: see `ps2_saves`. What tells
+//! them all apart from a PS5 save is here.
 
 use axum::extract::Query;
 use axum::http::StatusCode;
@@ -21,6 +26,9 @@ use serde_json::json;
 
 /// The emulator's title.
 pub const APP: &str = "PPSA99008";
+/// The title of its mirror ("ProsperoEden (Mirror)" on ProsperoStore, heydemoura/ProsperoEden):
+/// the same emulator under a title of its own, keeping its saves in the same place.
+pub const MIRROR: &str = "PPSA99016";
 /// `SaveEntry::kind` of its saves.
 pub const KIND: &str = "switch";
 /// Where it keeps every profile's saves.
@@ -42,9 +50,10 @@ fn is_profile(name: &str) -> bool {
     hex_digits(name, 32)
 }
 
-/// The save is one of the emulator's.
+/// The save is an emulator's: a Switch game's in ProsperoEden, or a PlayStation or PlayStation 2
+/// emulator's cards or saved states.
 pub fn is_emulator_save(e: &SaveEntry) -> bool {
-    e.kind == KIND
+    e.kind == KIND || crate::ps2_saves::is_kind(&e.kind)
 }
 
 /// `path` is a save folder of the emulator, `ROOT/<profile>/<game>`, and nothing past it.
@@ -55,18 +64,40 @@ pub fn is_save_path(path: &str) -> bool {
         .is_some_and(|(profile, game)| is_profile(profile) && is_game(game))
 }
 
-/// The app that writes the save: the emulator for its saves, the game itself for a PS5 one.
+/// The kind of emulator's save `path` is the folder of; None for a PS5 save's.
+pub fn kind_of_path(path: &str) -> Option<&'static str> {
+    if is_save_path(path) {
+        Some(KIND)
+    } else {
+        crate::ps2_saves::place_of(path).map(|p| p.emulator.kind)
+    }
+}
+
+/// The app that writes the save: ProsperoEden for its saves, the game itself for a PS5 one. (A
+/// PlayStation or PlayStation 2 emulator's saves are under its own title already.)
 pub fn app_of(e: &SaveEntry) -> &str {
-    if is_emulator_save(e) {
+    if e.kind == KIND {
         APP
     } else {
         &e.title_id
     }
 }
 
-/// A save the automatic backups take: a PS5 game's, or a game's in the emulator.
+/// The titles `app` runs as: ProsperoEden's own and its mirror's, any other app's alone. Either of
+/// ProsperoEden's writes its saves, so either one running holds them and either one closing is
+/// the emulator closing.
+pub fn titles_of(app: &str) -> Vec<&str> {
+    if app == APP {
+        vec![APP, MIRROR]
+    } else {
+        vec![app]
+    }
+}
+
+/// A save the automatic backups take: a PS5 game's (a PlayStation or PlayStation 2 emulator's
+/// saves carry its title), or a game's in ProsperoEden.
 pub fn backs_up(e: &SaveEntry) -> bool {
-    crate::looks_like_title_id(&e.title_id) || (is_emulator_save(e) && is_game(&e.title_id))
+    crate::looks_like_title_id(&e.title_id) || (e.kind == KIND && is_game(&e.title_id))
 }
 
 /// The profile as the user number in a backup's name: its first 7 hex digits (0 for the
@@ -78,18 +109,21 @@ fn user_of(profile: &str) -> i32 {
 
 /// The emulator's saves on `host`: none when it is not there or has no save yet.
 pub fn list(host: &str) -> Vec<SaveEntry> {
-    saves_in(&|path: &str| {
-        all_pages(&|offset| {
-            list_dir(
-                host,
-                path,
-                ListDirOptions {
-                    offset,
-                    ..Default::default()
-                },
-            )
-            .map_err(|e| format!("{e:#}"))
-        })
+    saves_in(&|path: &str| ls(host, path))
+}
+
+/// Every entry of the folder `path` on `host`.
+pub(crate) fn ls(host: &str, path: &str) -> Result<Vec<DirEntry>, String> {
+    all_pages(&|offset| {
+        list_dir(
+            host,
+            path,
+            ListDirOptions {
+                offset,
+                ..Default::default()
+            },
+        )
+        .map_err(|e| format!("{e:#}"))
     })
 }
 
@@ -148,7 +182,7 @@ pub fn saves_in(ls: &dyn Fn(&str) -> Result<Vec<DirEntry>, String>) -> Vec<SaveE
 
 /// The size and number of the files under `path`, and the newest time of the folder (`mtime`) and
 /// of everything in it, `depth` folders down.
-fn measure(
+pub(crate) fn measure(
     ls: &dyn Fn(&str) -> Result<Vec<DirEntry>, String>,
     path: &str,
     mtime: i64,
@@ -209,7 +243,9 @@ pub async fn get_switch(Query(q): Query<SwitchQuery>) -> Response {
         let running = if saves.is_empty() {
             None
         } else {
-            crate::save_backup::title_running(&host, APP).ok()
+            crate::save_backup::running_of(&host, &titles_of(APP))
+                .map(|t| t.is_some())
+                .ok()
         };
         (saves, running)
     })
@@ -401,6 +437,9 @@ mod tests {
             ..ps5.clone()
         };
         assert_eq!(app_of(&switch), APP);
+        // Either of the emulator's titles is it; a game is only itself.
+        assert_eq!(titles_of(app_of(&switch)), [APP, MIRROR]);
+        assert_eq!(titles_of(app_of(&ps5)), ["PPSA01234"]);
         assert!(backs_up(&ps5) && backs_up(&switch));
         // A Switch title ID is not a PS5 one: only the emulator's saves carry it.
         assert!(!backs_up(&SaveEntry {

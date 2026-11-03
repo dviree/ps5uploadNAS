@@ -5,6 +5,7 @@ import { DEFAULT_PICTURE, type Enhance, type PictureTools } from "../../lib/rpPi
 import { hdrScreen, hdrSupport, type HdrSupport } from "../../lib/rpHdr";
 import { useTr } from "../../state/lang";
 import { isMobile } from "../../lib/platform";
+import { androidPipAvailable } from "../../lib/androidPip";
 import { appSavesToPhotos } from "../../lib/rpCapture";
 import { gameModeKind } from "../../lib/gameMode";
 import { keysFor, rebind, PAD_ACTIONS, type KeyAction } from "../../lib/remotePlayStream";
@@ -17,6 +18,10 @@ import { ControllerSetup } from "./ControllerSetup";
 import { ButtonRemap } from "./ButtonRemap";
 import { RpNetworkSettings } from "./NetworkExtras";
 import { RpBlockerSetting } from "./RpBlockers";
+import { KbmModeSection } from "./KbmModeSection";
+import { KbmShortcutsSection } from "./KbmShortcutsSection";
+import { useKbmStore } from "../../state/kbm";
+import { shortcutLabel } from "../../lib/kbmShortcuts";
 
 /** Remote Play's settings, one tab at a time (in the settings drawer, SettingsDrawer.tsx). */
 export type SettingsTab = "picture" | "sound" | "controls" | "session";
@@ -268,6 +273,7 @@ export function SettingsBody({ tab, running }: { tab: SettingsTab; running: bool
   const keymap = useRemotePlayStore((s) => s.keymap);
   const setKeymap = useRemotePlayStore((s) => s.setKeymap);
   const num = (v: string) => Number(v);
+  const releaseKey = useKbmStore((s) => shortcutLabel(s.shortcuts.release));
   const later = running ? tr("rp_set_applies_next", undefined, "Applies when you start again") : undefined;
 
   if (tab === "picture") {
@@ -424,6 +430,30 @@ export function SettingsBody({ tab, running }: { tab: SettingsTab; running: bool
           <GameModeNote />
         </Section>
         <Section>
+          <Toggle
+            checked={prefs.miniPlayer !== false}
+            onChange={(v) => setPrefs({ miniPlayer: v })}
+            label={tr("rp_mini_setting", undefined, "Mini player on other screens")}
+            hint={tr(
+              "rp_mini_setting_hint",
+              undefined,
+              "While you use other screens of the app, the picture stays in a small window you can drag to any corner. Tap it to come back here.",
+            )}
+          />
+          {androidPipAvailable() && (
+            <Toggle
+              checked={prefs.systemPip !== false}
+              onChange={(v) => setPrefs({ systemPip: v })}
+              label={tr("rp_system_pip_setting", undefined, "Keep the picture floating when you leave the app")}
+              hint={tr(
+                "rp_system_pip_setting_hint",
+                undefined,
+                "Going to the home screen while you play keeps the picture in a small window over other apps. Tap it to come back.",
+              )}
+            />
+          )}
+        </Section>
+        <Section>
           <Select
             label={tr("rp_replay_setting", undefined, "Instant replay")}
             value={String(prefs.replayS)}
@@ -471,12 +501,14 @@ export function SettingsBody({ tab, running }: { tab: SettingsTab; running: bool
 
   return (
     <div className="space-y-6">
+      <KbmModeSection running={running} />
+      <KbmShortcutsSection />
       <Section>
         <Toggle
           checked={prefs.capturePointer}
           onChange={(v) => setPrefs({ capturePointer: v })}
           label={tr("rp_capture_pointer", undefined, "Clicking the picture hides the pointer")}
-          hint={tr("rp_capture_pointer_hint", undefined, "Esc shows it again.")}
+          hint={tr("rp_capture_pointer_hint2", { key: releaseKey }, `${releaseKey} shows it again.`)}
         />
         <Toggle
           checked={prefs.rumble}
@@ -520,6 +552,21 @@ export function SettingsBody({ tab, running }: { tab: SettingsTab; running: bool
             { value: "off", label: tr("rp_touch_off", undefined, "Never") },
           ]}
         />
+        {prefs.touchControls !== "off" && (
+          <label className="flex flex-col gap-1 text-xs font-medium">
+            {tr("rp_tp_speed", undefined, "Touchpad speed")}
+            <input
+              type="range"
+              min={0.5}
+              max={4}
+              step={0.25}
+              value={prefs.touchpadSpeed}
+              onChange={(e) => setPrefs({ touchpadSpeed: num(e.target.value) })}
+              className="h-9 accent-[var(--color-accent)]"
+              data-testid="rp-touchpad-speed"
+            />
+          </label>
+        )}
         {prefs.touchControls !== "off" && (
           <div className="grid grid-cols-2 items-end gap-3">
             <Select

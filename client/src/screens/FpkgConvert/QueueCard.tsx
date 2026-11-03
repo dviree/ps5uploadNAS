@@ -15,6 +15,8 @@ import { QueueItemOptions } from "./QueueItemOptions";
 export interface QueueCardProps {
   items: ConvertItem[];
   running: boolean;
+  /** The game being made is paused (#631): the rest wait for it. */
+  paused?: boolean;
   /** Open Upload & Install, where a made game installs or uploads. */
   onOpenUpload: () => void;
   onStart: () => void;
@@ -52,7 +54,7 @@ export function QueueCard(p: QueueCardProps) {
   if (p.items.length === 0) return null;
   const send = tr("send_title_v2", undefined, "Upload & Install");
   return (
-    <Card>
+    <Card padded={false} className="p-3.5 sm:p-4">
       <div className="flex flex-col gap-3">
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="text-sm font-medium">{tr("cq_title_v2", undefined, "⑤ Queue")}</div>
@@ -115,7 +117,9 @@ export function QueueCard(p: QueueCardProps) {
                   <div
                     className={`truncate text-xs ${i.status === "failed" ? "text-[var(--color-bad)]" : "text-[var(--color-muted)]"}`}
                   >
-                    {statusText[i.status]}
+                    {i.status === "running" && p.paused
+                      ? tr("fpkg.paused_queue_waits", undefined, "Paused — the queue waits")
+                      : statusText[i.status]}
                     {i.error ? ` — ${i.error}` : i.packagePath ? ` — ${i.packagePath}` : ""}
                   </div>
                 </div>

@@ -67,8 +67,10 @@ export interface GameCardProps {
   canBrowse: boolean;
   inspection: FpkgInspection | null;
   checking: boolean;
-  /** A run is going: nothing here may change. */
+  /** A run is going: the game checked here may not change; games picked go into the queue. */
   locked: boolean;
+  /** While locked: games picked now are made after the run without pressing Start (#621). */
+  queueStarts?: boolean;
   dropActive: boolean;
   /** A .rar's password, when the source is one; never stored. */
   password: string;
@@ -84,23 +86,27 @@ export function GameCard(props: GameCardProps) {
   const passed = inspection?.checks.filter((c) => c.ok) ?? [];
   const fw = inspection ? firmwareLine(inspection, tr) : null;
   return (
-    <Card>
+    <Card padded={false} className="p-3.5 sm:p-4">
       <div className="flex flex-col gap-2">
         <div className="text-sm font-medium">{tr("fpkg.card.game", undefined, "① Game")}</div>
+        {/* A modest drop area (the user found the tall one wasteful): one row of what to do and
+            the pick buttons, wrapping on a phone. The whole card's window takes the drop. */}
         <div
-          className={`flex flex-col items-center gap-2 rounded-lg border-2 border-dashed p-4 text-center text-sm ${
+          data-testid="game-drop"
+          className={`flex flex-wrap items-center gap-x-3 gap-y-2 rounded-lg border border-dashed px-3 py-2 text-sm ${
             props.dropActive
               ? "border-[color-mix(in_srgb,var(--color-accent)_40%,transparent)] bg-[var(--color-accent-soft,transparent)]"
               : "border-[var(--color-border)]"
-          } ${props.locked ? "opacity-60" : ""}`}
+          }`}
         >
-          <FolderInput size={20} aria-hidden className="text-[var(--color-muted)]" />
-          <div>
-            {tr("fpkg.dropHere", undefined, "Drop a game folder, image or archive here")}
+          <div className="flex min-w-0 items-center gap-2 text-[var(--color-muted)]">
+            <FolderInput size={16} aria-hidden className="shrink-0" />
+            <span>{tr("fpkg.dropHere", undefined, "Drop a game folder, image or archive here")}</span>
           </div>
           {props.canBrowse && (
             <>
               <AddSources
+                className="justify-start!"
                 fileFilters={GAME_FILE_FILTERS}
                 disabled={props.checking}
                 onFiles={(paths) => props.onAdd(paths.map((path) => ({ path, isDir: false })))}
@@ -114,20 +120,26 @@ export function GameCard(props: GameCardProps) {
                     variant="secondary"
                     size="sm"
                     leftIcon={<Gamepad2 size={14} />}
-                    disabled={props.locked || props.checking}
+                    disabled={props.checking}
                     onClick={props.onBrowseConsole}
                   >
                     {tr("fpkg.browseConsole", undefined, "On the PS5…")}
                   </Button>
                 )}
               </AddSources>
-              <div className="text-xs text-[var(--color-muted)]" data-testid="add-sources-hint">
+              <div className="w-full text-xs text-[var(--color-muted)]" data-testid="add-sources-hint">
                 {props.locked
-                  ? tr(
-                      "workshop_add_locked",
-                      undefined,
-                      "A game is being made: games picked now wait in the queue.",
-                    )
+                  ? props.queueStarts
+                    ? tr(
+                        "workshop_add_locked_v2",
+                        undefined,
+                        "A game is being made: games you pick or drop now go into the queue and are made after it.",
+                      )
+                    : tr(
+                        "workshop_add_locked_manual",
+                        undefined,
+                        "A game is being made: games you pick or drop now wait in the queue until you start it.",
+                      )
                   : tr(
                       "workshop_add_hint",
                       undefined,

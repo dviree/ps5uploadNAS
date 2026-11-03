@@ -23,6 +23,8 @@ const cleanupExtract = vi.fn(async () => ({ ok: true }));
 const deletePackage = vi.fn(async () => ({ ok: true }));
 const jobStatus = vi.fn();
 const jobCancel = vi.fn();
+const jobPause = vi.fn();
+const jobResume = vi.fn();
 const installStream = vi.fn();
 const uploadInstall = vi.fn();
 // The staged row an upload install reports through; the test drives it.
@@ -43,6 +45,8 @@ vi.mock("../api/fpkg", () => ({
 vi.mock("../api/ps5", () => ({
   jobStatus: (...a: unknown[]) => jobStatus(...a),
   jobCancel: (...a: unknown[]) => jobCancel(...a),
+  jobPause: (...a: unknown[]) => jobPause(...a),
+  jobResume: (...a: unknown[]) => jobResume(...a),
 }));
 vi.mock("./pkgLibrary", () => ({
   pkgLibraryStore: () => ({
@@ -82,7 +86,14 @@ vi.mock("./roster", async (orig) => ({
   useRosterStore: { getState: () => roster },
 }));
 
-import { POLL_MS, archiveStem, resumeRememberedRun, useFpkgConversion } from "./fpkgConversion";
+import {
+  POLL_MS,
+  archiveStem,
+  pausedSoFar,
+  resumeRememberedRun,
+  stagePausedSoFar,
+  useFpkgConversion,
+} from "./fpkgConversion";
 import { commandTask, taskCapabilities } from "./taskControls";
 import { useTaskStore } from "./tasks";
 
@@ -120,6 +131,60 @@ describe("fpkg pipeline", () => {
     conn.payloadStatus = "up";
     roster.profiles = [];
     jobCancel.mockReset().mockResolvedValue(undefined);
+    jobPause.mockReset().mockResolvedValue(undefined);
+    jobResume.mockReset().mockResolvedValue(undefined);
+  });
+
+  it("pauses and resumes the build job, keeping paused time out of its times (#631)", async () => {
+    const running = {
+      status: "running",
+      stage: { id: "compress", index: 2, count: 5, done: 5, total: 10 },
+    };
+    jobStatus.mockResolvedValue(running);
+    await useFpkgConversion.getState().start(req, { install: false, host: null });
+    await tick();
+    await useFpkgConversion.getState().pause();
+    expect(jobPause).toHaveBeenCalledWith("j1");
+    let p = useFpkgConversion.getState().pipeline;
+    expect(p).toMatchObject({ phase: "running", paused: true });
+    const taskId = p.phase === "running" ? p.taskId : null;
+    expect(useTaskStore.getState().tasks.find((t) => t.id === taskId)?.status).toBe("paused");
+    // The engine keeps saying paused: the pause holds across polls.
+    jobStatus.mockResolvedValue({ ...running, paused: true, paused_ms: 1000 });
+    await vi.advanceTimersByTimeAsync(3000);
+    p = useFpkgConversion.getState().pipeline;
+    expect(p).toMatchObject({ phase: "running", paused: true });
+    if (p.phase !== "running") throw new Error("not running");
+    const now = Date.now();
+    expect(pausedSoFar(p, now)).toBeGreaterThanOrEqual(3000);
+    expect(stagePausedSoFar(p, now)).toBeGreaterThanOrEqual(3000);
+    // A second Pause does nothing; Resume asks the engine.
+    await useFpkgConversion.getState().pause();
+    expect(jobPause).toHaveBeenCalledTimes(1);
+    await useFpkgConversion.getState().resume();
+    expect(jobResume).toHaveBeenCalledWith("j1");
+    p = useFpkgConversion.getState().pipeline;
+    expect(p).toMatchObject({ phase: "running", paused: false, pausedAtMs: null });
+    if (p.phase !== "running") throw new Error("not running");
+    const kept = pausedSoFar(p, Date.now());
+    expect(kept).toBeGreaterThanOrEqual(3000);
+    // Not paused any more: the paused total stands still.
+    jobStatus.mockResolvedValue(running);
+    await vi.advanceTimersByTimeAsync(2000);
+    p = useFpkgConversion.getState().pipeline;
+    if (p.phase !== "running") throw new Error("not running");
+    expect(pausedSoFar(p, Date.now())).toBe(kept);
+    expect(useTaskStore.getState().tasks.find((t) => t.id === taskId)?.status).toBe("running");
+  });
+
+  it("follows a pause made elsewhere (another window, the API)", async () => {
+    jobStatus.mockResolvedValue({ status: "running", stage: { id: "write", index: 3, count: 5, done: 1, total: 4 }, paused: true });
+    await useFpkgConversion.getState().start(req, { install: false, host: null });
+    await tick();
+    expect(useFpkgConversion.getState().pipeline).toMatchObject({ phase: "running", paused: true });
+    jobStatus.mockResolvedValue({ status: "done", dest: "/out/a.pkg", bytes_sent: 9 });
+    await tick();
+    expect(useFpkgConversion.getState().pipeline).toMatchObject({ phase: "done" });
   });
 
   it("converts through the stages and ends done", async () => {
@@ -359,7 +424,7 @@ describe("fpkg pipeline", () => {
     expect(useFpkgConversion.getState().pipeline).toMatchObject({ phase: "running", stage: "extract" });
     expect(extract).toHaveBeenCalledWith("/dl/My Game.part1.rar", "/out", "pw");
     await tick();
-    expect(buildImage).toHaveBeenCalledWith(game, "/out", "ffpkg", true, undefined, 8192, false, "My Game", "balanced");
+    expect(buildImage).toHaveBeenCalledWith(game, "/out", "ffpkg", true, undefined, 8192, false, "My Game", "balanced", undefined);
     await tick();
     expect(useFpkgConversion.getState().pipeline).toMatchObject({
       phase: "done",
@@ -381,7 +446,7 @@ describe("fpkg pipeline", () => {
     });
     await useFpkgConversion.getState().buildImage("/games/PPSA1-app", "/out", false);
     await tick();
-    expect(buildImage).toHaveBeenCalledWith("/games/PPSA1-app", "/out", "exfat", false, undefined, 8192, false, undefined, "balanced");
+    expect(buildImage).toHaveBeenCalledWith("/games/PPSA1-app", "/out", "exfat", false, undefined, 8192, false, undefined, "balanced", undefined);
     expect(useFpkgConversion.getState().pipeline).toMatchObject({
       phase: "running",
       mode: "image",
@@ -411,7 +476,7 @@ describe("fpkg pipeline", () => {
     await useFpkgConversion.getState().buildFolder("/games/Game.ffpfsc", "/out");
     expect(useFpkgConversion.getState().pipeline).toMatchObject({ phase: "running", mode: "folder", stage: "write" });
     await tick();
-    expect(buildFolder).toHaveBeenCalledWith("/games/Game.ffpfsc", "/out", undefined, false, undefined, undefined);
+    expect(buildFolder).toHaveBeenCalledWith("/games/Game.ffpfsc", "/out", undefined, false, undefined, undefined, undefined);
     expect(useFpkgConversion.getState().pipeline).toMatchObject({ stage: "verify", stageDone: 2, stageTotal: 5 });
     jobStatus.mockResolvedValueOnce({ status: "done", dest: "/out/Game", bytes_sent: 9 });
     await tick();
@@ -474,6 +539,7 @@ describe("fpkg pipeline", () => {
     await useFpkgConversion.getState().buildFolder(
       "/games/PPSA26344.exfat",
       "/lz4",
+      false,
       { installRuntime: true },
       { title: "Ghost of Yotei", host: "10.0.0.2", volume: null, subpath: "homebrew", register: true },
     );
@@ -493,7 +559,7 @@ describe("fpkg pipeline", () => {
     // A plain LZ4 run after it sends nothing.
     added.length = 0;
     useFpkgConversion.setState({ pipeline: { phase: "idle" } });
-    await useFpkgConversion.getState().buildFolder("/games/X.exfat", "/lz4", { installRuntime: true });
+    await useFpkgConversion.getState().buildFolder("/games/X.exfat", "/lz4", false, { installRuntime: true });
     jobStatus.mockResolvedValueOnce({ status: "done", dest: "/lz4/X-lz4", bytes_sent: 9 });
     await tick();
     expect(added).toEqual([]);
@@ -506,7 +572,7 @@ describe("fpkg pipeline", () => {
     jobStatus.mockResolvedValueOnce({ status: "done", dest: "/out/G.ffpkg", bytes_sent: 9 });
     await useFpkgConversion.getState().buildImage("/games/G", "/out", false, "ffpkg");
     await tick();
-    expect(buildImage).toHaveBeenCalledWith("/games/G", "/out", "ffpkg", false, undefined, 8192, false, undefined, "balanced");
+    expect(buildImage).toHaveBeenCalledWith("/games/G", "/out", "ffpkg", false, undefined, 8192, false, undefined, "balanced", undefined);
     expect(useFpkgConversion.getState().pipeline).toMatchObject({
       phase: "done",
       packagePath: "/out/G.ffpkg",
@@ -525,7 +591,7 @@ describe("fpkg pipeline", () => {
     await useFpkgConversion.getState().buildImage("/games/A", "/out", false, "exfat", undefined, lz4);
     expect(useFpkgConversion.getState().pipeline).toMatchObject({ phase: "running", stage: "pack" });
     await tick();
-    expect(buildImage).toHaveBeenCalledWith("/games/A", "/out", "exfat", false, lz4, 8192, false, undefined, "balanced");
+    expect(buildImage).toHaveBeenCalledWith("/games/A", "/out", "exfat", false, lz4, 8192, false, undefined, "balanced", undefined);
     expect(useFpkgConversion.getState().pipeline).toMatchObject({
       stage: "pack",
       stageDone: 5,
@@ -558,7 +624,7 @@ describe("fpkg pipeline", () => {
     try {
       await useFpkgConversion.getState().buildImage("/games/S", "/out", true, "ffpkg");
       await tick();
-      expect(buildImage).toHaveBeenCalledWith("/games/S", "/out", "ffpkg", true, undefined, 8192, false, undefined, "smallest");
+      expect(buildImage).toHaveBeenCalledWith("/games/S", "/out", "ffpkg", true, undefined, 8192, false, undefined, "smallest", undefined);
     } finally {
       useConvertPrefs.getState().setImageLevel("balanced");
       useFpkgConversion.setState({ pipeline: { phase: "idle" } });
@@ -579,7 +645,7 @@ describe("fpkg pipeline", () => {
     });
     await useFpkgConversion.getState().buildImage("/games/G", "/out", true, "ffpkg");
     await tick();
-    expect(buildImage).toHaveBeenCalledWith("/games/G", "/out", "ffpkg", true, undefined, 8192, false, undefined, "balanced");
+    expect(buildImage).toHaveBeenCalledWith("/games/G", "/out", "ffpkg", true, undefined, 8192, false, undefined, "balanced", undefined);
     expect(useFpkgConversion.getState().pipeline).toMatchObject({
       phase: "running",
       mode: "image",
@@ -878,7 +944,7 @@ describe("fpkg pipeline", () => {
     expect(useFpkgConversion.getState().pipeline).toMatchObject({ phase: "running", mode: "image", stage: "extract" });
     expect(extract).toHaveBeenCalledWith("/dl/My Game.part1.rar", "/out", "pw");
     await tick();
-    expect(buildImage).toHaveBeenCalledWith(game, "/out", "exfat", true, undefined, 8192, false, "My Game", "balanced");
+    expect(buildImage).toHaveBeenCalledWith(game, "/out", "exfat", true, undefined, 8192, false, "My Game", "balanced", undefined);
     await tick();
     expect(useFpkgConversion.getState().pipeline).toMatchObject({
       phase: "done",

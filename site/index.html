@@ -162,7 +162,7 @@
             <h3 data-i18n="play.home.title">One press from Home</h3>
             <p data-i18n="play.home.text">The Play card sits at the top of Home: press Play, or pick up your last game where you left it. Every game's page has Play too, which starts the game and streams it in one go.</p>
             <ul class="ticks">
-              <li data-i18n="play.home.t1">Wakes the console and signs in for you</li>
+              <li data-i18n="play.home.t1b">Wakes the console and signs in for you, asking for your PS5 passcode if there is one</li>
               <li data-i18n="play.home.t2">Keeps playing while you use other screens</li>
               <li data-i18n="play.home.t3">Fit, Fill or Stretch the picture; full screen and picture in picture</li>
             </ul>
@@ -183,7 +183,7 @@
               <li data-i18n="play.setup.s2">Sign in to a user and give it an account ID</li>
               <li data-i18n="play.setup.s3">Sign the account in, offline</li>
               <li data-i18n="play.setup.s4">Turn Remote Play on</li>
-              <li data-i18n="play.setup.s5">Pair this app with the console</li>
+              <li data-i18n="play.setup.s5b">Pair this app with the console, or with the PIN the PS5 shows</li>
             </ol>
           </div>
           <figure class="shot tilt-r">
@@ -208,6 +208,58 @@
               <source srcset="assets/shots/phones-dark.webp" media="(prefers-color-scheme: dark)" data-theme-src="phones" />
               <img src="assets/shots/phones-light.webp" data-i18n-attr="alt:alt.phones" alt="The phone panel: a code to scan, to use a phone as a controller or to watch." width="1600" height="1000" loading="lazy" data-theme-img="phones" />
             </picture>
+          </figure>
+        </div>
+        <div class="tour-row flip" id="keyboard-mouse">
+          <div class="tour-text">
+            <span class="tag" data-i18n="play.kbm.tag">New in 10.4</span>
+            <h3 data-i18n="play.kbm.title">Your keyboard and mouse, as the PS5's own</h3>
+            <p data-i18n="play.kbm.text">Play has three ways to use your keyboard and mouse, kept for each game. Switch with the button on the stream bar, or with ⌃ ⌥ M (Ctrl+Alt+M on Windows and Linux).</p>
+            <ul class="ticks">
+              <li data-i18n="play.kbm.t1">Controller: the keys and mouse act as a controller, as before</li>
+              <li data-i18n="play.kbm.t2">Keyboard &amp; mouse: the PS5 gets a real keyboard and mouse, for games and apps that support them, the PS5's browser and homebrew such as terminals</li>
+              <li data-i18n="play.kbm.t3">Mixed: a real mouse, while the keys act as a controller and WASD moves</li>
+            </ul>
+          </div>
+          <figure class="shot tilt-r">
+            <picture>
+              <source srcset="assets/shots/kbm-dark.webp" media="(prefers-color-scheme: dark)" data-theme-src="kbm" />
+              <img src="assets/shots/kbm-light.webp" data-i18n-attr="alt:alt.kbm" alt="Play in Keyboard &amp; mouse mode: a card over the game shows the keys ⌃ ⌥ that give the keyboard and mouse back." width="1600" height="1000" loading="lazy" data-theme-img="kbm" />
+            </picture>
+          </figure>
+        </div>
+        <div class="tour-row">
+          <div class="tour-text">
+            <h3 data-i18n="play.release.title">Click to play, ⌃ ⌥ to get out</h3>
+            <p data-i18n="play.release.text">Click the picture and the PS5 has your keyboard and mouse. Press and let go of ⌃ ⌥ (Ctrl+Alt on Windows and Linux) to get them back.</p>
+            <ul class="ticks">
+              <li data-i18n="play.release.t1">A card shows the keys the first time, and again when you seem to be looking for the way out</li>
+              <li data-i18n="play.release.t2">A faint "⌃ ⌥ to release" stays at the top while you play</li>
+              <li data-i18n="play.release.t3">Both shortcuts can be changed in Settings › Controls › Shortcuts</li>
+            </ul>
+          </div>
+          <figure class="shot tilt-l">
+            <picture>
+              <source srcset="assets/shots/kbm-settings-dark.webp" media="(prefers-color-scheme: dark)" data-theme-src="kbm-settings" />
+              <img src="assets/shots/kbm-settings-light.webp" data-i18n-attr="alt:alt.kbm_settings" alt="Settings › Controls: Controller, Keyboard &amp; mouse and Mixed, and the Shortcuts with a new key being recorded." width="1600" height="1000" loading="lazy" data-theme-img="kbm-settings" />
+            </picture>
+          </figure>
+        </div>
+      </div>
+      <div class="wrap">
+        <div class="everywhere kbm-touch">
+          <div class="everywhere-text">
+            <h3 data-i18n="play.touchpad.title">A phone as the PS5's touchpad and keyboard</h3>
+            <p data-i18n="play.touchpad.text">On a phone or tablet, switch the picture from Controller to Touchpad: drag to move the pointer, tap to click, tap with two fingers to right-click and drag with two to scroll. ⌨ opens your phone's keyboard and types on the PS5.</p>
+            <p data-i18n="play.touchpad.pad">A phone used as a controller has a Touchpad &amp; keyboard tab too.</p>
+          </div>
+          <figure class="device phone">
+            <div class="screen">
+              <picture>
+                <source srcset="assets/shots/m-touchpad-dark.webp" media="(prefers-color-scheme: dark)" data-theme-src="m-touchpad" />
+                <img src="assets/shots/m-touchpad-light.webp" data-i18n-attr="alt:alt.m_touchpad" alt="Play on a phone held sideways, in Touchpad mode: the Controller and Touchpad switch at the top and the keyboard button at the side." width="844" height="390" loading="lazy" data-theme-img="m-touchpad" />
+              </picture>
+            </div>
           </figure>
         </div>
       </div>
@@ -237,7 +289,7 @@
             <p data-i18n="tour.upload.text">Drop a package, a game folder, an image or an archive: the app works out what it is and does the right thing. Transfers are resumable and run at the full speed of your network, with thousands of small files packed together so they never crawl.</p>
             <ul class="ticks">
               <li data-i18n="tour.upload.t1">Install from your computer, a link or a network share</li>
-              <li data-i18n="tour.upload.t2">A queue that carries on while you do other things</li>
+              <li data-i18n="tour.upload.t2b">A queue that carries on while you do other things: pause an upload, or send something else first</li>
               <li data-i18n="tour.upload.t3">Updates and add-ons install from each game's page</li>
             </ul>
           </div>
@@ -263,7 +315,7 @@
         <div class="tour-row">
           <div class="tour-text">
             <h3 data-i18n="tour.saves.title">Saves and files</h3>
-            <p data-i18n="tour.saves.text">Back your saves up on a schedule, restore them, and take a snapshot before you try something new. Browse the console's drives like a folder on your computer: copy, move and open files both ways.</p>
+            <p data-i18n="tour.saves.text2">Back your saves up on a schedule or with one press, restore them, and copy one to another user on the same PS5 or to a friend. Emulator saves (PS1, PS2, Switch) too. Browse the console's drives like a folder on your computer: copy, move and open files both ways.</p>
           </div>
           <figure class="shot tilt-l">
             <picture>
@@ -430,6 +482,49 @@
                 <li data-i18n="howto.docker.s2">Open port 19113 on that machine in a browser.</li>
                 <li data-i18n="howto.docker.s3">The whole app is there, including Play.</li>
               </ol>
+            </div>
+          </details>
+          <details class="guide">
+            <summary data-i18n="howto.phone.title">Use it from a phone</summary>
+            <div>
+              <ol>
+                <li data-i18n="howto.phone.s1">Install the app: the Android or iPhone download below. The iPhone app is sideloaded with AltStore or Sideloadly and an Apple ID; a free one works.</li>
+                <li data-i18n="howto.phone.s2">Open <b>Connection</b>, enter the PS5's address and send the helper. The app talks to the PS5 directly, Play included.</li>
+                <li data-i18n="howto.phone.s3">Rather use a browser? Open port 19113 of a computer at home that runs the Docker image, or port 9180 of the PS5 for its own page (first turn on <b>Allow other devices on the network</b> in that page's Settings).</li>
+              </ol>
+              <p class="muted" data-i18n="howto.phone.note">Play in a phone's browser needs an https:// page. Over a plain http:// address, play with the app.</p>
+            </div>
+          </details>
+          <details class="guide">
+            <summary data-i18n="howto.away.title">Play away from home</summary>
+            <div>
+              <ol>
+                <li data-i18n="howto.away.s1">PS5Upload works on your home network. Never open its ports to the internet: it has no password.</li>
+                <li data-i18n="howto.away.s2">Join your home network with a VPN such as Tailscale: on your phone or laptop, plus a computer at home set up as a subnet router, or the ps5-tailscale payload on the PS5.</li>
+                <li data-i18n="howto.away.s3">Connect to the PS5 at its usual address and play. How smooth it is depends on your home connection's upload speed.</li>
+              </ol>
+              <p class="muted" data-i18n="howto.away.note">Through a VPN, Stream &amp; install and installs from a link don't work (use Upload &amp; install), and waking from rest mode may not: leave the PS5 on.</p>
+            </div>
+          </details>
+          <details class="guide">
+            <summary data-i18n="howto.tv.title">Wake the PS5 without the TV</summary>
+            <div>
+              <ol>
+                <li data-i18n="howto.tv.s1">The TV turns on with the PS5 because of HDMI-CEC.</li>
+                <li data-i18n="howto.tv.s2">On the PS5, turn off <b>Settings › System › HDMI › Enable HDMI Device Link</b>, or turn off CEC on the TV (Anynet+, SIMPLINK, BRAVIA Sync…).</li>
+                <li data-i18n="howto.tv.s3">Wake and Play now leave the TV off. The controller won't turn the TV on any more either.</li>
+              </ol>
+            </div>
+          </details>
+          <details class="guide">
+            <summary data-i18n="howto.lag.title">See where Play's delay comes from</summary>
+            <div>
+              <ol>
+                <li data-i18n="howto.lag.s1">Press <b>Stats</b> on the picture's bar (on a phone, in the ⋯ menu).</li>
+                <li data-i18n="howto.lag.s2">The line <i>net · queue · decode · screen</i> shows each stage in ms: the network to this device, the wait for the decoder, decoding, and showing the picture.</li>
+                <li data-i18n="howto.lag.s3">A big net: a cable for the PS5 and 5 GHz Wi-Fi help most. A big decode: try 720p. <b>Low latency</b> in Play's settings shortens the queue.</li>
+              </ol>
+              <p class="muted" data-i18n="howto.lag.note">The PS5's own part and your TV's delay aren't in these numbers; use the TV's game mode.</p>
             </div>
           </details>
           <details class="guide">

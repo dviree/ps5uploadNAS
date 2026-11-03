@@ -17,6 +17,16 @@
 //!   on or off, and binary `[5][one Opus packet]` is one mic frame (48 kHz
 //!   stereo, 10 ms, 40 bytes; see `rp_stream::mic`). Only the attached page's
 //!   mic counts, and the mic goes off whenever the page changes.
+//!   Native keyboard & mouse (vinput_api.rs): `{"kbm": {"on", "mouse", "keyboard"}}` (repeated as
+//!   its heartbeat) and binary `[8][16-byte report]`, from the attached page only; answered with
+//!   `{"kbm": {"on", "mouse", "keyboard", "err", "reason"}}`.
+//!   The console's on-screen keyboard, only for a session started with `"keyboard": true`:
+//!   `{"keyboard_text": "…"}`, `{"keyboard_accept": true}`, `{"keyboard_reject": true}`
+//!   (see rp_keyboard.rs).
+//!   The user's sign-in passcode, when the console asks for it before the stream starts (the
+//!   page is told `{"stage": "passcode", "retry": bool, "wait_s": n}`): `{"passcode": "1234"}`
+//!   (four digits) or `{"passcode_cancel": true}`. Only the attached page's answer counts; the
+//!   passcode is passed to the console and never kept or logged.
 //! * engine → client, binary `[u8 kind][payload]`: 0 = video codec header
 //!   (Annex-B parameter sets), 1 = video access unit, 3 = audio header,
 //!   4 = audio frame (Opus), 6 = DualSense haptics frame (10 ms of 3 kHz stereo s16le PCM),
@@ -27,6 +37,14 @@
 //!   (`{"light": [r, g, b]}`) and, for a session started with `"dualsense": true`, adaptive
 //!   triggers (`{"triggers": {"left": [mode, 10 bytes…], "right": […]}}`) and the console's
 //!   effect strengths (`{"ds_intensity": [haptics, triggers]}`, 0 off 1 strong 2 medium 3 weak).
+//!   For a session started with `"keyboard": true`, the console's keyboard
+//!   (`{"keyboard": {"open": …, "text": …}}`, rp_keyboard.rs).
+//!   A phone's touchpad & keyboard (pad_link.rs) reaches the page as text, for the page to merge
+//!   into its own keyboard & mouse (it stays the only owner of the console's devices):
+//!   `{"pad_kbm": {"id", "on", "mouse", "keyboard"}}` (the phone's heartbeat, every 500 ms while
+//!   on), `{"pad_kbm": {"id", "r": "<32 hex chars: one 16-byte report>"}}`, and
+//!   `{"pad_kbm": {"id", "left": true}}` when the phone leaves or loses the controller (let go
+//!   of whatever it held).
 //!
 //! The session belongs to the engine, not to the socket. The console serves
 //! one session at a time and holds its slot for 12-30 s after one ends, so a
@@ -37,7 +55,14 @@
 //! page it was showing on is told `{"stage": "moved"}`. Only `stop`, the wait
 //! running out, or the console ends it; the page then gets `{"stage":
 //! "ended"}` and a Close frame. `GET /api/ps5/rp/session` says what is
-//! running. `GET /rp-player` is a test page.
+//! running (with its `session` id). `GET /rp-player` is a test page.
+//!
+//! Automation (rp_automation.rs, #615): a local script or agent can ask for the picture the page
+//! shows (`GET /api/ps5/rp/frame`) and hold controller input as one more controller
+//! (`POST /api/ps5/rp/input`), without taking the stream over. The engine never decodes video:
+//! the attached page is sent `{"snapshot": {"id", "format", "max_width", "after_seq"?}}` and
+//! answers with binary `[9][u32 BE meta length][meta JSON][image]` (see
+//! `rp_automation::KIND_SNAPSHOT`). Watchers and phones are never asked.
 //!
 //! Latency: video goes through a queue a few frames deep (two for a page that
 //! asked for `low_latency`); a page that falls behind loses frames (and the
@@ -53,7 +78,9 @@ use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::response::{Html, IntoResponse, Response};
 use axum::Json;
 use ps5upload_core::rp_stream::{
-    run_stream, Codec, ControllerState, MicInput, Progress, StreamConfig, StreamSink,
+    run_stream, valid_passcode, Codec, ControllerState, KeyboardEvent, KeyboardInput, MicInput,
+    Passcode, Progress, StreamConfig, StreamSink, PASSCODE_CANCELLED, PASSCODE_CONSOLE_GAVE_UP,
+    PASSCODE_TIMEOUT, PASSCODE_TOO_MANY, PASSCODE_WAIT,
 };
 use tokio::sync::mpsc;
 
@@ -77,6 +104,13 @@ const KIND_VIDEO_TIMED: u8 = 7;
 /// Mic frames waiting for the stream thread (10 ms each): a stalled thread
 /// drops voice rather than playing it late.
 const MIC_QUEUE: usize = 50;
+
+#[path = "rp_automation.rs"]
+pub(crate) mod automation;
+
+/// Session ids: each session the engine starts gets the next one, so a client naming an old
+/// session is refused rather than steered into its replacement.
+static NEXT_SESSION: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, serde::Deserialize)]
 struct StartReq {
@@ -116,6 +150,10 @@ struct StartReq {
     /// Video as kind 7 (each access unit with the engine's time), for the page's latency stages.
     #[serde(default)]
     timing: bool,
+    /// Typing into the console's on-screen keyboard (rp_keyboard.rs). Without it the session
+    /// is as before.
+    #[serde(default)]
+    keyboard: bool,
 }
 
 impl StartReq {
@@ -144,6 +182,29 @@ struct ClientMsg {
     /// The page's clock, echoed back as `{"pong": …}`.
     #[serde(default)]
     ping: Option<serde_json::Value>,
+    /// Native keyboard & mouse on or off, and its heartbeat (vinput_api.rs).
+    #[serde(default)]
+    kbm: Option<crate::vinput_api::KbmMsg>,
+    /// Typing into the console's keyboard (rp_keyboard.rs).
+    #[serde(flatten)]
+    keyboard: crate::rp_keyboard::PageKeyboard,
+    /// The user's passcode, when the console asked for it.
+    #[serde(default)]
+    passcode: Option<Secret>,
+    /// The user would rather not enter it: the start ends.
+    #[serde(default)]
+    passcode_cancel: bool,
+}
+
+/// A passcode as the page sent it: never printed, not even in a debug dump.
+#[derive(serde::Deserialize)]
+#[serde(transparent)]
+struct Secret(String);
+
+impl std::fmt::Debug for Secret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("<redacted>")
+    }
 }
 
 /// The answer to a ping: the page's own value back, untouched, and the engine's clock now.
@@ -179,6 +240,8 @@ struct Viewer {
 /// The one running session.
 struct Live {
     host: String,
+    /// This session's id (NEXT_SESSION), shown by `GET /api/ps5/rp/session`.
+    session: u64,
     hevc: bool,
     keep_alive: Duration,
     /// Every pad state the page sent, in order: a quick tap is a press and a
@@ -207,6 +270,14 @@ struct Live {
     replay: Mutex<Option<crate::rp_replay::Replay>>,
     /// Watchers (pad_link.rs, watch party): each gets its own copy of the picture and sound.
     spectators: Mutex<Vec<Spectator>>,
+    /// The console's on-screen keyboard (rp_keyboard.rs).
+    keyboard: crate::rp_keyboard::KeyboardLink,
+    /// While the console waits for the user's passcode: whether the last one was wrong.
+    passcode_ask: Mutex<Option<bool>>,
+    /// The page's answer, until the stream thread takes it.
+    passcode_answer: Mutex<Option<Passcode>>,
+    /// A local automation client's frame requests and held input (rp_automation.rs).
+    auto: automation::AutoState,
 }
 
 /// A watcher's queue. `need_key`: it cannot use a frame until the next keyframe (it just
@@ -234,6 +305,15 @@ fn live() -> Option<Arc<Live>> {
 pub(crate) fn push_pad(source: u64, state: Option<ControllerState>) {
     if let Some(l) = live() {
         l.push_pad(source, state);
+    }
+}
+
+/// A phone's touchpad & keyboard input for the page (pad_link.rs): `{"pad_kbm": v}` on the
+/// viewer's socket, for the page to merge into its own keyboard & mouse. Dropped when no page
+/// shows the session.
+pub(crate) fn push_pad_kbm(v: serde_json::Value) {
+    if let Some(l) = live() {
+        l.send_ctl(text(serde_json::json!({ "pad_kbm": v })));
     }
 }
 
@@ -267,6 +347,16 @@ pub(crate) fn remove_spectator(id: u64) {
             g.retain(|s| s.id != id);
         }
     }
+}
+
+/// A page shows the Remote Play session of `host` (that page owns the console's keyboard and mouse
+/// input, vinput_api.rs).
+pub(crate) fn page_attached(host: &str) -> bool {
+    let key = crate::vinput_api::host_key(host);
+    live().is_some_and(|l| {
+        crate::vinput_api::host_key(&l.host) == key
+            && l.viewer.lock().map(|g| g.is_some()).unwrap_or(false)
+    })
 }
 
 /// The console being played, if any.
@@ -381,6 +471,7 @@ impl Live {
     fn new(host: String, hevc: bool, keep_alive: Duration) -> Self {
         Live {
             host,
+            session: NEXT_SESSION.fetch_add(1, Ordering::Relaxed),
             hevc,
             keep_alive,
             pad: Default::default(),
@@ -400,7 +491,66 @@ impl Live {
             mic_on: AtomicBool::new(false),
             replay: Mutex::new(None),
             spectators: Mutex::new(Vec::new()),
+            keyboard: Default::default(),
+            passcode_ask: Mutex::new(None),
+            passcode_answer: Mutex::new(None),
+            auto: Default::default(),
         }
+    }
+
+    /// What the page is told while the console waits for the passcode.
+    fn passcode_status(retry: bool) -> Message {
+        text(serde_json::json!({
+            "stage": "passcode",
+            "retry": retry,
+            "wait_s": PASSCODE_WAIT.as_secs(),
+        }))
+    }
+
+    /// The console asks for the passcode: ask the page (and any page that attaches meanwhile).
+    fn ask_passcode(&self, retry: bool) {
+        if let Ok(mut a) = self.passcode_answer.lock() {
+            *a = None;
+        }
+        if let Ok(mut q) = self.passcode_ask.lock() {
+            *q = Some(retry);
+        }
+        self.send_ctl(Self::passcode_status(retry));
+    }
+
+    /// Page `id` answered. Kept only from the attached page, while a passcode is asked for,
+    /// and only four digits (or a cancel).
+    fn answer_passcode(&self, id: u64, answer: Passcode) -> bool {
+        if !self.is_viewer(id) {
+            return false;
+        }
+        if let Passcode::Digits(d) = &answer {
+            if !valid_passcode(d) {
+                return false;
+            }
+        }
+        let Ok(q) = self.passcode_ask.lock() else {
+            return false;
+        };
+        if q.is_none() {
+            return false;
+        }
+        match self.passcode_answer.lock() {
+            Ok(mut a) => {
+                *a = Some(answer);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
+    /// The answer for the stream thread, once.
+    fn take_passcode(&self) -> Option<Passcode> {
+        let a = self.passcode_answer.lock().ok()?.take()?;
+        if let Ok(mut q) = self.passcode_ask.lock() {
+            *q = None;
+        }
+        Some(a)
     }
 
     fn is_viewer(&self, id: u64) -> bool {
@@ -483,6 +633,13 @@ impl Live {
                 serde_json::json!({"stage": "first_frame", "attached": true}),
             ));
         }
+        if let Some(k) = self.keyboard.on_attach() {
+            let _ = ctl.try_send(text(k));
+        }
+        // The console still waits for the passcode: this page is the one to ask now.
+        if let Some(retry) = self.passcode_ask.lock().ok().and_then(|g| *g) {
+            let _ = ctl.try_send(Self::passcode_status(retry));
+        }
         self.need_key.store(true, Ordering::Relaxed);
         self.want_key.store(true, Ordering::Relaxed);
         let old = self.viewer.lock().ok().and_then(|mut g| {
@@ -494,6 +651,8 @@ impl Live {
             })
         });
         if let Some(old) = old {
+            // A picture asked of the page that just lost the stream will not come.
+            self.auto.viewer_gone(old.id);
             let _ = old
                 .ctl
                 .try_send(text(serde_json::json!({"stage": "moved"})));
@@ -513,10 +672,13 @@ impl Live {
         };
         if g.as_ref().is_some_and(|v| v.id == id) {
             *g = None;
+            drop(g);
             if let Ok(mut a) = self.alone_since.lock() {
                 *a = Some(Instant::now());
             }
+            self.auto.viewer_gone(id);
             self.push_pad(PAGE_SOURCE, None);
+            self.mic_switch(false);
         }
     }
 
@@ -527,17 +689,24 @@ impl Live {
             if g.len() < 256 {
                 g.push_back(merged);
             }
-            drop(g);
-            self.mic_switch(false);
         }
     }
 
     fn snapshot(&self) -> serde_json::Value {
         let attached = self.viewer.lock().map(|g| g.is_some()).unwrap_or(false);
+        // The console waits for the user's passcode: phones and watchers are told only that (the
+        // prompt itself goes to the page that runs the session, see ask_passcode).
+        let passcode = self
+            .passcode_ask
+            .lock()
+            .map(|g| g.is_some())
+            .unwrap_or(false);
         serde_json::json!({
             "host": self.host,
+            "session": self.session,
             "playing": self.playing.load(Ordering::Relaxed),
             "attached": attached,
+            "passcode": passcode,
         })
     }
 }
@@ -687,6 +856,20 @@ impl StreamSink for Sink {
     fn mic(&mut self) -> Option<MicInput> {
         self.live.mic.lock().ok()?.pop_front()
     }
+    fn keyboard(&mut self, ev: KeyboardEvent) {
+        let v = self.live.keyboard.event(ev);
+        self.live.send_ctl(text(v));
+    }
+    fn keyboard_input(&mut self) -> Option<KeyboardInput> {
+        self.live.keyboard.next()
+    }
+    fn passcode_needed(&mut self, retry: bool) {
+        crate::log_info!("rp_stream: the console asks for the user's passcode (retry {retry})");
+        self.live.ask_passcode(retry);
+    }
+    fn passcode(&mut self) -> Option<Passcode> {
+        self.live.take_passcode()
+    }
 }
 
 /// An error as the player shows it: a stable `code` to pick the plain-English
@@ -704,7 +887,11 @@ fn error_status(e: &anyhow::Error) -> serde_json::Value {
         // Any other refusal at session init: a code nobody has explained yet (80108b26, …).
         None if text.contains("session init refused") => ("refused", None),
         None if text.contains("did not wake") => ("wake_failed", None),
-        None if text.contains("login passcode") => ("passcode", None),
+        None if text.contains(PASSCODE_CANCELLED) => ("passcode_cancelled", None),
+        None if text.contains(PASSCODE_TOO_MANY) => ("passcode_too_many", None),
+        None if text.contains(PASSCODE_TIMEOUT) || text.contains(PASSCODE_CONSOLE_GAVE_UP) => {
+            ("passcode_timeout", None)
+        }
         None if text.contains("Nagare") || text.contains("AvCap") => ("video_refused", None),
         // Mid-stream: the console went quiet or closed the control connection.
         None if text.contains("console stopped sending")
@@ -722,12 +909,25 @@ pub async fn ws(upgrade: WebSocketUpgrade) -> Response {
 }
 
 /// What is streaming now, for a page that wants to show or rejoin it.
-pub async fn current() -> Json<serde_json::Value> {
+pub async fn current(headers: axum::http::HeaderMap) -> Json<serde_json::Value> {
     let live = LIVE.lock().ok().and_then(|g| g.clone());
-    Json(match live {
-        Some(l) => l.snapshot(),
-        None => serde_json::json!({"host": null}),
-    })
+    Json(current_for(
+        live.map(|l| l.snapshot()),
+        crate::vinput_api::host_is_local(&headers),
+    ))
+}
+
+/// The session's state for `current`. Its id is only for a local script driving it (#615,
+/// AUTOMATION.md; the app's pages read only `host`): left out for a request that does not
+/// address this computer as localhost.
+fn current_for(snapshot: Option<serde_json::Value>, local: bool) -> serde_json::Value {
+    let mut v = snapshot.unwrap_or_else(|| serde_json::json!({"host": null, "session": null}));
+    if !local {
+        if let Some(o) = v.as_object_mut() {
+            o.remove("session");
+        }
+    }
+    v
 }
 
 /// `GET /api/ps5/rp/replay`: the instant replay's frames (rp_replay.rs), for the page to save as
@@ -781,6 +981,7 @@ fn begin(start: &StartReq, creds: ps5upload_core::rp_session::SessionCreds) -> A
     }
     cfg.mic = start.mic;
     cfg.dualsense = start.dualsense;
+    cfg.keyboard = start.keyboard;
     let live = Arc::new(Live::new(
         start.host.clone(),
         cfg.codec.is_hevc(),
@@ -791,6 +992,7 @@ fn begin(start: &StartReq, creds: ps5upload_core::rp_session::SessionCreds) -> A
             .min(MAX_KEEP_ALIVE),
     ));
     live.mic_enabled.store(cfg.mic, Ordering::Relaxed);
+    live.keyboard.enabled.store(cfg.keyboard, Ordering::Relaxed);
     live.set_replay(start.replay_s);
     let l = live.clone();
     tokio::task::spawn_blocking(move || {
@@ -950,6 +1152,7 @@ async fn session(mut socket: WebSocket) {
     // Pongs go on this page's own status queue, behind what is already there,
     // so the time measured is the time the page's messages really take.
     let pong_tx = ctl_tx.clone();
+    let kbm_tx = ctl_tx.clone();
     let id = live.attach(video_tx, ctl_tx, start.timing);
 
     let mut reason = "ended";
@@ -1000,14 +1203,43 @@ async fn session(mut socket: WebSocket) {
                         if m.replay_s.is_some() {
                             live.set_replay(m.replay_s);
                         }
+                        if let Some(k) = &m.kbm {
+                            if live.is_viewer(id) {
+                                let tx = kbm_tx.clone();
+                                let status: crate::vinput_api::StatusFn = Arc::new(move |v| {
+                                    let _ = tx.try_send(text(v));
+                                });
+                                crate::vinput_api::control(&live.host, crate::vinput_api::Owner::Page(id), k, status);
+                            }
+                        }
+                        if live.is_viewer(id) {
+                            live.keyboard.page_typed(&m.keyboard);
+                        }
+                        if let Some(Secret(p)) = m.passcode {
+                            live.answer_passcode(id, Passcode::Digits(p));
+                        }
+                        if m.passcode_cancel {
+                            live.answer_passcode(id, Passcode::Cancel);
+                        }
                     }
                 }
                 Some(Ok(Message::Binary(b))) if b.first() == Some(&KIND_MIC) => {
                     live.mic_frame(id, &b[1..]);
                 }
+                // The picture a local automation client asked for (rp_automation.rs).
+                Some(Ok(Message::Binary(b))) if b.first() == Some(&automation::KIND_SNAPSHOT) => {
+                    live.auto.page_answered(id, b.slice(1..));
+                }
+                // A native keyboard & mouse report: only from the page the session is shown on.
+                Some(Ok(Message::Binary(b))) if b.first() == Some(&crate::vinput_api::KIND_KBM) => {
+                    if live.is_viewer(id) {
+                        crate::vinput_api::report(&live.host, crate::vinput_api::Owner::Page(id), &b[1..]);
+                    }
+                }
                 // The page left: the session waits for it (or another).
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => {
                     live.detach(id);
+                    crate::vinput_api::off(&live.host, crate::vinput_api::Owner::Page(id), "left");
                     return;
                 }
                 _ => {}
@@ -1015,6 +1247,8 @@ async fn session(mut socket: WebSocket) {
         }
     }
     live.detach(id);
+    // Whatever ended it (stop, the session over, another page): this page's keys and buttons go.
+    crate::vinput_api::off(&live.host, crate::vinput_api::Owner::Page(id), "left");
     close(&mut socket, reason).await;
 }
 
@@ -1025,6 +1259,96 @@ pub async fn player() -> impl IntoResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The session id (for a local script) is left out for a request not addressed to
+    /// localhost; the rest, which the app reads, stays.
+    #[test]
+    fn the_session_id_goes_only_to_localhost() {
+        let snap = || Some(serde_json::json!({"host": "10.0.0.9", "session": 3, "playing": true}));
+        assert_eq!(current_for(snap(), true)["session"], 3);
+        let v = current_for(snap(), false);
+        assert!(v.get("session").is_none());
+        assert_eq!(v["host"], "10.0.0.9");
+        assert_eq!(v["playing"], true);
+        assert_eq!(current_for(None, false), serde_json::json!({"host": null}));
+    }
+
+    #[test]
+    fn the_console_asking_for_the_passcode_reaches_the_page_and_back() {
+        let live = Live::new("10.0.0.9".into(), false, Duration::from_secs(60));
+        let (vtx, _vrx) = mpsc::channel(8);
+        let (ctx, mut crx) = mpsc::channel(8);
+        let id = live.attach(vtx, ctx, false);
+        let next_text = |rx: &mut mpsc::Receiver<Message>| loop {
+            match rx.try_recv() {
+                Ok(Message::Text(t)) => {
+                    break serde_json::from_str::<serde_json::Value>(t.as_str()).unwrap()
+                }
+                Ok(_) => continue,
+                Err(e) => panic!("no status: {e}"),
+            }
+        };
+        // Nothing is taken before the console asks.
+        assert!(!live.answer_passcode(id, Passcode::Digits("1234".into())));
+        // A watcher (watch party): it never gets the prompt.
+        let (stx, mut srx) = mpsc::channel(8);
+        live.spectators.lock().unwrap().push(Spectator {
+            id: 77,
+            tx: stx,
+            need_key: true,
+        });
+        let mut sink = Sink {
+            live: Arc::new(live),
+            t0: Instant::now(),
+        };
+        assert_eq!(sink.live.snapshot()["passcode"], false);
+        sink.passcode_needed(false);
+        // Phones and watchers see only that the console waits (pad_link sends the snapshot).
+        assert_eq!(sink.live.snapshot()["passcode"], true);
+        let v = next_text(&mut crx);
+        assert_eq!(v["stage"], "passcode");
+        assert_eq!(v["retry"], false);
+        assert_eq!(v["wait_s"], PASSCODE_WAIT.as_secs());
+        assert!(srx.try_recv().is_err(), "a watcher was asked");
+        // Nor can it answer.
+        assert!(!sink
+            .live
+            .answer_passcode(77, Passcode::Digits("1234".into())));
+        assert!(sink.passcode().is_none());
+        // Not four digits, or from another page: ignored.
+        assert!(!sink.live.answer_passcode(id, Passcode::Digits("12".into())));
+        assert!(!sink
+            .live
+            .answer_passcode(id + 1, Passcode::Digits("1234".into())));
+        // A ClientMsg carries it; the answer goes to the stream thread once.
+        let m: ClientMsg = serde_json::from_str(r#"{"passcode":"1234"}"#).unwrap();
+        assert!(!format!("{:?}", m.passcode).contains("1234"));
+        assert!(sink
+            .live
+            .answer_passcode(id, Passcode::Digits(m.passcode.unwrap().0)));
+        assert!(matches!(sink.passcode(), Some(Passcode::Digits(d)) if d == "1234"));
+        assert!(sink.passcode().is_none());
+        // Wrong: asked again, and a page attaching meanwhile is asked too.
+        sink.passcode_needed(true);
+        assert_eq!(next_text(&mut crx)["retry"], true);
+        let (vtx2, _vrx2) = mpsc::channel(8);
+        let (ctx2, mut crx2) = mpsc::channel(8);
+        let id2 = sink.live.attach(vtx2, ctx2, false);
+        assert_eq!(next_text(&mut crx2)["stage"], "passcode");
+        let m: ClientMsg = serde_json::from_str(r#"{"passcode_cancel":true}"#).unwrap();
+        assert!(m.passcode_cancel);
+        assert!(sink.live.answer_passcode(id2, Passcode::Cancel));
+        assert!(matches!(sink.passcode(), Some(Passcode::Cancel)));
+    }
+
+    #[test]
+    fn passcode_endings_have_their_own_codes() {
+        let code = |t: &str| error_status(&anyhow::anyhow!(t.to_string()))["code"].clone();
+        assert_eq!(code(PASSCODE_CANCELLED), "passcode_cancelled");
+        assert_eq!(code(PASSCODE_TIMEOUT), "passcode_timeout");
+        assert_eq!(code(PASSCODE_CONSOLE_GAVE_UP), "passcode_timeout");
+        assert_eq!(code(PASSCODE_TOO_MANY), "passcode_too_many");
+    }
 
     #[test]
     fn watchers_start_at_a_keyframe_and_a_slow_one_skips_ahead() {
@@ -1321,6 +1645,36 @@ mod tests {
     }
 
     #[test]
+    fn a_pad_press_leaves_the_mic_on() {
+        // A merge once put the "mic off" of a page leaving into every pad change: talking and
+        // pressing a button (or a phone's, or an automation client's) cut the mic.
+        let live = Arc::new(Live::new("h".into(), false, DEFAULT_KEEP_ALIVE));
+        live.mic_enabled.store(true, Ordering::Relaxed);
+        let mut sink = Sink {
+            live: live.clone(),
+            t0: Instant::now(),
+        };
+        let (vt, _vr, ct, _cr) = page();
+        let id = live.attach(vt, ct, false);
+        live.set_mic(id, true);
+        assert_eq!(sink.mic(), Some(MicInput::On));
+        live.push_pad(PAGE_SOURCE, Some(ControllerState::default()));
+        live.push_pad(3, Some(ControllerState::default()));
+        assert_eq!(sink.mic(), None);
+        assert!(live.mic_on.load(Ordering::Relaxed));
+        live.detach(id);
+        assert_eq!(sink.mic(), Some(MicInput::Off));
+    }
+
+    #[test]
+    fn each_session_has_its_own_id_and_says_it() {
+        let a = Live::new("h".into(), false, DEFAULT_KEEP_ALIVE);
+        let b = Live::new("h".into(), false, DEFAULT_KEEP_ALIVE);
+        assert!(b.session > a.session);
+        assert_eq!(a.snapshot()["session"], a.session);
+    }
+
+    #[test]
     fn a_session_without_the_mic_ignores_it() {
         let live = Arc::new(Live::new("h".into(), false, DEFAULT_KEEP_ALIVE));
         let mut sink = Sink {
@@ -1335,6 +1689,42 @@ mod tests {
         let s: StartReq =
             serde_json::from_str(r#"{"host":"h","regist_key":"","rp_key":""}"#).unwrap();
         assert!(!s.mic);
+    }
+
+    #[test]
+    fn the_keyboard_is_only_on_when_asked_and_only_for_the_attached_page() {
+        let s: StartReq =
+            serde_json::from_str(r#"{"host":"h","regist_key":"","rp_key":""}"#).unwrap();
+        assert!(!s.keyboard, "an older page gets no keyboard");
+        let live = Arc::new(Live::new("h".into(), false, DEFAULT_KEEP_ALIVE));
+        live.keyboard.enabled.store(true, Ordering::Relaxed);
+        let mut sink = Sink {
+            live: live.clone(),
+            t0: Instant::now(),
+        };
+        let (vt, _vr, ct, mut cr) = page();
+        live.attach(vt, ct, false);
+        sink.keyboard(KeyboardEvent::Open("ü".into()));
+        assert_eq!(
+            kinds(&mut cr),
+            vec![r#"{"keyboard":{"open":true,"text":"ü"}}"#]
+        );
+        // A page that attaches now is told the keyboard is open.
+        let (vt2, _vr2, ct2, mut cr2) = page();
+        live.attach(vt2, ct2, false);
+        assert!(kinds(&mut cr2)
+            .iter()
+            .any(|m| m == r#"{"keyboard":{"open":true,"text":"ü"}}"#));
+        let m: ClientMsg = serde_json::from_str(r#"{"keyboard_text": "üx"}"#).unwrap();
+        live.keyboard.page_typed(&m.keyboard);
+        let m: ClientMsg = serde_json::from_str(r#"{"keyboard_accept": true}"#).unwrap();
+        live.keyboard.page_typed(&m.keyboard);
+        assert_eq!(
+            sink.keyboard_input(),
+            Some(KeyboardInput::Text("üx".into()))
+        );
+        assert_eq!(sink.keyboard_input(), Some(KeyboardInput::Accept));
+        assert_eq!(sink.keyboard_input(), None);
     }
 
     #[test]
