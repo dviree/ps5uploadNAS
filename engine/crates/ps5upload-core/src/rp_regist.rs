@@ -102,7 +102,8 @@ fn pad_session_key_hex(hex: &str) -> String {
 
 pub fn credential_from_regist_key(regist_key_hex: &str) -> Result<u64> {
     let bytes = parse_hex(regist_key_hex)
-        .ok_or_else(|| anyhow!("regist key is not hex: {regist_key_hex:?}"))?;
+        // Never the key itself in the message: errors reach logs and bug reports.
+        .ok_or_else(|| anyhow!("regist key is not hex ({} chars)", regist_key_hex.len()))?;
     // The console pads the field with NULs; the meaningful part is the
     // text before the first one.
     let end = bytes.iter().position(|b| *b == 0).unwrap_or(bytes.len());
@@ -112,8 +113,7 @@ pub fn credential_from_regist_key(regist_key_hex: &str) -> Result<u64> {
     if text.is_empty() {
         bail!("regist key decoded to an empty string");
     }
-    u64::from_str_radix(text, 16)
-        .with_context(|| format!("regist key {text:?} is not a hex number"))
+    u64::from_str_radix(text, 16).context("regist key is not a hex number")
 }
 
 fn parse_hex(s: &str) -> Option<Vec<u8>> {
@@ -226,6 +226,39 @@ pub fn build_request_body(
     RegistRequest { body, seed, iv }
 }
 
+/// Remote Play on the PS5 did not take the pairing at all: no answer to the search, or the
+/// pairing port refused the connection (#642). Nearly always Remote Play is off, or the console
+/// has no pairing window open: its own Link Device screen opens one, and only while it shows its
+/// PIN (a PIN from another tool, such as LinkDEV, opens nothing here).
+#[derive(Debug)]
+pub struct NotAnswering {
+    /// What the network said, kept for the log and bug reports.
+    pub detail: String,
+}
+
+impl std::fmt::Display for NotAnswering {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "Remote Play on the PS5 is not answering pairing ({}). The PS5 must be awake, with \
+             Remote Play on: Settings › System › Remote Play › Enable Remote Play",
+            self.detail
+        )
+    }
+}
+
+impl std::error::Error for NotAnswering {}
+
+/// The same for a PIN typed from the PS5, where there are two things to check.
+fn pin_not_answering(detail: &str) -> anyhow::Error {
+    anyhow!(
+        "Remote Play on the PS5 is not answering pairing ({detail}). Check two things. Remote \
+         Play is on: Settings › System › Remote Play › Enable Remote Play. And the PIN comes from \
+         the PS5's own Settings › System › Remote Play › Link Device screen, left open while you \
+         pair: a PIN from another tool, such as LinkDEV, does not work"
+    )
+}
+
 /// Announce ourselves on 9295 before registering.
 ///
 /// Not optional: without it the console rejects the registration. It is a
@@ -243,11 +276,8 @@ fn regist_search(host: &str, timeout: Duration) -> Result<()> {
         .map_err(|e| anyhow!("sending SRC3 to {addr}: {e}"))?;
 
     let mut buf = [0u8; 1024];
-    let (n, _) = socket.recv_from(&mut buf).map_err(|e| {
-        anyhow!(
-            "the console did not answer the registration search on {addr}: {e}. \
-             It must be awake, with Remote Play enabled."
-        )
+    let (n, _) = socket.recv_from(&mut buf).map_err(|e| NotAnswering {
+        detail: format!("no answer to the search on {addr}: {e}"),
     })?;
     if !buf[..n].starts_with(b"RES3") {
         bail!(
@@ -276,12 +306,59 @@ pub(crate) struct HttpReply {
     pub(crate) body: Vec<u8>,
 }
 
+/// Headers whose values a log line may show; any other header is named only (RP-Nonce and the
+/// like are key material).
+const LOGGABLE_HEADERS: &[&str] = &[
+    "rp-application-reason",
+    "rp-version",
+    "server",
+    "content-length",
+    "connection",
+    "content-type",
+];
+
+/// A console reply for a detailed-logs line: the status, the reason, the header names, and the
+/// values of [`LOGGABLE_HEADERS`] only.
+pub(crate) fn reply_for_log(reply: &HttpReply) -> String {
+    let headers: Vec<String> = reply
+        .headers
+        .iter()
+        .map(|(k, v)| {
+            if LOGGABLE_HEADERS.contains(&k.as_str()) {
+                format!("{k}={v}")
+            } else {
+                k.clone()
+            }
+        })
+        .collect();
+    format!(
+        "HTTP {} [{}] body {} bytes",
+        reply.code,
+        headers.join(", "),
+        reply.body.len()
+    )
+}
+
+/// What to say when the console's answer isn't an HTTP reply. Only its size: the rest is not ours
+/// to put in a log.
+fn unreadable_reply(len: usize) -> String {
+    let what = if len == 0 {
+        "The PS5 closed the connection without answering".to_string()
+    } else {
+        format!("The PS5 sent a reply the app can't read ({len} bytes)")
+    };
+    format!(
+        "{what}. Its Remote Play may be stuck on an earlier session: close Remote Play on any other \
+         device, restart the PS5 and try again"
+    )
+}
+
 /// Split a raw HTTP response into its status code, headers and body.
 pub(crate) fn split_http(raw: &[u8]) -> Result<HttpReply> {
     let split = raw
         .windows(4)
         .position(|w| w == b"\r\n\r\n")
-        .ok_or_else(|| anyhow!("no header/body break in the console's reply"))?;
+        .ok_or_else(|| anyhow!("{}", unreadable_reply(raw.len())))?;
     let head = String::from_utf8_lossy(&raw[..split]);
     let body = raw[split + 4..].to_vec();
 
@@ -310,11 +387,19 @@ pub(crate) fn split_http(raw: &[u8]) -> Result<HttpReply> {
 fn reason_text(code: &str) -> &'static str {
     match code.to_ascii_lowercase().as_str() {
         "80108b09" => "the PIN was wrong or has expired",
-        // Hit when a pending registration was already finalised on the
-        // console — polling Remote Play status probes
-        // sceRemoteplayConfirmDeviceRegist, which does exactly that. Retrying
-        // from a clean state is the fix, so say so.
-        "80108b03" => "a previous pairing attempt is still pending — try again",
+        // Hit when a pending registration was already finalised on the console
+        // (polling Remote Play status probes sceRemoteplayConfirmDeviceRegist,
+        // which does exactly that): the engine tries again by itself. Reported
+        // from the field too with Enable Remote Play off on the console's own
+        // screen, where trying and unpairing change nothing: the step that is
+        // left is on the console.
+        "80108b03" => {
+            "Remote Play isn't ready on the PS5. Open Settings › System › Remote Play on the \
+             console and turn on Enable Remote Play. If it's greyed out, this PS5 user's account \
+             usually isn't activated: activate it in Accounts › Users. If it still won't turn on \
+             or stay on, run the offline sign-in in Play › Set up and restart the PS5. Then press \
+             Pair again"
+        }
         "80108b02" => "the console rejected the PSN account",
         "80108b10" => "Remote Play is already in use",
         "80108b15" => "Remote Play crashed on the console",
@@ -348,8 +433,17 @@ pub fn register(host: &str, account_id_b64: &str, pin: u32) -> Result<Registrati
     let req_built = build_request_body(account_id_b64.trim(), pin, &nonce);
 
     let addr = resolve(host, REGIST_PORT)?;
-    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(10))
-        .map_err(|e| anyhow!("connecting to {addr}: {e}"))?;
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(10)).map_err(|e| {
+        // Refused: nothing takes pairings on 9295 now, and trying again will not change
+        // that. Anything else (a timeout, a reset) may pass on the next try.
+        if e.kind() == std::io::ErrorKind::ConnectionRefused {
+            anyhow::Error::new(NotAnswering {
+                detail: format!("{addr} refused the connection: {e}"),
+            })
+        } else {
+            anyhow!("connecting to {addr}: {e}")
+        }
+    })?;
     stream.set_read_timeout(Some(Duration::from_secs(30)))?;
     stream.set_write_timeout(Some(Duration::from_secs(10)))?;
 
@@ -628,14 +722,67 @@ mod tests {
     }
 
     #[test]
+    fn a_reply_that_is_not_http_gets_a_plain_error_with_only_its_size() {
+        let none = split_http(b"").err().unwrap().to_string();
+        assert!(none.contains("without answering"), "{none}");
+        let junk = split_http(b"secret-looking bytes")
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(junk.contains("20 bytes"), "{junk}");
+        assert!(!junk.contains("secret"), "{junk}");
+    }
+
+    #[test]
+    fn a_bad_regist_key_is_not_quoted_in_its_error() {
+        // Decodes to text that isn't hex.
+        let hex: String = "SECRETZZ".bytes().map(|b| format!("{b:02x}")).collect();
+        let e = format!("{:#}", credential_from_regist_key(&hex).unwrap_err());
+        assert!(!e.contains("SECRETZZ"), "{e}");
+    }
+
+    #[test]
     fn the_pending_registration_refusal_is_named() {
         // 80108b03 used to fall through to the generic "the console refused",
-        // which reads as unfixable. It is fixable: retry from a clean state.
-        assert_eq!(
-            reason_text("80108b03"),
-            "a previous pairing attempt is still pending — try again"
-        );
+        // and then to "try again", which changes nothing when the console's own
+        // switch is what's missing. The next step, named.
+        let t = reason_text("80108b03");
+        assert!(t.contains("Enable Remote Play"), "{t}");
+        assert!(t.contains("Pair again"), "{t}");
+        assert!(t.contains("Accounts › Users"), "{t}");
         assert_eq!(reason_text("80108B03"), reason_text("80108b03"));
+    }
+
+    #[test]
+    fn a_pending_registration_is_tried_again_with_a_fresh_start_and_others_are_not() {
+        use std::cell::Cell;
+        let quick = Duration::ZERO;
+        // Clears by itself.
+        let n = Cell::new(0);
+        let r = with_pending_retries(3, quick, || {
+            n.set(n.get() + 1);
+            if n.get() < 3 {
+                bail!("registration failed (HTTP 403): x (reason 80108B03)")
+            }
+            Ok(7)
+        });
+        assert_eq!((r.unwrap(), n.get()), (7, 3));
+        // Doesn't: the last answer stands, with the next step in it.
+        let n = Cell::new(0);
+        let r: Result<()> = with_pending_retries(3, quick, || {
+            n.set(n.get() + 1);
+            bail!("registration failed (HTTP 403): x (reason 80108b03)")
+        });
+        assert_eq!(n.get(), 3);
+        assert!(r.unwrap_err().to_string().contains("80108b03"));
+        // Any other refusal: at once.
+        let n = Cell::new(0);
+        let r: Result<()> = with_pending_retries(3, quick, || {
+            n.set(n.get() + 1);
+            bail!("registration failed (HTTP 403): the PIN is wrong (reason 80108b09)")
+        });
+        assert_eq!(n.get(), 1);
+        assert!(r.is_err());
     }
 
     #[test]
@@ -728,24 +875,28 @@ pub fn pair_with_console(mgmt_addr: &str, host: &str) -> Result<PairResult> {
     // Give up any PIN left over from an abandoned attempt before asking for
     // a new one (the request replaces a live PIN anyway; this also clears a
     // finished attempt's state). Cancel makes no Sony call that can block.
-    let _ = crate::remoteplay::remoteplay_cancel(mgmt_addr);
+    // Done in the attempt below.
 
-    // The PIN comes back in the ack. It must NOT be fetched by polling
-    // status: that probes sceRemoteplayConfirmDeviceRegist, which finalises
-    // the pending registration on the console, and the handshake below is
-    // then refused (measured: HTTP 403, reason 80108b03).
-    // Its error already says what failed (the payload's Sony call and code).
-    let snap = crate::remoteplay::remoteplay_request(mgmt_addr, None)?;
+    let reg = with_pending_retries(PENDING_TRIES, PENDING_WAIT, || {
+        // A retry's old PIN goes first, as above.
+        let _ = crate::remoteplay::remoteplay_cancel(mgmt_addr);
+        // The PIN comes back in the ack. It must NOT be fetched by polling
+        // status: that probes sceRemoteplayConfirmDeviceRegist, which finalises
+        // the pending registration on the console, and the handshake below is
+        // then refused (measured: HTTP 403, reason 80108b03).
+        // Its error already says what failed (the payload's Sony call and code).
+        let snap = crate::remoteplay::remoteplay_request(mgmt_addr, None)?;
 
-    let pin = snap.pin.trim().to_string();
-    if pin.is_empty() {
-        bail!("the console did not return a pairing PIN");
-    }
-    let pin_num: u32 = pin
-        .parse()
-        .map_err(|_| anyhow!("the console produced a PIN we cannot read: {pin:?}"))?;
+        let pin = snap.pin.trim().to_string();
+        if pin.is_empty() {
+            bail!("the console did not return a pairing PIN");
+        }
+        let pin_num: u32 = pin
+            .parse()
+            .map_err(|_| anyhow!("the console produced a PIN we cannot read: {pin:?}"))?;
 
-    let reg = register(host, &account_id, pin_num)?;
+        register(host, &account_id, pin_num)
+    })?;
     let credential = credential_from_regist_key(&reg.regist_key)?;
 
     // Best effort: the PIN has been consumed, so clear the waiting state
@@ -761,6 +912,30 @@ pub fn pair_with_console(mgmt_addr: &str, host: &str) -> Result<PairResult> {
         account_id_b64: account_id,
         account_via: readiness.account_via,
     })
+}
+
+/// Tries at the helper's pairing when the console answers 80108b03 (a registration left pending),
+/// each with a fresh PIN, and the wait between them. It clears by itself when it was a finished
+/// attempt's state; a console where it doesn't has a step left on its own screen (`reason_text`).
+const PENDING_TRIES: u32 = 3;
+const PENDING_WAIT: Duration = Duration::from_secs(2);
+
+fn with_pending_retries<T>(
+    tries: u32,
+    wait: Duration,
+    mut attempt: impl FnMut() -> Result<T>,
+) -> Result<T> {
+    let mut n = 0;
+    loop {
+        n += 1;
+        match attempt() {
+            Err(e) if n < tries && e.to_string().to_ascii_lowercase().contains("80108b03") => {
+                crate::core_log!("rp_regist: pairing try {n}: a registration is pending; again");
+                std::thread::sleep(wait);
+            }
+            r => return r,
+        }
+    }
 }
 
 /// A PIN as the user typed it from the PS5's Link Device screen: eight digits, spaces and dashes
@@ -833,6 +1008,10 @@ pub fn pair_with_pin(host: &str, account_id_b64: &str, pin: &str) -> Result<Pair
     }
     let reg = with_retries(PIN_TRIES, PIN_RETRY_WAIT, || {
         register(host, account_id_b64, pin)
+    })
+    .map_err(|e| match e.downcast_ref::<NotAnswering>() {
+        Some(n) => pin_not_answering(&n.detail),
+        None => e,
     })?;
     let credential = credential_from_regist_key(&reg.regist_key)?;
     Ok(PairResult {
@@ -879,7 +1058,7 @@ mod manual_pin_tests {
         let n = Cell::new(0);
         let r: Result<()> = with_retries(3, quick, || {
             n.set(n.get() + 1);
-            bail!("connecting to 192.0.2.1:9295: connection refused")
+            bail!("connecting to 192.0.2.1:9295: connection timed out")
         });
         assert_eq!(n.get(), 3);
         let m = r.unwrap_err().to_string();
@@ -887,6 +1066,41 @@ mod manual_pin_tests {
             m.contains("3 times") && m.contains("Press Pair again"),
             "{m}"
         );
+    }
+
+    #[test]
+    fn remote_play_not_answering_is_said_with_its_two_causes_and_not_retried() {
+        // A refused port or an unanswered search is not a dropped connection: no retry.
+        let quick = Duration::from_millis(0);
+        let n = std::cell::Cell::new(0);
+        let r: Result<()> = with_retries(3, quick, || {
+            n.set(n.get() + 1);
+            Err(NotAnswering {
+                detail: "192.0.2.1:9295 refused the connection: Connection refused (os error 111)"
+                    .into(),
+            }
+            .into())
+        });
+        assert_eq!(n.get(), 1);
+        let e = r.unwrap_err();
+        assert!(e.downcast_ref::<NotAnswering>().is_some());
+        // The helper's pairing: Remote Play must be on.
+        let m = e.to_string();
+        assert!(
+            m.contains("Enable Remote Play") && m.contains("os error 111"),
+            "{m}"
+        );
+        // A typed PIN: also where the PIN must come from, and that other tools' do not work.
+        let m = pin_not_answering("no answer to the search on 192.0.2.1:9295").to_string();
+        for want in [
+            "Enable Remote Play",
+            "Link Device",
+            "left open while you pair",
+            "LinkDEV",
+            "192.0.2.1:9295",
+        ] {
+            assert!(m.contains(want), "{want}: {m}");
+        }
     }
 
     #[test]

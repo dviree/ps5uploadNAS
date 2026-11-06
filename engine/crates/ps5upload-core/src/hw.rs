@@ -47,6 +47,10 @@ pub struct HwInfo {
 /// where any of these are legitimately 0 during normal operation.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct HwTemps {
+    /// Set when only the basic temperatures could be read: why the full read failed. Everything
+    /// beyond the temperatures then reads as unavailable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extended_error: Option<String>,
     pub cpu_temp: i32,
     pub soc_temp: i32,
     /// M.2 NVMe expansion slot temperature (°C). Channel 2 of the SoC
@@ -109,10 +113,15 @@ pub struct HwTemps {
     /// out of 20–110 °C, or from an older helper.
     #[serde(default)]
     pub fan_filtered_c: Option<f32>,
-    /// Where the clocks came from: `"mp1"` (read), `"unsupported"` (the driver refused once; the
-    /// helper does not try again until it restarts), or `""` (not asked for, or an older helper).
+    /// Where the clocks came from: `"mp1"` (read; while the driver is busy, the last values or
+    /// zeros), `"unsupported"` (the driver refused; the helper does not try again until it
+    /// restarts), or `""` (not asked for, or an older helper).
     #[serde(default)]
     pub gpu_clock_src: String,
+    /// The power controller's read has not come back (seen for as long as a game runs), so
+    /// `gpu_clock_src` and the core clocks say nothing. `false` from an older helper.
+    #[serde(default)]
+    pub mp1_busy: bool,
     /// The eight CPU cores' clocks in MHz: the power controller's figure for each core's
     /// P-state, not a cycle count. `0` = unknown or outside 400–4000 MHz. Empty when the clocks
     /// were not read.
@@ -123,16 +132,37 @@ pub struct HwTemps {
     pub cpu_core_mhz_min: u32,
     #[serde(default)]
     pub cpu_core_mhz_max: u32,
-    /// How the measured clocks came: `"add_chain"` (timed on the console), `"unsupported"`
-    /// (no CPU took the measuring thread; not tried again until the helper restarts), or `""`
-    /// (not asked for, or an older helper).
+    /// How the measured clocks came: `"add_chain"` (timed on the console, this read or an
+    /// earlier one), `"unsupported"` (no CPU took the measuring thread and nothing was measured
+    /// earlier; the next read tries again), or `""` (not asked for, or an older helper).
     #[serde(default)]
     pub cpu_measure_src: String,
+    /// The measuring read has not come back, so `cpu_measure_src` and the measured clocks say
+    /// nothing. `false` from an older helper.
+    #[serde(default)]
+    pub measure_busy: bool,
     /// The clock each of the eight cores really ran at while busy, in MHz, measured with a
     /// timed chain of adds; indexed like `cpu_core_mhz`. `0` = not measured (the game cores
     /// are not open to the helper) or outside 400–5000 MHz.
     #[serde(default)]
     pub cpu_core_measured_mhz: Vec<u32>,
+    /// How the last read of the CPU temperature went: Sony's return code (`"0x00000000"` is
+    /// success), `"fault"` (the call crashed and was recovered), `"missing"` (no such call on
+    /// this firmware), `"range"` (it answered with an impossible value) or `"none"` (no read has
+    /// finished yet). `None` from an older helper. Says why `cpu_temp` is 0.
+    #[serde(default)]
+    pub cpu_temp_rc: Option<String>,
+    /// The same for the SoC temperature.
+    #[serde(default)]
+    pub soc_temp_rc: Option<String>,
+    /// How long the last read of the basic sensors took, in ms; with `stale`, how long the read
+    /// still running has taken so far. `None` from an older helper.
+    #[serde(default)]
+    pub read_ms: Option<u32>,
+    /// Another request's read was still running, so these are the last values it had (0 if it
+    /// had none): the helper answers at once rather than queueing behind a stalled sensor call.
+    #[serde(default)]
+    pub stale: bool,
 }
 
 fn default_sensor_unavailable() -> i32 {
@@ -144,6 +174,10 @@ pub struct HwPower {
     pub operating_time_sec: u64,
     pub operating_time_hours: u64,
     pub operating_time_minutes: u64,
+    /// When the console booted, in seconds since the epoch on the console's own clock (to
+    /// compare with file times there); 0 from a helper that doesn't say.
+    #[serde(default)]
+    pub boot_time_sec: u64,
     pub boot_count: u64,
     pub power_consumption_mw: u32,
     /// System load average (1, 5, 15 minute windows) via the SDK's
@@ -335,6 +369,18 @@ pub fn hw_temps_with_clocks(addr: &str, extended: bool, clocks: bool) -> Result<
     Ok(sanitize_temps(parse_hw_temps(&body)))
 }
 
+/// The basic temperatures alone, with its own deadline: what is left when the full read fails.
+pub fn hw_temps_basic_within(addr: &str, timeout: std::time::Duration) -> Result<HwTemps> {
+    let body = mgmt::call_with(
+        addr,
+        m::HW_TEMPS,
+        m::HW_TEMPS.label,
+        hw_temps_selector(false, false),
+        Some(timeout),
+    )?;
+    Ok(sanitize_temps(parse_hw_temps(&body)))
+}
+
 /// The HW_TEMPS request body. "ufs" = usage + fan + shape (NOT power — see [`hw_temps`]); each
 /// is independently gated payload-side so this set is the verified-safe one. "c" adds the
 /// clocks; an older helper ignores the letter it does not know.
@@ -363,6 +409,7 @@ fn parse_core_list(v: &str) -> Vec<u32> {
 fn parse_hw_temps(body: &[u8]) -> HwTemps {
     let get = parse_kv(body);
     HwTemps {
+        extended_error: None,
         cpu_temp: get("cpu_temp").and_then(|v| v.parse().ok()).unwrap_or(0),
         soc_temp: get("soc_temp").and_then(|v| v.parse().ok()).unwrap_or(0),
         m2_temp: get("m2_temp").and_then(|v| v.parse().ok()).unwrap_or(0),
@@ -411,6 +458,7 @@ fn parse_hw_temps(body: &[u8]) -> HwTemps {
             .filter(|v| matches!(*v, "mp1" | "unsupported"))
             .unwrap_or("")
             .to_string(),
+        mp1_busy: get("mp1_busy") == Some("1"),
         cpu_core_mhz: get("cpu_core_mhz").map(parse_core_list).unwrap_or_default(),
         cpu_core_mhz_min: get("cpu_core_mhz_min")
             .and_then(|v| v.parse().ok())
@@ -422,10 +470,22 @@ fn parse_hw_temps(body: &[u8]) -> HwTemps {
             .filter(|v| matches!(*v, "add_chain" | "unsupported"))
             .unwrap_or("")
             .to_string(),
+        measure_busy: get("measure_busy") == Some("1"),
         cpu_core_measured_mhz: get("cpu_core_measured_mhz")
             .map(parse_core_list)
             .unwrap_or_default(),
+        cpu_temp_rc: get("cpu_temp_rc").and_then(sensor_rc_token),
+        soc_temp_rc: get("soc_temp_rc").and_then(sensor_rc_token),
+        read_ms: get("read_ms").and_then(|v| v.parse().ok()),
+        stale: get("stale") == Some("1"),
     }
+}
+
+/// A `*_temp_rc` value: a short token (`0x…`, `fault`, `missing`, `range`, `none`). A helper this
+/// engine has not met may add others; anything that does not look like one reads as absent.
+fn sensor_rc_token(v: &str) -> Option<String> {
+    (!v.is_empty() && v.len() <= 16 && v.bytes().all(|b| b.is_ascii_alphanumeric()))
+        .then(|| v.to_string())
 }
 
 pub fn hw_power(addr: &str) -> Result<HwPower> {
@@ -452,6 +512,9 @@ pub fn hw_power(addr: &str) -> Result<HwPower> {
             .and_then(|v| v.parse().ok())
             .unwrap_or(0),
         operating_time_minutes: get("operating_time_minutes")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0),
+        boot_time_sec: get("boot_time_sec")
             .and_then(|v| v.parse().ok())
             .unwrap_or(0),
         boot_count: get("boot_count").and_then(|v| v.parse().ok()).unwrap_or(0),
@@ -902,6 +965,47 @@ mod tests {
     }
 
     #[test]
+    fn parse_hw_temps_says_how_the_read_went() {
+        let body = b"cpu_temp=0\nsoc_temp=52\ncpu_freq_mhz=800\nsoc_clock_mhz=0\nsoc_power_mw=0\n\
+            cpu_temp_rc=0x80020016\nsoc_temp_rc=0x00000000\nread_ms=1234\nstale=0\n";
+        let t = sanitize_temps(parse_hw_temps(body));
+        assert_eq!(t.cpu_temp, 0);
+        assert_eq!(t.soc_temp, 52);
+        assert_eq!(t.cpu_temp_rc.as_deref(), Some("0x80020016"));
+        assert_eq!(t.soc_temp_rc.as_deref(), Some("0x00000000"));
+        assert_eq!(t.read_ms, Some(1234));
+        assert!(!t.stale);
+
+        // The answer a caller gets while another request's read is stuck.
+        let body = b"cpu_temp=50\ncpu_temp_rc=fault\nsoc_temp_rc=none\nread_ms=30000\nstale=1\n";
+        let t = parse_hw_temps(body);
+        assert_eq!(t.cpu_temp_rc.as_deref(), Some("fault"));
+        assert_eq!(t.soc_temp_rc.as_deref(), Some("none"));
+        assert_eq!(t.read_ms, Some(30000));
+        assert!(t.stale);
+
+        // Garbage reads as absent, not as a value and not as a failed parse.
+        let t = parse_hw_temps(b"cpu_temp_rc=a b\nsoc_temp_rc=\nread_ms=-1\nstale=yes\n");
+        assert_eq!(t.cpu_temp_rc, None);
+        assert_eq!(t.soc_temp_rc, None);
+        assert_eq!(t.read_ms, None);
+        assert!(!t.stale);
+    }
+
+    #[test]
+    fn parse_hw_temps_older_helper_sends_no_read_report() {
+        let t = parse_hw_temps(b"cpu_temp=36\nsoc_temp=34\ncpu_freq_mhz=800\n");
+        assert_eq!(t.cpu_temp, 36);
+        assert_eq!(t.cpu_temp_rc, None);
+        assert_eq!(t.soc_temp_rc, None);
+        assert_eq!(t.read_ms, None);
+        assert!(!t.stale);
+        // And the JSON the app reads keeps its keys, snake_case, either way.
+        let v = serde_json::to_value(&t).unwrap();
+        assert!(v.get("cpu_temp_rc").is_some() && v.get("read_ms").is_some());
+    }
+
+    #[test]
     fn parse_hw_temps_m2_temp() {
         // New payload with an M.2 NVMe drive installed: channel 2 reports
         // a valid temp alongside soc_temp.
@@ -1088,6 +1192,10 @@ mod tests {
         );
         assert_eq!((t.cpu_core_mhz_min, t.cpu_core_mhz_max), (2844, 3500));
         assert_eq!(t.cpu_measure_src, "", "an older helper says nothing");
+        assert!(
+            !t.mp1_busy && !t.measure_busy,
+            "an older helper says nothing"
+        );
         assert!(t.cpu_core_measured_mhz.is_empty());
     }
 
@@ -1125,6 +1233,10 @@ mod tests {
         assert_eq!(t.soc_clock_mhz, 2500);
         let t = sanitize_temps(parse_hw_temps(b"soc_clock_mhz=-2230\n"));
         assert_eq!(t.soc_clock_mhz, 0);
+
+        // The read has not come back: the helper says which, and the rest says nothing.
+        let t = parse_hw_temps(b"mp1_busy=1\nmeasure_busy=0\n");
+        assert!(t.mp1_busy && !t.measure_busy);
 
         // Unsupported: all zero, no min/max, the source word kept so the UI can say so.
         let body = b"soc_clock_mhz=0\ngpu_clock_src=unsupported\ncpu_core_mhz=0,0,0,0,0,0,0,0\ncpu_core_mhz_min=0\ncpu_core_mhz_max=0\n";

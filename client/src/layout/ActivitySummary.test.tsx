@@ -2,6 +2,7 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { describe, expect, it, vi } from "vitest";
 
 vi.mock("../state/lang", () => ({
+  useLangStore: { getState: () => ({ lang: "en" }) },
   useTr: () =>
     (key: string, vars?: Record<string, string | number>, fallback?: string) => {
       let s = fallback ?? key;
@@ -26,8 +27,6 @@ function task(p: Partial<Task>): Task {
     origin: "x",
     createdAt: new Date(NOW - 100_000 + n).toISOString(),
     status: "running",
-    attempts: 0,
-    maxAttempts: 1,
     consoleId: "h",
     payload: {},
     label: `Job ${n}`,
@@ -224,5 +223,16 @@ describe("failureText", () => {
     expect(failureText("console_rest_mode")).toMatch(/rest mode/);
     expect(failureText("USB gone")).toBe("USB gone");
     expect(failureText("some_unknown_token")).toBe("some_unknown_token");
+  });
+});
+
+describe("shownEta", () => {
+  it("shows a real time left, never one from a vanishing speed", async () => {
+    const { shownEta } = await import("./ActivitySummary");
+    expect(shownEta(90)).toBe(true);
+    expect(shownEta(1.42e218 * 3600)).toBe(false);
+    expect(shownEta(Infinity)).toBe(false);
+    expect(shownEta(0)).toBe(false);
+    expect(shownEta(undefined)).toBe(false);
   });
 });

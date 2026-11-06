@@ -82,6 +82,7 @@ export default function ConvertScreen() {
         path,
         lz4Dir.trim() || outputDir.trim() || undefined,
         false,
+        undefined,
         { installRuntime: true },
         send,
       );
@@ -90,7 +91,7 @@ export default function ConvertScreen() {
   /** Compress one game into a .ffpfsc image in the output folder under Convert: an image is
    *  compressed as it is, a game folder written as a compressed image. The original is only
    *  read. */
-  const convertToFfpfsc = (path: string, isFolder: boolean, send = false) => {
+  const convertToFfpfsc = (path: string, _isFolder: boolean, send = false) => {
     // Not next to the source (the default for an image): the library is mounted read-only.
     const out =
       useConvertPrefs.getState().outputDir.trim() || "~/Downloads/fpkgs";
@@ -105,9 +106,9 @@ export default function ConvertScreen() {
           deleteAfter: false,
         }
       : undefined;
-    void (isFolder
-      ? run.buildImage(path, out, true, "exfat", thenUpload)
-      : run.compress(path, out, thenUpload));
+    // A folder is written as a compressed image, an image re-written compressed (upstream's
+    // Workshop compresses both through buildImage).
+    void run.buildImage(path, out, true, "exfat", thenUpload);
     setTab("convert");
   };
   /** Send a game as it is (a folder, an LZ4 game folder or an image) to the connected PS5

@@ -14,6 +14,20 @@ export interface MeshActivityItem {
   count?: number;
   /** Remote Play: where a phone joins this device's session as a controller (pad_link.rs). */
   pad?: string;
+  /** Remote Play with Play Together open (#641): friends nearby may join (they are asked). */
+  join?: MeshJoin;
+}
+
+/** A Play Together host as the other apps on the network see it. */
+export interface MeshJoin {
+  code: string;
+  players: number;
+  max: number;
+  host_name: string;
+  console_name: string;
+  game_title?: string | null;
+  /** The guest socket: ws://<host computer>:<port>/api/join/ws */
+  ws: string;
 }
 
 export interface MeshDevice {
@@ -113,6 +127,22 @@ const post = (route: string, body: object) =>
 const str = (v: unknown) => (typeof v === "string" ? v : "");
 const num = (v: unknown) => (typeof v === "number" && Number.isFinite(v) ? v : 0);
 
+/** A friend's Play Together, kept only when it can be joined (a socket and a code). */
+function toJoin(v: unknown): MeshJoin | undefined {
+  if (!v || typeof v !== "object") return undefined;
+  const j = v as Record<string, unknown>;
+  if (typeof j.ws !== "string" || !j.ws || typeof j.code !== "string" || !j.code) return undefined;
+  return {
+    code: j.code,
+    players: num(j.players),
+    max: num(j.max),
+    host_name: str(j.host_name),
+    console_name: str(j.console_name),
+    game_title: typeof j.game_title === "string" ? j.game_title : null,
+    ws: j.ws,
+  };
+}
+
 function toItems(v: unknown): MeshActivityItem[] {
   if (!Array.isArray(v)) return [];
   return v
@@ -124,6 +154,7 @@ function toItems(v: unknown): MeshActivityItem[] {
       stage: typeof x.stage === "string" ? x.stage : undefined,
       count: typeof x.count === "number" ? x.count : undefined,
       pad: typeof x.pad === "string" ? x.pad : undefined,
+      join: toJoin(x.join),
     }))
     .filter((x) => x.kind);
 }

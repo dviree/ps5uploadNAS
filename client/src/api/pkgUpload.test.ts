@@ -92,7 +92,7 @@ describe("browser package upload", () => {
     }
     vi.stubGlobal("XMLHttpRequest", FakeXhr);
     await expect(
-      stageBrowserFile(new File(["test"], "a.txt"), (sent, total) => seen.push([sent, total])),
+      stageBrowserFile(new File(["test"], "a.txt"), { onProgress: (sent, total) => seen.push([sent, total]) }),
     ).resolves.toMatchObject({ uploadId: "id-1", path: "/tmp/x/a.txt" });
     expect(seen).toEqual([[2, 4], [4, 4]]);
   });

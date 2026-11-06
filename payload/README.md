@@ -3,7 +3,8 @@
 The C payload that runs on the PS5. Built with the
 [PS5 Payload SDK](https://github.com/ps5-payload-dev/sdk) (version pinned
 in [`../scripts/ps5-sdk.env`](../scripts/ps5-sdk.env)), sent to the
-console's ELF loader, and left resident until reboot or rest mode.
+console's ELF loader, and left resident until reboot. It keeps running through rest mode on the
+firmware tested (13.60), and its listener rebinds after the wake.
 
 Its main port is **9120**, AVA1 (`third_party/ava1/spec/SPEC.md`): transfers,
 status, filesystem, mount, app, hardware, package and shell calls all
@@ -21,9 +22,10 @@ and the short-lived archive extractor (`extractor/`, no socket).
 the takeover, starting the AVA1 server, and cleanup. It binds no
 socket of its own. `src/runtime.c` holds the management handlers the AVA1
 table (`src/mgmt_table.def`, dispatched by `src/mgmt_rpc.c`) calls, and the
-instance lifecycle (ownership record, reap, shutdown). `ava1/` is the AVA1 protocol in C (frames,
-generated codecs in `ava1/gen/`, Noise handshake, server); never edit
-`ava1/gen/` by hand. `src/takeover.c`
+instance lifecycle (ownership record, reap, shutdown). The AVA1 protocol in C (frames, Noise
+handshake, server) is the `third_party/ava1/c` submodule, with its generated codecs in `c/gen/`; the
+helper's own methods are generated into `gen/ava1_app_gen.{c,h}`. Never edit either by hand.
+`src/takeover.c`
 asks an older resident payload to stand down before binding.
 
 The rest of `src/` is one module per capability: registration and launch,
@@ -39,12 +41,32 @@ the helper), self-escalates, and answers a JSON-lines protocol
 Sony's installer over a 127.0.0.1 HTTP URL. The engine sends it automatically
 when nothing is listening on :9115.
 
+### Play Together controllers (`src/vpad.c`)
+
+Friends who join a Remote Play session (Play Together, #641) play as Players
+2-4 on virtual DualSense controllers the helper itself makes with ioctls on
+`/dev/hid`; no companion process. The engine drives them over the `vpad.*`
+management methods (`include/vpad.h` has the contract, buttons and block
+layout): each slot belongs to a guest's 128-bit token, a pad is made for the
+foreground user so the console asks "Who's using this controller?" (the guest
+picks Quick Play), states carry a `seq` so old ones are ignored, and a
+watchdog puts a silent pad at rest after 400 ms and removes one with no
+heartbeat for 90 s. Pads go when the helper stops. `vinput.caps` reports
+`"vpad":3` so the engine can tell a helper that has them.
+`tests/vpad_selftest.c` drives all of it over a fake `/dev/hid`.
+
 ### Prior art
 
 The installer daemon is our own implementation. Its design was informed, as
 behavioural references only (no code or names are carried into the daemon),
 by cy33hc's ps5-ezremote-dpi, etaHEN and elf-arsenal's DPI payloads, and
 itsPLK's on-console PKG Manager (the loopback-serving + cacheability rules).
+
+The `/dev/hid` requests behind the Play Together controllers (add, insert,
+delete and output, and their block layouts) are from Darkatek7's
+[ProsperoSunshine](https://github.com/Darkatek7/ProsperoSunshine)
+(`src/platform/ps5/pad.c`, GPL-3.0-only, itself derived from ps5-mcp's
+RemoteEye), written anew in `src/vpad.c`.
 
 ## Build
 
@@ -76,7 +98,8 @@ in milliseconds and can't wedge a console.
 - **Never `rename()` across mounts.** It panics the kernel. Guard on
   `st_dev`.
 - **Nothing large on a thread stack.** Threads that need room ask for it
-  explicitly (512 KiB–1 MiB); the default is small. A 256 KiB buffer in
+  explicitly (512 KiB–1 MiB); the default is 64 KiB (measured on FW
+  13.60). A 256 KiB buffer in
   an FTP handler once overflowed it and wedged consoles hard enough to
   need a power cycle — bulk buffers are heap-allocated now.
 - **Every blocking wait needs a bound.** Unbounded `ptrace` waits froze

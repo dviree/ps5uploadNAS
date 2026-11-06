@@ -14,6 +14,8 @@
  */
 import type { LucideIcon } from "lucide-react";
 import {
+  Heart,
+  Plug,
   Cable,
   Send as SendIcon,
   Package,
@@ -129,7 +131,7 @@ export const NAV_ITEMS: NavItem[] = [
   {
     to: "/files",
     key: "v5_tab_files",
-    fallback: "File System",
+    fallback: "Files",
     icon: FolderTree,
     section: { key: "nav_section_files", fallback: "Files & Storage" },
   },
@@ -215,6 +217,12 @@ export const NAV_ITEMS: NavItem[] = [
     section: { key: "nav_section_app", fallback: "App" },
   },
   {
+    to: "/mcp-api",
+    key: "mcp_api_nav",
+    fallback: "MCP & API",
+    icon: Plug,
+  },
+  {
     to: "/faq",
     key: "help_title",
     fallback: "Help",
@@ -249,8 +257,16 @@ export const BUG_REPORT_NAV_ITEM: NavItem = {
   icon: Bug,
 };
 
+/** Thanks & Support: right under Bug report, never hidden: the supporters, and Ko-fi and crypto. */
+export const THANKS_NAV_ITEM: NavItem = {
+  to: "/thanks",
+  key: "thanks_nav",
+  fallback: "Thanks & Support",
+  icon: Heart,
+};
+
 /** Above every section, in this order; none can be hidden. */
-export const FIXED_NAV_ITEMS: readonly NavItem[] = [HOME_NAV_ITEM, PLAY_NAV_ITEM, BUG_REPORT_NAV_ITEM];
+export const FIXED_NAV_ITEMS: readonly NavItem[] = [HOME_NAV_ITEM, PLAY_NAV_ITEM, BUG_REPORT_NAV_ITEM, THANKS_NAV_ITEM];
 
 /** Whether a screen is pinned (never hidden, never counted as hidden). */
 export function isFixedNav(to: string): boolean {

@@ -7,37 +7,17 @@
 //! the server runs inside the app process). The `windows_subsystem`
 //! console suppression lives on the binary (`main.rs`), not here.
 //!
-//! Listens on 0.0.0.0:19113 by default (set PS5UPLOAD_ENGINE_PORT env var to override).
-//! API routes are LAN-guarded via the `loopback_guard` middleware — only
-//! `/pkg-host/*` accepts off-loopback peers (so the PS5 can fetch fakepkg
-//! bytes during install). Everything else 403s any non-loopback source,
-//! except the IPs in PS5UPLOAD_ALLOW_IP (comma-separated, for remote clients).
-//! PS5 address defaults to 192.168.137.2 (set PS5_ADDR to override).
+//! Listens on 0.0.0.0:19113 by default (set PS5UPLOAD_ENGINE_PORT env var to override). Peers
+//! are gated by the `loopback_guard` middleware: loopback and the IPs in PS5UPLOAD_ALLOW_IP
+//! (comma-separated, for remote clients) reach everything; any other peer only the few routes
+//! `loopback_allows` names. PS5 address defaults to 192.168.137.2 (set PS5_ADDR to override).
 //!
-//! API
-//! ───
-//!   GET  /                            → dashboard UI (HTML)
-//!   GET  /api/ps5/status              → PS5 runtime STATUS_ACK body (JSON)
-//!   POST /api/transfer/file           → start single-file transfer job
-//!   POST /api/transfer/dir            → start directory transfer job
-//!   POST /api/transfer/zip            → start zip-archive transfer (decompress on host)
-//!   POST /api/zip/inspect             → preview a .zip (counts/sizes/game meta)
-//!   POST /api/transfer/file-list      → start multi-file transfer from explicit list
-//!   GET  /api/jobs/{id}               → poll job status/result
-//!   GET  /api/jobs                    → list all jobs (summary)
-//!   POST /api/jobs/{id}/pause|resume  → hold / continue a Workshop job (see `workshop_api`)
-//!   GET  /api/events                  → SSE stream of job state changes
-//!   GET  /api/event-journal           → bug-report event journal (since/until/cat)
-//!   POST /api/ps5/cleanup             → recursively remove a path under PS5 allowlist
-//!   GET  /api/ps5/volumes             → list storage volumes detected by the payload
-//!   GET  /api/ps5/list-dir?path=...   → list immediate children of a directory on PS5
-//!   POST /api/ps5/disk-usage          → start a recursive size walk (see `disk_usage`)
-//!   POST /api/ps5/cleanup/scan        → console clean-up scan / apply (see `console_cleanup_api`)
-//!   GET  /api/ps5/console-shares      → the console's own saved network shares (see `console_shares_api`)
+//! The API is the route table in `build_app`, plus the sub-routers it merges.
 
 mod activity;
 mod ampr_index_api;
 mod ampr_trace;
+mod api_errors;
 mod app_dump_api;
 mod ava1_api;
 mod browser_payload;
@@ -49,39 +29,52 @@ mod collection_check_api;
 mod collection_tidy_api;
 mod console_cleanup_api;
 mod console_files_api;
+mod console_move;
 mod console_payload;
 mod console_read;
 mod console_shares_api;
 mod console_snapshot;
+mod console_tasks_api;
+mod console_tools_api;
+mod consoles_api;
 mod convert_source;
+mod diag_api;
 mod disk_usage;
 mod download_relay;
 mod elfldr_guard;
 mod emulator_saves;
 mod engine_log;
 mod engine_update;
+mod event_bus;
 mod event_journal;
 mod fakelibs_api;
 mod fan_boost;
+mod ffmpeg_tool;
 mod folder_build;
 mod fpkg_api;
 mod fpkg_firmware;
+mod frame_decode;
 mod games_api;
+mod golive_dest;
+mod golive_ffmpeg;
 mod hearbridge_api;
 mod helper_copies_api;
 mod helper_mirror;
 mod helper_stop;
+mod host_guard;
 mod icon_cache;
 mod image_browse;
 mod image_build;
 mod inspect;
 mod install;
+mod join;
 mod link;
 mod link_lz4;
 mod local_fs;
 mod log_dedup;
 mod lz4_api;
 mod lz4_compat;
+mod mcp;
 mod mesh_api;
 mod mesh_drive;
 mod mesh_drive_plan;
@@ -89,36 +82,48 @@ mod mgmt_route;
 mod migrate_6;
 mod net_doctor;
 mod net_health;
+mod openapi;
+mod ops;
 mod pad_link;
+mod payloads_api;
 mod pkg_install;
 mod pkg_sidecar;
 mod pldmgr_api;
 mod profile_image;
 mod ps2_saves;
+mod queue_api;
 mod remote;
 mod remote_download;
 mod remote_pkg;
+mod rp_golive;
 mod rp_keyboard;
+mod rp_live_ts;
 mod rp_replay;
 mod rp_stream_api;
 mod save_backup;
 mod save_backup_server;
 mod save_copy;
+mod settings_api;
 mod settings_backup;
 mod shared_state;
 mod state_io;
 mod telemetry;
 mod vinput_api;
 mod wake_login_api;
+mod web_pages;
 #[cfg(feature = "webui")]
 mod webui;
 mod win_net;
 mod workshop_api;
 
 #[cfg(test)]
+mod api_surface_tests;
+#[cfg(test)]
 mod ava1_only_tests;
 #[cfg(test)]
 mod event_hooks_tests;
+#[cfg(test)]
+mod queue_api_tests;
 
 use axum::http::HeaderMap;
 use axum::{
@@ -141,9 +146,9 @@ use ps5upload_core::{
     focus::{focus_probe, FocusProbe},
     fs_ops::{
         app_launch, app_list_registered, app_register, app_unregister, fs_delete_with_op_id,
-        fs_mkdir, fs_mount, fs_move_with_timeout, fs_op_cancel, fs_op_status, fs_read,
-        fs_read_with_timeout, fs_unmount, list_dir, reconcile, DirListing, ListDirOptions,
-        MountResult, ReconcileMode, RegisterResult,
+        fs_mkdir, fs_mount, fs_op_cancel, fs_op_status, fs_read, fs_read_with_timeout, fs_unmount,
+        list_dir, reconcile, DirListing, ListDirOptions, MountResult, ReconcileMode,
+        RegisterResult,
     },
     game_meta::{parse_param_json_bytes, parse_param_sfo_bytes},
     hw::{
@@ -240,7 +245,6 @@ fn apply_per_request_bandwidth(cfg: &mut TransferConfig, cap_mbps: Option<f64>) 
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
-    convert::Infallible,
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
         Arc, Mutex, OnceLock, Weak,
@@ -248,10 +252,7 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::{broadcast, mpsc};
-use tokio_stream::{
-    wrappers::{BroadcastStream, ReceiverStream},
-    StreamExt as _,
-};
+use tokio_stream::{wrappers::ReceiverStream, StreamExt as _};
 use uuid::Uuid;
 
 // ─── Shared state ─────────────────────────────────────────────────────────────
@@ -407,6 +408,10 @@ pub(crate) enum JobState {
         /// happens to be watching the job against.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         error_console: Option<String>,
+        /// The figures behind a refusal for lack of room, which the client words in the user's
+        /// language (`error` and `error_detail` hold the English, for logs and scripts).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        error_space: Option<ps5upload_ava1::space::SpaceRefusal>,
     },
 }
 
@@ -439,6 +444,7 @@ fn job_failed_from_err(started_at_ms: u64, completed_at_ms: u64, err: &anyhow::E
             error_reason: Some(pce.kind.as_str().into()),
             error_detail: Some(pce.detail.clone()), // the console's message
             error_console: None,
+            error_space: None,
         };
     }
     if let Some(cf) = err.downcast_ref::<ps5upload_ava1::upload::ConsoleFailure>() {
@@ -466,6 +472,9 @@ fn job_failed_from_err(started_at_ms: u64, completed_at_ms: u64, err: &anyhow::E
             error_reason: Some(failure.reason.clone()),
             error_detail: Some(failure.detail.clone()),
             error_console: None,
+            error_space: err
+                .downcast_ref::<ps5upload_ava1::space::SpaceRefusal>()
+                .cloned(),
         };
     }
     let (reason, detail) = extract_payload_error(err);
@@ -495,6 +504,7 @@ fn job_failed_from_err(started_at_ms: u64, completed_at_ms: u64, err: &anyhow::E
         error_reason: reason,
         error_detail: detail,
         error_console: None,
+        error_space: None,
     }
 }
 
@@ -550,30 +560,21 @@ fn extract_payload_error(err: &anyhow::Error) -> (Option<String>, Option<String>
 /// and we want the progress bar to have a denominator on the first tick.
 /// Errors are silently skipped (unreadable entries contribute 0); this
 /// matches the permissive walk behavior elsewhere in core.
-/// The console's address as the engine uses it: the host only. AVA1 has one port, so a `:port`
-/// suffix from an older client (`ip:<retired port>`) is ignored. A bracketed IPv6 literal keeps
-/// its brackets so the pool can add the AVA1 port.
-pub(crate) fn console_addr(addr: &str) -> String {
-    let a = addr.trim();
-    if let Some(rest) = a.strip_prefix('[') {
-        return match rest.find(']') {
-            Some(i) => format!("[{}]", &rest[..i]),
-            None => a.to_string(),
-        };
-    }
-    match a.split_once(':') {
-        // exactly one colon: host:port. More than one is a bare IPv6 literal.
-        Some((host, port)) if !port.contains(':') => host.to_string(),
-        _ => a.to_string(),
-    }
-}
+/// The console's address as the engine uses it: the host only, brackets kept so the pool can add
+/// the AVA1 port. One implementation, in core.
+pub(crate) use ps5upload_core::events::console_addr;
 
 /// The console a destructive request (delete, move, unregister, power, ...) acts on. It must
 /// name one: falling back to the engine's default console could delete files on, or power off,
 /// a console the user was not looking at. `None`: answer with [`missing_console_addr`].
 fn required_console_addr(addr: Option<String>) -> Option<String> {
     // Map first, then refuse an empty host: ":1234" names no console either.
-    addr.as_deref().map(console_addr).filter(|a| !a.is_empty())
+    let addr = addr
+        .as_deref()
+        .map(|a| console_addr(&consoles_api::resolve(a)))
+        .filter(|a| !a.is_empty())?;
+    note_request_console(&addr);
+    Some(addr)
 }
 
 /// The 400 for a destructive request that names no console.
@@ -586,7 +587,30 @@ fn missing_console_addr() -> axum::response::Response {
 }
 
 fn console_addr_or_default(addr: Option<String>, default_addr: &str) -> String {
-    console_addr(addr.as_deref().unwrap_or(default_addr))
+    let addr = console_addr(&consoles_api::resolve(
+        addr.as_deref().unwrap_or(default_addr),
+    ));
+    note_request_console(&addr);
+    addr
+}
+
+tokio::task_local! {
+    /// The console the request being handled is about, once its handler has worked that out.
+    /// `log_requests` sets the slot up: most calls name their console in a JSON body it never
+    /// reads.
+    static REQUEST_CONSOLE: std::cell::RefCell<Option<String>>;
+}
+
+fn note_request_console(addr: &str) {
+    let _ = REQUEST_CONSOLE.try_with(|c| *c.borrow_mut() = Some(addr.to_string()));
+}
+
+/// The console a query string names, decoded, under any of the names the API accepts for it.
+fn console_from_query(uri: &axum::http::Uri) -> Option<String> {
+    let q = Query::<HashMap<String, String>>::try_from_uri(uri).ok()?;
+    ["addr", "console", "host", "ps5_addr", "ip"]
+        .iter()
+        .find_map(|k| q.0.get(*k).filter(|v| !v.is_empty()).cloned())
 }
 
 /// The engine's one startup line about the transport.
@@ -654,11 +678,11 @@ const ARCHIVE_STAGE_ENV: (&str, &str) = (
 /// off-loopback hitting an `/api/*` route is a third party that has no
 /// business calling our engine and gets a 403.
 ///
-/// `/pkg-host/*` is the single PS5-facing route; it's exempted from the
-/// guard so the console can fetch installable bytes. The route itself
-/// uses a UUIDv4 token in the URL as the auth gate (~122 bits of
-/// entropy, rotated per install — the trust boundary is the local LAN,
-/// same as any other on-LAN homebrew installer).
+/// Off-loopback peers reach exactly what `loopback_allows` names. `/pkg-host/*` is PS5-facing, so
+/// the console can fetch installable bytes; it uses a UUIDv4 token in the URL as the auth gate
+/// (~122 bits of entropy, rotated per install — the trust boundary is the local LAN, same as any
+/// other on-LAN homebrew installer). `/pad` + `/api/pad/ws` and `/join` + `/api/join/ws` are a
+/// phone's and a friend's way in; their sockets check a key themselves.
 /// What repeated failures are collapsed by: the route AND the console it was about, so one
 /// switched-off console's failures do not hide (or get "recovered" by) another's.
 fn failure_key(method: &str, path: &str, console: Option<&str>) -> String {
@@ -668,6 +692,11 @@ fn failure_key(method: &str, path: &str, console: Option<&str>) -> String {
     }
 }
 
+/// A route polled about once a second whatever the app is doing, not worth a debug line each.
+fn is_constant_poll(path: &str) -> bool {
+    matches!(path, "/api/engine-logs" | "/api/activity")
+}
+
 /// Log every (allowed) request: method, path, status, duration. Recorded at
 /// `debug` so it always lands in engine.log (rotated, crash-survivable) for a
 /// complete "what was the engine doing when it hung" trace, but only reaches
@@ -675,15 +704,18 @@ fn failure_key(method: &str, path: &str, console: Option<&str>) -> String {
 /// debug/trace. 5xx is bumped to `warn` so failures show at the default level.
 async fn log_requests(req: Request, next: Next) -> axum::response::Response {
     let method = req.method().clone();
-    let path = req.uri().path().to_string();
-    // The console a call was about (`?addr=`), for the event journal.
-    let console = req.uri().query().and_then(|q| {
-        q.split('&')
-            .find_map(|kv| kv.strip_prefix("addr="))
-            .map(|v| v.replace("%3A", ":").replace("%3a", ":"))
-    });
+    let path = api_errors::request_path(&req);
+    let query_console = console_from_query(req.uri());
     let start = std::time::Instant::now();
-    let resp = next.run(req).await;
+    // The console a call was about, for the event journal: what the handler worked out (a POST
+    // names it in its body), else what the query says.
+    let (resp, console) = REQUEST_CONSOLE
+        .scope(std::cell::RefCell::new(None), async {
+            let resp = next.run(req).await;
+            (resp, REQUEST_CONSOLE.with(|c| c.borrow().clone()))
+        })
+        .await;
+    let console = console.or(query_console);
     let ms = start.elapsed().as_millis();
     let status = resp.status().as_u16();
     // The full per-request trace always goes to the debug log, which is
@@ -694,9 +726,12 @@ async fn log_requests(req: Request, next: Next) -> axum::response::Response {
     // about once a second, so logging it makes the log grow purely from
     // being watched — a self-feeding stream of `GET /api/engine-logs -> 200`
     // that crowds out real traffic and never stops. Reading the log is not
-    // an event worth recording. A failure still gets through: only this
-    // debug line is skipped, and the 5xx path below is untouched.
-    if path != "/api/engine-logs" {
+    // an event worth recording. The app's activity poll is the same, once a
+    // second for its whole life: it wore through a busy log in a few hours, and
+    // a failure from that morning was gone from a report filed that evening. A
+    // failure still gets through: only this debug line is skipped, and the 5xx
+    // path below is untouched.
+    if !is_constant_poll(&path) {
         log_debug!("{method} {path} -> {status} ({ms}ms)");
     }
 
@@ -839,6 +874,10 @@ fn loopback_allows(cfg: &LoopbackGuardConfig, peer: std::net::IpAddr, path: &str
         // QR code's key or waits for the computer to allow it.
         || path == "/pad"
         || path == "/api/pad/ws"
+        // A friend joining Play Together (join.rs): the guest page and its socket, which checks
+        // the invite or the resume token itself. The rest of /api/join is the host's.
+        || path == "/join"
+        || path == "/api/join/ws"
         || peer.is_loopback()
         || allow_rules_contain(&cfg.allowed_ips, peer)
 }
@@ -866,16 +905,16 @@ async fn loopback_guard(
     req: Request,
     next: Next,
 ) -> impl IntoResponse {
-    let path = req.uri().path();
-    if loopback_allows(&cfg, peer.ip(), path) {
+    let path = api_errors::request_path(&req);
+    if loopback_allows(&cfg, peer.ip(), &path) {
         return next.run(req).await.into_response();
     }
-    eprintln!(
+    stderr_quiet(&format!(
         "[ps5upload-engine] refusing request to {path} from {peer}: not loopback and not in \
          PS5UPLOAD_ALLOW_IP — to allow it, set PS5UPLOAD_ALLOW_IP={} (or its subnet, e.g. \
          192.168.1.0/24)",
         peer.ip()
-    );
+    ));
     // Say who was refused and what to set. The bare "loopback only" gave a
     // self-hoster nothing to act on, and behind Docker the address the engine
     // sees is often not the one they would guess.
@@ -901,7 +940,7 @@ fn browser_origin_allows(origin: &str, host: &str) -> bool {
         return false;
     };
     let origin_authority = origin_rest.split('/').next().unwrap_or("");
-    if origin_authority.eq_ignore_ascii_case(host) {
+    if host_guard::same_server(origin_scheme, origin_authority, host) {
         return true;
     }
     // Vite development serves the renderer on a different port, but both
@@ -943,6 +982,7 @@ fn browser_request_allows(headers: &axum::http::HeaderMap, path: &str) -> bool {
     if path.starts_with("/pkg-host/") {
         return true;
     }
+    let path = host_guard::strip_base(path);
     let cross_site = headers
         .get("sec-fetch-site")
         .and_then(|v| v.to_str().ok())
@@ -975,20 +1015,51 @@ fn browser_request_allows(headers: &axum::http::HeaderMap, path: &str) -> bool {
         // but still carry Fetch Metadata. Native/CLI clients carry neither.
         return !cross_site;
     };
+    // A proxy that rewrites `Host` says what the browser asked for here. A cross-site page cannot
+    // set this header without a preflight, and the preflight (without it) is refused above.
     browser_origin_allows(origin, host)
+        || host_guard::first_forwarded(headers, "x-forwarded-host")
+            .is_some_and(|forwarded| browser_origin_allows(origin, forwarded))
+}
+
+/// What to say to a refused browser request: both sides of the comparison, because the usual
+/// cause is a reverse proxy that rewrites `Host` (nginx does by default), and nothing else in the
+/// answer would point there.
+fn cross_site_refusal(headers: &axum::http::HeaderMap) -> String {
+    let shown = |name: &str| {
+        headers.get(name).map(|v| {
+            let text = v.to_str().unwrap_or("(unreadable)");
+            text.chars().take(200).collect::<String>()
+        })
+    };
+    let host = shown("host").unwrap_or_else(|| "(none)".to_string());
+    match shown("origin") {
+        Some(origin) => format!(
+            "cross-site browser requests are not allowed: Origin {origin} does not match Host \
+             {host}. Behind a reverse proxy, forward the Host header (nginx: proxy_set_header \
+             Host $http_host)."
+        ),
+        None => format!(
+            "cross-site browser requests are not allowed: the browser marked this request as \
+             cross-site (Host {host})."
+        ),
+    }
 }
 
 async fn browser_origin_guard(req: Request, next: Next) -> impl IntoResponse {
-    let path = req.uri().path();
-    if browser_request_allows(req.headers(), path) {
+    let path = api_errors::request_path(&req);
+    if let Some(refused) = host_guard::refuse_host(req.headers(), &path) {
+        return refused;
+    }
+    if host_guard::is_page_navigation(req.method(), req.headers(), &path)
+        || browser_request_allows(req.headers(), &path)
+    {
         return next.run(req).await.into_response();
     }
-    eprintln!("[ps5upload-engine] refusing cross-site browser request to {path}");
-    (
-        StatusCode::FORBIDDEN,
-        "cross-site browser requests are not allowed",
-    )
-        .into_response()
+    stderr_quiet(&format!(
+        "[ps5upload-engine] refusing cross-site browser request to {path}"
+    ));
+    (StatusCode::FORBIDDEN, cross_site_refusal(req.headers())).into_response()
 }
 
 /// Walk a directory and return `(total_bytes, planned_files)` — collects
@@ -1009,13 +1080,15 @@ fn walk_plan(root: &std::path::Path, excludes: &[String]) -> (u64, Vec<PlannedFi
             if ft.is_dir() {
                 stack.push(path);
             } else if ft.is_file() {
-                if ps5upload_core::excludes::is_excluded_strings(&path, excludes) {
+                // Relative to the source, as the transfer matches: a pattern naming a folder that
+                // also occurs above it (`data`, `Games`) must not empty the plan.
+                let rel = path.strip_prefix(root).unwrap_or(&path);
+                if ps5upload_core::excludes::is_excluded_strings(rel, excludes) {
                     continue;
                 }
                 if let Ok(m) = entry.metadata() {
                     let size = m.len();
                     total += size;
-                    let rel = path.strip_prefix(root).unwrap_or(&path);
                     let rel_str = rel
                         .to_string_lossy()
                         .replace(std::path::MAIN_SEPARATOR, "/");
@@ -1052,7 +1125,8 @@ fn walk_plan_with(
                 stack.push(path);
                 continue;
             }
-            if ps5upload_core::excludes::is_excluded_strings(&path, excludes) {
+            let rel = path.strip_prefix(root).unwrap_or(&path);
+            if ps5upload_core::excludes::is_excluded_strings(rel, excludes) {
                 continue;
             }
             let m = fs
@@ -1060,7 +1134,6 @@ fn walk_plan_with(
                 .map_err(|e| format!("could not read {}: {e}", path.display()))?;
             {
                 total += m.len;
-                let rel = path.strip_prefix(root).unwrap_or(&path);
                 out.push(PlannedFile {
                     rel_path: rel.to_string_lossy().replace('\\', "/"),
                     size: m.len,
@@ -1224,7 +1297,7 @@ fn spawn_progress_ticker(
                         // job); `files` serializes as a count. Sent while
                         // the lock is held, so it can never follow the
                         // terminal event `set_job` sends under the same lock.
-                        if events_tx.receiver_count() > 0 {
+                        if event_bus::tick_wanted(&events_tx) {
                             if let Some(state) = g.get(&job_id).map(|st| serde_json::json!(st)) {
                                 let msg = serde_json::json!({ "job_id": job_id.to_string(), "job": with_live_notes(job_id, state) });
                                 let _ = events_tx.send(msg.to_string());
@@ -1297,7 +1370,7 @@ fn spawn_verify_stage(
                 }
             };
             let Some(state) = snapshot else { break };
-            if events_tx.receiver_count() > 0 {
+            if event_bus::tick_wanted(&events_tx) {
                 let msg = serde_json::json!({ "job_id": job_id.to_string(), "job": with_live_notes(job_id, state) });
                 let _ = events_tx.send(msg.to_string());
             }
@@ -1412,6 +1485,7 @@ impl Drop for JobFailOnDropGuard {
                 error_reason: None,
                 error_detail: None,
                 error_console: None,
+                error_space: None,
             },
         );
     }
@@ -1462,6 +1536,14 @@ pub(crate) fn live_notes_for(job_id: Uuid) -> Arc<ps5upload_core::transfer::Live
     notes
 }
 
+/// Threads `job_id`'s live notes into `cfg`, with the counter the transfer writes the bytes
+/// a resume found already on the console into (served as `resumed_bytes`).
+fn attach_live_notes(cfg: &mut TransferConfig, job_id: Uuid) {
+    let notes = live_notes_for(job_id);
+    cfg.progress_bytes_resumed = Some(notes.resumed_bytes.clone());
+    cfg.progress_live = Some(notes);
+}
+
 /// Adds a running job's live notes to its snapshot JSON: `phase` (`"skipping"` with
 /// `skip_done_bytes` / `skip_total_bytes`), `bottleneck` (AVA1's word) and `settling`. Fields
 /// that do not apply are absent, so the client shows nothing for them. A snapshot that is not
@@ -1487,6 +1569,19 @@ pub(crate) fn merge_live_notes(
             "skip_total_bytes".into(),
             n.skip_total_bytes.load(Relaxed).into(),
         );
+    }
+    if n.phase.load(Relaxed) == ps5upload_core::transfer::LIVE_PHASE_MEASURING {
+        o.insert("phase".into(), "measuring".into());
+        o.insert(
+            "measure_done_bytes".into(),
+            n.skip_done_bytes.load(Relaxed).into(),
+        );
+    }
+    // What the console already held when the job first opened (a resume). `bytes_sent`
+    // counts it, so a client takes it off for this run's speed and time left.
+    let resumed = n.resumed_bytes.load(std::sync::atomic::Ordering::Acquire);
+    if resumed > 0 {
+        o.insert("resumed_bytes".into(), resumed.into());
     }
     let bn = n.bottleneck.load(Relaxed);
     if bn != 0 {
@@ -1565,9 +1660,23 @@ fn cancel_flag(job_id: Uuid) -> Option<Arc<AtomicBool>> {
         .and_then(Weak::upgrade)
 }
 
-/// Pause or resume a running Workshop job. False when there is none by that id.
-pub(crate) fn set_job_paused(job_id: Uuid, paused: bool) -> bool {
-    cancel_flag(job_id).is_some_and(|f| ps5upload_fpkg::workshop::set_paused(&f, paused))
+/// How asking a job to pause or go on ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum JobPause {
+    Done,
+    /// There is no running job by that id.
+    NotRunning,
+    /// There is, and it is not one that can wait (only a Workshop job's workers can).
+    NotPausable,
+}
+
+/// Pause or resume a running Workshop job.
+pub(crate) fn set_job_paused(job_id: Uuid, paused: bool) -> JobPause {
+    match cancel_flag(job_id) {
+        None => JobPause::NotRunning,
+        Some(f) if ps5upload_fpkg::workshop::set_paused(&f, paused) => JobPause::Done,
+        Some(_) => JobPause::NotPausable,
+    }
 }
 
 /// Register a fresh cancel flag for `job_id` and return it to thread into
@@ -1626,6 +1735,16 @@ fn evict_oldest_terminal(jobs: &mut HashMap<Uuid, JobState>) {
     }
 }
 
+impl JobState {
+    pub(crate) fn started_at_ms(&self) -> u64 {
+        match self {
+            JobState::Running { started_at_ms, .. }
+            | JobState::Done { started_at_ms, .. }
+            | JobState::Failed { started_at_ms, .. } => *started_at_ms,
+        }
+    }
+}
+
 /// Update a job's state and broadcast the change over SSE.
 pub(crate) fn set_job(
     jobs: &Arc<Mutex<HashMap<Uuid, JobState>>>,
@@ -1644,8 +1763,9 @@ pub(crate) fn set_job(
         }
         g.insert(job_id, state);
         // Sent under the lock, as the progress ticker does: a ticker's "running" can then
-        // never reach a client after this "done".
-        if events_tx.receiver_count() > 0 {
+        // never reach a client after this "done". Sent whoever listens: `/api/jobs?since_seq=`
+        // numbers a job by its changes.
+        {
             let msg = serde_json::json!({ "job_id": job_id.to_string(), "job": with_live_notes(job_id, json.clone()) });
             let _ = events_tx.send(msg.to_string());
         }
@@ -1760,6 +1880,7 @@ fn relay_preflight(
 
 #[derive(Deserialize)]
 struct TransferFileReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     tx_id: Option<String>,
     dest: String,
@@ -1772,6 +1893,7 @@ struct TransferFileReq {
 
 #[derive(Deserialize)]
 struct TransferDirReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     tx_id: Option<String>,
     dest_root: String,
@@ -1792,6 +1914,7 @@ struct TransferDirReq {
 /// source is an archive path instead of a directory.
 #[derive(Deserialize)]
 struct TransferZipReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     tx_id: Option<String>,
     dest_root: String,
@@ -2058,6 +2181,7 @@ struct ZipInspectReq {
 /// inflate-to-RAM-vs-temp knob.
 #[derive(Deserialize)]
 struct Transfer7zReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     tx_id: Option<String>,
     dest_root: String,
@@ -2075,11 +2199,12 @@ struct SevenzInspectReq {
 }
 
 /// `/api/transfer/rar` request. Like 7z plus an optional `password` for
-/// encrypted archives. (RAR is desktop-only — the Android build cfg's out both
+/// encrypted archives. (RAR is desktop-only — the phone builds cfg out both
 /// the real handler and this struct, so it lives behind the same gate.)
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[derive(Deserialize)]
 struct TransferRarReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     tx_id: Option<String>,
     dest_root: String,
@@ -2103,6 +2228,7 @@ struct LinkProbeReq {
 /// `/api/link/download` request: download a link's file to a console folder.
 #[derive(Deserialize)]
 struct LinkDownloadReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     tx_id: Option<String>,
     url: String,
@@ -2120,8 +2246,7 @@ struct LinkDownloadReq {
     unpack: bool,
 }
 
-/// `/api/rar/packages` request. Desktop-only, same gate as the handler.
-#[cfg(not(target_os = "android"))]
+/// `/api/rar/packages` request (every archive kind: the name predates ZIP and 7z).
 #[derive(Deserialize)]
 struct RarPackagesReq {
     archive_path: String,
@@ -2130,7 +2255,7 @@ struct RarPackagesReq {
 }
 
 /// `/api/rar/inspect` request. Desktop-only, same gate as the handler.
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[derive(Deserialize)]
 struct RarInspectReq {
     archive_path: String,
@@ -2146,6 +2271,7 @@ struct FileListEntryReq {
 
 #[derive(Deserialize)]
 struct TransferFileListReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     tx_id: Option<String>,
     dest_root: String,
@@ -2156,6 +2282,7 @@ struct TransferFileListReq {
 
 #[derive(Deserialize)]
 struct TransferDirReconcileReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     tx_id: Option<String>,
     dest_root: String,
@@ -2176,6 +2303,7 @@ pub(crate) struct JobCreated {
 
 #[derive(Deserialize)]
 struct AddrQuery {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
 }
 
@@ -2184,6 +2312,7 @@ struct AddrQuery {
 /// value (or absent) is the basic, auto-poll-safe read.
 #[derive(Deserialize)]
 struct HwTempsQuery {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     #[serde(default)]
     extended: Option<u8>,
@@ -2245,30 +2374,37 @@ async fn ui_handler() -> impl IntoResponse {
     }
 }
 
-/// GET /api/events — SSE stream of job state changes
-async fn events_stream(
-    State(state): State<AppState>,
-) -> Sse<impl tokio_stream::Stream<Item = Result<Event, Infallible>>> {
-    let rx = state.events_tx.subscribe();
-    let stream = BroadcastStream::new(rx).filter_map(|msg| match msg {
-        Ok(data) => Some(Ok(Event::default().data(data))),
-        Err(_) => None, // lagged or channel closed — skip
-    });
-    Sse::new(stream).keep_alive(KeepAlive::default())
-}
-
 #[derive(Deserialize)]
 struct CleanupReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     path: String,
 }
 
-/// POST /api/ps5/cleanup — asks the PS5 payload to rm -rf a path.
+/// Whether the routes that exist only for tests and benches answer: `PS5UPLOAD_ENGINE_DEBUG=1`.
+fn debug_routes_on() -> bool {
+    debug_routes_allowed(std::env::var("PS5UPLOAD_ENGINE_DEBUG").ok().as_deref())
+}
+
+fn debug_routes_allowed(value: Option<&str>) -> bool {
+    value == Some("1")
+}
+
+/// What a route that is off answers: the same as one that does not exist.
+fn no_such_route() -> axum::response::Response {
+    json_err(StatusCode::NOT_FOUND, "no such route").into_response()
+}
+
+/// POST /api/ps5/cleanup — asks the PS5 payload to rm -rf a path. For tests and benches only:
+/// off unless `PS5UPLOAD_ENGINE_DEBUG=1`.
 /// Safe: payload refuses paths outside `/data/ps5upload-{bench,sweep,smoke}/`.
 async fn ps5_cleanup(
     State(_state): State<AppState>,
     Json(req): Json<CleanupReq>,
 ) -> impl IntoResponse {
+    if !debug_routes_on() {
+        return no_such_route();
+    }
     let Some(addr) = required_console_addr(req.addr) else {
         return missing_console_addr();
     };
@@ -2302,6 +2438,7 @@ async fn ps5_cleanup(
 
 #[derive(Deserialize)]
 struct ListDirQuery {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     path: String,
     #[serde(default)]
@@ -2387,6 +2524,7 @@ async fn local_storage_roots_handler() -> impl IntoResponse {
 
 #[derive(Deserialize)]
 struct FsPathReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     path: String,
     /// Optional unique 64-bit identifier the client generates so it
@@ -2403,14 +2541,15 @@ struct FsPathReq {
 
 #[derive(Deserialize)]
 struct FsMoveReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     from: String,
     to: String,
     /// Merge into an existing destination instead of refusing it. Files that
     /// collide are replaced; anything already in the destination that the
-    /// source doesn't mention is left alone. Absent = the historical
-    /// refuse-to-clobber behaviour, so only a caller that has actually asked
-    /// the user gets the destructive path.
+    /// source doesn't mention is left alone. Absent = an existing destination
+    /// is refused (`fs_move_exists` / `fs_copy_dest_exists`, 409 on a move), so
+    /// only a caller that has actually asked the user gets the destructive path.
     #[serde(default)]
     overwrite: bool,
     /// Optional unique 64-bit identifier the client generates so it
@@ -2426,6 +2565,7 @@ struct FsMoveReq {
 
 #[derive(Deserialize)]
 struct FsChmodReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     path: String,
     /// Octal string like "0777". String (not u32) so JSON parsers
@@ -2433,6 +2573,43 @@ struct FsChmodReq {
     mode: String,
     #[serde(default)]
     recursive: bool,
+}
+
+/// The registered game running now whose files are at or under `path`, if any. Asks the console
+/// only about what runs first, and more only when something does, so a delete with no game
+/// running costs one small call. A check that can't be made refuses nothing: the app's own rows
+/// check first, and this is the backstop for everything else that deletes.
+fn running_title_from(addr: &str, path: &str) -> Option<String> {
+    let running: Vec<String> = process_list(addr)
+        .ok()?
+        .processes
+        .into_iter()
+        .filter(|p| p.kind == "app" && !p.title_id.is_empty())
+        .map(|p| p.title_id)
+        .collect();
+    if running.is_empty() {
+        return None;
+    }
+    app_list_registered(addr)
+        .ok()?
+        .apps
+        .into_iter()
+        .find(|a| {
+            running.iter().any(|t| t.eq_ignore_ascii_case(&a.title_id))
+                && removes_source(path, &a.src)
+        })
+        .map(|a| a.title_id)
+}
+
+/// Whether deleting `path` takes away a game registered from `source`.
+fn removes_source(path: &str, source: &str) -> bool {
+    let path = path.trim_end_matches('/');
+    let source = source.trim_end_matches('/');
+    !path.is_empty()
+        && (source == path
+            || source
+                .strip_prefix(path)
+                .is_some_and(|rest| rest.starts_with('/')))
 }
 
 async fn ps5_fs_delete(
@@ -2447,6 +2624,16 @@ async fn ps5_fs_delete(
     let op_id = req.op_id;
     let started = std::time::Instant::now();
     crate::log_info!("fs_delete: addr={addr} path={path} op_id={op_id}");
+    let (check_addr, check_path) = (addr.clone(), path.clone());
+    if let Ok(Some(title)) =
+        tokio::task::spawn_blocking(move || running_title_from(&check_addr, &check_path)).await
+    {
+        return json_err(
+            StatusCode::CONFLICT,
+            format!("{title} is running from this path. Close it first."),
+        )
+        .into_response();
+    }
     let path_for_log = path.clone();
     // 1-hour deadline: fs_delete is a single-shot RPC; the payload runs
     // a recursive `rm -rf` and only sends FS_DELETE_ACK at the end. A
@@ -2543,6 +2730,7 @@ async fn ps5_fs_unpack(
 
 #[derive(Deserialize)]
 struct FsExtractReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     path: String,
     dest: String,
@@ -2658,25 +2846,18 @@ async fn ps5_fs_move(
     } else {
         next_fs_op_id()
     };
-    // One blocking closure for the whole decision: the rename is still tried first (a
-    // same-drive move is metadata-only) and only a cross-mount refusal becomes a console-side
-    // move (copy, then delete the source after a verified finish). `overwrite` travels with
-    // it, so a move that was not allowed to clobber still refuses.
+    // One blocking closure for the whole decision (`console_move::run`): the rename is still
+    // tried first (a same-drive move is metadata-only). `overwrite` travels with it, so a move
+    // that was not allowed to clobber refuses on one drive and across drives alike.
     match tokio::task::spawn_blocking(move || {
         // Marks the console busy for the job: a helper stop is refused meanwhile.
         let _busy = helper_stop::enter(&addr);
-        match fs_move_with_timeout(&addr, &from, &to, Some(io_timeout)) {
-            Err(e)
-                if {
-                    let msg = format!("{e:#}");
-                    msg.contains("cross_mount") || msg.contains("EXDEV")
-                } =>
-            {
-                require_console_ready(&addr)?;
-                ps5upload_ava1::copy::console_copy(&addr, &from, &to, op_id, true, overwrite)
-            }
-            other => other,
-        }
+        let console = console_move::Console {
+            addr: &addr,
+            op_id,
+            rename_timeout: io_timeout,
+        };
+        console_move::run(&console, &from, &to, overwrite)
     })
     .await
     .map_err(anyhow::Error::from)
@@ -2701,7 +2882,13 @@ async fn ps5_fs_move(
                 "fs_move failed: {from_for_log} -> {to_for_log} in {} ms: {e}",
                 started.elapsed().as_millis()
             );
-            json_err(StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response()
+            let msg = format!("{e:#}");
+            let status = if console_move::is_exists_refusal(&msg) {
+                StatusCode::CONFLICT
+            } else {
+                StatusCode::BAD_GATEWAY
+            };
+            json_err(status, msg).into_response()
         }
     }
 }
@@ -2778,6 +2965,7 @@ async fn ps5_fs_copy(
 
 #[derive(Debug, serde::Deserialize)]
 struct FsMountReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     image_path: String,
     #[serde(default)]
@@ -2793,11 +2981,10 @@ struct FsMountReq {
     read_only: Option<bool>,
 }
 
-async fn ps5_fs_mount(
-    State(state): State<AppState>,
-    Json(req): Json<FsMountReq>,
-) -> impl IntoResponse {
-    let addr = console_addr_or_default(req.addr, &state.default_ps5_addr);
+async fn ps5_fs_mount(Json(req): Json<FsMountReq>) -> impl IntoResponse {
+    let Some(addr) = required_console_addr(req.addr) else {
+        return missing_console_addr();
+    };
     let image_path = req.image_path;
     let mount_name = req.mount_name;
     let mount_point = req.mount_point;
@@ -2810,6 +2997,7 @@ async fn ps5_fs_mount(
     );
     let image_for_log = image_path.clone();
     let result: Result<MountResult, anyhow::Error> = tokio::task::spawn_blocking(move || {
+        let _busy = helper_stop::enter(&addr);
         fs_mount(
             &addr,
             &image_path,
@@ -2844,6 +3032,7 @@ async fn ps5_fs_mount(
 
 #[derive(Debug, serde::Deserialize)]
 struct FsUnmountReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     mount_point: String,
 }
@@ -2855,15 +3044,15 @@ struct FsUnmountReq {
 /// previously being gated out of the UI.
 #[derive(Debug, serde::Deserialize)]
 struct AppLaunchReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     title_id: String,
 }
 
-async fn ps5_app_launch(
-    State(state): State<AppState>,
-    Json(req): Json<AppLaunchReq>,
-) -> impl IntoResponse {
-    let addr = console_addr_or_default(req.addr, &state.default_ps5_addr);
+async fn ps5_app_launch(Json(req): Json<AppLaunchReq>) -> impl IntoResponse {
+    let Some(addr) = required_console_addr(req.addr) else {
+        return missing_console_addr();
+    };
     let title_id = req.title_id;
     let started = std::time::Instant::now();
     crate::log_info!("app_launch: addr={addr} title_id={title_id}");
@@ -2899,6 +3088,7 @@ async fn ps5_app_launch(
 /// been opened up.
 #[derive(Debug, serde::Deserialize)]
 struct AppRegisterReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     src_path: String,
     /// 2.2.26 opt-in: rewrite `<src>/sce_sys/param.json`'s
@@ -2922,10 +3112,13 @@ async fn ps5_app_register(
         "app_register: addr={addr} src_path={src_path} patch_drm_type={patch_drm_type}"
     );
     let path_for_log = src_path.clone();
-    match tokio::task::spawn_blocking(move || app_register(&addr, &src_path, patch_drm_type))
-        .await
-        .map_err(anyhow::Error::from)
-        .and_then(|r| r)
+    match tokio::task::spawn_blocking(move || {
+        let _busy = helper_stop::enter(&addr);
+        app_register(&addr, &src_path, patch_drm_type)
+    })
+    .await
+    .map_err(anyhow::Error::from)
+    .and_then(|r| r)
     {
         Ok(result) => {
             crate::log_info!(
@@ -2953,6 +3146,7 @@ async fn ps5_app_register(
 /// Sony accepted (`null` from an older helper).
 #[derive(Debug, serde::Deserialize)]
 struct AppUnregisterReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     title_id: String,
 }
@@ -3094,6 +3288,8 @@ async fn ps5_fs_chmod(
         None
     };
     match tokio::task::spawn_blocking(move || {
+        // Marks the console busy for the job: a helper stop is refused meanwhile.
+        let _busy = helper_stop::enter(&addr);
         ps5upload_core::fs_ops::fs_chmod_with_timeout(&addr, &path, &mode, recursive, io_timeout)
     })
     .await
@@ -3127,6 +3323,7 @@ async fn ps5_fs_chmod(
 #[derive(Deserialize)]
 struct FsOpStatusQuery {
     op_id: u64,
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
 }
 
@@ -3192,28 +3389,28 @@ async fn ps5_fs_op_status(
 #[derive(Deserialize)]
 struct FsOpCancelReq {
     op_id: u64,
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
 }
 
-async fn ps5_fs_op_cancel(
-    State(state): State<AppState>,
-    Json(req): Json<FsOpCancelReq>,
-) -> impl IntoResponse {
-    let addr = console_addr_or_default(req.addr, &state.default_ps5_addr);
-    let op_id = req.op_id;
+/// Stops a console file operation: this engine's own job if it runs one with that id, else the
+/// helper's. False when nothing with that id is running.
+async fn cancel_fs_op(addr: String, op_id: u64) -> anyhow::Result<bool> {
     crate::log_info!("fs_op_cancel: op_id={op_id}");
     if ps5upload_ava1::copy::op_cancel(op_id) {
-        return (
-            StatusCode::OK,
-            Json(serde_json::json!({ "cancelled": true })),
-        )
-            .into_response();
+        return Ok(true);
     }
-    match tokio::task::spawn_blocking(move || fs_op_cancel(&addr, op_id))
+    tokio::task::spawn_blocking(move || fs_op_cancel(&addr, op_id))
         .await
         .map_err(anyhow::Error::from)
         .and_then(|r| r)
-    {
+}
+
+async fn ps5_fs_op_cancel(Json(req): Json<FsOpCancelReq>) -> impl IntoResponse {
+    let Some(addr) = required_console_addr(req.addr) else {
+        return missing_console_addr();
+    };
+    match cancel_fs_op(addr, req.op_id).await {
         Ok(found) => (
             StatusCode::OK,
             Json(serde_json::json!({ "cancelled": found })),
@@ -3223,11 +3420,10 @@ async fn ps5_fs_op_cancel(
     }
 }
 
-async fn ps5_fs_mkdir(
-    State(state): State<AppState>,
-    Json(req): Json<FsPathReq>,
-) -> impl IntoResponse {
-    let addr = console_addr_or_default(req.addr, &state.default_ps5_addr);
+async fn ps5_fs_mkdir(Json(req): Json<FsPathReq>) -> impl IntoResponse {
+    let Some(addr) = required_console_addr(req.addr) else {
+        return missing_console_addr();
+    };
     let path = req.path;
     let started = std::time::Instant::now();
     crate::log_info!("fs_mkdir: addr={addr} path={path}");
@@ -3271,6 +3467,34 @@ async fn ps5_hw_info(
     }
 }
 
+/// The fallback read's deadline: with the full read's 30 s, it stays inside the app's 60 s.
+const HW_TEMPS_FALLBACK_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// The full read, or when it fails or stalls the basic temperatures with `extended_error` saying
+/// why the rest is missing. The helper answers one reply for a read: a single getter that fails or
+/// hangs (seen while a game runs) would otherwise hide the temperatures it read fine.
+fn hw_temps_with_fallback(
+    full: impl FnOnce() -> anyhow::Result<HwTemps>,
+    basic: impl FnOnce() -> anyhow::Result<HwTemps>,
+    has_more_than_basic: bool,
+) -> anyhow::Result<HwTemps> {
+    let e = match full() {
+        Ok(t) => return Ok(t),
+        Err(e) if !has_more_than_basic => return Err(e),
+        Err(e) => e,
+    };
+    let why = format!("{e:#}");
+    crate::log_warn!("hw_temps: the full read failed, trying the basic one: {why}");
+    match basic() {
+        Ok(mut t) => {
+            t.extended_error = Some(why);
+            Ok(t)
+        }
+        // The helper is not answering at all: the first error says so best.
+        Err(_) => Err(e),
+    }
+}
+
 async fn ps5_hw_temps(
     State(state): State<AppState>,
     Query(q): Query<HwTempsQuery>,
@@ -3278,11 +3502,16 @@ async fn ps5_hw_temps(
     let addr = console_addr_or_default(q.addr, &state.default_ps5_addr);
     let extended = q.extended.unwrap_or(0) != 0;
     let clocks = q.clocks.unwrap_or(0) != 0;
-    let r: Result<HwTemps, anyhow::Error> =
-        tokio::task::spawn_blocking(move || hw_temps_with_clocks(&addr, extended, clocks))
-            .await
-            .map_err(anyhow::Error::from)
-            .and_then(|r| r);
+    let r: Result<HwTemps, anyhow::Error> = tokio::task::spawn_blocking(move || {
+        hw_temps_with_fallback(
+            || hw_temps_with_clocks(&addr, extended, clocks),
+            || ps5upload_core::hw::hw_temps_basic_within(&addr, HW_TEMPS_FALLBACK_TIMEOUT),
+            extended || clocks,
+        )
+    })
+    .await
+    .map_err(anyhow::Error::from)
+    .and_then(|r| r);
     match r {
         Ok(v) => (StatusCode::OK, Json(v)).into_response(),
         Err(e) => json_err(StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
@@ -3305,7 +3534,7 @@ async fn ps5_syslog_tail(
             .map_err(anyhow::Error::from)
             .and_then(|r| r);
     match r {
-        Ok(v) => (StatusCode::OK, Json(serde_json::json!({ "text": v }))).into_response(),
+        Ok(v) => (StatusCode::OK, Json(console_log_reply(&v))).into_response(),
         Err(e) => json_err(StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
     }
 }
@@ -3329,6 +3558,7 @@ async fn ps5_hw_power(
 
 #[derive(Debug, serde::Deserialize)]
 struct TimeSyncReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     /// Target wall-clock time as unix seconds (UTC). Required when
     /// `use_ntp` is false (or absent): a missing one is a 400, never a
@@ -3390,13 +3620,39 @@ async fn ps5_time_get_route(
     }
 }
 
-async fn ps5_time_sync_route(
-    State(state): State<AppState>,
-    Json(req): Json<TimeSyncReq>,
-) -> impl IntoResponse {
-    let addr = console_addr_or_default(req.addr, &state.default_ps5_addr);
+/// A host name or an IP address, nothing else: the engine sends this server a UDP packet.
+fn valid_ntp_server(server: &str) -> bool {
+    if server.parse::<std::net::IpAddr>().is_ok() {
+        return true;
+    }
+    !server.is_empty()
+        && server.len() <= 253
+        && server.split('.').all(|label| {
+            !label.is_empty()
+                && label.len() <= 63
+                && !label.starts_with('-')
+                && !label.ends_with('-')
+                && label
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        })
+}
+
+async fn ps5_time_sync_route(Json(req): Json<TimeSyncReq>) -> impl IntoResponse {
+    let Some(addr) = required_console_addr(req.addr) else {
+        return missing_console_addr();
+    };
 
     // Resolve the target time: either from NTP or from the client-provided value.
+    if let Some(server) = req.ntp_server.as_deref().filter(|_| req.use_ntp) {
+        if !valid_ntp_server(server) {
+            return json_err(
+                StatusCode::BAD_REQUEST,
+                "ntp_server must be a host name or an IP address",
+            )
+            .into_response();
+        }
+    }
     let (target, source, ntp_server) = if req.use_ntp {
         let custom = req.ntp_server.clone();
         let ntp_result = tokio::task::spawn_blocking(move || {
@@ -3474,16 +3730,16 @@ async fn ps5_time_sync_route(
 /// /api/ps5/* surface.
 #[derive(serde::Deserialize)]
 struct SmpMetaControlReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     #[serde(flatten)]
     inner: ps5upload_core::smp_meta::SmpMetaControlRequest,
 }
 
-async fn ps5_smp_meta_control_route(
-    State(state): State<AppState>,
-    Json(req): Json<SmpMetaControlReq>,
-) -> impl IntoResponse {
-    let addr = console_addr_or_default(req.addr, &state.default_ps5_addr);
+async fn ps5_smp_meta_control_route(Json(req): Json<SmpMetaControlReq>) -> impl IntoResponse {
+    let Some(addr) = required_console_addr(req.addr) else {
+        return missing_console_addr();
+    };
     let inner = req.inner;
     let r: Result<ps5upload_core::smp_meta::SmpMetaControlAck, anyhow::Error> =
         tokio::task::spawn_blocking(move || {
@@ -3553,9 +3809,10 @@ async fn ps5_hw_drive_sensors(
     }
 }
 
-/// Snapshot of running PS5 processes. The payload walks `allproc` via
-/// kernel R/W and returns JSON directly; we pass it through largely
-/// untouched after a small reshape into the typed `ProcList` shape.
+/// GET /api/ps5/proc/list — a light snapshot of running PS5 processes. The payload walks `allproc`
+/// via kernel R/W and returns JSON directly; we pass it through largely untouched after a small
+/// reshape into the typed `ProcList` shape. `/api/ps5/process/list` is the detailed one (title ids,
+/// memory, kill support).
 async fn ps5_proc_list(
     State(state): State<AppState>,
     Query(q): Query<AddrQuery>,
@@ -3594,6 +3851,7 @@ async fn ps5_process_list(
 
 #[derive(Debug, serde::Deserialize)]
 struct HostQuery {
+    #[serde(alias = "console", alias = "addr")]
     host: String,
 }
 
@@ -3663,6 +3921,7 @@ fn spawn_console_upgrade_cleanup(console: String) {
 
 #[derive(Debug, serde::Deserialize)]
 struct KlogQuery {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     max_bytes: Option<u32>,
 }
@@ -3681,9 +3940,15 @@ async fn ps5_klog(State(state): State<AppState>, Query(q): Query<KlogQuery>) -> 
         .map_err(anyhow::Error::from)
         .and_then(|r| r);
     match r {
-        Ok(text) => (StatusCode::OK, Json(serde_json::json!({ "text": text }))).into_response(),
+        Ok(text) => (StatusCode::OK, Json(console_log_reply(&text))).into_response(),
         Err(e) => json_err(StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
     }
+}
+
+/// A console's kernel log or syslog as a reply: nothing of ours writes a secret there, but
+/// everything on the console can, and these go to whoever asks.
+fn console_log_reply(text: &str) -> serde_json::Value {
+    serde_json::json!({ "text": ps5upload_core::secret_text::without_secrets(text) })
 }
 
 /// GET /api/cache/artwork — how much disk the artwork cache is using.
@@ -3719,6 +3984,7 @@ async fn cache_artwork_clear() -> impl IntoResponse {
 
 #[derive(Deserialize)]
 struct AppInfoQueryParams {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     title_id: String,
     /// Comma-separated key filter; omit for every key.
@@ -3751,6 +4017,7 @@ async fn ps5_appinfo_query(
 
 #[derive(Deserialize)]
 struct HiddenIconsParams {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
 }
 
@@ -3790,6 +4057,7 @@ async fn ps5_net_ports(
 
 #[derive(Deserialize)]
 struct UsbEjectReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     mount_point: String,
     #[serde(default)]
@@ -3800,26 +4068,61 @@ struct UsbEjectReq {
 /// so it can be pulled. Without `force`, `usb_eject_busy` means something on the console
 /// holds it open; `force` unmounts anyway after a sync.
 async fn ps5_usb_eject(
-    State(state): State<AppState>,
-    Json(req): Json<UsbEjectReq>,
-) -> impl IntoResponse {
-    let addr = console_addr_or_default(req.addr, &state.default_ps5_addr);
+    installs: pkg_install::PkgInstallStateHandle,
+    req: UsbEjectReq,
+) -> axum::response::Response {
+    let Some(addr) = required_console_addr(req.addr) else {
+        return missing_console_addr();
+    };
     let mp = req.mount_point;
     let force = req.force;
     crate::log_info!("usb_eject: addr={addr} mount_point={mp} force={force}");
-    let r =
-        tokio::task::spawn_blocking(move || ps5upload_core::fs_ops::usb_eject(&addr, &mp, force))
-            .await
-            .map_err(anyhow::Error::from)
-            .and_then(|r| r);
+    // Our own job writing to the drive holds it open too, and a forced unmount would cut it off:
+    // truncated files, and possibly a damaged exFAT volume.
+    if helper_stop::is_busy(&addr) || installs.jobs.active_for(&addr) {
+        return eject_refused(EJECT_REFUSED_JOBS);
+    }
+    let r = tokio::task::spawn_blocking(move || {
+        // A forced unmount also takes a drive from a game playing from it. The helper can't say
+        // which drive a game reads, so any game holds a force. Not being able to ask is no
+        // reason to refuse: the helper is what answers the eject as well.
+        if force && eject_game_running(&addr) {
+            anyhow::bail!(EJECT_REFUSED_GAME);
+        }
+        ps5upload_core::fs_ops::usb_eject(&addr, &mp, force)
+    })
+    .await
+    .map_err(anyhow::Error::from)
+    .and_then(|r| r);
     match r {
         Ok(()) => (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response(),
+        Err(e) if e.to_string() == EJECT_REFUSED_GAME => eject_refused(EJECT_REFUSED_GAME),
         Err(e) => json_err(StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
     }
 }
 
+/// An eject refused because this engine runs a transfer, file operation or install there.
+const EJECT_REFUSED_JOBS: &str = "usb_eject_refused_jobs";
+/// A forced eject refused because a game is running.
+const EJECT_REFUSED_GAME: &str = "usb_eject_refused_game";
+
+fn eject_refused(code: &str) -> axum::response::Response {
+    (
+        StatusCode::CONFLICT,
+        Json(serde_json::json!({ "error": code })),
+    )
+        .into_response()
+}
+
+fn eject_game_running(addr: &str) -> bool {
+    process_list(addr)
+        .map(|list| list.processes.iter().any(|p| p.kind == "app"))
+        .unwrap_or(false)
+}
+
 #[derive(Deserialize)]
 struct SaveOpenReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     /// The save image under /user/home; empty or absent only reports what is open.
     #[serde(default)]
@@ -3829,17 +4132,26 @@ struct SaveOpenReq {
 /// POST /api/ps5/saves/open `{addr, image}` — the helper mounts the save decrypted (copied
 /// under /data first) and says where; the Files screen then reads and writes it. One save
 /// open at a time; another one closes the first. Empty `image` reports what is open.
-async fn ps5_save_open(
-    State(state): State<AppState>,
-    Json(req): Json<SaveOpenReq>,
-) -> impl IntoResponse {
-    let addr = console_addr_or_default(req.addr, &state.default_ps5_addr);
+async fn ps5_save_open(Json(req): Json<SaveOpenReq>) -> impl IntoResponse {
+    let Some(addr) = required_console_addr(req.addr) else {
+        return missing_console_addr();
+    };
     let image = req.image;
     crate::log_info!("save_open: addr={addr} image={image}");
-    let r = tokio::task::spawn_blocking(move || ps5upload_core::saves::save_open(&addr, &image))
-        .await
-        .map_err(anyhow::Error::from)
-        .and_then(|r| r);
+    let r = tokio::task::spawn_blocking(move || {
+        let _busy = helper_stop::enter(&addr);
+        // The open copy is written back over the real image on close, so a game writing the save
+        // meanwhile would lose what it wrote. An empty image only reports what is open.
+        if let Some(title) = save_backup::title_of_save_image(&image) {
+            if save_backup::title_running(&addr, title).map_err(anyhow::Error::msg)? {
+                anyhow::bail!("{title} is running on the PS5. Close the game, then open its save.");
+            }
+        }
+        ps5upload_core::saves::save_open(&addr, &image)
+    })
+    .await
+    .map_err(anyhow::Error::from)
+    .and_then(|r| r);
     match r {
         Ok(v) => (StatusCode::OK, Json(v)).into_response(),
         Err(e) => json_err(StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
@@ -3847,16 +4159,18 @@ async fn ps5_save_open(
 }
 
 /// POST /api/ps5/saves/close `{addr}` — unmounts the open save and writes it back.
-async fn ps5_save_close(
-    State(state): State<AppState>,
-    Json(req): Json<SaveOpenReq>,
-) -> impl IntoResponse {
-    let addr = console_addr_or_default(req.addr, &state.default_ps5_addr);
+async fn ps5_save_close(Json(req): Json<SaveOpenReq>) -> impl IntoResponse {
+    let Some(addr) = required_console_addr(req.addr) else {
+        return missing_console_addr();
+    };
     crate::log_info!("save_close: addr={addr}");
-    let r = tokio::task::spawn_blocking(move || ps5upload_core::saves::save_close(&addr))
-        .await
-        .map_err(anyhow::Error::from)
-        .and_then(|r| r);
+    let r = tokio::task::spawn_blocking(move || {
+        let _busy = helper_stop::enter(&addr);
+        ps5upload_core::saves::save_close(&addr)
+    })
+    .await
+    .map_err(anyhow::Error::from)
+    .and_then(|r| r);
     match r {
         Ok(v) => (StatusCode::OK, Json(v)).into_response(),
         Err(e) => json_err(StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
@@ -3865,6 +4179,7 @@ async fn ps5_save_close(
 
 #[derive(Deserialize)]
 struct SetIconHiddenReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     title_id: String,
     hidden: bool,
@@ -3874,11 +4189,10 @@ struct SetIconHiddenReq {
 /// icon (#407). Only app.db's `visible` flag changes; the title stays installed. A refusal
 /// (a system app, a title with no icon, app.db locked) is a 200 with `ok: false` and the
 /// helper's reason, so the app can show it.
-async fn ps5_set_icon_hidden(
-    State(state): State<AppState>,
-    Json(req): Json<SetIconHiddenReq>,
-) -> impl IntoResponse {
-    let addr = console_addr_or_default(req.addr, &state.default_ps5_addr);
+async fn ps5_set_icon_hidden(Json(req): Json<SetIconHiddenReq>) -> impl IntoResponse {
+    let Some(addr) = required_console_addr(req.addr) else {
+        return missing_console_addr();
+    };
     let r = tokio::task::spawn_blocking(move || {
         ps5upload_core::diagnostics::set_icon_hidden(&addr, &req.title_id, req.hidden)
     })
@@ -3911,6 +4225,7 @@ async fn ps5_net_interfaces(
 
 #[derive(Debug, serde::Deserialize)]
 struct AppLifecycleReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     action: String,
     app_id: u32,
@@ -3955,6 +4270,7 @@ async fn ps5_app_lifecycle(
 
 #[derive(Debug, serde::Deserialize)]
 struct FsReadPreviewReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     path: String,
     max_bytes: Option<u64>,
@@ -4029,6 +4345,7 @@ async fn ps5_focus(State(state): State<AppState>, Query(q): Query<AddrQuery>) ->
 
 #[derive(Debug, serde::Deserialize)]
 struct ProcessKillReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     pid: i32,
 }
@@ -4058,6 +4375,7 @@ async fn ps5_process_kill(
 
 #[derive(Debug, serde::Deserialize)]
 struct HelperStopReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
 }
 
@@ -4104,6 +4422,7 @@ async fn ps5_helper_stop(
 
 #[derive(Debug, serde::Deserialize)]
 struct PowerControlReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     /// One of "reboot" | "shutdown" | "standby" | "tick".
     action: String,
@@ -4147,6 +4466,7 @@ async fn ps5_power_control(
 #[derive(Debug, serde::Deserialize)]
 struct PowerWakeReq {
     /// The console's address. DDP is spoken to the console directly.
+    #[serde(alias = "console", alias = "addr")]
     host: String,
     /// `user-credential` captured from the PS Remote Play app. Without it the
     /// console silently ignores the request.
@@ -4165,12 +4485,15 @@ struct PowerWakeReq {
 /// Remote Play" on the console; with that off nothing is listening at all.
 #[derive(Debug, serde::Deserialize)]
 struct PowerWakeLoginReq {
+    #[serde(alias = "console", alias = "addr")]
     host: String,
     #[serde(default)]
     credential: String,
-    /// Both hex, harvested from a pairing. Required — signing in needs the
-    /// full session keys, not just the wake credential.
+    /// Both hex, harvested from a pairing. Signing in needs the full session keys, not just the
+    /// wake credential; left out, the ones the engine keeps for this console are used.
+    #[serde(default)]
     regist_key: String,
+    #[serde(default)]
     rp_key: String,
     /// Someone is there to type the user's login passcode if the console asks: the sign-in is
     /// held and the passcode asked for (wake_login_api). Otherwise (an automatic wake) a
@@ -4185,7 +4508,14 @@ struct PowerWakeLoginReq {
 /// Play control session so the console comes up on the user's home screen,
 /// the way the official app does. Long-running: it waits for the console to
 /// boot before signing in.
-async fn ps5_power_wake_login(Json(req): Json<PowerWakeLoginReq>) -> impl IntoResponse {
+async fn ps5_power_wake_login(Json(mut req): Json<PowerWakeLoginReq>) -> impl IntoResponse {
+    req.host = consoles_api::resolve(&req.host);
+    if req.regist_key.trim().is_empty() && req.rp_key.trim().is_empty() {
+        if let Some((regist_key, rp_key)) = consoles_api::rp_keys(&req.host) {
+            req.regist_key = regist_key;
+            req.rp_key = rp_key;
+        }
+    }
     let host = req.host.clone();
     let cred = req.credential.clone();
     let creds =
@@ -4226,8 +4556,12 @@ async fn ps5_power_wake_login(Json(req): Json<PowerWakeLoginReq>) -> impl IntoRe
 }
 
 async fn ps5_power_wake(Json(req): Json<PowerWakeReq>) -> impl IntoResponse {
-    let host = req.host.clone();
-    let cred = req.credential.clone();
+    let host = consoles_api::resolve(&req.host);
+    let cred = if req.credential.trim().is_empty() {
+        consoles_api::wake_credential(&host).unwrap_or_default()
+    } else {
+        req.credential.clone()
+    };
     match tokio::task::spawn_blocking(move || ps5upload_core::ddp::wake(&host, &cred)).await {
         Ok(Ok(())) => (
             StatusCode::OK,
@@ -4244,6 +4578,7 @@ async fn ps5_power_wake(Json(req): Json<PowerWakeReq>) -> impl IntoResponse {
 struct PowerPairReq {
     /// The payload's management address. Optional — falls back to the
     /// engine's configured console, like every other payload call.
+    #[serde(alias = "console")]
     addr: Option<String>,
     /// The console's address. Registration and wake use their own ports,
     /// so this is the bare host, not the management address.
@@ -4268,12 +4603,12 @@ struct PowerPairReq {
 /// The console has to be awake with the payload running. That is not a
 /// limitation worth working around — pairing happens once, and what it
 /// buys is the ability to wake the console later, when it is not.
-async fn ps5_power_pair(
-    State(state): State<AppState>,
-    Json(req): Json<PowerPairReq>,
-) -> impl IntoResponse {
-    let addr = console_addr_or_default(req.addr, &state.default_ps5_addr);
-    let host = req.host.clone();
+async fn ps5_power_pair(Json(req): Json<PowerPairReq>) -> impl IntoResponse {
+    // `host` is the console being paired: it names one even without `addr`.
+    let host = consoles_api::resolve(&req.host);
+    let Some(addr) = required_console_addr(req.addr.or_else(|| Some(host.clone()))) else {
+        return missing_console_addr();
+    };
     let manual = req.pin.filter(|p| !p.trim().is_empty());
     crate::log_info!(
         "power_pair: addr={addr} host={host} with={}",
@@ -4284,9 +4619,14 @@ async fn ps5_power_pair(
         }
     );
     let account_id = req.account_id.unwrap_or_default();
-    let r = tokio::task::spawn_blocking(move || match manual {
-        Some(pin) => ps5upload_core::rp_regist::pair_with_pin(&host, &account_id, &pin),
-        None => ps5upload_core::rp_regist::pair_with_console(&addr, &host),
+    let r = tokio::task::spawn_blocking(move || {
+        let p = match manual {
+            Some(pin) => ps5upload_core::rp_regist::pair_with_pin(&host, &account_id, &pin),
+            None => ps5upload_core::rp_regist::pair_with_console(&addr, &host),
+        }?;
+        // The engine keeps the keys too, so a script can start a stream by address alone.
+        consoles_api::remember_pairing(&host, &p);
+        Ok::<_, anyhow::Error>(p)
     })
     .await
     .map_err(anyhow::Error::from)
@@ -4299,6 +4639,7 @@ async fn ps5_power_pair(
 
 #[derive(Debug, serde::Deserialize)]
 struct DdpStatusQuery {
+    #[serde(alias = "console", alias = "addr")]
     host: String,
 }
 
@@ -4346,6 +4687,7 @@ async fn ps5_power_telemetry(
 
 #[derive(Debug, serde::Deserialize)]
 struct SavesListQuery {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     #[serde(default)]
     user_id: Option<i32>,
@@ -4448,6 +4790,7 @@ async fn ps5_smp_checkout_status(
 
 #[derive(Debug, serde::Deserialize)]
 struct SmpCheckoutBeginReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     image_path: String,
     mount_point: String,
@@ -4462,11 +4805,10 @@ struct SmpCheckoutBeginReq {
 /// to notice the source has gone and release its read-only mount. See
 /// `ps5upload_core::smp_checkout` for why the image has to be moved rather
 /// than simply unmounted.
-async fn ps5_smp_checkout_begin(
-    State(state): State<AppState>,
-    Json(req): Json<SmpCheckoutBeginReq>,
-) -> impl IntoResponse {
-    let addr = console_addr_or_default(req.addr, &state.default_ps5_addr);
+async fn ps5_smp_checkout_begin(Json(req): Json<SmpCheckoutBeginReq>) -> impl IntoResponse {
+    let Some(addr) = required_console_addr(req.addr) else {
+        return missing_console_addr();
+    };
     let r = tokio::task::spawn_blocking(move || {
         ps5upload_core::smp_checkout::begin(&addr, &req.image_path, &req.mount_point, &req.title_id)
     })
@@ -4485,11 +4827,10 @@ async fn ps5_smp_checkout_begin(
 
 /// POST /api/ps5/smp/checkout/finish — unmount the edited image, put it back
 /// where ShadowMount+ will find it, and clear the journal.
-async fn ps5_smp_checkout_finish(
-    State(state): State<AppState>,
-    Json(q): Json<AddrQuery>,
-) -> impl IntoResponse {
-    let addr = console_addr_or_default(q.addr, &state.default_ps5_addr);
+async fn ps5_smp_checkout_finish(Json(q): Json<AddrQuery>) -> impl IntoResponse {
+    let Some(addr) = required_console_addr(q.addr) else {
+        return missing_console_addr();
+    };
     let r = tokio::task::spawn_blocking(move || ps5upload_core::smp_checkout::finish(&addr))
         .await
         .map_err(anyhow::Error::from)
@@ -4517,6 +4858,7 @@ async fn ps5_smp_image_rw_status(
 
 #[derive(Debug, serde::Deserialize)]
 struct SmpImageRwBeginReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     title_id: String,
 }
@@ -4540,11 +4882,10 @@ async fn ps5_smp_image_rw_begin(
     }
 }
 
-async fn ps5_smp_image_rw_finish(
-    State(state): State<AppState>,
-    Json(q): Json<AddrQuery>,
-) -> impl IntoResponse {
-    let addr = console_addr_or_default(q.addr, &state.default_ps5_addr);
+async fn ps5_smp_image_rw_finish(Json(q): Json<AddrQuery>) -> impl IntoResponse {
+    let Some(addr) = required_console_addr(q.addr) else {
+        return missing_console_addr();
+    };
     let r = tokio::task::spawn_blocking(move || ps5upload_core::smp_image_rw::finish(&addr))
         .await
         .map_err(anyhow::Error::from)
@@ -4557,6 +4898,7 @@ async fn ps5_smp_image_rw_finish(
 
 #[derive(Debug, serde::Deserialize)]
 struct FsWriteBytesReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     path: String,
     /// Base64 of the file contents. Base64 because this is a JSON body and the
@@ -4610,6 +4952,7 @@ async fn ps5_fs_write_bytes(
 
 #[derive(Debug, serde::Deserialize)]
 struct PeripheralReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     action: ps5upload_core::diagnostics::PeripheralAction,
     /// The USB port, beep pattern or brightness level the action takes; 0 otherwise.
@@ -4622,11 +4965,10 @@ struct PeripheralReq {
 ///
 /// The disc drive, the USB ports, the beeper and the front light. Replies with the
 /// helper's own ack (`ok`, `action`, `code`); a transport failure is a 502.
-async fn ps5_peripheral(
-    State(state): State<AppState>,
-    Json(q): Json<PeripheralReq>,
-) -> impl IntoResponse {
-    let addr = q.addr.unwrap_or_else(|| state.default_ps5_addr.clone());
+async fn ps5_peripheral(Json(q): Json<PeripheralReq>) -> impl IntoResponse {
+    let Some(addr) = required_console_addr(q.addr) else {
+        return missing_console_addr();
+    };
     let (action, port) = (q.action, q.port);
     match tokio::task::spawn_blocking(move || {
         ps5upload_core::diagnostics::peripheral_control(&addr, action, port)
@@ -4634,10 +4976,12 @@ async fn ps5_peripheral(
     .await
     {
         Ok(Ok(ack)) => Json(serde_json::to_value(ack).unwrap_or_default()).into_response(),
-        // The helper answered ok=false: that is an answer, not a transport failure.
-        Ok(Err(e)) if format!("{e:#}").contains("PERIPHERAL_CONTROL failed") => {
-            Json(serde_json::json!({ "ok": false, "err": format!("{e:#}") })).into_response()
-        }
+        // The helper refused: not a transport failure, so it says so in `reason`.
+        Ok(Err(e)) if format!("{e:#}").contains("PERIPHERAL_CONTROL failed") => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": format!("{e:#}"), "reason": "helper_refused" })),
+        )
+            .into_response(),
         Ok(Err(e)) => json_err(StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
         Err(e) => json_err(StatusCode::BAD_GATEWAY, format!("{e}")).into_response(),
     }
@@ -4645,6 +4989,7 @@ async fn ps5_peripheral(
 
 #[derive(Debug, serde::Deserialize)]
 struct FanThresholdReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     threshold_c: u8,
     /// Optional fan reapply interval in seconds (1–300). When present,
@@ -4658,11 +5003,10 @@ struct FanThresholdReq {
 ///
 /// Out-of-range inputs return 400 with the specific range error —
 /// BAD_GATEWAY is reserved for payload/transport failures.
-async fn ps5_hw_set_fan_threshold(
-    State(state): State<AppState>,
-    Json(q): Json<FanThresholdReq>,
-) -> impl IntoResponse {
-    let addr = console_addr_or_default(q.addr, &state.default_ps5_addr);
+async fn ps5_hw_set_fan_threshold(Json(q): Json<FanThresholdReq>) -> impl IntoResponse {
+    let Some(addr) = required_console_addr(q.addr) else {
+        return missing_console_addr();
+    };
     let threshold = q.threshold_c;
     let reapply = q.reapply_sec;
     crate::log_info!(
@@ -4710,6 +5054,7 @@ async fn ps5_hw_set_fan_threshold(
 /// path denied) return 404 so the UI can fall back to the folder name.
 #[derive(Debug, serde::Deserialize)]
 struct GameMetaQuery {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     path: String,
     /// game-icon only: 128, 256 or 384 for a scaled copy (see `icon_thumb_px`).
@@ -5154,6 +5499,9 @@ struct InstalledApp {
 
 #[derive(Debug, serde::Serialize)]
 struct InstalledAppsResponse {
+    /// Where this list comes from: read from the console now (`/api/games/installed` is what
+    /// saved consoles had when last read; `/api/pkg/installed` is one title's package files).
+    source: &'static str,
     titles: Vec<InstalledApp>,
     /// True if app_list_registered() failed (e.g. older payload) — the
     /// UI then can't reliably tag the "registered" group, so it shows
@@ -5329,7 +5677,7 @@ fn app_folder_has_param(addr: &str, title_id: &str) -> bool {
         .any(|f| fs_read(addr, &format!("/user/app/{title_id}/sce_sys/{f}"), 0, 16).is_ok())
 }
 
-/// GET /api/ps5/apps/installed?addr=IP:MGMT_PORT
+/// GET /api/ps5/apps/installed?addr=IP:MGMT_PORT — what is on the console now, read from it.
 async fn ps5_apps_installed(
     State(state): State<AppState>,
     Query(q): Query<AddrQuery>,
@@ -5554,6 +5902,7 @@ async fn ps5_apps_installed(
                 })
             });
             Ok(InstalledAppsResponse {
+                source: "console",
                 titles,
                 registered_unavailable,
                 incomplete: !complete,
@@ -5570,6 +5919,7 @@ async fn ps5_apps_installed(
 
 #[derive(Debug, serde::Deserialize)]
 struct AppIconQuery {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     title_id: String,
     /// 128, 256 or 384: a scaled copy for a grid. Absent: the full cover.
@@ -5830,6 +6180,7 @@ async fn ps5_pkg_scan_external(
 
 #[derive(Deserialize)]
 struct PkgMetadataQuery {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     /// Absolute on-console pkg path, e.g. `/mnt/usb0/games/foo.pkg`. Subject to
     /// the same `fs_read` allowlist as every other read (so it can only reach
@@ -6186,8 +6537,13 @@ async fn speed_test_cleanup_handler() -> impl IntoResponse {
 
 #[derive(Deserialize)]
 struct HealthFixReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     action: ps5upload_core::health::FixAction,
+    /// For `clean_junk`: the files the user was shown. Anything else is left alone, and so is one
+    /// of these no longer on the list. Absent: everything on the list at this moment.
+    #[serde(default)]
+    paths: Option<Vec<String>>,
 }
 
 /// POST /api/ps5/health/fix
@@ -6196,15 +6552,32 @@ struct HealthFixReq {
 /// so an unknown or arbitrary value is rejected by serde before any
 /// console operation runs.
 async fn health_fix_handler(
-    State(_state): State<AppState>,
-    Json(req): Json<HealthFixReq>,
-) -> impl IntoResponse {
+    installs: pkg_install::PkgInstallStateHandle,
+    req: HealthFixReq,
+) -> axum::response::Response {
     let Some(addr) = required_console_addr(req.addr) else {
         return missing_console_addr();
     };
     let action = req.action;
+    // A staged install reads its package from a folder this cleans, and a queue can be between
+    // two of its items' steps with an old file there.
+    if matches!(action, ps5upload_core::health::FixAction::CleanJunk)
+        && (helper_stop::is_busy(&addr) || installs.jobs.active_for(&addr))
+    {
+        return (
+            StatusCode::CONFLICT,
+            Json(serde_json::json!({ "error": "health_fix_busy" })),
+        )
+            .into_response();
+    }
+    let paths = req.paths;
     let result = tokio::task::spawn_blocking(move || {
-        ps5upload_core::health::apply_fix(&addr, &action, env!("CARGO_PKG_VERSION"))
+        ps5upload_core::health::apply_fix_of(
+            &addr,
+            &action,
+            paths.as_deref(),
+            env!("CARGO_PKG_VERSION"),
+        )
     })
     .await;
     match result {
@@ -6309,7 +6682,9 @@ async fn transfer_file_handler(
     State(state): State<AppState>,
     Json(req): Json<TransferFileReq>,
 ) -> impl IntoResponse {
-    let addr = req.addr.unwrap_or_else(|| state.default_ps5_addr.clone());
+    let Some(addr) = required_console_addr(req.addr) else {
+        return missing_console_addr();
+    };
     // A caller-supplied tx_id marks a resume-capable client; the job is reopened by id.
     let caller_supplied_tx_id = req.tx_id.is_some();
     let tx_id = match parse_or_random_tx_id(req.tx_id.as_deref()) {
@@ -6320,6 +6695,7 @@ async fn transfer_file_handler(
     let job_id = Uuid::new_v4();
     telemetry::tag(job_id, "file");
     telemetry::set_drive(job_id, &req.dest);
+    mesh_api::note_job(job_id, &addr, "Upload", &req.dest);
     let started_at_ms = now_ms();
     crate::log_info!(
         "transfer_file: job={job_id} addr={addr} src={} dest={} resume={caller_supplied_tx_id}",
@@ -6342,8 +6718,11 @@ async fn transfer_file_handler(
         match remote::source_fs::RemoteSourceFs::for_path(&req.src).await {
             Ok((fs, p)) => (Some(fs), p),
             Err(e) => {
-                return json_err(StatusCode::BAD_REQUEST, format!("cannot read source: {e}"))
-                    .into_response()
+                return json_err(
+                    StatusCode::BAD_REQUEST,
+                    format!("cannot read source: {}", remote::api::error_with_hint(&e)),
+                )
+                .into_response()
             }
         }
     } else {
@@ -6462,7 +6841,7 @@ async fn transfer_file_handler(
         cfg.progress_files = Some(Arc::clone(&progress_files));
         cfg.progress_files_finalized = Some(Arc::clone(&progress_files_finalized));
         cfg.progress_bytes_finalized = Some(Arc::clone(&progress_bytes_finalized));
-        cfg.progress_live = Some(live_notes_for(job_id));
+        attach_live_notes(&mut cfg, job_id);
         apply_per_request_bandwidth(&mut cfg, bandwidth_cap);
 
         if fail_job_unless_console_ready(&jobs, &events_tx, job_id, started_at_ms, &addr) {
@@ -6485,50 +6864,7 @@ async fn transfer_file_handler(
         // Resume is by job_id (the sender reopens with JobOpen); retries live in the
         // adapter's loop.
         let result = ps5upload_ava1::upload::upload_file(&cfg, tx_id, &req.dest, &src_path);
-        let files_sent_count: u64 = 1;
-        let mut skipped_files_count: u64 = 0;
-        let mut skipped_bytes_count: u64 = 0;
-        let mut files_sent_count = files_sent_count;
-        // An AVA1 job reports what the console already had (skip policies, SPEC §11.4)
-        // and the files actually sent; an all-skipped resume is "already up to date".
-        if let Some((sf, sb, fs)) = result
-            .as_ref()
-            .ok()
-            .and_then(|r| ava1_skip_counts(&r.commit_ack_body))
-        {
-            (skipped_files_count, skipped_bytes_count, files_sent_count) = (sf, sb, fs);
-        }
-        match result {
-            Ok(r) => {
-                let completed_at_ms = now_ms();
-                set_job(
-                    &jobs,
-                    &events_tx,
-                    job_id,
-                    JobState::Done {
-                        started_at_ms,
-                        completed_at_ms,
-                        elapsed_ms: completed_at_ms.saturating_sub(started_at_ms),
-                        tx_id_hex: r.tx_id_hex,
-                        bytes_sent: r.bytes_sent,
-                        dest: r.dest,
-                        files_sent: files_sent_count,
-                        skipped_files: skipped_files_count,
-                        skipped_bytes: skipped_bytes_count,
-                        commit_ack: serde_json::from_str(&r.commit_ack_body).ok(),
-                    },
-                )
-            }
-            Err(e) => {
-                let completed_at_ms = now_ms();
-                set_job(
-                    &jobs,
-                    &events_tx,
-                    job_id,
-                    job_failed_from_err(started_at_ms, completed_at_ms, &e),
-                )
-            }
-        }
+        publish_transfer_end(&jobs, &events_tx, job_id, started_at_ms, result, 1);
         fail_guard.mark_succeeded();
     });
 
@@ -6546,7 +6882,9 @@ async fn transfer_dir_handler(
     State(state): State<AppState>,
     Json(req): Json<TransferDirReq>,
 ) -> impl IntoResponse {
-    let addr = req.addr.unwrap_or_else(|| state.default_ps5_addr.clone());
+    let Some(addr) = required_console_addr(req.addr) else {
+        return missing_console_addr();
+    };
     // A caller-supplied tx_id signals "reuse if already in the payload's
     // journal" — the cross-session resume flow. Engine-minted tx_ids
     // mean "fresh upload." Encode that into the initial BEGIN_TX flags
@@ -6576,6 +6914,7 @@ async fn transfer_dir_handler(
     let job_id = Uuid::new_v4();
     telemetry::tag(job_id, "dir");
     telemetry::set_drive(job_id, &req.dest_root);
+    mesh_api::note_job(job_id, &addr, "Upload", &req.dest_root);
     let started_at_ms = now_ms();
     crate::log_info!(
         "transfer_dir: job={job_id} addr={addr} src_dir={} dest_root={} resume={} excludes={}",
@@ -6658,7 +6997,10 @@ async fn transfer_dir_handler(
                         job_failed_from_err(
                             started_at_ms,
                             completed_at_ms,
-                            &anyhow::anyhow!("cannot read source: {e}"),
+                            &anyhow::anyhow!(
+                                "cannot read source: {}",
+                                remote::api::error_with_hint(&e)
+                            ),
                         ),
                     );
                     fail_guard.mark_succeeded();
@@ -6681,10 +7023,13 @@ async fn transfer_dir_handler(
                 job_failed_from_err(
                     started_at_ms,
                     completed_at_ms,
-                    &anyhow::anyhow!(
-                        "source directory not found or not a directory: {}",
-                        req.src_dir
-                    ),
+                    &anyhow::Error::from(ps5upload_ava1::upload::UploadFailure {
+                        reason: "source_missing".into(),
+                        detail: format!(
+                            "source directory not found or not a directory: {}",
+                            req.src_dir
+                        ),
+                    }),
                 ),
             );
             fail_guard.mark_succeeded();
@@ -6724,7 +7069,14 @@ async fn transfer_dir_handler(
                     &jobs,
                     &events_tx,
                     job_id,
-                    job_failed_from_err(started_at_ms, completed_at_ms, &anyhow::anyhow!(msg)),
+                    job_failed_from_err(
+                        started_at_ms,
+                        completed_at_ms,
+                        &anyhow::Error::from(ps5upload_ava1::upload::UploadFailure {
+                            reason: "source_names_made_up".into(),
+                            detail: msg,
+                        }),
+                    ),
                 );
                 fail_guard.mark_succeeded();
                 return;
@@ -6817,7 +7169,7 @@ async fn transfer_dir_handler(
         cfg.progress_files = Some(Arc::clone(&progress_files));
         cfg.progress_files_finalized = Some(Arc::clone(&progress_files_finalized));
         cfg.progress_bytes_finalized = Some(Arc::clone(&progress_bytes_finalized));
-        cfg.progress_live = Some(live_notes_for(job_id));
+        attach_live_notes(&mut cfg, job_id);
         apply_per_request_bandwidth(&mut cfg, req.bandwidth_cap_mbps);
         crate::log_info!("transfer_dir: job={job_id} protocol=ava1");
         if skip_existing.is_some() {
@@ -6845,45 +7197,14 @@ async fn transfer_dir_handler(
             ),
             None => ps5upload_ava1::upload::upload_dir(&cfg, tx_id, &req.dest_root, &src_path),
         };
-        // What the console already had (skip policies, SPEC §11.4) and the files actually
-        // sent, from the commit ack, as the single-file route reports them; the plan's
-        // count when the ack has none.
-        let (skipped_files_count, skipped_bytes_count, files_sent_count) = result
-            .as_ref()
-            .ok()
-            .and_then(|r| ava1_skip_counts(&r.commit_ack_body))
-            .unwrap_or((0, 0, files_sent_count));
-        match result {
-            Ok(r) => {
-                let completed_at_ms = now_ms();
-                set_job(
-                    &jobs,
-                    &events_tx,
-                    job_id,
-                    JobState::Done {
-                        started_at_ms,
-                        completed_at_ms,
-                        elapsed_ms: completed_at_ms.saturating_sub(started_at_ms),
-                        tx_id_hex: r.tx_id_hex,
-                        bytes_sent: r.bytes_sent,
-                        dest: r.dest,
-                        files_sent: files_sent_count,
-                        skipped_files: skipped_files_count,
-                        skipped_bytes: skipped_bytes_count,
-                        commit_ack: serde_json::from_str(&r.commit_ack_body).ok(),
-                    },
-                )
-            }
-            Err(e) => {
-                let completed_at_ms = now_ms();
-                set_job(
-                    &jobs,
-                    &events_tx,
-                    job_id,
-                    job_failed_from_err(started_at_ms, completed_at_ms, &e),
-                )
-            }
-        }
+        publish_transfer_end(
+            &jobs,
+            &events_tx,
+            job_id,
+            started_at_ms,
+            result,
+            files_sent_count,
+        );
         fail_guard.mark_succeeded();
     });
 
@@ -6918,12 +7239,16 @@ struct LocalPathQuery {
 /// browser UI has no such thing, so the Upload screen's drag-drop router
 /// had nothing to call and threw BrowserUnsupportedError (issue #262).
 async fn local_path_kind_handler(Query(q): Query<LocalPathQuery>) -> impl IntoResponse {
-    let kind = match std::fs::metadata(&q.path) {
+    // Off the async workers: a stat of a hung network mount parks its thread for the mount's
+    // timeout, and every console's requests share these workers.
+    let kind = tokio::task::spawn_blocking(move || match std::fs::metadata(&q.path) {
         Ok(md) if md.is_dir() => "folder",
         Ok(md) if md.is_file() => "file",
         Ok(_) => "other",
         Err(_) => "missing",
-    };
+    })
+    .await
+    .unwrap_or("missing");
     (StatusCode::OK, Json(serde_json::json!({ "kind": kind }))).into_response()
 }
 
@@ -6942,19 +7267,21 @@ async fn local_inspect_folder_handler(Query(q): Query<LocalPathQuery>) -> impl I
                 } else {
                     None
                 };
-                serde_json::json!({ "ok": true, "result": r, "wrapped_hint": hint })
+                Ok(serde_json::json!({ "ok": true, "result": r, "wrapped_hint": hint }))
             }
-            Err(e) => serde_json::json!({ "ok": false, "error": format!("{e:#}") }),
+            Err(e) => Err(format!("{e:#}")),
         }
     })
     .await;
     match r {
-        Ok(v) => (StatusCode::OK, Json(v)).into_response(),
-        Err(e) => (
-            StatusCode::OK,
-            Json(serde_json::json!({ "ok": false, "error": format!("join: {e}") })),
+        Ok(Ok(v)) => (StatusCode::OK, Json(v)).into_response(),
+        // A folder it could not read. `ok` stays for the client's shared shape.
+        Ok(Err(error)) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({ "ok": false, "error": error })),
         )
             .into_response(),
+        Err(e) => json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("join: {e}")).into_response(),
     }
 }
 
@@ -7219,7 +7546,9 @@ async fn transfer_zip_handler(
     State(state): State<AppState>,
     Json(req): Json<TransferZipReq>,
 ) -> impl IntoResponse {
-    let addr = req.addr.unwrap_or_else(|| state.default_ps5_addr.clone());
+    let Some(addr) = required_console_addr(req.addr) else {
+        return missing_console_addr();
+    };
     let caller_supplied_tx_id = req.tx_id.is_some();
     let tx_id = match parse_or_random_tx_id(req.tx_id.as_deref()) {
         Ok(id) => id,
@@ -7285,6 +7614,7 @@ async fn transfer_zip_handler(
     let job_id = Uuid::new_v4();
     telemetry::tag(job_id, "zip");
     telemetry::set_drive(job_id, &req.dest_root);
+    mesh_api::note_job(job_id, &addr, "Upload", &req.dest_root);
     let started_at_ms = now_ms();
     crate::log_info!(
         "transfer_zip: job={job_id} addr={addr} zip={} dest_root={} resume={} files={} bytes={total_bytes}",
@@ -7364,7 +7694,7 @@ async fn transfer_zip_handler(
         cfg.progress_files = Some(Arc::clone(&progress_files));
         cfg.progress_files_finalized = Some(Arc::clone(&progress_files_finalized));
         cfg.progress_bytes_finalized = Some(Arc::clone(&progress_bytes_finalized));
-        cfg.progress_live = Some(live_notes_for(job_id));
+        attach_live_notes(&mut cfg, job_id);
         apply_per_request_bandwidth(&mut cfg, req.bandwidth_cap_mbps);
         // Resume is by job_id (the sender reopens with JobOpen); retries live in the
         // adapter's loop. An archive AVA1 cannot read (encryption, an unsupported method, a
@@ -7377,37 +7707,14 @@ async fn transfer_zip_handler(
             std::path::Path::new(&req.zip_path),
         )
         .map_err(zip_failure);
-        match result {
-            Ok(r) => {
-                let completed_at_ms = now_ms();
-                set_job(
-                    &jobs,
-                    &events_tx,
-                    job_id,
-                    JobState::Done {
-                        started_at_ms,
-                        completed_at_ms,
-                        elapsed_ms: completed_at_ms.saturating_sub(started_at_ms),
-                        tx_id_hex: r.tx_id_hex,
-                        bytes_sent: r.bytes_sent,
-                        dest: r.dest,
-                        files_sent: files_sent_count,
-                        skipped_files: 0,
-                        skipped_bytes: 0,
-                        commit_ack: serde_json::from_str(&r.commit_ack_body).ok(),
-                    },
-                )
-            }
-            Err(e) => {
-                let completed_at_ms = now_ms();
-                set_job(
-                    &jobs,
-                    &events_tx,
-                    job_id,
-                    job_failed_from_err(started_at_ms, completed_at_ms, &e),
-                )
-            }
-        }
+        publish_transfer_end(
+            &jobs,
+            &events_tx,
+            job_id,
+            started_at_ms,
+            result,
+            files_sent_count,
+        );
         fail_guard.mark_succeeded();
     });
 
@@ -7418,6 +7725,40 @@ async fn transfer_zip_handler(
         }),
     )
         .into_response()
+}
+
+/// Publishes how a transfer job ended. What the console already had and the files actually sent
+/// come from the commit ack (a resume or a skip policy, SPEC §11.4; an all-skipped resume is
+/// "already up to date"), `planned_files` when the ack has none.
+fn publish_transfer_end(
+    jobs: &Arc<Mutex<HashMap<Uuid, JobState>>>,
+    events_tx: &broadcast::Sender<String>,
+    job_id: Uuid,
+    started_at_ms: u64,
+    result: anyhow::Result<ps5upload_core::transfer::TransferResult>,
+    planned_files: u64,
+) {
+    let completed_at_ms = now_ms();
+    let state = match result {
+        Ok(r) => {
+            let (skipped_files, skipped_bytes, files_sent) =
+                ava1_skip_counts(&r.commit_ack_body).unwrap_or((0, 0, planned_files));
+            JobState::Done {
+                started_at_ms,
+                completed_at_ms,
+                elapsed_ms: completed_at_ms.saturating_sub(started_at_ms),
+                tx_id_hex: r.tx_id_hex,
+                bytes_sent: r.bytes_sent,
+                dest: r.dest,
+                files_sent,
+                skipped_files,
+                skipped_bytes,
+                commit_ack: serde_json::from_str(&r.commit_ack_body).ok(),
+            }
+        }
+        Err(e) => job_failed_from_err(started_at_ms, completed_at_ms, &e),
+    };
+    set_job(jobs, events_tx, job_id, state);
 }
 
 /// A zip the AVA1 source refused as unusable becomes a typed job failure, so the client shows
@@ -7543,6 +7884,7 @@ async fn sevenz_inspect_stream_handler(Json(req): Json<SevenzInspectReq>) -> imp
 
 #[derive(Deserialize)]
 struct ProfileUsernameReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     slot: i32,
     name: String,
@@ -7550,6 +7892,7 @@ struct ProfileUsernameReq {
 
 #[derive(Deserialize)]
 struct ProfileLocalUsernameReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     uid: u32,
     name: String,
@@ -7559,6 +7902,7 @@ struct ProfileLocalUsernameReq {
 /// user (0 or absent = the foreground user).
 #[derive(Deserialize)]
 struct ProfileNpReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     #[serde(default)]
     slot: i32,
@@ -7568,6 +7912,7 @@ struct ProfileNpReq {
 
 #[derive(Deserialize)]
 struct ProfileActivateReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     slot: i32,
     /// Accepts a JSON string ("0x1a2b" or decimal) as well as a number.
@@ -7613,6 +7958,7 @@ impl AccountIdInput {
 
 #[derive(Deserialize)]
 struct ProfileAvatarReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     /// Host-side path to the source image the user picked (same model as
     /// the zip/7z handlers, which take a host `archive_path`).
@@ -7636,16 +7982,20 @@ struct ProfilePreviewReq {
     crop: Option<ps5upload_core::profile::CropPosition>,
 }
 
+// ─── Console toast ──────────────────────────────────────────────────────
+
 // ─── User create / delete ───────────────────────────────────────────────
 
 #[derive(Deserialize)]
 struct UserCreateReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     name: String,
 }
 
 #[derive(Deserialize)]
 struct UserDeleteReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     uid: i32,
     #[serde(default)]
@@ -7656,6 +8006,7 @@ struct UserDeleteReq {
 
 #[derive(Deserialize)]
 struct BackupSnapshotReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     tag: String,
     path: String,
@@ -7663,6 +8014,7 @@ struct BackupSnapshotReq {
 
 #[derive(Deserialize)]
 struct BackupListReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     #[serde(default)]
     tag: Option<String>,
@@ -7670,6 +8022,7 @@ struct BackupListReq {
 
 #[derive(Deserialize)]
 struct BackupRestoreReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     tag: String,
     timestamp: i64,
@@ -7677,6 +8030,7 @@ struct BackupRestoreReq {
 
 #[derive(Deserialize)]
 struct BackupDeleteReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     tag: String,
     timestamp: i64,
@@ -7685,6 +8039,7 @@ struct BackupDeleteReq {
 // ── v4.1: Remote Play ─────────────────────────────────────────────────
 #[derive(Deserialize)]
 struct RemotePlayReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     #[serde(default)]
     manual_account_id: Option<String>,
@@ -7693,6 +8048,7 @@ struct RemotePlayReq {
 // ── v4.1: Notifications ───────────────────────────────────────────────
 #[derive(Deserialize)]
 struct NotifListReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     #[serde(default)]
     since_seq: u64,
@@ -7713,11 +8069,10 @@ async fn profile_info_handler(
     }
 }
 
-async fn profile_username_handler(
-    State(state): State<AppState>,
-    Json(req): Json<ProfileUsernameReq>,
-) -> impl IntoResponse {
-    let addr = console_addr_or_default(req.addr, &state.default_ps5_addr);
+async fn profile_username_handler(Json(req): Json<ProfileUsernameReq>) -> impl IntoResponse {
+    let Some(addr) = required_console_addr(req.addr) else {
+        return missing_console_addr();
+    };
     let slot = req.slot;
     let name = req.name;
     crate::log_info!("profile_set_username: addr={addr} slot={slot}");
@@ -7734,10 +8089,11 @@ async fn profile_username_handler(
 }
 
 async fn profile_local_username_handler(
-    State(state): State<AppState>,
     Json(req): Json<ProfileLocalUsernameReq>,
 ) -> impl IntoResponse {
-    let addr = console_addr_or_default(req.addr, &state.default_ps5_addr);
+    let Some(addr) = required_console_addr(req.addr) else {
+        return missing_console_addr();
+    };
     let uid = req.uid;
     let name = req.name;
     crate::log_info!("profile_set_local_username: addr={addr} uid={uid}");
@@ -7854,11 +8210,10 @@ async fn profile_np_restore_handler(Json(req): Json<ProfileNpReq>) -> impl IntoR
 }
 
 /// POST /api/ps5/users/create — create a new local user account.
-async fn user_create_handler(
-    State(state): State<AppState>,
-    Json(req): Json<UserCreateReq>,
-) -> impl IntoResponse {
-    let addr = console_addr_or_default(req.addr, &state.default_ps5_addr);
+async fn user_create_handler(Json(req): Json<UserCreateReq>) -> impl IntoResponse {
+    let Some(addr) = required_console_addr(req.addr) else {
+        return missing_console_addr();
+    };
     let name = req.name;
     crate::log_info!("user_create: addr={addr} name={name}");
     let r = tokio::task::spawn_blocking(move || ps5upload_core::users::user_create(&addr, &name))
@@ -7911,11 +8266,10 @@ async fn user_delete_handler(
 }
 
 /// POST /api/ps5/backup/snapshot — snapshot a file or directory tree.
-async fn backup_snapshot_handler(
-    State(state): State<AppState>,
-    Json(req): Json<BackupSnapshotReq>,
-) -> impl IntoResponse {
-    let addr = console_addr_or_default(req.addr, &state.default_ps5_addr);
+async fn backup_snapshot_handler(Json(req): Json<BackupSnapshotReq>) -> impl IntoResponse {
+    let Some(addr) = required_console_addr(req.addr) else {
+        return missing_console_addr();
+    };
     let tag = req.tag;
     let path = req.path;
     crate::log_info!("backup_snapshot: addr={addr} tag={tag} path={path}");
@@ -8023,11 +8377,10 @@ async fn backup_delete_handler(
 }
 
 // ── v4.1: Remote Play handlers ────────────────────────────────────────
-async fn remoteplay_request_handler(
-    State(state): State<AppState>,
-    Json(req): Json<RemotePlayReq>,
-) -> impl IntoResponse {
-    let addr = console_addr_or_default(req.addr, &state.default_ps5_addr);
+async fn remoteplay_request_handler(Json(req): Json<RemotePlayReq>) -> impl IntoResponse {
+    let Some(addr) = required_console_addr(req.addr) else {
+        return missing_console_addr();
+    };
     let acct = req.manual_account_id;
     crate::log_info!("remoteplay_request: addr={addr}");
     let r = tokio::task::spawn_blocking(move || {
@@ -8086,11 +8439,12 @@ async fn remoteplay_readiness_handler(
 }
 
 async fn remoteplay_enable_handler(
-    State(state): State<AppState>,
     Query(q): Query<AddrQuery>,
     Json(body): Json<RemotePlayEnableBody>,
 ) -> impl IntoResponse {
-    let addr = console_addr_or_default(q.addr, &state.default_ps5_addr);
+    let Some(addr) = required_console_addr(q.addr) else {
+        return missing_console_addr();
+    };
     if body.scope != "service" && body.scope != "user" {
         return json_err(
             StatusCode::BAD_REQUEST,
@@ -8121,6 +8475,7 @@ fn post_addr(query: Option<String>, body: &[u8]) -> Option<String> {
     #[derive(Deserialize)]
     struct AddrBody {
         #[serde(default)]
+        #[serde(alias = "console", alias = "host")]
         addr: Option<String>,
     }
     query.filter(|a| !a.trim().is_empty()).or_else(|| {
@@ -8132,11 +8487,12 @@ fn post_addr(query: Option<String>, body: &[u8]) -> Option<String> {
 }
 
 async fn remoteplay_cancel_handler(
-    State(state): State<AppState>,
     Query(q): Query<AddrQuery>,
     body: axum::body::Bytes,
 ) -> impl IntoResponse {
-    let addr = console_addr_or_default(post_addr(q.addr, &body), &state.default_ps5_addr);
+    let Some(addr) = required_console_addr(post_addr(q.addr, &body)) else {
+        return missing_console_addr();
+    };
     let r =
         tokio::task::spawn_blocking(move || ps5upload_core::remoteplay::remoteplay_cancel(&addr))
             .await
@@ -8223,11 +8579,10 @@ async fn local_image_status() -> impl IntoResponse {
 ///
 /// Discards ps5upload's recorded play time on the console. This is our
 /// own tracking, not the console's own records, which are not writable.
-async fn activity_reset_handler(
-    State(state): State<AppState>,
-    Query(q): Query<AddrQuery>,
-) -> impl IntoResponse {
-    let addr = console_addr_or_default(q.addr, &state.default_ps5_addr);
+async fn activity_reset_handler(Query(q): Query<AddrQuery>) -> impl IntoResponse {
+    let Some(addr) = required_console_addr(q.addr) else {
+        return missing_console_addr();
+    };
     let r = tokio::task::spawn_blocking(move || ps5upload_core::activity::activity_reset(&addr))
         .await
         .map_err(anyhow::Error::from)
@@ -8243,11 +8598,10 @@ async fn activity_reset_handler(
 /// Empties the payload's notification ring. These are messages
 /// ps5upload put on the console's screen, so this clears everything
 /// the Notifications screen can show.
-async fn notif_clear_handler(
-    State(state): State<AppState>,
-    Query(q): Query<AddrQuery>,
-) -> impl IntoResponse {
-    let addr = console_addr_or_default(q.addr, &state.default_ps5_addr);
+async fn notif_clear_handler(Query(q): Query<AddrQuery>) -> impl IntoResponse {
+    let Some(addr) = required_console_addr(q.addr) else {
+        return missing_console_addr();
+    };
     let r = tokio::task::spawn_blocking(move || ps5upload_core::notif::notif_clear(&addr))
         .await
         .map_err(anyhow::Error::from)
@@ -8261,23 +8615,27 @@ async fn notif_clear_handler(
 // ── v4.2: Cheat engine handlers ──────────────────────────────────────
 #[derive(Deserialize)]
 struct CheatsAddrQuery {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
 }
 
 #[derive(Deserialize)]
 struct CheatsGetQuery {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     title_id: String,
 }
 
 #[derive(Deserialize)]
 struct CheatsDeleteQuery {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     title_id: String,
 }
 
 #[derive(Deserialize)]
 struct CheatsToggleReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     title_id: String,
     index: i32,
@@ -8291,6 +8649,7 @@ fn default_true() -> bool {
 
 #[derive(Deserialize)]
 struct CheatsEngineSetReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     enabled: bool,
 }
@@ -8327,11 +8686,10 @@ async fn cheats_get_handler(
     }
 }
 
-async fn cheats_toggle_handler(
-    State(state): State<AppState>,
-    Json(req): Json<CheatsToggleReq>,
-) -> impl IntoResponse {
-    let addr = console_addr_or_default(req.addr, &state.default_ps5_addr);
+async fn cheats_toggle_handler(Json(req): Json<CheatsToggleReq>) -> impl IntoResponse {
+    let Some(addr) = required_console_addr(req.addr) else {
+        return missing_console_addr();
+    };
     let title_id = req.title_id;
     let index = req.index;
     let on = req.on;
@@ -8371,11 +8729,10 @@ async fn cheats_delete_handler(
 }
 
 /// POST /api/ps5/cheats/reload `{addr}` (a POST for the same reason as delete).
-async fn cheats_reload_handler(
-    State(state): State<AppState>,
-    Json(q): Json<CheatsAddrQuery>,
-) -> impl IntoResponse {
-    let addr = console_addr_or_default(q.addr, &state.default_ps5_addr);
+async fn cheats_reload_handler(Json(q): Json<CheatsAddrQuery>) -> impl IntoResponse {
+    let Some(addr) = required_console_addr(q.addr) else {
+        return missing_console_addr();
+    };
     let r = tokio::task::spawn_blocking(move || ps5upload_core::cheats::cheats_reload(&addr))
         .await
         .map_err(anyhow::Error::from)
@@ -8401,11 +8758,10 @@ async fn cheats_status_handler(
     }
 }
 
-async fn cheats_engine_set_handler(
-    State(state): State<AppState>,
-    Json(req): Json<CheatsEngineSetReq>,
-) -> impl IntoResponse {
-    let addr = console_addr_or_default(req.addr, &state.default_ps5_addr);
+async fn cheats_engine_set_handler(Json(req): Json<CheatsEngineSetReq>) -> impl IntoResponse {
+    let Some(addr) = required_console_addr(req.addr) else {
+        return missing_console_addr();
+    };
     let enabled = req.enabled;
     let r = tokio::task::spawn_blocking(move || {
         ps5upload_core::cheats::cheats_engine_set(&addr, enabled)
@@ -8449,6 +8805,7 @@ async fn cheats_repos_search_handler(
 
 #[derive(Deserialize)]
 struct CheatsRepoDownloadReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     repo_id: String,
     filename: String,
@@ -8456,10 +8813,11 @@ struct CheatsRepoDownloadReq {
 }
 
 async fn cheats_repos_download_handler(
-    State(state): State<AppState>,
     Json(req): Json<CheatsRepoDownloadReq>,
 ) -> impl IntoResponse {
-    let addr = console_addr_or_default(req.addr, &state.default_ps5_addr);
+    let Some(addr) = required_console_addr(req.addr) else {
+        return missing_console_addr();
+    };
     let r = tokio::task::spawn_blocking(move || {
         ps5upload_core::cheats::cheats_repo_download(
             &addr,
@@ -8481,6 +8839,7 @@ async fn cheats_repos_download_handler(
 
 #[derive(Deserialize)]
 struct ActivityDbQueryParams {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     #[serde(default = "default_db_query")]
     query: String,
@@ -8542,6 +8901,7 @@ async fn sdk_scan_handler(
 
 #[derive(Deserialize)]
 struct SdkPatchReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     title_id: String,
     target_sdk: String,
@@ -8574,6 +8934,7 @@ async fn sdk_patch_handler(
 
 #[derive(Deserialize)]
 struct SdkRestoreReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     title_id: String,
 }
@@ -8643,6 +9004,7 @@ async fn profile_avatar_preview_handler(Json(req): Json<ProfilePreviewReq>) -> i
 
 #[derive(Deserialize)]
 struct AvatarCurrentQuery {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     uid: u32,
 }
@@ -8688,11 +9050,10 @@ async fn profile_avatar_current_handler(
         .into_response()
 }
 
-async fn profile_avatar_handler(
-    State(state): State<AppState>,
-    Json(req): Json<ProfileAvatarReq>,
-) -> impl IntoResponse {
-    let addr = console_addr_or_default(req.addr, &state.default_ps5_addr);
+async fn profile_avatar_handler(Json(req): Json<ProfileAvatarReq>) -> impl IntoResponse {
+    let Some(addr) = required_console_addr(req.addr) else {
+        return missing_console_addr();
+    };
     let mode = ps5upload_core::profile::SquareMode::parse(req.mode.as_deref().unwrap_or("crop"))
         .with_crop(req.crop);
     let uid = req.uid.unwrap_or(0);
@@ -8736,7 +9097,9 @@ async fn transfer_7z_handler(
     State(state): State<AppState>,
     Json(req): Json<Transfer7zReq>,
 ) -> impl IntoResponse {
-    let addr = req.addr.unwrap_or_else(|| state.default_ps5_addr.clone());
+    let Some(addr) = required_console_addr(req.addr) else {
+        return missing_console_addr();
+    };
     let caller_supplied_tx_id = req.tx_id.is_some();
     let tx_id = match parse_or_random_tx_id(req.tx_id.as_deref()) {
         Ok(id) => id,
@@ -8785,6 +9148,7 @@ async fn transfer_7z_handler(
     let job_id = Uuid::new_v4();
     telemetry::tag(job_id, "7z");
     telemetry::set_drive(job_id, &req.dest_root);
+    mesh_api::note_job(job_id, &addr, "Upload", &req.dest_root);
     let started_at_ms = now_ms();
     crate::log_info!(
         "transfer_7z: job={job_id} addr={addr} archive={} dest_root={} resume={} files={} bytes={total_bytes}",
@@ -8844,6 +9208,10 @@ async fn transfer_7z_handler(
         let _stop_guard = TickerStopGuard::new(stop_ticker);
         let mut fail_guard =
             JobFailOnDropGuard::new(Arc::clone(&jobs), events_tx.clone(), job_id, started_at_ms);
+        if fail_job_unless_console_ready(&jobs, &events_tx, job_id, started_at_ms, &addr) {
+            fail_guard.mark_succeeded();
+            return;
+        }
         let mut cfg = make_transfer_config(&addr);
         // The flag registered before the task: the core checks it at every shard boundary.
         cfg.cancel = Some(cancel);
@@ -8852,12 +9220,8 @@ async fn transfer_7z_handler(
         cfg.progress_files = Some(Arc::clone(&progress_files));
         cfg.progress_files_finalized = Some(Arc::clone(&progress_files_finalized));
         cfg.progress_bytes_finalized = Some(Arc::clone(&progress_bytes_finalized));
-        cfg.progress_live = Some(live_notes_for(job_id));
+        attach_live_notes(&mut cfg, job_id);
         apply_per_request_bandwidth(&mut cfg, req.bandwidth_cap_mbps);
-        if fail_job_unless_console_ready(&jobs, &events_tx, job_id, started_at_ms, &addr) {
-            fail_guard.mark_succeeded();
-            return;
-        }
         // Resume is by job_id (the sender reopens with JobOpen); retries live in the
         // adapter's loop. An archive AVA1 cannot read (encryption, a feature the decoder lacks)
         // is a failure with its own reason: there is no other transport to hand it to.
@@ -8879,37 +9243,14 @@ async fn transfer_7z_handler(
                 e
             }
         });
-        match result {
-            Ok(r) => {
-                let completed_at_ms = now_ms();
-                set_job(
-                    &jobs,
-                    &events_tx,
-                    job_id,
-                    JobState::Done {
-                        started_at_ms,
-                        completed_at_ms,
-                        elapsed_ms: completed_at_ms.saturating_sub(started_at_ms),
-                        tx_id_hex: r.tx_id_hex,
-                        bytes_sent: r.bytes_sent,
-                        dest: r.dest,
-                        files_sent: files_sent_count,
-                        skipped_files: 0,
-                        skipped_bytes: 0,
-                        commit_ack: serde_json::from_str(&r.commit_ack_body).ok(),
-                    },
-                )
-            }
-            Err(e) => {
-                let completed_at_ms = now_ms();
-                set_job(
-                    &jobs,
-                    &events_tx,
-                    job_id,
-                    job_failed_from_err(started_at_ms, completed_at_ms, &e),
-                )
-            }
-        }
+        publish_transfer_end(
+            &jobs,
+            &events_tx,
+            job_id,
+            started_at_ms,
+            result,
+            files_sent_count,
+        );
         fail_guard.mark_succeeded();
     });
 
@@ -8924,7 +9265,7 @@ async fn transfer_7z_handler(
 
 /// POST /api/rar/inspect — desktop only. Counts + uncompressed size of a
 /// `.rar` (multi-volume opens from the first part; `password` for encrypted).
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 async fn rar_inspect_handler(Json(req): Json<RarInspectReq>) -> impl IntoResponse {
     let p = req.archive_path.clone();
     let pw = req.password.clone();
@@ -8943,7 +9284,7 @@ async fn rar_inspect_handler(Json(req): Json<RarInspectReq>) -> impl IntoRespons
     }
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 async fn rar_inspect_handler() -> impl IntoResponse {
     json_err(
         StatusCode::NOT_IMPLEMENTED,
@@ -8955,12 +9296,14 @@ async fn rar_inspect_handler() -> impl IntoResponse {
 /// POST /api/transfer/rar — desktop only. Host-extract the `.rar` (any volume
 /// set, optional password) to a temp dir, then stream the tree to the PS5 via
 /// the directory transfer. Mirrors `transfer_7z_handler`'s job model.
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 async fn transfer_rar_handler(
     State(state): State<AppState>,
     Json(req): Json<TransferRarReq>,
 ) -> impl IntoResponse {
-    let addr = req.addr.unwrap_or_else(|| state.default_ps5_addr.clone());
+    let Some(addr) = required_console_addr(req.addr) else {
+        return missing_console_addr();
+    };
     let caller_supplied_tx_id = req.tx_id.is_some();
     let tx_id = match parse_or_random_tx_id(req.tx_id.as_deref()) {
         Ok(id) => id,
@@ -9007,6 +9350,7 @@ async fn transfer_rar_handler(
     let job_id = Uuid::new_v4();
     telemetry::tag(job_id, "rar");
     telemetry::set_drive(job_id, &req.dest_root);
+    mesh_api::note_job(job_id, &addr, "Upload", &req.dest_root);
     let started_at_ms = now_ms();
     crate::log_info!(
         "transfer_rar: job={job_id} addr={addr} archive={} dest_root={} resume={} files={} bytes={total_bytes}",
@@ -9019,10 +9363,13 @@ async fn transfer_rar_handler(
     let progress_files = Arc::new(AtomicU64::new(0));
     let progress_files_finalized = Arc::new(AtomicU64::new(0));
     let progress_bytes_finalized = Arc::new(AtomicU64::new(0));
+    // The plan leaves out entries whose headers give no size; the transfer stores the measured
+    // total here once it has decoded them.
+    let measured_total = Arc::new(AtomicU64::new(total_bytes));
     let ctx = TickerContext {
         started_at_ms,
         total_bytes,
-        dynamic_total_bytes: None,
+        dynamic_total_bytes: Some(Arc::clone(&measured_total)),
         skipped_files: 0,
         skipped_bytes: 0,
     };
@@ -9074,11 +9421,12 @@ async fn transfer_rar_handler(
         // The flag registered before the task: the core checks it at every shard boundary.
         cfg.cancel = Some(cancel);
         cfg.excludes = req.excludes;
+        cfg.progress_total = Some(measured_total);
         cfg.progress_bytes = Some(Arc::clone(&progress));
         cfg.progress_files = Some(Arc::clone(&progress_files));
         cfg.progress_files_finalized = Some(Arc::clone(&progress_files_finalized));
         cfg.progress_bytes_finalized = Some(Arc::clone(&progress_bytes_finalized));
-        cfg.progress_live = Some(live_notes_for(job_id));
+        attach_live_notes(&mut cfg, job_id);
         apply_per_request_bandwidth(&mut cfg, req.bandwidth_cap_mbps);
         // The password stays in this request for the job's lifetime and is never logged;
         // resume passes reuse it from the RarSource. An archive AVA1 cannot read is a failure
@@ -9102,37 +9450,14 @@ async fn transfer_rar_handler(
                 e
             }
         });
-        match result {
-            Ok(r) => {
-                let completed_at_ms = now_ms();
-                set_job(
-                    &jobs,
-                    &events_tx,
-                    job_id,
-                    JobState::Done {
-                        started_at_ms,
-                        completed_at_ms,
-                        elapsed_ms: completed_at_ms.saturating_sub(started_at_ms),
-                        tx_id_hex: r.tx_id_hex,
-                        bytes_sent: r.bytes_sent,
-                        dest: r.dest,
-                        files_sent: files_sent_count,
-                        skipped_files: 0,
-                        skipped_bytes: 0,
-                        commit_ack: serde_json::from_str(&r.commit_ack_body).ok(),
-                    },
-                )
-            }
-            Err(e) => {
-                let completed_at_ms = now_ms();
-                set_job(
-                    &jobs,
-                    &events_tx,
-                    job_id,
-                    job_failed_from_err(started_at_ms, completed_at_ms, &e),
-                )
-            }
-        }
+        publish_transfer_end(
+            &jobs,
+            &events_tx,
+            job_id,
+            started_at_ms,
+            result,
+            files_sent_count,
+        );
         fail_guard.mark_succeeded();
     });
 
@@ -9145,7 +9470,7 @@ async fn transfer_rar_handler(
         .into_response()
 }
 
-#[cfg(target_os = "android")]
+#[cfg(any(target_os = "android", target_os = "ios"))]
 async fn transfer_rar_handler() -> impl IntoResponse {
     json_err(
         StatusCode::NOT_IMPLEMENTED,
@@ -9154,11 +9479,11 @@ async fn transfer_rar_handler() -> impl IntoResponse {
     .into_response()
 }
 
-/// POST /api/rar/packages — desktop only. The `.pkg` entries of a RAR (any folder depth), from
+/// POST /api/rar/packages — the `.pkg` entries of a ZIP, 7z or RAR (any folder depth), from
 /// the headers alone, so several packages in one archive can be found before anything is
 /// unpacked (R6, #370). `PKG_ALLOW` is the same allow-list the unpack passes as `excludes`, so
-/// what is listed here is exactly what `/api/transfer/rar` will send.
-#[cfg(not(target_os = "android"))]
+/// what is listed here is exactly what `/api/transfer/rar` will send. On a phone only RAR is
+/// refused: ZIP and 7z are pure Rust and their unpack routes exist there.
 async fn rar_packages_handler(Json(req): Json<RarPackagesReq>) -> impl IntoResponse {
     let p = req.archive_path.clone();
     let pw = req.password.clone();
@@ -9185,22 +9510,13 @@ async fn rar_packages_handler(Json(req): Json<RarPackagesReq>) -> impl IntoRespo
     }
 }
 
-#[cfg(target_os = "android")]
-async fn rar_packages_handler() -> impl IntoResponse {
-    json_err(
-        StatusCode::NOT_IMPLEMENTED,
-        "RAR is not supported on this build",
-    )
-    .into_response()
-}
-
 /// The exclude entry that keeps only packages (see `ps5upload_core::excludes`).
-#[cfg(not(target_os = "android"))]
 const RAR_PKG_ALLOW: &str = "!*.pkg";
+/// The same for a package named `.fpkg` (the name a converted package can carry).
+const RAR_FPKG_ALLOW: &str = "!*.fpkg";
 
 /// Which archive reader a path's name asks for. A split RAR is recognised by any of its
 /// parts' names; a `.7z.001` style split 7z is not supported and is not claimed here.
-#[cfg(not(target_os = "android"))]
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
 enum ArchiveKind {
     Zip,
@@ -9208,7 +9524,6 @@ enum ArchiveKind {
     Rar,
 }
 
-#[cfg(not(target_os = "android"))]
 fn archive_kind_of(path: &str) -> Option<ArchiveKind> {
     let lower = path.to_ascii_lowercase();
     if lower.ends_with(".zip") {
@@ -9225,20 +9540,25 @@ fn archive_kind_of(path: &str) -> Option<ArchiveKind> {
 /// The `.pkg` files inside a ZIP, 7z or RAR (path inside the archive, unpacked size), read
 /// from the archive's listing without unpacking anything. `password` only applies to RAR:
 /// the ZIP and 7z readers here do not decrypt.
-#[cfg(not(target_os = "android"))]
 fn archive_package_entries(
     path: &str,
     password: Option<&str>,
 ) -> anyhow::Result<Vec<(String, u64)>> {
-    let allow = [RAR_PKG_ALLOW.to_string()];
+    let allow = [RAR_PKG_ALLOW.to_string(), RAR_FPKG_ALLOW.to_string()];
     let p = std::path::Path::new(path);
     match archive_kind_of(path) {
         Some(ArchiveKind::Zip) => Ok(ps5upload_core::transfer::zip_plan_preview(p, &allow)?.1),
         Some(ArchiveKind::SevenZ) => {
             Ok(ps5upload_core::transfer::sevenz_plan_preview(p, &allow)?.1)
         }
+        #[cfg(not(any(target_os = "android", target_os = "ios")))]
         Some(ArchiveKind::Rar) => {
             Ok(ps5upload_core::transfer::rar_layout(p, password, &allow)?.files)
+        }
+        #[cfg(any(target_os = "android", target_os = "ios"))]
+        Some(ArchiveKind::Rar) => {
+            let _ = password;
+            anyhow::bail!("RAR is not supported on this build")
         }
         None => anyhow::bail!("not a .zip, .7z or .rar archive: {path}"),
     }
@@ -9268,7 +9588,7 @@ async fn link_probe_handler(Json(req): Json<LinkProbeReq>) -> impl IntoResponse 
     }
 }
 
-fn valid_link_url(url: &str) -> bool {
+pub(crate) fn valid_link_url(url: &str) -> bool {
     url.len() <= 4093
         && !url.bytes().any(|b| b < 0x20 || b == 0x7f)
         && !url.contains('#')
@@ -9298,7 +9618,9 @@ async fn link_download_handler(
         Ok(d) => d,
         Err(e) => return json_err(StatusCode::BAD_REQUEST, e).into_response(),
     };
-    let addr = req.addr.unwrap_or_else(|| state.default_ps5_addr.clone());
+    let Some(addr) = required_console_addr(req.addr) else {
+        return missing_console_addr();
+    };
     let tx_id = match parse_or_random_tx_id(req.tx_id.as_deref()) {
         Ok(id) => id,
         Err(e) => return json_err(StatusCode::BAD_REQUEST, e.to_string()).into_response(),
@@ -9342,6 +9664,7 @@ async fn link_download_handler(
         )
         .into_response();
     }
+    let validators = class.validators.clone();
     // An .lz4 link is unpacked on the way: the console gets the image, not the .lz4.
     let lz4 = class.lz4.clone().filter(|_| req.unpack);
     let packed = total;
@@ -9372,6 +9695,7 @@ async fn link_download_handler(
     let job_id = Uuid::new_v4();
     telemetry::tag(job_id, "link_download");
     telemetry::set_drive(job_id, &dest_dir);
+    mesh_api::note_job(job_id, &addr, "Upload", &dest_dir);
     let started_at_ms = now_ms();
     // The host only: a link can carry a signed token in its path or query.
     let host = url
@@ -9451,11 +9775,12 @@ async fn link_download_handler(
         cfg.progress_files = Some(Arc::clone(&progress_files));
         cfg.progress_files_finalized = Some(Arc::clone(&progress_files_finalized));
         cfg.progress_bytes_finalized = Some(Arc::clone(&progress_bytes_finalized));
-        cfg.progress_live = Some(live_notes_for(job_id));
+        attach_live_notes(&mut cfg, job_id);
         apply_per_request_bandwidth(&mut cfg, req.bandwidth_cap_mbps);
-        let remote = Arc::new(crate::remote_pkg::RemoteSource::new_with_options(
-            url, packed, insecure,
-        ));
+        let remote = Arc::new(
+            crate::remote_pkg::RemoteSource::new_with_options(url, packed, insecure)
+                .with_validators(validators),
+        );
         // A plain file is read at any offset (resume continues where the console stopped); an
         // .lz4 is decoded forward on one thread and its decoded bytes are what is sent.
         let (source, seq): (
@@ -9515,37 +9840,7 @@ async fn link_download_handler(
                     }
                 }
             });
-        match result {
-            Ok(r) => {
-                let completed_at_ms = now_ms();
-                set_job(
-                    &jobs,
-                    &events_tx,
-                    job_id,
-                    JobState::Done {
-                        started_at_ms,
-                        completed_at_ms,
-                        elapsed_ms: completed_at_ms.saturating_sub(started_at_ms),
-                        tx_id_hex: r.tx_id_hex,
-                        bytes_sent: r.bytes_sent,
-                        dest: r.dest,
-                        files_sent: 1,
-                        skipped_files: 0,
-                        skipped_bytes: 0,
-                        commit_ack: serde_json::from_str(&r.commit_ack_body).ok(),
-                    },
-                )
-            }
-            Err(e) => {
-                let completed_at_ms = now_ms();
-                set_job(
-                    &jobs,
-                    &events_tx,
-                    job_id,
-                    job_failed_from_err(started_at_ms, completed_at_ms, &e),
-                )
-            }
-        }
+        publish_transfer_end(&jobs, &events_tx, job_id, started_at_ms, result, 1);
         fail_guard.mark_succeeded();
     });
 
@@ -9566,7 +9861,9 @@ async fn transfer_file_list_handler(
     if req.files.is_empty() {
         return json_err(StatusCode::BAD_REQUEST, "files list is empty").into_response();
     }
-    let addr = req.addr.unwrap_or_else(|| state.default_ps5_addr.clone());
+    let Some(addr) = required_console_addr(req.addr) else {
+        return missing_console_addr();
+    };
     let tx_id = match parse_or_random_tx_id(req.tx_id.as_deref()) {
         Ok(id) => id,
         Err(e) => return json_err(StatusCode::BAD_REQUEST, e.to_string()).into_response(),
@@ -9575,6 +9872,7 @@ async fn transfer_file_list_handler(
     let job_id = Uuid::new_v4();
     telemetry::tag(job_id, "file_list");
     telemetry::set_drive(job_id, &req.dest_root);
+    mesh_api::note_job(job_id, &addr, "Upload", &req.dest_root);
     let started_at_ms = now_ms();
     let entries: Vec<FileListEntry> = req
         .files
@@ -9647,10 +9945,8 @@ async fn transfer_file_list_handler(
             }
         }
     };
-    if !planner_skipped.is_empty() {
-        for (src, err) in &planner_skipped {
-            log_warn!("planner: skipped {} (metadata failed: {})", src, err);
-        }
+    for (src, err) in &planner_skipped {
+        log_warn!("planner: skipped {} (metadata failed: {})", src, err);
     }
     if entries.is_empty() {
         // Nothing readable: no job, the first reason tells the user what is wrong.
@@ -9733,59 +10029,41 @@ async fn transfer_file_list_handler(
         cfg.progress_files = Some(Arc::clone(&progress_files));
         cfg.progress_files_finalized = Some(Arc::clone(&progress_files_finalized));
         cfg.progress_bytes_finalized = Some(Arc::clone(&progress_bytes_finalized));
-        cfg.progress_live = Some(live_notes_for(job_id));
+        attach_live_notes(&mut cfg, job_id);
         apply_per_request_bandwidth(&mut cfg, req.bandwidth_cap_mbps);
         crate::log_info!("transfer_file_list: job={job_id} protocol=ava1");
         // Resume is by job_id (the sender reopens with JobOpen); retries live in the adapter's
         // loop. A list that names several directories becomes one job per directory.
         let result = ps5upload_ava1::upload::upload_list(&cfg, tx_id, &req.dest_root, &entries);
-        // Skip and sent counts from the commit ack when it has them (as the dir route).
-        let (skipped_files_count, skipped_bytes_count, files_sent_count) = result
-            .as_ref()
-            .ok()
-            .and_then(|r| ava1_skip_counts(&r.commit_ack_body))
-            .unwrap_or((0, 0, files_sent_count));
-        match result {
-            Ok(r) => {
-                let completed_at_ms = now_ms();
-                set_job(
-                    &jobs,
-                    &events_tx,
-                    job_id,
-                    JobState::Done {
-                        started_at_ms,
-                        completed_at_ms,
-                        elapsed_ms: completed_at_ms.saturating_sub(started_at_ms),
-                        tx_id_hex: r.tx_id_hex,
-                        bytes_sent: r.bytes_sent,
-                        dest: r.dest,
-                        files_sent: files_sent_count,
-                        skipped_files: skipped_files_count,
-                        skipped_bytes: skipped_bytes_count,
-                        commit_ack: serde_json::from_str(&r.commit_ack_body).ok(),
-                    },
-                )
-            }
-            Err(e) => {
-                let completed_at_ms = now_ms();
-                set_job(
-                    &jobs,
-                    &events_tx,
-                    job_id,
-                    job_failed_from_err(started_at_ms, completed_at_ms, &e),
-                )
-            }
-        }
+        publish_transfer_end(
+            &jobs,
+            &events_tx,
+            job_id,
+            started_at_ms,
+            result,
+            files_sent_count,
+        );
         fail_guard.mark_succeeded();
     });
 
+    // The job runs without these files, so the caller is told now: otherwise the run reports
+    // success with them simply absent.
     (
         StatusCode::ACCEPTED,
-        Json(JobCreated {
-            job_id: job_id.to_string(),
-        }),
+        Json(file_list_created(job_id, &planner_skipped)),
     )
         .into_response()
+}
+
+/// A file-list job's answer: its id and the sources it left out because they could not be read.
+fn file_list_created(job_id: Uuid, skipped: &[(String, String)]) -> serde_json::Value {
+    serde_json::json!({
+        "job_id": job_id.to_string(),
+        "skipped_unreadable": skipped
+            .iter()
+            .map(|(path, error)| serde_json::json!({ "path": path, "error": error }))
+            .collect::<Vec<_>>(),
+    })
 }
 
 // ─── Download (PS5 → host) ───────────────────────────────────────────────────
@@ -9793,6 +10071,7 @@ async fn transfer_file_list_handler(
 #[derive(Deserialize)]
 struct TransferDownloadReq {
     /// The console (a `:port` suffix from an older client is ignored).
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     /// Path on the PS5 to download. For `kind: "folder"` this is the
     /// root of the tree; for `kind: "file"` it's the file itself.
@@ -10099,6 +10378,13 @@ async fn transfer_download_handler(
         )
         .into_response();
     }
+    if let Some(why) = ps5upload_core::transfer::host_unsafe_component(basename) {
+        return json_err(
+            StatusCode::BAD_REQUEST,
+            format!("{basename:?} cannot be saved on this computer: {why}."),
+        )
+        .into_response();
+    }
     // Stat via spawn_blocking — dest_dir can be a network mount where
     // a blocking stat would stall the reactor for every console.
     let dest_dir_for_stat = dest_dir.clone();
@@ -10136,6 +10422,7 @@ async fn transfer_download_handler(
 
 #[derive(Deserialize)]
 struct TransferDownloadZipReq {
+    #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
     /// Remote file or folder to archive.
     src_path: String,
@@ -10151,6 +10438,10 @@ struct TransferDownloadZipReq {
     /// (smaller for text-heavy trees; cannot resume, so a drop restarts the archive).
     #[serde(default)]
     compression: Option<String>,
+    /// What to do with a file already at `dest_zip`: `replace` overwrites it (the person chose
+    /// that, say in a save dialog). Absent: refuse with a 409, as the link download does.
+    #[serde(default)]
+    existing: Option<String>,
 }
 
 /// POST /api/transfer/download-zip — pull a PS5 file/folder straight into a
@@ -10217,6 +10508,22 @@ async fn transfer_download_zip_handler(
                 return json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}"))
                     .into_response()
             }
+        }
+    }
+    // A finished download renames over the destination: an archive already there would be gone
+    // without a word.
+    if req.existing.as_deref() != Some("replace") {
+        let at = dest_zip.clone();
+        if let Ok(Ok(md)) = tokio::task::spawn_blocking(move || std::fs::metadata(&at)).await {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": format!("{} already exists ({} bytes).", dest_zip.display(), md.len()),
+                    "existing_path": dest_zip.display().to_string(),
+                    "existing_bytes": md.len(),
+                })),
+            )
+                .into_response();
         }
     }
 
@@ -10351,8 +10658,19 @@ async fn transfer_dir_reconcile_handler(
         .into_response()
 }
 
-/// GET /api/jobs/{id}
-async fn get_job(State(state): State<AppState>, Path(id): Path<String>) -> impl IntoResponse {
+/// GET /api/jobs/{id}: a transfer job, or an install by its own id (`<epoch>-<seq>`, the same
+/// status as `/api/pkg/install/status`).
+async fn get_job(
+    State(state): State<AppState>,
+    installs: pkg_install::PkgInstallStateHandle,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if install::is_install_job_id(&id) {
+        return match installs.jobs.get(&id) {
+            Some(st) => (StatusCode::OK, Json(st)).into_response(),
+            None => json_err(StatusCode::NOT_FOUND, "job not found").into_response(),
+        };
+    }
     let uuid = match id.parse::<Uuid>() {
         Ok(u) => u,
         Err(_) => return json_err(StatusCode::BAD_REQUEST, "invalid job id").into_response(),
@@ -10402,8 +10720,21 @@ async fn get_job_files(State(state): State<AppState>, Path(id): Path<String>) ->
 /// registered cancel flag; the core aborts at its next shard boundary with
 /// `transfer_cancelled` and the partial tx is left interrupted/resumable (same
 /// as a dropped connection). Idempotent — cancelling an unknown/finished job is
-/// a no-op 200 (`cancelled:false`); the client may race the job ending.
-async fn cancel_job(Path(id): Path<String>) -> impl IntoResponse {
+/// a no-op 200 (`cancelled:false`); the client may race the job ending. An install's id stops
+/// that install, as `/api/pkg/install/stop` does.
+async fn cancel_job(
+    installs: pkg_install::PkgInstallStateHandle,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if install::is_install_job_id(&id) {
+        let cancelled = installs.jobs.request_cancel(&id);
+        crate::log_info!("cancel_job: install job={id} cancelled={cancelled}");
+        return (
+            StatusCode::OK,
+            Json(serde_json::json!({ "cancelled": cancelled })),
+        )
+            .into_response();
+    }
     let uuid = match id.parse::<Uuid>() {
         Ok(u) => u,
         Err(_) => return json_err(StatusCode::BAD_REQUEST, "invalid job id").into_response(),
@@ -10450,8 +10781,8 @@ struct DebugCrashQuery {
 /// Hard-gated behind `PS5UPLOAD_ENGINE_DEBUG=1`: with the env unset (every
 /// normal app launch) it 404s, so it can never be triggered in production.
 async fn debug_crash(Query(q): Query<DebugCrashQuery>) -> axum::response::Response {
-    if std::env::var("PS5UPLOAD_ENGINE_DEBUG").ok().as_deref() != Some("1") {
-        return (StatusCode::NOT_FOUND, "disabled").into_response();
+    if !debug_routes_on() {
+        return no_such_route();
     }
     match q.mode.as_deref() {
         // Unwinds the handler task; the global panic hook records the panic
@@ -10506,6 +10837,7 @@ async fn ps5_port_check(Query(q): Query<PortCheckQuery>) -> impl IntoResponse {
 
 #[derive(Debug, Deserialize)]
 struct PortCheckQuery {
+    #[serde(alias = "console", alias = "addr", alias = "host")]
     ip: String,
     port: u16,
     /// Optional override so a slow LAN can be probed more patiently.
@@ -10522,19 +10854,56 @@ struct PortCheckQuery {
 /// talking to the prior version's engine indefinitely (silently
 /// missing any newly-added routes — e.g. the FS_OP frames added in
 /// 2.2.7).
+#[derive(serde::Deserialize)]
+struct ToastBody {
+    #[serde(alias = "console", alias = "host")]
+    addr: Option<String>,
+    title: String,
+    subtitle: Option<String>,
+    icon: Option<String>,
+    action_url: Option<String>,
+}
+
+/// `POST /api/ps5/toast`: a notification on the console's screen, over its management port. The web
+/// UI's way to it, for "Upload complete" on the TV.
+async fn ps5_toast(Json(b): Json<ToastBody>) -> axum::response::Response {
+    let Some(addr) = required_console_addr(b.addr) else {
+        return missing_console_addr();
+    };
+    let req = ps5upload_core::app_lifecycle::ToastRequest {
+        title: b.title,
+        subtitle: b.subtitle.unwrap_or_default(),
+        icon: b.icon.unwrap_or_default(),
+        action_url: b.action_url.unwrap_or_default(),
+    };
+    let sent =
+        tokio::task::spawn_blocking(move || ps5upload_core::app_lifecycle::toast_send(&addr, &req))
+            .await;
+    match sent {
+        Ok(Ok(ack)) => Json(ack).into_response(),
+        Ok(Err(e)) => json_err(StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
+        Err(e) => json_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
 async fn engine_version() -> impl IntoResponse {
     (
         StatusCode::OK,
         Json(serde_json::json!({
             "version": env!("CARGO_PKG_VERSION"),
             // Capability flags the UI feature-detects. `rar` is desktop-only
-            // (the UnRAR C dep is excluded from the Android build), so the
+            // (UnRAR is a helper program, which neither phone app has), so the
             // client hides the .rar option when this is false.
-            "caps": { "rar": cfg!(not(target_os = "android")) },
-            // The console a self-hosted engine was set up for (`PS5_ADDR`, Docker), so a browser
-            // that has no PS5 chosen yet (a new device, or the page opened at another address
-            // such as over Tailscale) starts with it. Absent when the variable is not set.
+            // This fork: the same console under the name its web UI reads (lib/defaultConsole.ts)
+            // to pick it in a browser with no PS5 chosen, such as one opened over Tailscale.
             "ps5_addr": std::env::var("PS5_ADDR").ok().filter(|a| !a.trim().is_empty()),
+            "caps": { "rar": cfg!(not(any(target_os = "android", target_os = "ios"))) },
+            // `PS5_ADDR`, when the operator set one: the web UI lists it for a first browser, so
+            // the console the setup named is not typed in again.
+            "default_console": std::env::var("PS5_ADDR")
+                .ok()
+                .map(|a| a.trim().to_string())
+                .filter(|a| !a.is_empty()),
         })),
     )
 }
@@ -10569,24 +10938,73 @@ async fn activity_handler(
     Json(activity::snapshot(q.since, active))
 }
 
-/// GET /api/jobs
-async fn list_jobs(State(state): State<AppState>) -> impl IntoResponse {
+#[derive(Deserialize)]
+struct ListJobsQuery {
+    /// Only jobs that changed after this event number: a row's `seq`, the
+    /// `x-ps5upload-last-seq` header of an earlier answer, or an `id:` from `/api/events`.
+    since_seq: Option<u64>,
+    /// At most this many rows: the next ones after `since_seq`, else the newest.
+    limit: Option<usize>,
+}
+
+/// GET /api/jobs?since_seq=&limit= — transfers (`kind: "transfer"`) and installs (`kind: "install"`,
+/// whose `job` is the status `/api/pkg/install/status` gives), newest first; with `since_seq`, oldest
+/// change first so a poller's cursor never skips a job. `GET /api/jobs/{id}` and its `cancel` take
+/// either id. The job map keeps the last 256 finished jobs.
+async fn list_jobs(
+    State(state): State<AppState>,
+    installs: pkg_install::PkgInstallStateHandle,
+    Query(q): Query<ListJobsQuery>,
+) -> impl IntoResponse {
+    let bus = event_bus::bus();
+    // Read before the jobs: an event that lands in between is seen again next time, not missed.
+    let last_seq = bus.last_seq();
     let jobs = state.jobs.lock().unwrap_or_else(|e| e.into_inner());
-    let summary: Vec<serde_json::Value> = jobs
+    let mut rows: Vec<(u64, u64, serde_json::Value)> = jobs
         .iter()
         .map(|(id, s)| {
-            serde_json::json!({
-                "job_id": id.to_string(),
+            let id = id.to_string();
+            let seq = bus.job_seq(&id);
+            let row = serde_json::json!({
+                "job_id": id,
+                "kind": "transfer",
                 "status": match s {
                     JobState::Running { .. } => "running",
                     JobState::Done {..} => "done",
                     JobState::Failed {..} => "failed",
                 },
+                "seq": seq,
                 "job": s,
-            })
+            });
+            (seq, s.started_at_ms(), row)
         })
         .collect();
-    Json(summary)
+    drop(jobs);
+    rows.extend(installs.jobs.all().iter().map(|st| {
+        let seq = bus.job_seq(&st.job);
+        let mut row = install::job_list_entry(st);
+        row["seq"] = seq.into();
+        // An install's `started_at` is in seconds.
+        (seq, st.started_at.saturating_mul(1000), row)
+    }));
+    match q.since_seq {
+        Some(after) => {
+            rows.retain(|r| r.0 > after);
+            rows.sort_by_key(|r| r.0);
+        }
+        None => rows.sort_by_key(|r| std::cmp::Reverse(r.1)),
+    }
+    rows.truncate(q.limit.unwrap_or(usize::MAX));
+    // A truncated page's cursor is its own last row, or the rest would be skipped.
+    let cursor = match (q.since_seq, q.limit) {
+        (Some(_), Some(limit)) if rows.len() == limit => rows.last().map_or(last_seq, |r| r.0),
+        _ => last_seq,
+    };
+    let summary: Vec<serde_json::Value> = rows.into_iter().map(|r| r.2).collect();
+    (
+        [("x-ps5upload-last-seq", cursor.to_string())],
+        Json(summary),
+    )
 }
 
 // ─── Bug-report bundling (browser / self-hosted web UI) ──────────────────────
@@ -10625,6 +11043,58 @@ fn bundle_path_ok(p: &str) -> bool {
             .all(|seg| !seg.is_empty() && seg != "." && seg != "..")
 }
 
+/// Zips the bundle's entries, or says why not.
+fn build_bug_bundle(entries: &[BugBundleEntry]) -> Result<Vec<u8>, (StatusCode, String)> {
+    use base64::Engine as _;
+    use std::io::{Cursor, Write};
+
+    // A bundle is diagnostics, not a file transfer. Cap it so a malformed or
+    // hostile caller cannot drive the engine's memory through the roof.
+    const MAX_TOTAL: usize = 64 * 1024 * 1024;
+
+    let failed = |why: &str| (StatusCode::INTERNAL_SERVER_ERROR, why.to_string());
+    let mut buf = Cursor::new(Vec::<u8>::new());
+    let mut total = 0usize;
+    let mut zw = zip::ZipWriter::new(&mut buf);
+    let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated);
+    for e in entries {
+        if !bundle_path_ok(&e.path) {
+            return Err((
+                StatusCode::BAD_REQUEST,
+                format!("unsafe entry path: {}", e.path),
+            ));
+        }
+        let bytes: Vec<u8> = if let Some(t) = &e.text {
+            t.as_bytes().to_vec()
+        } else if let Some(b) = &e.base64 {
+            base64::engine::general_purpose::STANDARD
+                .decode(b)
+                .map_err(|_| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        format!("entry {} has invalid base64", e.path),
+                    )
+                })?
+        } else {
+            Vec::new()
+        };
+        total = total.saturating_add(bytes.len());
+        if total > MAX_TOTAL {
+            return Err((
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "bundle too large".to_string(),
+            ));
+        }
+        zw.start_file(e.path.clone(), opts)
+            .map_err(|_| failed("zip entry failed"))?;
+        zw.write_all(&bytes)
+            .map_err(|_| failed("zip write failed"))?;
+    }
+    zw.finish().map_err(|_| failed("zip finish failed"))?;
+    Ok(buf.into_inner())
+}
+
 /// POST /api/bug-report/bundle — zip client-supplied entries and return the
 /// archive as a download.
 ///
@@ -10639,69 +11109,31 @@ fn bundle_path_ok(p: &str) -> bool {
 /// only has to do the two things a browser cannot: build the zip and hand it
 /// back as an attachment.
 async fn bug_report_bundle_handler(Json(req): Json<BugBundleReq>) -> axum::response::Response {
-    use base64::Engine as _;
-    use std::io::{Cursor, Write};
-
     if req.entries.is_empty() {
         return json_err(StatusCode::BAD_REQUEST, "entries is required").into_response();
     }
-    // A bundle is diagnostics, not a file transfer. Cap it so a malformed or
-    // hostile caller cannot drive the engine's memory through the roof.
-    const MAX_TOTAL: usize = 64 * 1024 * 1024;
-
-    let mut buf = Cursor::new(Vec::<u8>::new());
-    let mut total = 0usize;
-    {
-        let mut zw = zip::ZipWriter::new(&mut buf);
-        let opts: zip::write::SimpleFileOptions = zip::write::SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Deflated);
-        for e in &req.entries {
-            if !bundle_path_ok(&e.path) {
-                return json_err(
-                    StatusCode::BAD_REQUEST,
-                    &format!("unsafe entry path: {}", e.path),
-                )
-                .into_response();
-            }
-            let bytes: Vec<u8> = if let Some(t) = &e.text {
-                t.as_bytes().to_vec()
-            } else if let Some(b) = &e.base64 {
-                match base64::engine::general_purpose::STANDARD.decode(b) {
-                    Ok(v) => v,
-                    Err(_) => {
-                        return json_err(
-                            StatusCode::BAD_REQUEST,
-                            format!("entry {} has invalid base64", e.path),
-                        )
-                        .into_response()
-                    }
-                }
-            } else {
-                Vec::new()
-            };
-            total = total.saturating_add(bytes.len());
-            if total > MAX_TOTAL {
-                return json_err(StatusCode::PAYLOAD_TOO_LARGE, "bundle too large").into_response();
-            }
-            if zw.start_file(e.path.clone(), opts).is_err() {
-                return json_err(StatusCode::INTERNAL_SERVER_ERROR, "zip entry failed")
-                    .into_response();
-            }
-            if zw.write_all(&bytes).is_err() {
-                return json_err(StatusCode::INTERNAL_SERVER_ERROR, "zip write failed")
-                    .into_response();
-            }
+    let filename = req.filename;
+    let entries = req.entries;
+    let count = entries.len();
+    // Deflating up to 64 MiB takes a while: not on an async worker, which serves every console.
+    let built = match tokio::task::spawn_blocking(move || build_bug_bundle(&entries)).await {
+        Ok(built) => built,
+        Err(e) => {
+            return json_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("bundle task failed: {e}"),
+            )
+            .into_response()
         }
-        if zw.finish().is_err() {
-            return json_err(StatusCode::INTERNAL_SERVER_ERROR, "zip finish failed")
-                .into_response();
-        }
-    }
+    };
+    let buf = match built {
+        Ok(buf) => buf,
+        Err((status, why)) => return json_err(status, why).into_response(),
+    };
 
     // Keep the leaf name simple: it lands in the user's Downloads folder and is
     // echoed into a Content-Disposition header.
-    let name = req
-        .filename
+    let name = filename
         .as_deref()
         .filter(|n| {
             !n.is_empty()
@@ -10711,10 +11143,10 @@ async fn bug_report_bundle_handler(Json(req): Json<BugBundleReq>) -> axum::respo
         })
         .unwrap_or("ps5upload-bugreport.zip");
 
-    let body = buf.into_inner();
+    let body = buf;
     crate::log_info!(
         "bug-report bundle: {} entries, {} bytes, name={}",
-        req.entries.len(),
+        count,
         body.len(),
         name
     );
@@ -10814,6 +11246,28 @@ fn trigger_shutdown() {
     SHUTDOWN.notify_one();
 }
 
+/// How long the drain may take once a stop was asked for. Under Docker's 10 seconds before SIGKILL.
+const DRAIN_CEILING: std::time::Duration = std::time::Duration::from_secs(8);
+
+/// After a stop was asked for: a response that does not finish in time does not get to keep the
+/// process, and the journal is flushed before it goes. Not for an engine inside a phone app, whose
+/// process is the app.
+fn spawn_drain_ceiling() {
+    std::thread::spawn(|| {
+        std::thread::sleep(DRAIN_CEILING);
+        stderr_quiet("[ps5upload-engine] drain took too long — exiting");
+        ps5upload_core::events::emit(
+            ps5upload_core::events::Cat::System,
+            ps5upload_core::events::Level::Info,
+            "engine_stop",
+            None,
+            "engine stopped with requests still open",
+        );
+        event_journal::flush_now();
+        std::process::exit(0);
+    });
+}
+
 /// Print to stderr without panicking. `eprintln!` panics when stderr is a closed pipe, which is
 /// exactly the state a dead desktop parent leaves behind (it was reading our stderr): the
 /// parent-watch thread died on its first message and the engine lived on, holding its port.
@@ -10881,8 +11335,9 @@ fn spawn_parent_watcher() {
 /// (`serve_in_process`); the two differ only in these flags.
 pub struct EngineConfig {
     /// Socket to bind. Desktop: `"0.0.0.0:19113"` (so the PS5 can reach
-    /// `/pkg-host/*` for fakepkg installs). Mobile in-process:
-    /// `"127.0.0.1:19113"` (loopback only; the renderer hits the same).
+    /// `/pkg-host/*` for fakepkg installs). Mobile in-process: the same
+    /// (`0.0.0.0:19113`, so the PS5 can fetch packages from the phone); the
+    /// renderer uses loopback, and the guard keeps `/api/*` local.
     pub bind: String,
     /// Default PS5 transfer address. Per-request `addr` params override
     /// it, so this is only a fallback.
@@ -10905,10 +11360,72 @@ pub struct EngineConfig {
 /// graceful shutdown. Behavior is identical to the former `main`; the
 /// `EngineConfig` flags select desktop-sidecar vs. in-process behavior.
 async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
+    // The port first: everything below touches the data directory and the journal, and an engine
+    // that finds a sibling already serving must leave without having touched either.
+    // Bind `0.0.0.0` so the PS5 can fetch `/pkg-host/*` for fakepkg
+    // installs. The loopback-guard middleware (above) gates every
+    // other route to peers whose source IP is on the loopback range,
+    // preserving the pre-2.2.52 "API is local-only" invariant for
+    // everything that isn't the deliberately PS5-facing pkg-host
+    // route. Pre-2.2.52 we bound `127.0.0.1`, which kept the API
+    // safe from the LAN by accident — but also broke pkg install
+    // because the PS5 couldn't reach the same listener it had to
+    // download from.
+    let bind = cfg.bind.clone();
+    let listener = match tokio::net::TcpListener::bind(&bind).await {
+        Ok(l) => l,
+        Err(e) => {
+            // Mobile / in-process: never exit the process (that would
+            // kill the whole app) — surface the bind failure as an Err
+            // for the caller to log/retry.
+            if !cfg.exit_on_error {
+                return Err(anyhow::anyhow!(
+                    "in-process engine failed to bind {bind}: {e}"
+                ));
+            }
+            // Port already bound. Don't panic — that's both noisy in
+            // the user's engine.log and surfaces to the renderer as
+            // "engine request failed" with no useful diagnostic.
+            // Probe whether the port answers a TCP connect at all
+            // (cheap, no extra HTTP-client dep). If it does, an
+            // engine — ours or otherwise — is up and the Tauri
+            // shell's probe-then-spawn flow on the next start() will
+            // pick the right action (use it / surface an error).
+            // Exit 0 in that case. If even the connect fails, the
+            // port's in some half-bound state (e.g. TIME_WAIT or
+            // permissions) — exit non-zero with a clear log.
+            // Probe via loopback rather than `bind` (which is `0.0.0.0`
+            // and not a routable connect target). If something is bound
+            // on this port at all, the loopback form will accept.
+            let probe_addr = bind.replacen("0.0.0.0", "127.0.0.1", 1);
+            let connectable = tokio::time::timeout(
+                std::time::Duration::from_millis(500),
+                tokio::net::TcpStream::connect(&probe_addr),
+            )
+            .await
+            .ok()
+            .and_then(|r| r.ok())
+            .is_some();
+            if connectable {
+                stderr_quiet(&format!(
+                    "[ps5upload-engine] {bind} already bound by another \
+                     process (likely a sibling engine); exiting 0",
+                ));
+                return Ok(());
+            }
+            stderr_quiet(&format!(
+                "[ps5upload-engine] failed to bind {bind}: {e} \
+                 (port held by an unresponsive process — kill it or \
+                 override with PS5UPLOAD_ENGINE_PORT)",
+            ));
+            std::process::exit(2);
+        }
+    };
     // Convert (and the package viewer) read games on saved servers and the console in place.
     convert_source::register();
     // Every management call (hardware, filesystem, apps, ...) goes through one transport
     // seam in the core crate; this registers the AVA1 implementation over the shared pool.
+    host_guard::log_settings();
     // A console it cannot serve is a `helper_not_ava1` error, never another protocol.
     ps5upload_ava1::mgmt::install();
     // Every new session says who this engine is, whatever opened it (Devices showed a phone
@@ -10954,6 +11471,8 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
     // (reconcile per-parent progress, transfer retries, etc.) without
     // having to install a separate pipe for core diagnostics.
     ps5upload_core::log::set_sink(|msg| engine_log::record("info", msg.to_string()));
+    // core_debug! lines (written only while "Detailed logs" is on) land at debug.
+    ps5upload_core::log::set_debug_sink(|msg| engine_log::record("debug", msg.to_string()));
     // The bug-report journal: every crate's events (ps5upload_core::events) land on disk here.
     event_journal::install();
     ps5upload_core::events::emit(
@@ -10988,6 +11507,9 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
     // Install sessions live in their own state (served by pkg_install::api_router below); the helper
     // log mirror also reads it, to stay off a console while an install runs.
     let pkg_state = std::sync::Arc::new(pkg_install::PkgInstallState::restored());
+    // Automatic save backups wait for an install too.
+    save_backup::watch_installs(pkg_state.clone());
+    mesh_drive::watch_installs(pkg_state.clone());
     // Copies each connected console's helper log into the event journal.
     {
         let jobs = state.jobs.clone();
@@ -11001,8 +11523,126 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
         }));
     }
 
+    let state_jobs_for_presence = state.jobs.clone();
+    let (app, mcp_state) = build_app_and_mcp(
+        state,
+        pkg_state,
+        guard_cfg,
+        host_guard::base_path(),
+        queue_api::QueueState::from_env(),
+    );
+    // Mirror to stdout (terminal users) AND the engine.log ring
+    // (post-mortem diagnosis from the desktop shell once the
+    // terminal is closed). Printed only once the bind has succeeded:
+    // it used to come first, so a log showing it proved nothing about
+    // whether the engine was actually listening.
+    println!("[ps5upload-engine] listening on http://{bind}  (ps5={ps5_addr})");
+    crate::log_info!("listening on http://{bind}  (ps5={ps5_addr})");
+    // Fan boosts end on time and are undone even if the app closed in between.
+    fan_boost::spawn_sweeper();
+    // Automatic save backups run here, not in a window: they carry on with no app open.
+    save_backup::spawn(
+        &bind,
+        &std::env::var("PS5UPLOAD_BASE_URL").unwrap_or_default(),
+    );
+    // Save backups to a network share: on an interval, or when a game is closed (#592).
+    save_backup_server::spawn();
+    // Mesh Drive folders are kept in sync here too, app open or not.
+    mesh_drive::spawn();
+    pkg_install::spawn_stale_upload_sweep();
+    // What the other devices see of this engine, with no window open to say so.
+    mesh_api::spawn_presence(state_jobs_for_presence);
+    // Server copies an earlier run left behind (an extract that failed, then the app closed)
+    // are removed here: nothing else knows them after a restart.
+    tokio::task::spawn_blocking(remote::fetch::sweep_stale_copies);
+    tokio::task::spawn_blocking(settings_backup::seal_old_backups);
+    // Graceful shutdown: when the parent-watcher fires (stdin EOF), the
+    // SHUTDOWN Notify wakes this future, axum stops
+    // accepting new connections, drains in-flight ones, then returns.
+    // `spawn_drain_ceiling` is the hard ceiling: an open `/api/events`, a
+    // browser upload or a `/pkg-host` read would otherwise hold the drain
+    // until Docker's SIGKILL, and the stop line below would never be written.
+    // `into_make_service_with_connect_info::<SocketAddr>` is what makes
+    // the `ConnectInfo<SocketAddr>` extractor work in the loopback-guard
+    // middleware. Without this, axum hands handlers a generic ConnectInfo
+    // and the middleware would have to fall back to header-based source
+    // detection (less reliable, easier to spoof from a hostile LAN peer).
+    let served = if cfg.exit_on_error {
+        axum::serve(
+            no_delay(listener),
+            app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            shutdown_signal().await;
+            // An open MCP subscription would hold the drain up for as long as its client stays.
+            mcp_state.begin_shutdown();
+            spawn_drain_ceiling();
+        })
+        .await
+    } else {
+        serve_rebindable(&bind, listener, app, async move {
+            shutdown_signal().await;
+            mcp_state.begin_shutdown();
+        })
+        .await
+    };
+    ps5upload_core::events::emit(
+        ps5upload_core::events::Cat::System,
+        ps5upload_core::events::Level::Info,
+        "engine_stop",
+        None,
+        "engine stopped",
+    );
+    event_journal::flush_now();
+    if let Err(e) = served {
+        stderr_quiet(&format!("[ps5upload-engine] axum serve terminated: {e}"));
+        if cfg.exit_on_error {
+            std::process::exit(3);
+        }
+        return Err(anyhow::anyhow!("axum serve terminated: {e}"));
+    }
+    Ok(())
+}
+
+/// The whole HTTP surface: every route and layer, nothing started. `base` is the URL prefix
+/// (`PS5UPLOAD_BASE_URL`), empty for the root.
+#[cfg(test)]
+fn build_app(
+    state: AppState,
+    pkg_state: pkg_install::PkgInstallStateHandle,
+    guard_cfg: LoopbackGuardConfig,
+    base: &str,
+) -> Router {
+    build_app_and_mcp(
+        state,
+        pkg_state,
+        guard_cfg,
+        base,
+        queue_api::QueueState::from_env(),
+    )
+    .0
+}
+
+/// [`build_app`], and the MCP server in it: an open subscription must be told when the engine stops.
+fn build_app_and_mcp(
+    state: AppState,
+    pkg_state: pkg_install::PkgInstallStateHandle,
+    guard_cfg: LoopbackGuardConfig,
+    base: &str,
+    queue: queue_api::QueueState,
+) -> (Router, mcp::McpState) {
+    let mcp_events = state.events_tx.clone();
+    let ps5_addr = state.default_ps5_addr.clone();
+    // Job snapshots onto the numbered feed of `GET /api/events`.
+    event_bus::forward_jobs(&state.events_tx);
+    let op_registry = std::sync::Arc::new(ops::OpRegistry::default());
+    let ops_router = ops::router(op_registry.clone(), state.clone(), pkg_state.clone());
     let activity_installs = pkg_state.clone();
+    let jobs_installs = pkg_state.clone();
     let helper_stop_installs = pkg_state.clone();
+    let eject_installs = pkg_state.clone();
+    let browser_payload_installs = pkg_state.clone();
+    let health_fix_installs = pkg_state.clone();
     let cleanup_installs = pkg_state.clone();
     let app = Router::new()
         .route("/", get(ui_handler))
@@ -11017,6 +11657,7 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
         .route("/api/activity/label", post(activity::label_handler))
         .route("/api/ps5/status", get(ps5_status))
         .route("/api/ps5/port-check", get(ps5_port_check))
+        .route("/api/ps5/toast", post(ps5_toast))
         .route("/api/ps5/readiness", get(ps5_readiness))
         .route(
             ps5upload_core::mgmt_proxy::ROUTE,
@@ -11028,7 +11669,12 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
         .route("/api/speed-test/prepare", post(speed_test_prepare_handler))
         .route("/api/speed-test/cleanup", post(speed_test_cleanup_handler))
         .route("/api/ps5/health/junk", get(health_junk_handler))
-        .route("/api/ps5/health/fix", post(health_fix_handler))
+        .route(
+            "/api/ps5/health/fix",
+            post(move |Json(req): Json<HealthFixReq>| {
+                health_fix_handler(health_fix_installs.clone(), req)
+            }),
+        )
         .route("/api/ps5/cleanup", post(ps5_cleanup))
         .route("/api/ps5/volumes", get(ps5_volumes))
         .route("/api/ps5/pkg/scan-external", get(ps5_pkg_scan_external))
@@ -11056,6 +11702,11 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
             get(console_cleanup_api::apply_status),
         )
         .route("/api/ps5/cleanup/cancel", post(console_cleanup_api::cancel))
+        .route("/api/ps5/console-tasks", get(console_tasks_api::list))
+        .route(
+            "/api/ps5/console-tasks/cancel",
+            post(console_tasks_api::cancel),
+        )
         .route("/api/ps5/console-shares", get(console_shares_api::list))
         .route(
             "/api/ps5/console-shares/save",
@@ -11116,10 +11767,6 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
         .route(
             "/api/fpkg/extract/cleanup",
             post(fpkg_api::fpkg_extract_cleanup_handler),
-        )
-        .route(
-            "/api/ffpfsc/compress",
-            post(fpkg_api::ffpfsc_compress_handler),
         )
         .route("/api/exfat/build", post(fpkg_api::exfat_build_handler))
         .route("/api/folder/build", post(fpkg_api::folder_build_handler))
@@ -11182,6 +11829,11 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
         .route("/api/save-backup/ps2", get(ps2_saves::get_ps2))
         .route("/api/save-backup/restore", post(save_backup::post_restore))
         .route(
+            "/api/save-backup/restore-file",
+            post(save_backup::post_restore_file),
+        )
+        .route("/api/save-backup/note", get(save_backup::get_note))
+        .route(
             "/api/save-backup/snapshot",
             post(save_backup::post_snapshot),
         )
@@ -11190,11 +11842,10 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
             post(save_backup::post_import_ps4),
         )
         .route("/api/save-backup/share", post(save_copy::post_share))
-        // A shared save's zip comes as the body: saves run from a few KB to a few hundred MB.
+        // A shared save's zip comes as the body, written to disk as it arrives (its own limit).
         .route(
             "/api/save-backup/use-shared",
-            post(save_copy::post_use_shared)
-                .layer(axum::extract::DefaultBodyLimit::max(1024 * 1024 * 1024)),
+            post(save_copy::post_use_shared),
         )
         // Another user's save of the same game on the same console (#612).
         .route("/api/save-backup/copy", post(save_copy::post_copy))
@@ -11208,9 +11859,24 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
             "/api/shared/{name}",
             get(shared_state::get_doc).put(shared_state::put_doc),
         )
+        .route("/api/shared/{name}/schema", get(shared_state::schema))
+        // The console list and settings with names and types, every platform.
+        .route(
+            "/api/consoles",
+            get(consoles_api::list).put(consoles_api::put),
+        )
+        .route(
+            "/api/consoles/document",
+            get(consoles_api::get_document).put(consoles_api::put_document),
+        )
+        .route(
+            "/api/settings",
+            get(settings_api::get).patch(settings_api::patch),
+        )
         .route("/api/games/{id}", get(games_api::get_game))
         .route("/api/games/{id}/refresh", post(games_api::refresh))
         .route("/api/console-snapshots/keep", post(games_api::keep))
+        .route("/api/console-snapshots/forget", post(games_api::forget))
         .route(
             "/api/collection/trash/preview",
             post(collection_tidy_api::post_trash_preview),
@@ -11222,6 +11888,18 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
         .route(
             "/api/collection/organize/plan",
             post(collection_tidy_api::post_organize_plan),
+        )
+        .route(
+            "/api/collection/organize/plan/start",
+            post(collection_tidy_api::post_organize_plan_start),
+        )
+        .route(
+            "/api/collection/organize/plan/status",
+            get(collection_tidy_api::get_organize_plan_status),
+        )
+        .route(
+            "/api/collection/organize/plan/cancel",
+            post(collection_tidy_api::post_organize_plan_cancel),
         )
         .route(
             "/api/collection/organize/apply",
@@ -11270,7 +11948,10 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
         .route("/api/ps5/fs/op-cancel", post(ps5_fs_op_cancel))
         .route("/api/ps5/fs/mount", post(ps5_fs_mount))
         .route("/api/ps5/fs/unmount", post(ps5_fs_unmount))
-        .route("/api/ps5/usb/eject", post(ps5_usb_eject))
+        .route(
+            "/api/ps5/usb/eject",
+            post(move |Json(req): Json<UsbEjectReq>| ps5_usb_eject(eject_installs.clone(), req)),
+        )
         .route("/api/ps5/saves/open", post(ps5_save_open))
         .route("/api/ps5/saves/close", post(ps5_save_close))
         .route("/api/ps5/app/launch", post(ps5_app_launch))
@@ -11415,19 +12096,78 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
         // Remote Play stream spike (rp_stream_api).
         .route("/api/ps5/rp/ws", get(rp_stream_api::ws))
         .route("/api/ps5/rp/session", get(rp_stream_api::current))
+        // Remote Play with no app page (rp_control.rs), this computer only.
+        .route("/api/ps5/rp/start", post(rp_stream_api::control::start))
+        .route("/api/ps5/rp/stop", post(rp_stream_api::control::stop))
+        .route(
+            "/api/ps5/rp/settings",
+            post(rp_stream_api::control::settings),
+        )
+        .route(
+            "/api/ps5/rp/passcode",
+            post(rp_stream_api::control::passcode),
+        )
+        .route(
+            "/api/ps5/rp/keyboard",
+            post(rp_stream_api::control::keyboard),
+        )
+        .route("/api/ps5/rp/mic", post(rp_stream_api::control::mic))
         .route("/api/ps5/rp/replay", get(rp_stream_api::replay))
         // Remote Play for a local script or agent (#615), this computer only.
         .route("/api/ps5/rp/frame", get(rp_stream_api::automation::frame))
         .route("/api/ps5/rp/input", post(rp_stream_api::automation::input))
         .route(
+            "/api/ps5/rp/picture",
+            post(rp_stream_api::automation::picture),
+        )
+        .route(
             "/api/ps5/rp/input/release",
             post(rp_stream_api::automation::release),
         )
+        // The live feed for OBS (#635), this computer only.
+        .route(
+            "/api/ps5/rp/live.ts",
+            get(rp_stream_api::live_feed::live_ts),
+        )
+        .route(
+            "/api/ps5/rp/live/status",
+            get(rp_stream_api::live_feed::status),
+        )
+        // Go live (#635): the Remote Play stream to YouTube, Twitch, Kick, Facebook, custom.
+        .route("/api/stream/status", get(rp_golive::status))
+        .route("/api/stream/start", post(rp_golive::start))
+        .route("/api/stream/stop", post(rp_golive::stop))
+        .route("/api/stream/destinations", post(rp_golive::add_destination))
+        .route(
+            "/api/stream/destinations/{id}",
+            post(rp_golive::update_destination).delete(rp_golive::remove_destination),
+        )
+        .route(
+            "/api/stream/tools/ffmpeg/install",
+            post(rp_golive::install_ffmpeg),
+        )
         .route("/api/ps5/vinput/caps", get(vinput_api::caps))
         .route("/api/ps5/vinput/ws", get(vinput_api::ws))
+        .route(
+            "/api/ps5/vinput",
+            get(vinput_api::http_get).put(vinput_api::http_put),
+        )
+        .route("/api/ps5/vinput/report", post(vinput_api::http_report))
         .route("/rp-player", get(rp_stream_api::player))
         .route("/pad", get(pad_link::page))
         .route("/api/pad/ws", get(pad_link::ws))
+        // Play Together (#641): guests as Players 2-4 (join.rs).
+        .route("/join", get(join::page))
+        .route("/api/join/ws", get(join::ws))
+        .route("/api/join/relay", get(join::relay))
+        .route("/api/join", get(join::get_state))
+        .route("/api/join/open", post(join::open))
+        .route("/api/join/close", post(join::close))
+        .route("/api/join/invite", post(join::invite))
+        .route("/api/join/decide", post(join::decide))
+        .route("/api/join/kick", post(join::kick))
+        .route("/api/join/playing", post(join::playing))
+        .route("/api/join/settings", post(join::set_settings))
         .route(
             "/api/ps5/rp/pad-link",
             get(pad_link::get_status).post(pad_link::set_open),
@@ -11504,7 +12244,9 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
             "/api/remote/connections/{id}/test",
             post(remote::api::test_saved_handler),
         )
-        .merge(browser_payload::router())
+        .merge(browser_payload::router(browser_payload_installs))
+        .merge(payloads_api::router())
+        .merge(console_tools_api::router())
         .route("/api/remote/test", post(remote::api::test_form_handler))
         .route("/api/remote/list", post(remote::api::list_dir_handler))
         .route(
@@ -11634,28 +12376,55 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
         )
         .route("/api/version", get(engine_version))
         .route("/api/engine/update", get(engine_update::check))
-        .route("/api/jobs", get(list_jobs))
+        .route(
+            "/api/jobs",
+            get({
+                let installs = jobs_installs.clone();
+                move |st: State<AppState>, q: Query<ListJobsQuery>| {
+                    list_jobs(st, installs.clone(), q)
+                }
+            }),
+        )
         .route("/api/jobs/summaries", get(telemetry::summaries_handler))
         .route("/api/jobs/{id}/summary", get(telemetry::summary_handler))
         .route("/api/metrics", get(telemetry::metrics_handler))
         .route("/api/bug-report/bundle", post(bug_report_bundle_handler))
-        .route("/api/jobs/{id}", get(get_job))
+        .route(
+            "/api/jobs/{id}",
+            get({
+                let installs = jobs_installs.clone();
+                move |st: State<AppState>, id: Path<String>| get_job(st, installs.clone(), id)
+            }),
+        )
         .route("/api/jobs/{id}/files", get(get_job_files))
-        .route("/api/jobs/{id}/cancel", post(cancel_job))
+        .route(
+            "/api/jobs/{id}/cancel",
+            post({
+                let installs = jobs_installs.clone();
+                move |id: Path<String>| cancel_job(installs.clone(), id)
+            }),
+        )
         .route("/api/jobs/{id}/pause", post(workshop_api::pause_job))
         .route("/api/jobs/{id}/resume", post(workshop_api::resume_job))
+        .route("/api/workshop/jobs", get(workshop_api::get_jobs))
         .route(
             "/api/workshop/settings",
             get(workshop_api::get_settings).post(workshop_api::set_settings),
         )
-        .route("/api/events", get(events_stream))
+        .route("/api/events", get(event_bus::events_handler))
         .route("/api/engine-logs", get(engine_logs_tail))
+        .route(
+            "/api/diag/log-level",
+            get(diag_api::log_level_get).post(diag_api::log_level_set),
+        )
+        .route("/api/diag/features", get(diag_api::features))
         .route("/api/event-journal", get(event_journal::events_handler))
         .route(
             "/api/ps5/helper-log-ftp",
             get(helper_mirror::ftp_log_handler),
         )
         .route("/api/debug/crash", get(debug_crash))
+        .route("/api/openapi.json", get(openapi::serve))
         .with_state(state);
 
     // All browser APIs must be merged before nesting under the URL prefix.
@@ -11664,33 +12433,46 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
         .merge(pkg_install::api_router(pkg_state.clone()))
         .merge(remote_download::router(std::sync::Arc::new(
             remote_download::DownloadRegistry::default(),
-        )));
+        )))
+        .merge(queue_api::router(queue.clone()))
+        .merge(ops_router);
+
+    // Queue items call this same API in-process, as the MCP server does.
+    queue.attach(
+        app.clone()
+            .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024)),
+        pkg_state.clone(),
+    );
+
+    // The MCP server drives this same API in-process: it holds a clone of the router as it stands
+    // here, without /mcp itself or the reverse-proxy prefix. The body limit and the request log are
+    // what the outer layers below give an HTTP client.
+    let mcp_state = mcp::McpState::new(
+        app.clone()
+            .layer(axum::extract::DefaultBodyLimit::max(64 * 1024 * 1024))
+            .layer(middleware::from_fn(log_requests)),
+        mcp_events,
+        ps5_addr.clone(),
+    );
+    let app = app.merge(mcp::router(mcp_state.clone()));
 
     // SPA fallback: serve the embedded React bundle for every path that doesn't
     // match an explicit /api/* route above.  Only compiled when the `webui`
     // feature is on (Docker / self-hosted image); the regular build keeps the
-    // simple `GET /` dashboard handler above.
+    // simple `GET /` dashboard handler above. An unknown /api/* path is a JSON
+    // 404 in every build.
     #[cfg(feature = "webui")]
     let app = app.fallback(webui::spa_fallback);
+    #[cfg(not(feature = "webui"))]
+    let app = app.fallback(api_errors::fallback);
 
-    let app = if let Ok(base) = std::env::var("PS5UPLOAD_BASE_URL") {
-        let base = base.trim_end_matches('/');
-        if !base.is_empty() {
-            // Format Base URL
-            let base = if !base.starts_with('/') {
-                format!("/{}", base)
-            } else {
-                base.to_string()
-            };
-            // Create Axum Router using the base URL as a prefix for all routes.
-            axum::Router::new()
-                .nest(&base, app)
-                .route(&format!("{}/", base), get(ui_handler))
-        } else {
-            app
-        }
-    } else {
+    let app = if base.is_empty() {
         app
+    } else {
+        // Create Axum Router using the base URL as a prefix for all routes.
+        axum::Router::new()
+            .nest(base, app)
+            .route(&format!("{base}/"), get(ui_handler))
     };
 
     let cors = CorsLayer::new()
@@ -11708,16 +12490,12 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
                 .is_some_and(|value| browser_origin_allows(value, host))
         }))
         .allow_methods(Any)
-        .allow_headers(Any);
+        .allow_headers(Any)
+        // The renderer's JSON POST pollers would otherwise send a preflight before every request.
+        .max_age(std::time::Duration::from_secs(600));
 
     let app = app
         .merge(pkg_install::host_router(pkg_state))
-        // Tauri's renderer performs a few direct fetches to the sidecar for
-        // liveness, job polling and streamed resources. Emit CORS headers only
-        // for origins accepted by the same narrow trust rule as the guard
-        // below. The guard sits outside this layer, so foreign origins are
-        // rejected before CORS can answer either a simple request or preflight.
-        .layer(cors)
         // Explicit body-size cap. Axum's default DefaultBodyLimit is
         // 2 MiB, which is borderline for a TransferFileListReq carrying
         // tens of thousands of file paths and could silently change
@@ -11731,6 +12509,20 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
         // Request trace — inside the loopback guard (so we don't log rejected
         // LAN probes), wrapping the handlers so it times the full request.
         .layer(middleware::from_fn(log_requests))
+        // `Prefer: respond-async`: outside the log, so the log shows each route's real answer;
+        // inside CORS and the guards, so its 202 is an ordinary answer to an allowed request.
+        .layer(middleware::from_fn_with_state(
+            op_registry,
+            ops::respond_async,
+        ))
+        // Tauri's renderer performs a few direct fetches to the sidecar for
+        // liveness, job polling and streamed resources. Emit CORS headers only
+        // for origins accepted by the same narrow trust rule as the guard
+        // below. The guard sits outside this layer, so foreign origins are
+        // rejected before CORS can answer either a simple request or preflight.
+        .layer(cors)
+        .layer(middleware::from_fn(web_pages::api_no_store))
+        .layer(middleware::from_fn(web_pages::finish_pages))
         .layer(middleware::from_fn(browser_origin_guard))
         // Loopback-guard middleware MUST be applied last so it ends
         // up the OUTERMOST layer — axum wraps each `.layer()` around
@@ -11743,121 +12535,83 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
         // guard outermost, an off-loopback peer hitting any
         // non-`/pkg-host/*` route is rejected immediately, before
         // body-limit / handler.
-        .layer(middleware::from_fn_with_state(guard_cfg, loopback_guard));
+        .layer(middleware::from_fn_with_state(guard_cfg, loopback_guard))
+        // Outside even the guards: their refusals are errors in the API's shape too. It also
+        // works out the path without the prefix, which the guards above match on.
+        .layer(middleware::from_fn_with_state(
+            std::sync::Arc::<str>::from(base),
+            api_errors::api_surface,
+        ))
+        // Outside the allowlist it feeds: behind a trusted proxy, the address that counts is the
+        // client's.
+        .layer(middleware::from_fn(host_guard::apply_trusted_proxy));
+    (app, mcp_state)
+}
 
-    // Bind `0.0.0.0` so the PS5 can fetch `/pkg-host/*` for fakepkg
-    // installs. The loopback-guard middleware (above) gates every
-    // other route to peers whose source IP is on the loopback range,
-    // preserving the pre-2.2.52 "API is local-only" invariant for
-    // everything that isn't the deliberately PS5-facing pkg-host
-    // route. Pre-2.2.52 we bound `127.0.0.1`, which kept the API
-    // safe from the LAN by accident — but also broke pkg install
-    // because the PS5 couldn't reach the same listener it had to
-    // download from.
-    let bind = cfg.bind.clone();
-    let listener = match tokio::net::TcpListener::bind(&bind).await {
-        Ok(l) => l,
-        Err(e) => {
-            // Mobile / in-process: never exit the process (that would
-            // kill the whole app) — surface the bind failure as an Err
-            // for the caller to log/retry.
-            if !cfg.exit_on_error {
-                return Err(anyhow::anyhow!(
-                    "in-process engine failed to bind {bind}: {e}"
-                ));
+fn rebind_signal() -> &'static tokio::sync::Notify {
+    static SIGNAL: std::sync::OnceLock<tokio::sync::Notify> = std::sync::OnceLock::new();
+    SIGNAL.get_or_init(tokio::sync::Notify::new)
+}
+
+/// Phones: drop the listening socket and bind a new one, leaving the engine and its running
+/// requests alone. iOS can reclaim a suspended app's listening socket, after which nothing
+/// connects and `accept` only fails, while the process itself is fine.
+pub fn rebind_in_process() {
+    rebind_signal().notify_one();
+}
+
+/// In-process serving: as `axum::serve`, plus `rebind_in_process`. Connections already open finish
+/// on the old server, which has dropped its listener by then.
+async fn serve_rebindable<F>(
+    bind: &str,
+    first: tokio::net::TcpListener,
+    app: Router,
+    shutdown: F,
+) -> std::io::Result<()>
+where
+    F: std::future::Future<Output = ()> + Send + 'static,
+{
+    let (stop_all, _) = tokio::sync::watch::channel(false);
+    let stop = stop_all.clone();
+    tokio::spawn(async move {
+        shutdown.await;
+        let _ = stop.send(true);
+    });
+    let mut listener = first;
+    loop {
+        let (stop_this, stop_this_rx) = tokio::sync::oneshot::channel::<()>();
+        let mut all = stop_all.subscribe();
+        let serve = axum::serve(
+            no_delay(listener),
+            app.clone()
+                .into_make_service_with_connect_info::<std::net::SocketAddr>(),
+        )
+        .with_graceful_shutdown(async move {
+            tokio::select! {
+                _ = stop_this_rx => {}
+                _ = all.wait_for(|stopped| *stopped) => {}
             }
-            // Port already bound. Don't panic — that's both noisy in
-            // the user's engine.log and surfaces to the renderer as
-            // "engine request failed" with no useful diagnostic.
-            // Probe whether the port answers a TCP connect at all
-            // (cheap, no extra HTTP-client dep). If it does, an
-            // engine — ours or otherwise — is up and the Tauri
-            // shell's probe-then-spawn flow on the next start() will
-            // pick the right action (use it / surface an error).
-            // Exit 0 in that case. If even the connect fails, the
-            // port's in some half-bound state (e.g. TIME_WAIT or
-            // permissions) — exit non-zero with a clear log.
-            // Probe via loopback rather than `bind` (which is `0.0.0.0`
-            // and not a routable connect target). If something is bound
-            // on this port at all, the loopback form will accept.
-            let probe_addr = bind.replacen("0.0.0.0", "127.0.0.1", 1);
-            let connectable = tokio::time::timeout(
-                std::time::Duration::from_millis(500),
-                tokio::net::TcpStream::connect(&probe_addr),
-            )
-            .await
-            .ok()
-            .and_then(|r| r.ok())
-            .is_some();
-            if connectable {
-                eprintln!(
-                    "[ps5upload-engine] {bind} already bound by another \
-                     process (likely a sibling engine); exiting 0",
-                );
-                return Ok(());
+        });
+        let mut serving = tokio::spawn(async move { serve.await });
+        tokio::select! {
+            ended = &mut serving => {
+                return ended.unwrap_or_else(|e| Err(std::io::Error::other(e)));
             }
-            eprintln!(
-                "[ps5upload-engine] failed to bind {bind}: {e} \
-                 (port held by an unresponsive process — kill it or \
-                 override with PS5UPLOAD_ENGINE_PORT)",
-            );
-            std::process::exit(2);
+            _ = rebind_signal().notified() => {
+                // The old server keeps draining on its own task.
+                let _ = stop_this.send(());
+                listener = loop {
+                    match tokio::net::TcpListener::bind(bind).await {
+                        Ok(l) => break l,
+                        Err(e) => {
+                            eprintln!("[ps5upload-engine] listening again on {bind}: {e}");
+                            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                        }
+                    }
+                };
+            }
         }
-    };
-    // Mirror to stdout (terminal users) AND the engine.log ring
-    // (post-mortem diagnosis from the desktop shell once the
-    // terminal is closed). Printed only once the bind has succeeded:
-    // it used to come first, so a log showing it proved nothing about
-    // whether the engine was actually listening.
-    println!("[ps5upload-engine] listening on http://{bind}  (ps5={ps5_addr})");
-    crate::log_info!("listening on http://{bind}  (ps5={ps5_addr})");
-    // Fan boosts end on time and are undone even if the app closed in between.
-    fan_boost::spawn_sweeper();
-    // Automatic save backups run here, not in a window: they carry on with no app open.
-    save_backup::spawn(
-        &bind,
-        &std::env::var("PS5UPLOAD_BASE_URL").unwrap_or_default(),
-    );
-    // Save backups to a network share: on an interval, or when a game is closed (#592).
-    save_backup_server::spawn();
-    // Mesh Drive folders are kept in sync here too, app open or not.
-    mesh_drive::spawn();
-    // Server copies an earlier run left behind (an extract that failed, then the app closed)
-    // are removed here: nothing else knows them after a restart.
-    tokio::task::spawn_blocking(remote::fetch::sweep_stale_copies);
-    // Graceful shutdown: when the parent-watcher fires (stdin EOF), the
-    // SHUTDOWN Notify wakes this future, axum stops
-    // accepting new connections, drains in-flight ones, then returns.
-    // The 10-second watchdog in spawn_parent_watcher is the hard ceiling
-    // — if a stuck request blocks the drain (rare; only for pkg-host
-    // range reads on a dying PS5), we fall through to process::exit(0).
-    // `into_make_service_with_connect_info::<SocketAddr>` is what makes
-    // the `ConnectInfo<SocketAddr>` extractor work in the loopback-guard
-    // middleware. Without this, axum hands handlers a generic ConnectInfo
-    // and the middleware would have to fall back to header-based source
-    // detection (less reliable, easier to spoof from a hostile LAN peer).
-    let served = axum::serve(
-        no_delay(listener),
-        app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
-    )
-    .with_graceful_shutdown(shutdown_signal())
-    .await;
-    ps5upload_core::events::emit(
-        ps5upload_core::events::Cat::System,
-        ps5upload_core::events::Level::Info,
-        "engine_stop",
-        None,
-        "engine stopped",
-    );
-    event_journal::flush_now();
-    if let Err(e) = served {
-        eprintln!("[ps5upload-engine] axum serve terminated: {e}");
-        if cfg.exit_on_error {
-            std::process::exit(3);
-        }
-        return Err(anyhow::anyhow!("axum serve terminated: {e}"));
     }
-    Ok(())
 }
 
 /// The message a caught panic carried (`catch_unwind`'s payload), for an error text.
@@ -11899,6 +12653,13 @@ fn install_panic_logger() {
     }));
 }
 
+/// A panic the phone app's own hook caught (client/src-tauri/src/mobile_log.rs), for the in-app
+/// Log tab and the bug bundle. The engine's hook above is the desktop sidecar's; on a phone the
+/// hook belongs to the host.
+pub fn record_host_panic(text: String) {
+    engine_log::record_quiet("error", text);
+}
+
 /// `ps5upload-engine --healthcheck`: exit 0 when this host's engine answers
 /// `GET /api/jobs` with 200, 1 otherwise. The container images are `FROM
 /// scratch` — no shell, no curl, no wget — so without this Docker and Compose
@@ -11910,13 +12671,7 @@ pub fn healthcheck() -> i32 {
         .ok()
         .and_then(|v| v.parse().ok())
         .unwrap_or(19113);
-    let base = std::env::var("PS5UPLOAD_BASE_URL").unwrap_or_default();
-    let base = base.trim_matches('/');
-    let path = if base.is_empty() {
-        "/api/jobs".to_string()
-    } else {
-        format!("/{base}/api/jobs")
-    };
+    let path = format!("{}/api/jobs", host_guard::base_path());
     let addr = std::net::SocketAddr::from(([127, 0, 0, 1], port));
     let timeout = std::time::Duration::from_secs(3);
     let ok = (|| -> std::io::Result<bool> {
@@ -11939,6 +12694,8 @@ pub fn healthcheck() -> i32 {
         1
     }
 }
+
+pub use mcp::stdio::run_cli as run_mcp_bridge;
 
 pub async fn run_cli() {
     install_panic_logger();
@@ -12025,6 +12782,72 @@ pub async fn serve_in_process(bind: &str, ps5_addr: String) -> anyhow::Result<()
 }
 
 #[cfg(test)]
+mod request_log_tests {
+    use super::is_constant_poll;
+
+    #[test]
+    fn only_the_constant_polls_stay_out_of_the_debug_log() {
+        assert!(is_constant_poll("/api/engine-logs"));
+        assert!(is_constant_poll("/api/activity"));
+        assert!(!is_constant_poll("/api/ps5/status"));
+        assert!(!is_constant_poll("/api/activity/other"));
+    }
+}
+
+#[cfg(test)]
+mod rebind_tests {
+    use super::*;
+    use std::io::{Read, Write};
+
+    async fn get(addr: std::net::SocketAddr) -> std::io::Result<String> {
+        tokio::task::spawn_blocking(move || {
+            let mut s = std::net::TcpStream::connect(addr)?;
+            s.set_read_timeout(Some(std::time::Duration::from_secs(3)))?;
+            s.write_all(b"GET /ping HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")?;
+            let mut out = String::new();
+            s.read_to_string(&mut out)?;
+            Ok(out)
+        })
+        .await
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_rebind_makes_a_new_listener_on_the_same_port_and_shutdown_still_ends_it() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let app = Router::new().route("/ping", axum::routing::get(|| async { "pong" }));
+        let (quit, quit_rx) = tokio::sync::oneshot::channel::<()>();
+        let server = tokio::spawn(async move {
+            serve_rebindable(&addr.to_string(), listener, app, async move {
+                let _ = quit_rx.await;
+            })
+            .await
+        });
+        assert!(get(addr).await.unwrap().contains("pong"));
+
+        rebind_in_process();
+        // The switch takes a moment: the same port must answer again.
+        let mut answered = false;
+        for _ in 0..50 {
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+            if get(addr).await.is_ok_and(|r| r.contains("pong")) {
+                answered = true;
+                break;
+            }
+        }
+        assert!(answered, "the port never answered after the rebind");
+
+        let _ = quit.send(());
+        tokio::time::timeout(std::time::Duration::from_secs(5), server)
+            .await
+            .expect("shutdown must still end serving")
+            .unwrap()
+            .unwrap();
+    }
+}
+
+#[cfg(test)]
 mod list_dir_status_tests {
     use super::*;
 
@@ -12042,7 +12865,7 @@ mod list_dir_status_tests {
             StatusCode::BAD_GATEWAY
         );
         assert_eq!(
-            list_dir_error_status("connect 192.168.86.99:9120: timed out"),
+            list_dir_error_status("connect 192.0.2.99:9120: timed out"),
             StatusCode::BAD_GATEWAY
         );
     }
@@ -12092,6 +12915,20 @@ mod loopback_guard_tests {
     }
 
     #[test]
+    fn a_console_log_goes_out_without_a_secret() {
+        let reply = console_log_reply("sceSomething key=abc123 url=http://u:hunter2@h/x done");
+        let text = reply["text"].as_str().unwrap();
+        assert!(
+            !text.contains("abc123") && !text.contains("hunter2"),
+            "{text}"
+        );
+        assert!(
+            text.contains("sceSomething") && text.contains("done"),
+            "{text}"
+        );
+    }
+
+    #[test]
     fn loopback_always_allowed() {
         let c = cfg(&[]);
         assert!(loopback_allows(&c, ip("127.0.0.1"), "/api/jobs"));
@@ -12132,12 +12969,52 @@ mod loopback_guard_tests {
             "/api/ps5/rp/frame",
             "/api/ps5/rp/input",
             "/api/ps5/rp/input/release",
+            "/api/ps5/rp/picture",
+            "/api/ps5/rp/live.ts",
+            "/api/ps5/rp/live/status",
+            "/api/ps5/rp/start",
+            "/api/ps5/rp/stop",
+            "/api/ps5/rp/passcode",
+            "/api/ps5/rp/keyboard",
+            "/api/ps5/rp/mic",
+            "/api/ps5/vinput",
+            "/api/ps5/vinput/report",
+            "/api/consoles",
+            "/api/consoles/document",
+            "/api/settings",
             "/pad/../api/jobs",
             "/padx",
             "/api/pad/ws/x",
         ] {
             assert!(!loopback_allows(&c, ip("192.168.1.30"), p), "{p}");
         }
+    }
+
+    #[test]
+    fn a_friend_reaches_only_the_join_page_and_socket() {
+        let c = cfg(&[]);
+        assert!(loopback_allows(&c, ip("192.168.1.30"), "/join"));
+        assert!(loopback_allows(&c, ip("192.168.1.30"), "/api/join/ws"));
+        // The host's side of Play Together stays on this computer.
+        for p in [
+            "/api/join",
+            "/api/join/open",
+            "/api/join/close",
+            "/api/join/invite",
+            "/api/join/decide",
+            "/api/join/kick",
+            "/api/join/playing",
+            "/api/join/settings",
+            "/api/join/relay",
+            "/api/join/ws/x",
+            "/api/join/wsx",
+            "/join/../api/join/open",
+            "/joinx",
+            "/join/x",
+        ] {
+            assert!(!loopback_allows(&c, ip("192.168.1.30"), p), "{p}");
+        }
+        assert!(loopback_allows(&c, ip("127.0.0.1"), "/api/join/open"));
     }
 
     #[test]
@@ -12193,6 +13070,35 @@ mod loopback_guard_tests {
             &headers,
             "/pkg-host/session/file.pkg"
         ));
+    }
+
+    #[test]
+    fn browser_guard_lets_a_link_from_another_site_open_a_page() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("host", "ps5upload.home".parse().unwrap());
+        headers.insert("sec-fetch-site", "cross-site".parse().unwrap());
+        headers.insert("sec-fetch-mode", "navigate".parse().unwrap());
+        headers.insert("sec-fetch-dest", "document".parse().unwrap());
+        let get = axum::http::Method::GET;
+        assert!(host_guard::is_page_navigation(&get, &headers, "/join"));
+        // The guard's other half still refuses this shape, for what is not a page.
+        assert!(!host_guard::is_page_navigation(&get, &headers, "/api/jobs"));
+        assert!(!browser_request_allows(&headers, "/api/jobs"));
+    }
+
+    #[test]
+    fn browser_guard_compares_servers_not_strings() {
+        // A proxy's Host with the port spelled out, or dropped.
+        assert!(browser_origin_allows("https://x", "x:443"));
+        assert!(browser_origin_allows("https://x:8443", "x"));
+        assert!(!browser_origin_allows("https://evil.example", "x"));
+        // A proxy that rewrites Host and says what the browser asked for.
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert("host", "192.168.1.10:19113".parse().unwrap());
+        headers.insert("origin", "https://ps5upload.home".parse().unwrap());
+        assert!(!browser_request_allows(&headers, "/api/jobs"));
+        headers.insert("x-forwarded-host", "ps5upload.home, inner".parse().unwrap());
+        assert!(browser_request_allows(&headers, "/api/jobs"));
     }
 
     #[test]
@@ -12333,7 +13239,9 @@ mod cancel_registry_tests {
         let job_id = Uuid::new_v4();
         let flag = register_transfer_cancel(job_id);
         if cancel {
-            let r = cancel_job(Path(job_id.to_string())).await.into_response();
+            let r = cancel_job(Default::default(), Path(job_id.to_string()))
+                .await
+                .into_response();
             assert_eq!(r.status(), StatusCode::OK);
         }
         let jobs2 = Arc::clone(&jobs);
@@ -12442,6 +13350,88 @@ mod cancel_registry_tests {
 #[cfg(test)]
 mod helpers_tests {
     use super::*;
+
+    /// A pattern naming a folder that also occurs ABOVE the source (`data`, `Games`) must only
+    /// match inside it, as the transfer does: it emptied the plan, and the job then read
+    /// "N bytes of 0" while the whole tree was sent.
+    #[test]
+    fn the_folder_plan_matches_excludes_inside_the_source_only() {
+        let base = std::env::temp_dir().join(format!("ps5u-plan-{}", std::process::id()));
+        let root = base.join("data").join("Games").join("G");
+        std::fs::create_dir_all(root.join("data")).unwrap();
+        std::fs::write(root.join("eboot.bin"), b"12345").unwrap();
+        std::fs::write(root.join("data").join("a.bin"), b"123").unwrap();
+        let excludes = vec!["data".to_string()];
+
+        let (total, files) = walk_plan(&root, &excludes);
+        assert_eq!(total, 5);
+        assert_eq!(
+            files
+                .iter()
+                .map(|f| f.rel_path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["eboot.bin"]
+        );
+
+        let local = ps5upload_core::source_fs::LocalFs;
+        let (total, files) = walk_plan_with(&local, &root, &excludes).unwrap();
+        assert_eq!(total, 5);
+        assert_eq!(files.len(), 1);
+
+        // Nothing named by the pattern: the whole tree, however the source's own path reads.
+        let (total, _) = walk_plan(&root, &["Games".to_string()]);
+        assert_eq!(total, 8);
+
+        let inventory = ps5upload_core::fs_ops::walk_local_inventory(&root, &excludes).unwrap();
+        assert_eq!(inventory.keys().collect::<Vec<_>>(), vec!["eboot.bin"]);
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    /// Every transfer reports a resume the same way: zip, 7z and RAR used to say 0 skipped and the
+    /// planned count as sent, whatever the console had.
+    #[test]
+    fn a_finished_job_reads_what_was_skipped_and_sent_from_the_ack() {
+        let jobs: Arc<Mutex<HashMap<Uuid, JobState>>> = Arc::default();
+        let (events_tx, _rx) = broadcast::channel(4);
+        let job_id = Uuid::new_v4();
+        let result = |ack: &str| {
+            Ok(ps5upload_core::transfer::TransferResult {
+                tx_id_hex: "00".into(),
+                files_sent: 0,
+                bytes_sent: 10,
+                dest: "/data/x".into(),
+                commit_ack_body: ack.into(),
+            })
+        };
+        publish_transfer_end(
+            &jobs,
+            &events_tx,
+            job_id,
+            1,
+            result(r#"{"skipped_files":3,"skipped_bytes":900,"files_sent":2}"#),
+            5,
+        );
+        let g = jobs.lock().unwrap();
+        match g.get(&job_id) {
+            Some(JobState::Done {
+                files_sent,
+                skipped_files,
+                skipped_bytes,
+                ..
+            }) => assert_eq!((*files_sent, *skipped_files, *skipped_bytes), (2, 3, 900)),
+            other => panic!("{other:?}"),
+        }
+        drop(g);
+        publish_transfer_end(&jobs, &events_tx, job_id, 1, result("{}"), 5);
+        match jobs.lock().unwrap().get(&job_id) {
+            Some(JobState::Done {
+                files_sent,
+                skipped_files,
+                ..
+            }) => assert_eq!((*files_sent, *skipped_files), (5, 0), "the plan's count"),
+            other => panic!("{other:?}"),
+        };
+    }
 
     /// #275 — `POST /api/transfer/dir` used to await the full source walk
     /// before returning the job_id, so the client sat on "Starting…" for the
@@ -12624,16 +13614,29 @@ mod helpers_tests {
             events_tx,
         };
         let snap = body_json(
-            get_job(State(state.clone()), Path(job_id.to_string()))
-                .await
-                .into_response(),
+            get_job(
+                State(state.clone()),
+                Default::default(),
+                Path(job_id.to_string()),
+            )
+            .await
+            .into_response(),
         )
         .await;
         assert_eq!(snap["status"], "running");
         assert_eq!(snap["files_count"], 3);
         assert!(snap.get("files").is_none(), "full list in the poll: {snap}");
 
-        let listed = body_json(list_jobs(State(state.clone())).await.into_response()).await;
+        let no_paging = Query(ListJobsQuery {
+            since_seq: None,
+            limit: None,
+        });
+        let listed = body_json(
+            list_jobs(State(state.clone()), Default::default(), no_paging)
+                .await
+                .into_response(),
+        )
+        .await;
         assert!(listed[0]["job"].get("files").is_none());
         assert_eq!(listed[0]["job"]["files_count"], 3);
 
@@ -12700,6 +13703,7 @@ mod helpers_tests {
                     error_reason: None,
                     error_detail: None,
                     error_console: None,
+                    error_space: None,
                 },
             );
             tokio::time::sleep(Duration::from_millis(450)).await;
@@ -12886,6 +13890,128 @@ mod helpers_tests {
     }
 
     #[test]
+    fn a_resumed_running_snapshot_says_what_the_console_already_had() {
+        use ps5upload_core::transfer::LiveNotes;
+        use std::sync::atomic::Ordering::Relaxed;
+        let n = LiveNotes::default();
+        let running = serde_json::json!({"status": "running", "bytes_sent": 70});
+        // A fresh upload: no note.
+        assert!(merge_live_notes(Some(&n), running.clone())
+            .get("resumed_bytes")
+            .is_none());
+        n.resumed_bytes.store(60, Relaxed);
+        let v = merge_live_notes(Some(&n), running);
+        assert_eq!(v["resumed_bytes"].as_u64(), Some(60));
+        let done = serde_json::json!({"status": "done"});
+        assert_eq!(merge_live_notes(Some(&n), done.clone()), done);
+    }
+
+    /// With two consoles, a request that names none used to act on the default one with a 200.
+    #[tokio::test]
+    async fn requests_that_change_a_console_must_name_it() {
+        macro_rules! refused {
+            ($handler:ident, $body:tt) => {{
+                let req = serde_json::from_value(serde_json::json!($body)).unwrap();
+                let status = $handler(Json(req)).await.into_response().status();
+                assert_eq!(status, StatusCode::BAD_REQUEST, stringify!($handler));
+            }};
+        }
+        refused!(ps5_fs_mkdir, { "path": "/data/x" });
+        refused!(ps5_fs_mkdir, { "addr": "", "path": "/data/x" });
+        refused!(ps5_fs_mkdir, { "addr": ":9021", "path": "/data/x" });
+        let eject =
+            serde_json::from_value(serde_json::json!({ "mount_point": "/mnt/usb0" })).unwrap();
+        let installs = std::sync::Arc::new(pkg_install::PkgInstallState::default());
+        assert_eq!(
+            ps5_usb_eject(installs, eject).await.status(),
+            StatusCode::BAD_REQUEST
+        );
+        refused!(ps5_save_close, {});
+        refused!(ps5_smp_checkout_finish, {});
+        refused!(ps5_smp_image_rw_finish, {});
+        refused!(user_create_handler, { "name": "x" });
+        for status in [
+            activity_reset_handler(Query(AddrQuery { addr: None }))
+                .await
+                .into_response()
+                .status(),
+            notif_clear_handler(Query(AddrQuery { addr: None }))
+                .await
+                .into_response()
+                .status(),
+        ] {
+            assert_eq!(status, StatusCode::BAD_REQUEST);
+        }
+    }
+
+    #[test]
+    fn ntp_servers_are_names_or_addresses_only() {
+        for good in [
+            "pool.ntp.org",
+            "time.apple.com",
+            "ntp",
+            "192.168.1.1",
+            "fe80::1",
+        ] {
+            assert!(valid_ntp_server(good), "{good}");
+        }
+        for bad in [
+            "",
+            "http://pool.ntp.org",
+            "pool.ntp.org/x",
+            "pool.ntp.org:123",
+            "a b",
+            "-bad.example",
+            "bad..example",
+            "[::1]",
+        ] {
+            assert!(!valid_ntp_server(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn test_only_routes_answer_only_when_debug_is_on() {
+        assert!(!debug_routes_allowed(None));
+        assert!(!debug_routes_allowed(Some("0")));
+        assert!(debug_routes_allowed(Some("1")));
+        assert_eq!(no_such_route().status(), StatusCode::NOT_FOUND);
+    }
+
+    #[test]
+    fn a_failed_full_sensor_read_still_shows_the_temperatures() {
+        let temps = || {
+            Ok(HwTemps {
+                cpu_temp: 41,
+                ..Default::default()
+            })
+        };
+        // The full read works: nothing else runs, nothing is marked.
+        let t = hw_temps_with_fallback(temps, || panic!("no second read"), true).unwrap();
+        assert_eq!(t.extended_error, None);
+        // It fails: the temperatures, and why the rest is missing.
+        let t =
+            hw_temps_with_fallback(|| Err(anyhow::anyhow!("mgmt timed out")), temps, true).unwrap();
+        assert_eq!(t.cpu_temp, 41);
+        assert_eq!(t.extended_error.as_deref(), Some("mgmt timed out"));
+        // Nothing answers: the first error, not a second one about the fallback.
+        let e = hw_temps_with_fallback(
+            || Err(anyhow::anyhow!("refused")),
+            || Err(anyhow::anyhow!("also refused")),
+            true,
+        )
+        .unwrap_err();
+        assert_eq!(e.to_string(), "refused");
+        // The basic read was already what was asked for: no point asking twice.
+        let e = hw_temps_with_fallback(
+            || Err(anyhow::anyhow!("refused")),
+            || panic!("no second read"),
+            false,
+        )
+        .unwrap_err();
+        assert_eq!(e.to_string(), "refused");
+    }
+
+    #[test]
     fn post_addr_reads_the_query_or_the_json_body() {
         // The desktop app sends ?addr=, the browser build a JSON body.
         assert_eq!(
@@ -12970,6 +14096,18 @@ mod helpers_tests {
             failure_key("GET", "/api/jobs", None),
             failure_key("GET", "/api/jobs", Some(""))
         );
+    }
+
+    #[test]
+    fn a_delete_counts_for_a_game_at_or_inside_the_path_only() {
+        let src = "/data/homebrew/Game";
+        assert!(removes_source("/data/homebrew/Game", src));
+        assert!(removes_source("/data/homebrew/Game/", src));
+        assert!(removes_source("/data/homebrew", src));
+        assert!(!removes_source("/data/homebrew/Game/file.txt", src));
+        assert!(!removes_source("/data/homebrew/Gam", src));
+        assert!(!removes_source("/data/homebrew/Game2", src));
+        assert!(!removes_source("", src));
     }
 
     #[test]

@@ -10,6 +10,7 @@ import {
   HardDrive,
   Gamepad2,
   FileArchive,
+  AlertTriangle,
   Info,
   Check,
   Package,
@@ -21,7 +22,7 @@ import {
 } from "lucide-react";
 import clsx from "clsx";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
-import { isAndroid, isMobile } from "../../lib/platform";
+import { isMobile } from "../../lib/platform";
 import { pkgKindLabel } from "./pkgKind";
 import { isTauriEnv, safeUnlisten } from "../../lib/tauriEnv";
 import { engineIsOnThisDevice } from "../../state/engine";
@@ -56,7 +57,7 @@ import {
 import { useConnectionStore } from "../../state/connection";
 import { log } from "../../state/logs";
 import { hostOf } from "../../lib/addr";
-import { useScrollLock } from "../../lib/useScrollLock";
+import { Modal } from "../../components/Modal";
 import { pushNotification } from "../../state/notifications";
 import { useRosterStore } from "../../state/roster";
 import { Link, useNavigate } from "react-router";
@@ -105,6 +106,8 @@ import {
   type UploadItemOptions,
 } from "../../lib/uploadQueueItem";
 import { validateBatch } from "../../lib/uploadBatch";
+import { archiveDefault } from "../../lib/archiveDefault";
+import { archiveKindOf } from "../../state/rarPackages";
 import { scanChildren } from "../../lib/folderScan";
 import {
   useUploadBatch,
@@ -121,11 +124,13 @@ import { BottleneckLine, JobLiveNotes, UnsettledLine } from "./Bottleneck";
 import { WhySlowPanel } from "./WhySlow";
 import { SlowTransferHint } from "./SlowTransferHint";
 import { ElfSourceHint } from "./ElfSourceHint";
-import { humanizePs5Error } from "../../lib/humanizeError";
+import { humanizePs5Error, humanizeCaught } from "../../lib/humanizeError";
 import { formatBytes } from "../../lib/format";
 import { FoldSection } from "../../components/FoldSection";
 import { resumeSummary } from "../../lib/resumeSummary";
+import { progressFigures, resumedShown } from "../../lib/resumedProgress";
 import { useTr, type Translator } from "../../state/lang";
+import { formatNumber, formatDuration } from "../../lib/formatDate";
 
 // formatBytes moved to lib/format.ts.
 
@@ -182,6 +187,10 @@ function detectedLabel(
       };
   }
 }
+
+/** What happens to an archive source: unpacked into a folder named after it, unpacked straight
+ *  into the destination, or sent as the file it is (#645). */
+type ArchiveMode = "subfolder" | "flat" | "as-is";
 
 /**
  * Sending from this computer (or a saved server): pick or drop anything, and the app works out
@@ -246,14 +255,46 @@ export default function UploadScreen({
 
   const [dropActive, setDropActive] = useState(false);
 
-  // For a `.zip` source: wrap its contents in a folder named after the
-  // zip ("subfolder", the default) or extract them straight into the
-  // chosen destination ("flat"). Only surfaced for archives; ignored
-  // otherwise. Sticky across sources within a session.
-  const [archiveExtractMode, setArchiveExtractMode] = useState<
-    "subfolder" | "flat"
-  >("subfolder");
-  const archiveIntoSubfolder = archiveExtractMode === "subfolder";
+  // An archive source: unpack it into a folder named after it ("subfolder"), straight into the
+  // destination ("flat"), or send the archive file as it is ("as-is", #645). Each archive starts
+  // from what it holds (lib/archiveDefault): a game or packages unpack, anything else is sent as
+  // it is, and an archive whose listing is unknown has nothing chosen until the user picks.
+  // Where to unpack stays sticky across sources within a session.
+  const [unpackPlacement, setUnpackPlacement] = useState<"subfolder" | "flat">(
+    "subfolder",
+  );
+  const [archivePick, setArchivePick] = useState<{
+    path: string;
+    mode: ArchiveMode;
+  } | null>(null);
+  // A part of a multi-part set (`Game.part2.zip`) unpacks: one part's listing need not show
+  // the game, and the parts only make sense together.
+  const archiveIsPart =
+    source?.kind === "archive" &&
+    !!parseArchivePart(source.path.split(/[\\/]/).pop() ?? "");
+  const archiveSuggestion =
+    source?.kind !== "archive"
+      ? null
+      : archiveIsPart
+        ? "unpack"
+        : archiveDefault(source.zipInfo);
+  const archiveExtractMode: ArchiveMode | null =
+    source?.kind !== "archive"
+      ? null
+      : archivePick?.path === source.path
+        ? archivePick.mode
+        : archiveSuggestion === "unpack"
+          ? unpackPlacement
+          : archiveSuggestion;
+  const setArchiveExtractMode = (mode: ArchiveMode) => {
+    if (!source) return;
+    setArchivePick({ path: source.path, mode });
+    if (mode !== "as-is") setUnpackPlacement(mode);
+  };
+  const archiveAsIs = archiveExtractMode === "as-is";
+  const archiveIntoSubfolder = archiveExtractMode
+    ? archiveExtractMode === "subfolder"
+    : unpackPlacement === "subfolder";
 
   // Subscribe to the webview's drag-drop events. Tauri delivers the paths
   // already resolved to the host filesystem, so we only need to stat one
@@ -437,6 +478,7 @@ export default function UploadScreen({
       destinationVolume,
       destinationSubpath,
       archiveIntoSubfolder,
+      sendArchiveAsIs: archiveAsIs,
       reconcileMode,
       strategy,
       excludes: activeExcludes,
@@ -458,6 +500,7 @@ export default function UploadScreen({
     strategy: "overwrite" | "resume",
   ): string | null => {
     if (!source || !host?.trim()) return null;
+    if (source.kind === "archive" && !archiveExtractMode) return null;
     return queueAdd(
       buildUploadQueueItem(
         source,
@@ -480,13 +523,16 @@ export default function UploadScreen({
    */
   const handleQueueAllParts = (paths: string[]) => {
     if (!host?.trim() || paths.length === 0) return;
+    // Nothing chosen yet: never unpack (or send) the set without the user's say.
+    if (source?.kind === "archive" && !archiveExtractMode) return;
     const addr = consoleAddr(host);
     for (const partPath of paths) {
+      // Sent as they are, the parts are plain files, each under its own name.
       const { dest } = resolveUploadDest(
         destinationVolume,
         destinationSubpath,
         partPath,
-        true,
+        !archiveAsIs,
         archiveIntoSubfolder,
       );
       const displayName =
@@ -495,7 +541,7 @@ export default function UploadScreen({
           .split(/[\\/]/)
           .pop() ?? partPath;
       queueAdd({
-        sourceKind: "archive",
+        sourceKind: archiveAsIs ? "file" : "archive",
         sourcePath: partPath,
         displayName,
         resolvedDest: dest,
@@ -503,8 +549,8 @@ export default function UploadScreen({
         // Overwrite: a fresh set of parts, each into the shared folder.
         strategy: "overwrite",
         reconcileMode,
-        excludes: activeExcludes,
-        rarPassword,
+        excludes: archiveAsIs ? [] : activeExcludes,
+        rarPassword: archiveAsIs ? null : rarPassword,
         mountAfterUpload: false,
         mountReadOnly,
         registerAfterUpload: false,
@@ -516,6 +562,7 @@ export default function UploadScreen({
     dest: string;
     addr: string;
     entryCount: number;
+    more: boolean;
     isFolder: boolean;
   }>(null);
   // Separate from transferPhase — covers the pre-flight window (probe
@@ -587,7 +634,10 @@ export default function UploadScreen({
     // detectError set = source couldn't be inspected (corrupt/unreadable
     // zip, failed folder walk). Don't ship a half-detected source — for an
     // archive that's `zipInfo: null`, which would fail deep in the flow.
-    if (!source || detecting || preflightBusy || detectError) return;
+    // An archive sent as it is needs no listing; one with nothing chosen waits for a choice.
+    if (!source || detecting || preflightBusy) return;
+    if (detectError && !archiveAsIs) return;
+    if (source.kind === "archive" && !archiveExtractMode) return;
     // A .pkg installs via the queue's finisher (the single-shot transfer path
     // has no installer). "Upload now" therefore enqueues it and starts this
     // console's queue immediately — same end state, just routed through the
@@ -602,7 +652,7 @@ export default function UploadScreen({
           ...s.phasesByHost,
           "": {
             kind: "failed",
-            error: "Set your PS5's IP on the Connection tab first.",
+            error: tr("upload_err_no_console", undefined, "Set your PS5's IP on the Connection tab first."),
           },
         },
       }));
@@ -614,15 +664,15 @@ export default function UploadScreen({
     }
     // Archives extract into a directory, so the pre-flight probe treats them
     // as a folder destination (check the named subdir, not a same-named file).
+    // One sent as it is is a plain file.
+    const unpacks = source.kind === "archive" && !archiveAsIs;
     const isFolder =
-      source.kind === "folder" ||
-      source.kind === "game-folder" ||
-      source.kind === "archive";
+      source.kind === "folder" || source.kind === "game-folder" || unpacks;
     const { dest } = resolveUploadDest(
       destinationVolume,
       destinationSubpath,
       source.path,
-      source.kind === "archive",
+      unpacks,
       archiveIntoSubfolder,
     );
     const addr = consoleAddr(host);
@@ -647,6 +697,7 @@ export default function UploadScreen({
         dest,
         addr,
         entryCount: probe.exists ? probe.entryCount : 0,
+        more: probe.exists && probe.more === true,
         isFolder,
       });
     } catch (e) {
@@ -654,7 +705,7 @@ export default function UploadScreen({
       // catch the try/finally swallowed the throw and the button just
       // de-busied with no UI feedback, so the user clicked Upload and
       // nothing visible happened.
-      setPreflightError(e instanceof Error ? e.message : String(e));
+      setPreflightError(humanizeCaught(e));
     } finally {
       setPreflightBusy(false);
     }
@@ -666,16 +717,29 @@ export default function UploadScreen({
   const [batchStrategy, setBatchStrategy] = useState<"overwrite" | "resume">(
     "resume",
   );
-  const queueItems = useUploadQueueStore((s) => s.items);
+  // Only what the batch check reads, flattened so a progress tick on a queued item (its bytes,
+  // twice a second) doesn't re-render this whole screen.
+  const queueOccupied = useUploadQueueStore(
+    useShallow((s) =>
+      s.items
+        .filter(
+          (q) =>
+            (q.status === "pending" || q.status === "running") &&
+            hostOf(q.addr) === hostOf(host ?? ""),
+        )
+        .flatMap((q) => [q.sourcePath, q.resolvedDest]),
+    ),
+  );
   const hasBatchPkg = batchRows.some((r) => r.source?.kind === "pkg");
   // The preview uses fixed name parts; the add below makes real ones.
+  // Each archive in the list is unpacked or sent as it is by its own row's choice (#645).
   const batchItemFor = (r: BatchRow, notify = false, nonce = r.id, now = 0) =>
     r.source
-      ? buildUploadQueueItem(
-          r.source,
-          r.password,
-          uploadItemOptions(batchStrategy, notify && hasBatchPkg, nonce, now),
-        )
+      ? buildUploadQueueItem(r.source, r.password, {
+          ...uploadItemOptions(batchStrategy, notify && hasBatchPkg, nonce, now),
+          archiveIntoSubfolder: unpackPlacement === "subfolder",
+          sendArchiveAsIs: r.archiveChoice === "as-is",
+        })
       : null;
   const batchSizeFor = (r: BatchRow): number | null =>
     r.size ??
@@ -693,14 +757,11 @@ export default function UploadScreen({
         dest: batchItemFor(r)?.resolvedDest ?? r.path,
         size: batchSizeFor(r),
         needsPassword: r.status === "needs-password",
+        setIssue: r.setIssue,
       })),
-    queueItems
-      .filter(
-        (q) =>
-          (q.status === "pending" || q.status === "running") &&
-          hostOf(q.addr) === hostOf(host ?? ""),
-      )
-      .map((q) => ({ sourcePath: q.sourcePath, resolvedDest: q.resolvedDest })),
+    queueOccupied.flatMap((sourcePath, i, all) =>
+      i % 2 === 0 ? [{ sourcePath, resolvedDest: all[i + 1] }] : [],
+    ),
     new Map(
       availableVolumes.map(
         (v) => [v.path, volumeAllocatableBytes(v)] as [string, number | null],
@@ -715,10 +776,18 @@ export default function UploadScreen({
   const toAdd = included.filter(
     (r) => r.source && r.status === "ready" && !batchCheck.skip.has(r.id),
   );
+  // An archive with nothing chosen holds the list back until the user picks (#645).
+  const batchUndecided = included.some(
+    (r) =>
+      r.status === "ready" &&
+      r.source?.kind === "archive" &&
+      !r.archiveChoice,
+  );
   const batchReady =
     !!host?.trim() &&
     toAdd.length > 0 &&
     !batchCheck.blocked &&
+    !batchUndecided &&
     included.every((r) => r.status !== "inspecting");
   const addBatch = (startNow: boolean, now: number) => {
     if (!batchReady) return;
@@ -737,8 +806,7 @@ export default function UploadScreen({
     if (startNow && host) queueStartAdded(hostOf(host), ids);
   };
   // Packages in the list stream & install from this computer (nothing copied to the PS5 first,
-  // as one package's main button does); the rest upload as Upload {count} now would. Packages
-  // need no room on the PS5 for a copy, so only the rest are held to the space check.
+  // as one package's main button does); the rest upload as Upload {count} now would.
   const batchPkgs = included.filter(
     (r) => r.source?.kind === "pkg" && r.status === "ready",
   );
@@ -747,7 +815,7 @@ export default function UploadScreen({
     !!host?.trim() &&
     batchPkgs.length > 0 &&
     included.every((r) => r.status !== "inspecting") &&
-    (batchRest.length === 0 || !batchCheck.blocked);
+    (batchRest.length === 0 || (!batchCheck.blocked && !batchUndecided));
   const streamBatch = async (now: number) => {
     if (!canStreamBatch || !host) return;
     const pkgs = batchPkgs;
@@ -801,6 +869,7 @@ export default function UploadScreen({
       {pending && (
         <ExistingDestinationDialog
           entryCount={pending.entryCount}
+          more={pending.more}
           dest={pending.dest}
           isFolder={pending.isFolder}
           onOverride={() => beginUpload("overwrite")}
@@ -920,6 +989,7 @@ export default function UploadScreen({
           onRemove={(id) => batch.remove(id)}
           onInclude={(id, v) => batch.setInclude(id, v)}
           onPassword={(id, pw) => batch.setPassword(id, pw)}
+          onArchiveChoice={(id, c) => batch.setArchiveChoice(id, c)}
           onClear={() => batch.clear()}
           onConvert={(state) => navigate("/workshop", { state })}
         />
@@ -1103,7 +1173,7 @@ function Step1Picker({
                 ["upload_drop_kind_pkg", "Packages (.pkg, .fpkg): installed as a game, update or DLC, streamed from here or uploaded first."],
                 ["upload_drop_kind_game", "Game folders and game dumps: copied to the PS5; they can go on the home screen."],
                 ["upload_drop_kind_image", "Disk images (.exfat, .ffpkg, .ffpfs, .ffpfsc): copied to the PS5; they can be mounted."],
-                ["upload_drop_kind_archive", "Archives (.zip, .7z, .rar): extracted onto the PS5."],
+                ["upload_drop_kind_archive", "Archives (.zip, .7z, .rar): unpacked onto the PS5, or sent as they are — you choose."],
                 ["upload_drop_kind_other", "Any other file or folder: copied as it is."],
               ] as const
             ).map(([key, text]) => (
@@ -1140,8 +1210,8 @@ function Step2Options(props: {
   mountAfterUpload: boolean;
   mountReadOnly: boolean;
   registerAfterUpload: boolean;
-  archiveExtractMode: "subfolder" | "flat";
-  onSetArchiveExtractMode: (m: "subfolder" | "flat") => void;
+  archiveExtractMode: ArchiveMode | null;
+  onSetArchiveExtractMode: (m: ArchiveMode) => void;
   destinationVolume: string | null;
   destinationSubpath: string;
   availableVolumes: Volume[];
@@ -1305,10 +1375,14 @@ function Step2Options(props: {
   // premature until we can actually read the archive, so lead with the rar
   // card and hold the rest until it's readable.
   const rarBlocked = isRarSource && !source.zipInfo;
+  // An archive sent as it is (#645) is a plain file from here on: no excludes, lands under its
+  // own name. One with nothing chosen yet holds the upload buttons until the user picks.
+  const isArchive = source.kind === "archive";
+  const asIs = isArchive && archiveExtractMode === "as-is";
+  const unpacks = isArchive && !asIs;
+  const archiveUndecided = isArchive && !archiveExtractMode;
   const showExcludes =
-    source.kind === "folder" ||
-    source.kind === "game-folder" ||
-    source.kind === "archive";
+    source.kind === "folder" || source.kind === "game-folder" || unpacks;
   // Only offer ps5upload's own mount-after-upload for images the payload can
   // attach itself (exFAT/UFS/PFS). A .ffpfsc (compressed/nested PFS container)
   // is mountable only by ShadowMount+, so we hide the toggle and let SMP pick
@@ -1344,7 +1418,17 @@ function Step2Options(props: {
   // goes after what is running. Only a one-shot transfer from before 8.10 still in flight
   // (`inFlight`) holds it, since the two share the console's transfer port.
   const uploadDisabled =
-    detecting || inFlight || preflightBusy || !!detectError;
+    detecting ||
+    inFlight ||
+    preflightBusy ||
+    (!!detectError && !asIs) ||
+    archiveUndecided;
+  // Why Upload / Add to queue are greyed out while an archive waits for its choice.
+  const undecidedHint = tr(
+    "upload_archive_choose_first",
+    undefined,
+    "Choose what to do with the archive first",
+  );
 
   return (
     <>
@@ -1472,7 +1556,7 @@ function Step2Options(props: {
                     variant="secondary"
                     size="sm"
                     className="mt-2"
-                    disabled={inFlight || queueRunning}
+                    disabled={inFlight || queueRunning || archiveUndecided}
                     onClick={() => onQueueAllParts(partSet.paths)}
                   >
                     {tr(
@@ -1512,7 +1596,7 @@ function Step2Options(props: {
                             "Scanning archive… {count} entries",
                           ).replace(
                             "{count}",
-                            zipInspectEntries.toLocaleString(),
+                            formatNumber(zipInspectEntries),
                           )
                         : tr(
                             "upload_scanning_archive_title",
@@ -1613,12 +1697,24 @@ function Step2Options(props: {
       {isRarSource && <RarSourceCard key={source.path} />}
 
       {source.kind === "archive" && source.zipInfo && (
-        <ZipArchiveCard info={source.zipInfo} />
+        <ZipArchiveCard info={source.zipInfo} unpacks={unpacks} />
       )}
 
-      {source.kind === "archive" && !rarBlocked && (
+      {/* A rar that can't be read yet can still be sent as it is. */}
+      {source.kind === "archive" &&
+        (!rarBlocked || (!detecting && !!detectError)) && (
         <ArchiveExtractModeCard
           mode={archiveExtractMode}
+          detecting={detecting}
+          canUnpack={!detectError}
+          // A rar volume (`Game.part1.rar`) is only part of the archive: sent as it is, the
+          // other volumes would stay behind.
+          canSendAsIs={
+            !(
+              archiveKindOf(source.path) === "rar" &&
+              !!parseArchivePart(source.path.split(/[\\/]/).pop() ?? "")
+            )
+          }
           onChange={onSetArchiveExtractMode}
           destinationVolume={destinationVolume}
           destinationSubpath={destinationSubpath}
@@ -1718,7 +1814,7 @@ function Step2Options(props: {
                 destinationVolume,
                 destinationSubpath,
                 source.path,
-                source.kind === "archive",
+                unpacks,
                 archiveExtractMode === "subfolder",
               ).dest
             }
@@ -1773,7 +1869,7 @@ function Step2Options(props: {
             (possibly long) console name into the button label. Auto-hides for
             single-console users. Pushed to the left; actions stay right. */}
         {multiConsole && (
-          <span className="mr-auto inline-flex items-center gap-1.5 text-xs text-[var(--color-muted)]">
+          <span className="me-auto inline-flex items-center gap-1.5 text-xs text-[var(--color-muted)]">
             {tr("upload_target_label", "Uploading to")}
             <ConsoleChip addr={stepHost} />
           </span>
@@ -1800,7 +1896,12 @@ function Step2Options(props: {
         <button
           type="button"
           onClick={() => onAddToQueue("overwrite")}
-          disabled={detecting || preflightBusy || !!detectError}
+          disabled={
+            detecting ||
+            preflightBusy ||
+            (!!detectError && !asIs) ||
+            archiveUndecided
+          }
           className={ACTION_PLAIN}
           title={
             detecting
@@ -1809,10 +1910,12 @@ function Step2Options(props: {
                   undefined,
                   "Scanning game folder — wait for the scan to finish, then this button enables.",
                 )
-              : tr(
-                  "upload_add_to_queue_tooltip",
-                  "Add this upload to the queue without starting it",
-                )
+              : archiveUndecided
+                ? undecidedHint
+                : tr(
+                    "upload_add_to_queue_tooltip",
+                    "Add this upload to the queue without starting it",
+                  )
           }
         >
           {tr("upload_add_to_queue", "Add to queue")}
@@ -1828,23 +1931,25 @@ function Step2Options(props: {
                   undefined,
                   "Scanning game folder — wait for the scan to finish, then this button enables.",
                 )
-              : queueRunning
-                ? tr(
-                    "upload_after_running",
-                    undefined,
-                    "Starts after what the queue is sending now",
-                  )
-                : queueAutoStart
+              : archiveUndecided
+                ? undecidedHint
+                : queueRunning
                   ? tr(
-                      "upload_starts_queue",
+                      "upload_after_running",
                       undefined,
-                      "Starts the queue: anything already waiting goes first, in order",
+                      "Starts after what the queue is sending now",
                     )
-                  : tr(
-                      "upload_waits_for_start",
-                      undefined,
-                      "Adds to the queue. It runs when you press Start queue (Start the queue when you add something is off)",
-                    )
+                  : queueAutoStart
+                    ? tr(
+                        "upload_starts_queue",
+                        undefined,
+                        "Starts the queue: anything already waiting goes first, in order",
+                      )
+                    : tr(
+                        "upload_waits_for_start",
+                        undefined,
+                        "Adds to the queue. It runs when you press Start queue (Start the queue when you add something is off)",
+                      )
           }
           className={
             // For a package, Stream & install (next) is the main action;
@@ -1896,14 +2001,16 @@ function Step2Options(props: {
           />
         </div>
       )}
+      {!archiveUndecided && (
       <MirrorToRosterButton
-        sourceKind={source.kind}
+        sourceKind={asIs ? "file" : source.kind}
         srcPath={source.path}
         archiveIntoSubfolder={archiveExtractMode === "subfolder"}
         destinationVolume={destinationVolume}
         destinationSubpath={destinationSubpath}
         excludes={excludes.filter((e) => e.enabled).map((e) => e.pattern)}
       />
+      )}
     </>
   );
 }
@@ -1952,8 +2059,11 @@ function MirrorToRosterButton({
         startTransferDir,
         startTransferFile,
         startTransferZip,
+        startTransfer7z,
+        startTransferRar,
         waitForJob,
       } = await import("../../api/ps5");
+      const kind = archiveKindOf(srcPath);
       // Same path rule as the one-shot upload, so a mirror lands exactly
       // where the primary PS5 got it — including the archive subfolder /
       // flat-extract choice.
@@ -1977,15 +2087,19 @@ function MirrorToRosterButton({
             sourceKind === "file"
               ? await startTransferFile(srcPath, dest, addr)
               : sourceKind === "archive"
-                ? await startTransferZip(srcPath, dest, addr, null, excludes)
+                ? kind === "7z"
+                  ? await startTransfer7z(srcPath, dest, addr, null, excludes)
+                  : kind === "rar"
+                    ? await startTransferRar(srcPath, dest, addr, null, null, excludes)
+                    : await startTransferZip(srcPath, dest, addr, null, excludes)
                 : await startTransferDir(srcPath, dest, addr, null, excludes);
           await waitForJob(jobId);
-          pushNotification("info", `Mirrored to ${p.name}`, {
+          pushNotification("info", tr("upload_notif_mirrored", { name: p.name }, "Mirrored to {name}"), {
             body: `${srcPath} → ${dest}`,
           });
         } catch (e) {
-          pushNotification("error", `Mirror failed: ${p.name}`, {
-            body: e instanceof Error ? e.message : String(e),
+          pushNotification("error", tr("upload_notif_mirror_failed", { name: p.name }, "Mirror failed: {name}"), {
+            body: humanizeCaught(e),
           });
         }
       });
@@ -2028,7 +2142,7 @@ const ACTION_PRIMARY =
 
 /** The upload confirm's choices: one shape for all, the primary one filled with the accent. */
 const DIALOG_OPTION =
-  "flex items-start gap-3 rounded-[var(--radius-card)] border p-3.5 text-left text-sm transition";
+  "flex items-start gap-3 rounded-[var(--radius-card)] border p-3.5 text-start text-sm transition";
 const DIALOG_PRIMARY =
   "border-transparent bg-[image:var(--accent-fill)] text-[var(--color-accent-contrast)] shadow-[var(--accent-glow)] hover:brightness-105";
 const DIALOG_PLAIN =
@@ -2036,6 +2150,7 @@ const DIALOG_PLAIN =
 
 function ExistingDestinationDialog({
   entryCount,
+  more,
   dest,
   isFolder,
   onOverride,
@@ -2043,6 +2158,7 @@ function ExistingDestinationDialog({
   onCancel,
 }: {
   entryCount: number;
+  more: boolean;
   dest: string;
   isFolder: boolean;
   onOverride: () => void;
@@ -2050,8 +2166,6 @@ function ExistingDestinationDialog({
   onCancel: () => void;
 }) {
   const tr = useTr();
-  // This dialog mounts only while shown — lock background scroll for its life.
-  useScrollLock();
   // Clean destination → simple Start/Cancel confirm.
   // Existing content → three-way Override/Resume/Cancel for folders,
   // two-way Override/Cancel for single files (no resume concept on a
@@ -2060,10 +2174,10 @@ function ExistingDestinationDialog({
   const canResume = hasExisting && isFolder;
 
   const title = !hasExisting
-    ? "Start upload?"
+    ? tr("upload_dialog_title_start", undefined, "Start upload?")
     : isFolder
-      ? "Folder already has files"
-      : "File already exists";
+      ? tr("upload_dialog_title_folder_exists", undefined, "Folder already has files")
+      : tr("upload_dialog_title_file_exists", undefined, "File already exists");
 
   const subtitle = !hasExisting ? (
     <>
@@ -2072,17 +2186,27 @@ function ExistingDestinationDialog({
     </>
   ) : (
     <>
-      <span className="font-mono text-xs">{dest}</span>
+      <span className="font-mono text-xs break-all">{dest}</span>
+      <br />
       {isFolder
-        ? ` contains ${entryCount.toLocaleString()} item${entryCount === 1 ? "" : "s"} already.`
-        : ` is already on your PS5.`}
+        ? tr(
+            "upload_dialog_folder_item_count",
+            { count: `${formatNumber(entryCount)}${more ? "+" : ""}` },
+            "Items already in this folder: {count}",
+          )
+        : tr("upload_dialog_file_on_ps5", undefined, "This file is already on your PS5.")}
     </>
   );
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-[var(--overlay-scrim)] p-4 backdrop-blur-sm">
-      <div className="rounded-[var(--radius-panel)] border border-[var(--glass-edge)] bg-[var(--color-surface-raised)] shadow-[var(--edge-highlight),var(--shadow-1)] max-h-[calc(100dvh-2rem)] w-full max-w-md overflow-y-auto p-5 shadow-2xl">
-        <h2 className="mb-1 text-base font-semibold">{title}</h2>
+    <Modal
+      open
+      onClose={onCancel}
+      title={title}
+      role="alertdialog"
+      closeOnScrim={false}
+      bodyClassName="p-5"
+    >
         <p className="mb-4 text-sm text-[var(--color-muted)]">{subtitle}</p>
 
         <div className="grid gap-2">
@@ -2123,8 +2247,8 @@ function ExistingDestinationDialog({
             >
               {hasExisting
                 ? tr(
-                    "upload_override_desc",
-                    "Replace everything — re-send the entire source.",
+                    "upload_override_desc2",
+                    "Sends everything again. Files with the same name are replaced. Other files already there stay.",
                   )
                 : tr("upload_start_desc", "Send all files to the PS5.")}
             </span>
@@ -2154,8 +2278,7 @@ function ExistingDestinationDialog({
             "You can turn off this prompt in Settings → Upload.",
           )}
         </p>
-      </div>
-    </div>
+    </Modal>
   );
 }
 
@@ -2197,6 +2320,7 @@ function TransferStatus({ onRetry }: { onRetry: () => void }) {
       filesCompleted,
       skippedFiles,
       skippedBytes,
+      resumedBytes,
     } = phase;
     const resuming = resumeSummary(
       skippedFiles,
@@ -2204,6 +2328,9 @@ function TransferStatus({ onRetry }: { onRetry: () => void }) {
       skippedBytes,
       totalBytes,
     );
+    // A resume with no whole file in place (one big file partly sent before): say how much
+    // of it was already there, once.
+    const resumedHave = resuming ? null : resumedShown(resumedBytes, totalBytes);
     // Reconcile Phase 1 interstitial: the engine set Running before the
     // walk completed, so we have nothing to show yet. "Uploading 0 B"
     // would be misleading — describe what's actually happening.
@@ -2234,7 +2361,7 @@ function TransferStatus({ onRetry }: { onRetry: () => void }) {
           <span>
             {tr(
               "upload_status_preparing_files",
-              { count: files.length.toLocaleString() },
+              { count: formatNumber(files.length) },
               "Preparing transfer of {count} files…",
             )}
           </span>
@@ -2247,10 +2374,9 @@ function TransferStatus({ onRetry }: { onRetry: () => void }) {
         </div>
       );
     }
-    const pct =
-      totalBytes > 0 ? Math.min(100, (bytesSent / totalBytes) * 100) : 0;
-    const remaining = Math.max(0, totalBytes - bytesSent);
-    const etaSec = bytesPerSec > 0 ? remaining / bytesPerSec : null;
+    // `bytesSent` includes what a resume found already on the PS5; the speed is this run's,
+    // so the time left counts only what is still to send.
+    const { pct, etaSec } = progressFigures(bytesSent, totalBytes, bytesPerSec);
     // Finalize phase: every shard has been pushed onto the wire but the
     // engine is still waiting for the PS5's COMMIT_TX_ACK / drain ACKs.
     // For large file counts this round-trip waits on the PS5 fsyncing
@@ -2268,12 +2394,21 @@ function TransferStatus({ onRetry }: { onRetry: () => void }) {
             {tr(
               "upload_status_resuming",
               {
-                done: resuming.done.toLocaleString(),
-                total: resuming.total.toLocaleString(),
+                done: formatNumber(resuming.done),
+                total: formatNumber(resuming.total),
                 have: formatBytes(resuming.haveBytes),
                 send: formatBytes(resuming.sendBytes),
               },
               "Resuming: {done} of {total} files already present ({have}); {send} to send.",
+            )}
+          </div>
+        )}
+        {resumedHave !== null && (
+          <div className="mb-2 text-xs text-[var(--color-muted)]">
+            {tr(
+              "upload_resumed_have",
+              { have: formatBytes(resumedHave) },
+              "Resumed: {have} was already on the PS5.",
             )}
           </div>
         )}
@@ -2292,15 +2427,15 @@ function TransferStatus({ onRetry }: { onRetry: () => void }) {
               {files.length > 0 && (
                 <>
                   {" · "}
-                  {filesCompleted.toLocaleString()}{" "}
-                  {tr("upload_status_of", "of")} {files.length.toLocaleString()}{" "}
+                  {formatNumber(filesCompleted)}{" "}
+                  {tr("upload_status_of", "of")} {formatNumber(files.length)}{" "}
                   {tr("upload_status_files", "files")}
                 </>
               )}
               {skippedFiles > 0 && (
                 <>
                   {" · "}
-                  {skippedFiles.toLocaleString()}{" "}
+                  {formatNumber(skippedFiles)}{" "}
                   {tr("upload_status_skipped", "skipped")}
                 </>
               )}
@@ -2388,10 +2523,10 @@ function TransferStatus({ onRetry }: { onRetry: () => void }) {
                 {tr(
                   "upload_status_finalizing_counter",
                   {
-                    done: phase.filesFinalized.toLocaleString(),
-                    total: phase.filesFinalizingTotal.toLocaleString(),
+                    done: formatNumber(phase.filesFinalized),
+                    total: formatNumber(phase.filesFinalizingTotal),
                   },
-                  `Finalized ${phase.filesFinalized.toLocaleString()} / ${phase.filesFinalizingTotal.toLocaleString()} files. `,
+                  `Finalized ${formatNumber(phase.filesFinalized)} / ${formatNumber(phase.filesFinalizingTotal)} files. `,
                 )}
               </>
             ) : null}
@@ -2443,7 +2578,7 @@ function TransferStatus({ onRetry }: { onRetry: () => void }) {
                   <>
                     {" "}
                     {tr("upload_done_across", "across")}{" "}
-                    {phase.filesSent.toLocaleString()}{" "}
+                    {formatNumber(phase.filesSent)}{" "}
                     {tr("upload_done_files", "files")}
                   </>
                 )}
@@ -2458,7 +2593,7 @@ function TransferStatus({ onRetry }: { onRetry: () => void }) {
                   : tr("upload_skipped", "Skipped")}
               </dt>
               <dd className="text-[var(--color-text)]">
-                {phase.skippedFiles.toLocaleString()}{" "}
+                {formatNumber(phase.skippedFiles)}{" "}
                 {tr("upload_done_skipped_files", "files (")}
                 {formatBytes(phase.skippedBytes)}
                 {tr("upload_done_skipped_suffix", ") already on PS5")}
@@ -2519,7 +2654,7 @@ function TransferStatus({ onRetry }: { onRetry: () => void }) {
                   "Next: open the game in Games and, under On the PS5's drives, add it to the home screen or mount it.",
                 )}
           </span>
-          <div className="ml-auto flex items-center gap-2">
+          <div className="ms-auto flex items-center gap-2">
             {!phase.registeredAs && (
               <Button
                 variant="primary"
@@ -2720,7 +2855,7 @@ function FileListPanel({
       <div className="mb-1 flex items-center justify-between text-[var(--color-muted)]">
         <span>{tr("upload_file_list_files", "Files")}</span>
         <span>
-          {completed.toLocaleString()} / {total.toLocaleString()}
+          {formatNumber(completed)} / {formatNumber(total)}
           {windowed && (
             <>
               {" · "}
@@ -2793,19 +2928,6 @@ function FileListPanel({
       </ul>
     </div>
   );
-}
-
-/** Human-friendly duration: "3s", "1m 22s", "2h 14m". Used for
- *  ETA display in the progress row — rounds to whole seconds because
- *  a sub-second ETA is meaningless (noise from the rate smoother). */
-function formatDuration(sec: number): string {
-  if (!isFinite(sec) || sec < 0) return "—";
-  if (sec < 60) return `${Math.ceil(sec)}s`;
-  const m = Math.floor(sec / 60);
-  const s = Math.floor(sec % 60);
-  if (m < 60) return `${m}m ${s}s`;
-  const h = Math.floor(m / 60);
-  return `${h}h ${m % 60}m`;
 }
 
 function WrappedHintChip({
@@ -2891,12 +3013,12 @@ function GameMetaCard({
           <div className="truncate text-lg font-semibold">
             <GameTitleLink
               id={meta.title_id}
-              title={meta.title ?? "(untitled)"}
+              title={meta.title ?? tr("upload_untitled", undefined, "(untitled)")}
             />
           </div>
           <div className="mt-0.5 text-xs text-[var(--color-muted)]">
             {meta.content_version ? `v${meta.content_version} · ` : ""}
-            {formatBytes(meta.total_size)} · {meta.file_count.toLocaleString()}{" "}
+            {formatBytes(meta.total_size)} · {formatNumber(meta.file_count)}{" "}
             {tr("upload_game_meta_files", "files")}
           </div>
           <div className="mt-1 flex items-center gap-1 text-xs text-[var(--color-muted)]">
@@ -2921,7 +3043,7 @@ function FolderStatsCard({
   return (
     <section className="rounded-[var(--radius-panel)] border border-[var(--glass-edge)] bg-[var(--color-surface-raised)] shadow-[var(--edge-highlight),var(--shadow-1)] mb-4 p-4 text-sm text-[var(--color-muted)]">
       {formatBytes(totalBytes)} {tr("upload_folder_stats_across", "across")}{" "}
-      {fileCount.toLocaleString()} {tr("upload_folder_stats_files", "files")}
+      {formatNumber(fileCount)} {tr("upload_folder_stats_files", "files")}
     </section>
   );
 }
@@ -2992,7 +3114,7 @@ function PreflightEtaBanner({
           )}
         </span>
         {eta.throughputDefaulted && (
-          <span className="ml-2 italic">
+          <span className="ms-2 italic">
             (
             {tr(
               "upload_eta_default_qualifier",
@@ -3019,13 +3141,13 @@ function PreflightEtaBanner({
         )}
       </div>
       <div className="mb-3 text-[var(--color-muted)]">
-        {fileCount.toLocaleString()} {tr("upload_folder_stats_files", "files")}{" "}
+        {formatNumber(fileCount)} {tr("upload_folder_stats_files", "files")}{" "}
         · {formatBytes(totalBytes)}
       </div>
       <div className="mb-2 text-xs uppercase tracking-wide text-[var(--color-muted)]">
         {tr("upload_eta_section_title", undefined, "Estimated time")}
         {eta.throughputDefaulted && (
-          <span className="ml-2 normal-case tracking-normal italic">
+          <span className="ms-2 normal-case tracking-normal italic">
             (
             {tr(
               "upload_eta_default_qualifier",
@@ -3039,26 +3161,26 @@ function PreflightEtaBanner({
       <table className="text-xs">
         <tbody>
           <tr>
-            <td className="pr-3 text-[var(--color-muted)]">
+            <td className="pe-3 text-[var(--color-muted)]">
               {tr("upload_eta_row_transfer", undefined, "Transfer")}
             </td>
-            <td className="pr-3 tabular-nums">
+            <td className="pe-3 tabular-nums">
               ≈ {formatEtaSeconds(eta.transferSeconds)}
             </td>
           </tr>
           <tr>
-            <td className="pr-3 text-[var(--color-muted)]">
+            <td className="pe-3 text-[var(--color-muted)]">
               {tr("upload_eta_row_commit", undefined, "PS5 commit")}
             </td>
-            <td className="pr-3 tabular-nums">
+            <td className="pe-3 tabular-nums">
               ≈ {formatEtaSeconds(eta.commitSeconds)}
             </td>
           </tr>
           <tr className="border-t border-[var(--color-border)]">
-            <td className="pr-3 pt-1 font-medium">
+            <td className="pe-3 pt-1 font-medium">
               {tr("upload_eta_row_total", undefined, "Total")}
             </td>
-            <td className="pr-3 pt-1 font-medium tabular-nums">
+            <td className="pe-3 pt-1 font-medium tabular-nums">
               ≈ {formatEtaSeconds(eta.totalSeconds)}
             </td>
           </tr>
@@ -3103,7 +3225,7 @@ function RarSourceCard() {
   // user picked a middle part). The generic open-failure copy explains it.
   const otherErr = !!error && !needsPw && !wrongPw;
 
-  if (isAndroid()) {
+  if (isMobile()) {
     return (
       <div className="rounded-[var(--radius-panel)] border border-[var(--glass-edge)] bg-[var(--color-surface-raised)] shadow-[var(--edge-highlight),var(--shadow-1)] p-4">
         <p className="mb-1 text-sm font-medium">
@@ -3111,8 +3233,8 @@ function RarSourceCard() {
         </p>
         <p className="text-xs text-[var(--color-warn)]">
           {tr(
-            "err_rar_unsupported",
-            "RAR archives aren't supported on this build (Android uploads .zip and .7z only). Extract the .rar on a computer first, or use the desktop app.",
+            "err_rar_phones",
+            "RAR archives aren't supported on phones (the app uploads .zip and .7z only). Extract the .rar on a computer first, or use the desktop app.",
           )}
         </p>
       </div>
@@ -3291,7 +3413,14 @@ function PkgFinisherCard({
   );
 }
 
-function ZipArchiveCard({ info }: { info: ZipInspect }) {
+function ZipArchiveCard({
+  info,
+  unpacks = true,
+}: {
+  info: ZipInspect;
+  /** False when the archive is sent as it is: nothing is extracted. */
+  unpacks?: boolean;
+}) {
   const tr = useTr();
   // Space saved by keeping the dump zipped, as a percentage. Guard against a
   // zero/over-100% reading (already-compressed game data can make a "zip"
@@ -3318,7 +3447,7 @@ function ZipArchiveCard({ info }: { info: ZipInspect }) {
               <div className="truncate text-lg font-semibold">
                 <GameTitleLink
                   id={info.title_id}
-                  title={info.title ?? "(untitled)"}
+                  title={info.title ?? tr("upload_untitled", undefined, "(untitled)")}
                 />
               </div>
             </>
@@ -3342,7 +3471,7 @@ function ZipArchiveCard({ info }: { info: ZipInspect }) {
                 {tr("upload_zip_extracted", "extracted")}
               </>
             )}{" "}
-            · {info.file_count.toLocaleString()}{" "}
+            · {formatNumber(info.file_count)}{" "}
             {tr("upload_folder_stats_files", "files")}
           </div>
           {savedPct > 0 && (
@@ -3351,32 +3480,44 @@ function ZipArchiveCard({ info }: { info: ZipInspect }) {
               {tr("upload_zip_on_disk", "on disk")}
             </div>
           )}
-          <div className="mt-1 flex items-center gap-1 text-xs text-[var(--color-muted)]">
-            <Info size={12} />{" "}
-            {tr(
-              "upload_zip_explainer",
-              "Decompressed on your computer and streamed in — files land already extracted on the PS5.",
-            )}
-          </div>
+          {unpacks && (
+            <div className="mt-1 flex items-center gap-1 text-xs text-[var(--color-muted)]">
+              <Info size={12} />{" "}
+              {tr(
+                "upload_zip_explainer",
+                "Decompressed on your computer and streamed in — files land already extracted on the PS5.",
+              )}
+            </div>
+          )}
         </div>
       </div>
     </section>
   );
 }
 
-/** Lets the user choose how a `.zip` lands on the PS5: wrapped in a
- *  folder named after the archive, or extracted straight into the
- *  destination. Shows a live preview of the resulting path for each
- *  choice so the outcome is unambiguous before they upload. */
+/** Lets the user choose what happens to an archive: unpacked into a
+ *  folder named after it, unpacked straight into the destination, or sent
+ *  as the file it is (#645). Shows a live preview of the resulting path for
+ *  each choice so the outcome is unambiguous before they upload. With
+ *  nothing chosen (the archive's listing could not tell) it asks. */
 function ArchiveExtractModeCard({
   mode,
+  detecting = false,
+  canUnpack = true,
+  canSendAsIs = true,
   onChange,
   destinationVolume,
   destinationSubpath,
   sourcePath,
 }: {
-  mode: "subfolder" | "flat";
-  onChange: (m: "subfolder" | "flat") => void;
+  mode: ArchiveMode | null;
+  /** The archive is still being read: no "choose" prompt yet. */
+  detecting?: boolean;
+  /** False when the archive couldn't be read: it can only be sent as it is. */
+  canUnpack?: boolean;
+  /** False for a volume of a multi-volume rar: alone it is not the archive. */
+  canSendAsIs?: boolean;
+  onChange: (m: ArchiveMode) => void;
   destinationVolume: string | null;
   destinationSubpath: string;
   sourcePath: string;
@@ -3400,9 +3541,14 @@ function ArchiveExtractModeCard({
     true,
     false,
   ).dest;
+  const asIsDest = resolveUploadDest(
+    destinationVolume,
+    destinationSubpath,
+    sourcePath,
+  ).dest;
 
   const options: {
-    value: "subfolder" | "flat";
+    value: ArchiveMode;
     label: string;
     desc: string;
     preview: string;
@@ -3432,6 +3578,20 @@ function ArchiveExtractModeCard({
       ),
       preview: `${flatDest}/…`,
     },
+    {
+      value: "as-is",
+      label: tr(
+        "upload_archive_send_as_is_label",
+        undefined,
+        "Send the archive as it is (don't unpack)",
+      ),
+      desc: tr(
+        "upload_archive_send_as_is_desc",
+        { ext },
+        "Copies the {ext} file itself to the PS5. Choose this for a jailbreak update, payloads or anything else that expects the archive.",
+      ),
+      preview: asIsDest,
+    },
   ];
 
   return (
@@ -3441,19 +3601,36 @@ function ArchiveExtractModeCard({
         {tr(
           "upload_archive_extract_heading",
           { ext },
-          "Where should the {ext} unpack?",
+          "What should happen to this {ext}?",
         )}
       </div>
+      {!mode && !detecting && (
+        <div
+          className="mb-3 flex items-start gap-1.5 text-xs text-[var(--color-warn)]"
+          data-testid="archive-choose"
+        >
+          <AlertTriangle size={14} className="mt-px shrink-0" />
+          {tr(
+            "upload_archive_choose",
+            undefined,
+            "Couldn't tell what this archive holds. Choose whether to unpack it on the PS5 or send it as it is.",
+          )}
+        </div>
+      )}
       <div className="flex flex-col gap-2">
         {options.map((opt) => {
           const selected = mode === opt.value;
+          const disabled =
+            (!canUnpack && opt.value !== "as-is") || (!canSendAsIs && opt.value === "as-is");
           return (
             <button
               key={opt.value}
               type="button"
+              disabled={disabled}
+              data-testid={`archive-mode-${opt.value}`}
               onClick={() => onChange(opt.value)}
               className={
-                "flex items-start gap-3 rounded-[var(--radius-card)] border p-3.5 text-left transition-colors " +
+                "flex items-start gap-3 rounded-[var(--radius-card)] border p-3.5 text-start transition-colors disabled:cursor-not-allowed disabled:opacity-50 " +
                 (selected
                   ? "border-[color-mix(in_srgb,var(--color-accent)_45%,transparent)] bg-[var(--color-surface-raised)] shadow-[var(--edge-highlight),var(--shadow-1)] ring-1 ring-[color-mix(in_srgb,var(--color-accent)_30%,transparent)]"
                   : "border-[var(--color-border)] bg-[var(--color-surface)] hover:bg-[var(--color-surface-raised)]")
@@ -3626,7 +3803,7 @@ function MountAfterUploadCard({
           PS5 from silently writing save-data back into the image and
           corrupting it on next mount. */}
       <Toggle
-        className={`mt-3 ml-6 ${checked ? "" : "opacity-50"}`}
+        className={`mt-3 ms-6 ${checked ? "" : "opacity-50"}`}
         checked={readOnly}
         disabled={!checked}
         onChange={(c) => onChangeReadOnly(c)}
@@ -3779,6 +3956,7 @@ function DestinationCard({
           block={false}
           className="flex-1"
           value={subpath}
+          aria-label={tr("upload_dest_subpath_label", undefined, "Folder on the drive")}
           onChange={(e) => onChange(volume, e.target.value)}
         />
       </div>
@@ -3900,7 +4078,7 @@ function ExcludesCard({
                   type="button"
                   onClick={() => onRemove(rule.pattern)}
                   className="rounded-full p-1.5 text-[var(--color-muted)] hover:bg-[var(--color-surface-3)] hover:text-[var(--color-text)]"
-                  title={`Remove ${rule.pattern}`}
+                  title={tr("upload_exclude_remove", { pattern: rule.pattern }, "Remove {pattern}")}
                 >
                   <X size={12} />
                 </button>
@@ -3971,7 +4149,7 @@ function ModeRadio({
         />
         <span className="font-medium">{label}</span>
       </div>
-      <div className="mt-0.5 pl-6 text-xs text-[var(--color-muted)]">
+      <div className="mt-0.5 ps-6 text-xs text-[var(--color-muted)]">
         {hint}
       </div>
     </label>

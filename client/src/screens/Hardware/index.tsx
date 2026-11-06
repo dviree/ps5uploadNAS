@@ -66,6 +66,7 @@ import {
   type SmpMetaStats,
 } from "../../api/ps5";
 import { formatDate } from "../../lib/formatDate";
+import { humanizeCaught } from "../../lib/humanizeError";
 
 /** Hardware Monitor tab — live sensor + uptime view.
  *  The payload side is in payload/src/hw_info.c with
@@ -204,7 +205,7 @@ type Tr = (
  *  console that refused the read, or a value out of range. */
 export function clockHint(
   tr: Tr,
-  temps: Pick<HwTemps, "gpu_clock_src"> | null,
+  temps: Pick<HwTemps, "gpu_clock_src" | "mp1_busy"> | null,
   hasValue: boolean,
   readHint: string,
 ): string {
@@ -214,6 +215,7 @@ export function clockHint(
       undefined,
       "Click Read sensors for a live reading",
     );
+  if (temps.mp1_busy) return clockBusyHint(tr);
   const src = temps.gpu_clock_src ?? "";
   if (src === "unsupported")
     return tr(
@@ -236,9 +238,18 @@ export function clockHint(
   return readHint;
 }
 
+function clockBusyHint(tr: Tr): string {
+  return tr(
+    "hw_clock_busy",
+    undefined,
+    "The console didn't answer this read in time. It usually answers once the game is closed",
+  );
+}
+
 /** The measured row's hint: like clockHint, from the measurement's own source. */
 function measuredHint(tr: Tr, temps: HwTemps | null, hasValue: boolean): string {
   if (!temps) return clockHint(tr, null, false, "");
+  if (temps.measure_busy) return clockBusyHint(tr);
   const src = temps.cpu_measure_src ?? "";
   if (src === "unsupported")
     return tr(
@@ -355,6 +366,8 @@ export default function HardwareScreen() {
   const sensorBusy = useRef(false);
   const [sensorLoading, setSensorLoading] = useState(false);
   const [sensorReadAt, setSensorReadAt] = useState<number | null>(null);
+  // The last read got only the basic temperatures: one of the other sensors did not answer.
+  const [sensorsPartial, setSensorsPartial] = useState(false);
 
   // Guard flag: if a previous refresh is still pending, skip new
   // ticks. Prevents overlapping requests if the PS5 is slow to
@@ -381,6 +394,7 @@ export default function HardwareScreen() {
     setDrives(null);
     setError(null);
     setSensorReadAt(null);
+    setSensorsPartial(false);
   }, [host]);
 
   const refresh = useCallback(async () => {
@@ -436,7 +450,7 @@ export default function HardwareScreen() {
       }
     } catch (e) {
       if (probe.isStale()) return;
-      setError(e instanceof Error ? e.message : String(e));
+      setError(humanizeCaught(e));
     } finally {
       busy.current = false;
       setLoading(false);
@@ -469,11 +483,12 @@ export default function HardwareScreen() {
       ]);
       if (probe.isStale()) return;
       setTemps(next);
+      setSensorsPartial(!!next.extended_error);
       if (nextDrives) setDrives(nextDrives);
       setSensorReadAt(Date.now());
     } catch (e) {
       if (probe.isStale()) return;
-      setError(e instanceof Error ? e.message : String(e));
+      setError(humanizeCaught(e));
     } finally {
       sensorBusy.current = false;
       setSensorLoading(false);
@@ -553,6 +568,15 @@ export default function HardwareScreen() {
 
       {/* Only surface the error card when the payload IS up — otherwise
           the ConnectionGate below already explains the state. */}
+      {sensorsPartial && (
+        <p className="mb-4 text-xs text-[var(--color-muted)]">
+          {tr(
+            "hw_sensors_partial",
+            undefined,
+            "Only the temperatures could be read. The other sensors did not answer. Press Read sensors to try again.",
+          )}
+        </p>
+      )}
       {error && payloadStatus === "up" && (
         <div className="mb-4">
           <ErrorCard
@@ -984,7 +1008,7 @@ function StatRow({
     // with the value instead of floating between the value and the hint.
     <div className="metric-row min-w-0 py-2" style={{ alignItems: "baseline" }}>
       <dt className="min-w-0 text-[var(--color-muted)]">{label}</dt>
-      <dd className="min-w-0 max-w-[65%] shrink-0 text-right" title={tooltip ?? hint}>
+      <dd className="min-w-0 max-w-[65%] shrink-0 text-end" title={tooltip ?? hint}>
         <div className="whitespace-nowrap font-mono tabular-nums">{value}</div>
         {hint && (
           <div className="mt-0.5 text-xs leading-snug text-[var(--color-muted)]">
@@ -1464,7 +1488,7 @@ function SystemTimeCard({
       setError(null);
     } catch (e) {
       if (probe.isStale()) return;
-      setError(e instanceof Error ? e.message : String(e));
+      setError(humanizeCaught(e));
     }
   }, [host, payloadUp, guardSys]);
 
@@ -1514,7 +1538,7 @@ function SystemTimeCard({
         await refreshPs5();
       } catch (e) {
         if (probe.isStale()) return;
-        setError(e instanceof Error ? e.message : String(e));
+        setError(humanizeCaught(e));
       } finally {
         setBusy(false);
       }
@@ -1694,7 +1718,7 @@ function SmpMetaCard({
       if (s.poll_seconds > 0 && !pollDragging.current) setPollDraft(s.poll_seconds);
     } catch (e) {
       if (probe.isStale()) return;
-      setError(e instanceof Error ? e.message : String(e));
+      setError(humanizeCaught(e));
     }
   }, [canTalk, guard]);
 
@@ -1717,7 +1741,7 @@ function SmpMetaCard({
       await refresh();
     } catch (e) {
       if (probe.isStale()) return;
-      setError(e instanceof Error ? e.message : String(e));
+      setError(humanizeCaught(e));
     } finally {
       // Always clear the local busy flag — gating it on !isStale() left the
       // panel permanently disabled when the host switched mid-RPC (busy is
@@ -1744,7 +1768,7 @@ function SmpMetaCard({
       await refresh();
     } catch (e) {
       if (probe.isStale()) return;
-      setError(e instanceof Error ? e.message : String(e));
+      setError(humanizeCaught(e));
     } finally {
       // Always clear the local busy flag — gating it on !isStale() left the
       // panel permanently disabled when the host switched mid-RPC (busy is
@@ -1786,7 +1810,7 @@ function SmpMetaCard({
         await refresh();
       } catch (e) {
         if (probe.isStale()) return;
-        setError(e instanceof Error ? e.message : String(e));
+        setError(humanizeCaught(e));
       } finally {
         // Always clear the local busy flag — gating it on !isStale() left the
         // whole SMP card permanently disabled when the host switched mid-RPC
@@ -1813,7 +1837,7 @@ function SmpMetaCard({
         {busy && (
           <Spinner size={12} tone="accent" />
         )}
-        <span className="ml-auto flex items-center gap-1 text-xs font-medium">
+        <span className="ms-auto flex items-center gap-1 text-xs font-medium">
           {running ? (
             <>
               <span className="inline-block h-1.5 w-1.5 rounded-full bg-[var(--color-good)]" />
@@ -1877,7 +1901,7 @@ function SmpMetaCard({
             <dd className="font-mono tabular-nums">
               {stats?.still_missing ?? 0}
               {stats?.last_missing && (
-                <span className="ml-1 text-[var(--color-muted)]">
+                <span className="ms-1 text-[var(--color-muted)]">
                   ({stats.last_missing})
                 </span>
               )}

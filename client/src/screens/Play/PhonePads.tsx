@@ -5,6 +5,7 @@ import { Smartphone, X } from "lucide-react";
 import { Button } from "../../components";
 import { getEngineUrl } from "../../state/engine";
 import { useTr } from "../../state/lang";
+import { NetworkChoice } from "./NetworkChoice";
 
 /** The phones link of this engine's Remote Play session (pad_link.rs). */
 export interface PadLinkState {
@@ -13,16 +14,37 @@ export interface PadLinkState {
   url: string | null;
   /** Every address of this computer a phone may reach, best first (`url` is the first). */
   urls: string[];
+  /** This computer's Tailscale address (one of `urls`), while Tailscale is connected. */
+  tailscale: string | null;
   /** What the phone app connects to (it asks; this computer allows). */
   pad_ws: string | null;
   pads: Array<{ id: number; name: string; watch?: boolean; control?: boolean }>;
   pending: Array<{ id: number; name: string }>;
 }
 
+/** A phone's name on this computer's list: what it calls itself, in this app's language when it
+ *  is one of the /pad page's device words (or gave none). */
+export function phoneName(tr: ReturnType<typeof useTr>, name: string): string {
+  switch (name) {
+    case "iphone":
+      return tr("rp_phone_name_iphone", undefined, "iPhone");
+    case "ipad":
+      return tr("rp_phone_name_ipad", undefined, "iPad");
+    case "android":
+      return tr("rp_phone_name_android", undefined, "Android phone");
+    case "":
+    case "phone":
+      return tr("rp_phone_name_phone", undefined, "Phone");
+    default:
+      return name;
+  }
+}
+
 const EMPTY: PadLinkState = {
   open: false,
   url: null,
   urls: [],
+  tailscale: null,
   pad_ws: null,
   pads: [],
   pending: [],
@@ -57,6 +79,7 @@ export function readPadLink(v: unknown): PadLinkState {
     urls: Array.isArray(o.urls)
       ? o.urls.filter((u): u is string => typeof u === "string")
       : [],
+    tailscale: typeof o.tailscale === "string" ? o.tailscale : null,
     pad_ws: typeof o.pad_ws === "string" ? o.pad_ws : null,
     pads: list(o.pads),
     pending: list(o.pending),
@@ -114,14 +137,16 @@ export const padControl = (id: number, on: boolean) =>
 export const watchUrl = (padUrl: string) => `${padUrl}&w=1`;
 
 /** A QR code as an SVG path: crisp at any size, no canvas. */
-function QrCode({
+export function QrCode({
   text,
   label,
   size = 192,
+  testId = "rp-pad-qr",
 }: {
   text: string;
   label: string;
   size?: number;
+  testId?: string;
 }) {
   const { path, n } = useMemo(() => {
     const qr = qrcode(0, "M");
@@ -141,7 +166,7 @@ function QrCode({
       height={size}
       role="img"
       aria-label={label}
-      data-testid="rp-pad-qr"
+      data-testid={testId}
       className="rounded-md bg-white"
     >
       <path d={path} fill="#000" shapeRendering="crispEdges" />
@@ -177,13 +202,6 @@ export function PhonePadsPanel({
   const best =
     picked && urls.includes(picked) ? picked : (link.url ?? urls[0] ?? null);
   const shown = best && mode === "watch" ? watchUrl(best) : best;
-  const hostOf = (u: string) => {
-    try {
-      return new URL(u).hostname;
-    } catch {
-      return u;
-    }
-  };
 
   return (
     <div
@@ -268,31 +286,19 @@ export function PhonePadsPanel({
               >
                 {shown}
               </p>
-              {urls.length > 1 && (
-                <div className="space-y-1" data-testid="rp-pad-addresses">
-                  <p className="text-xs text-[var(--color-muted)]">
-                    {tr(
-                      "rp_phone_other_network",
-                      undefined,
-                      "Nothing opens on the phone? This computer is on more than one network: pick the one the phone's Wi-Fi is on.",
-                    )}
-                  </p>
-                  <div className="flex flex-wrap gap-1.5">
-                    {urls.map((u) => (
-                      <button
-                        key={u}
-                        type="button"
-                        aria-pressed={u === shown}
-                        onClick={() => setPicked(u)}
-                        className="chip min-h-8 px-3 font-mono text-xs"
-                        data-testid="rp-pad-address"
-                      >
-                        {hostOf(u)}
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              )}
+              <NetworkChoice
+                urls={urls}
+                tailscale={link.tailscale}
+                current={best}
+                onPick={setPicked}
+                otherNetwork={tr(
+                  "rp_phone_other_network",
+                  undefined,
+                  "Nothing opens on the phone? This computer is on more than one network: pick the one the phone's Wi-Fi is on.",
+                )}
+                testId="rp-pad-addresses"
+                addressTestId="rp-pad-address"
+              />
               <p className="text-xs text-[var(--color-muted)]" data-testid="rp-pad-android-lan">
                 {tr(
                   "rp_phone_android_lan",
@@ -319,7 +325,7 @@ export function PhonePadsPanel({
             <li key={p.id} className="flex items-center gap-2 text-sm">
               <span className="inline-block h-2 w-2 rounded-full bg-[var(--color-good)]" />
               <span className="flex-1 truncate">
-                {p.name}
+                {phoneName(tr, p.name)}
                 {p.watch && (
                   <span className="ms-2 text-xs text-[var(--color-muted)]">
                     {p.control
@@ -381,6 +387,7 @@ export function PadAsks({ pending }: { pending: PadLinkState["pending"] }) {
   const tr = useTr();
   if (!pending.length) return null;
   const p = pending[0];
+  const name = phoneName(tr, p.name);
   return (
     <div
       className="pointer-events-auto absolute left-1/2 top-16 z-40 flex -translate-x-1/2 flex-wrap items-center gap-2 rounded-full bg-black/85 px-4 py-2 text-sm text-white shadow-lg"
@@ -393,8 +400,8 @@ export function PadAsks({ pending }: { pending: PadLinkState["pending"] }) {
       <span>
         {tr(
           "rp_phone_ask",
-          { name: p.name },
-          `${p.name} wants to be a controller`,
+          { name },
+          `${name} wants to be a controller`,
         )}
       </span>
       <button

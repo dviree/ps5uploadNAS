@@ -8,6 +8,7 @@ import SessionBanner from "./SessionBanner";
 import RemotePlayBanner from "./RemotePlayBanner";
 import EngineDownBanner from "./EngineDownBanner";
 import MovedConsoleBanner, { useMovedConsoleWatch } from "./MovedConsoleBanner";
+import { InstallAskHost } from "../components/InstallAskHost";
 import { PairingDialog } from "../screens/Connection/PairingDialog";
 import { useHelperReplaceGuard } from "../screens/Connection/useHelperReplaceGuard";
 import { helperSendFor, useHelperSendStore } from "../state/helperSend";
@@ -42,7 +43,7 @@ import {
   BLACK_BOX_SETTLE_MS,
   shouldCaptureBlackBox,
 } from "../lib/payloadBlackBox";
-import { useUpdateStore } from "../state/update";
+import { startUpdateChecks, useUpdateStore } from "../state/update";
 import { engineApi } from "../api/engine";
 import { fetchHwPower, payloadCheck, portCheck, procListGet } from "../api/ps5";
 import { keepAwakeTargets, powerFromCheck } from "../lib/consolePower";
@@ -56,7 +57,16 @@ import {
   useActiveProfile,
 } from "../state/roster";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
+import { invoke } from "@tauri-apps/api/core";
+import { useToastStore } from "../state/toasts";
 import { isTauriEnv, safeUnlisten } from "../lib/tauriEnv";
+import {
+  agentsMayBeStale,
+  mcpUrl,
+  rememberAgentUrls,
+  staleAgents,
+  type AgentStatus,
+} from "../screens/McpApi/model";
 import { engineIsOnThisDevice } from "../state/engine";
 import { trStatic } from "../lib/trStatic";
 import { useRemotePlayStore } from "../state/remotePlay";
@@ -70,8 +80,11 @@ import {
 import { ensureOsNotificationPermission } from "../lib/osNotify";
 import { powerTick } from "../api/ps5";
 import { anyAwakeWork, awakeConsoles } from "../lib/awakeWork";
+import { readConsoleTasks } from "../state/consoleTasks";
 import { useTaskStore } from "../state/tasks";
 import { transferScreenBusy } from "../lib/ps5Transfers";
+import { bytesMoved } from "../lib/bytesMoved";
+import { consoleBusy } from "../lib/usePoll";
 import {
   autoRedeployDecision,
   liveHelperDecision,
@@ -92,6 +105,7 @@ import { ShortcutsOverlay } from "../components/ShortcutsOverlay";
 import { LocalPathPicker } from "../components/LocalPathPicker";
 import { Toaster } from "../components/Toaster";
 import { WakePasscodeHost } from "../components/WakePasscodeHost";
+import { RemotePlayHost } from "./RemotePlayHost";
 import { SignInNeededHost } from "../components/SignInNeededHost";
 import { LiveRegion } from "../components/LiveRegion";
 import { SkipNav } from "../components/SkipNav";
@@ -103,6 +117,7 @@ import {
   mgmtAddr,
   hostOf,
   PS5_AVA1_PORT,
+  PAYLOAD_MANAGER_PORT,
 } from "../lib/addr";
 import { safeGetItem, safeSetItem } from "../lib/safeStorage";
 import { useUploadQueueStore } from "../state/uploadQueue";
@@ -113,6 +128,7 @@ import {
 import { isDragOutCopy } from "../lib/dragOut";
 import { keepMinionOff } from "../state/minionMemory";
 import { startRosterShare } from "../state/rosterShare";
+import { startStagedRelease } from "../lib/browserStaging";
 import { startSharedPrefs } from "../lib/sharedPrefs";
 import { startMeshShare } from "../lib/meshShare";
 import { useMeshSync } from "./useMeshSync";
@@ -128,14 +144,16 @@ import { installPlayTimeAccumulator } from "../state/playTime";
 import { installRunningWatch } from "../state/runningWatch";
 import { useTr } from "../state/lang";
 import { isAndroid, isMobile } from "../lib/platform";
-import { localFs } from "../api/localFs";
+import { localFs, storageAccessUsesPrompt } from "../api/localFs";
 import { getAppVersion } from "../lib/appVersion";
 import { GlobalPackageViewer } from "../components/GlobalPackageViewer";
 import { IncomingShareSheet } from "../components/IncomingShareSheet";
+import { OpenLinks } from "../components/OpenLinks";
 import { dropTarget, usePackageViewer } from "../state/packageViewer";
 import { installConvertRunner } from "../lib/convertQueueRunner";
 import { recordAppEvent } from "../lib/appJournal";
 import { engineProbeVerdict } from "../lib/engineUnreachable";
+import { useConfirm } from "../components/ConfirmDialog";
 
 // The Convert queue builds through the Convert pipeline wherever the user is in the app.
 installConvertRunner();
@@ -144,7 +162,7 @@ installConvertRunner();
  *  status bar. Runs for the lifetime of the app so the indicators
  *  reflect current state regardless of which screen is visible.
  *
- *  - Engine: localhost `/api/jobs`, every 5s. Fast; doesn't touch PS5.
+ *  - Engine: localhost `/api/version`, every 5s. Fast; doesn't touch PS5.
  *  - Payload: the PS5's :9120 via `payload_check`, every 10s, and only
  *    when a host is configured (no point spamming DOWN probes against
  *    the default IP if the user hasn't entered theirs). */
@@ -199,6 +217,9 @@ async function consoleBootAndProcesses(
  *  exited by then, so only the ones that stay are remembered. */
 const AUTO_LOADER_SETTLE_MS = 20_000;
 
+/** Consoles whose auto-loader playlist is sending right now. */
+const autoLoadersRunning = new Set<string>();
+
 /** Run the auto-loader's playlist on a console that just came up, unless this boot already
  *  ran it and what it loaded is still running (lib/autoLoaderGuard). */
 async function runAutoLoaderOnce(
@@ -216,7 +237,12 @@ async function runAutoLoaderOnce(
     return;
   }
   log.info("connection", `auto-loader: running "${playlistName}" on ${host}`);
-  await usePayloadPlaylistsStore.getState().run(playlistId, host, PS5_LOADER_PORT);
+  autoLoadersRunning.add(key);
+  try {
+    await usePayloadPlaylistsStore.getState().run(playlistId, host, PS5_LOADER_PORT);
+  } finally {
+    autoLoadersRunning.delete(key);
+  }
   await new Promise((r) => setTimeout(r, AUTO_LOADER_SETTLE_MS));
   const after = await consoleBootAndProcesses(host);
   if (after.boot !== null && after.names !== null) {
@@ -408,9 +434,8 @@ function useStatusPolling() {
       // contention during exactly the window where the console can least
       // afford it. If the count has NOT advanced, the transfer may
       // genuinely be stuck, and we fall through to a real probe.
-      if (transferScreenBusy(probedHost)) {
-        const phase = useTransferStore.getState().phasesByHost[key];
-        const sent = phase && phase.kind === "running" ? phase.bytesSent : null;
+      if (consoleBusy(probedHost)) {
+        const sent = bytesMoved(key);
         const prevSent = transferProgressRef.current[key];
         // Any CHANGE counts as proof of life, not just an increase: a
         // resumed attempt restarts the byte count lower, and that still
@@ -487,6 +512,9 @@ function useStatusPolling() {
         if (s.reachable || sessionNeedsAttention(s.session)) {
           missCountRef.current[key] = 0;
           newStatus = "up";
+          // What the console's own page has running, for Activity (#658): one small read with
+          // this tick, and only when the helper can answer it.
+          if (s.reachable && !sessionNeedsAttention(s.session)) void readConsoleTasks(probedHost);
           // A helper answering well after the user stopped it was started another way: the
           // console is not "stopped by you" any more (state/helperStopped).
           if (noteHelperAnswering(probedHost))
@@ -537,12 +565,18 @@ function useStatusPolling() {
         // a transfer runs; guardElfldr itself asks at most every 10 minutes per console.
         if (newStatus === "up" && prev.payloadStatus !== "up") {
           const guardHost = probedHost;
-          window.setTimeout(() => {
+          const whenSettled = () => {
             const now = useConnectionStore.getState().runtimeByHost[key];
             if (now?.payloadStatus !== "up") return;
             if (transferScreenBusy(guardHost)) return;
+            // Swapping elfldr closes the loader for a moment: not under a playlist still sending.
+            if (autoLoadersRunning.has(key)) {
+              window.setTimeout(whenSettled, BLACK_BOX_SETTLE_MS);
+              return;
+            }
             void guardElfldr(hostOf(guardHost) || guardHost, false);
-          }, BLACK_BOX_SETTLE_MS);
+          };
+          window.setTimeout(whenSettled, BLACK_BOX_SETTLE_MS);
         }
         // Log only on an up<->down TRANSITION (not every poll).
         if (
@@ -868,9 +902,10 @@ function useAutoRedeployDownHelpers() {
         // of its chain; a helper pushed into that window lands before the
         // kernel patches it relies on and crashed an FW 11.40 console three
         // times out of three. Wait until :9021 has been open a while.
-        const loaderOpen = await portCheck(hostOf(host) || host, PS5_LOADER_PORT).catch(
-          () => false,
-        );
+        // Payload Manager counts: a send goes through it when :9021 is closed (#344).
+        const loaderOpen =
+          (await portCheck(hostOf(host) || host, PS5_LOADER_PORT).catch(() => false)) ||
+          (await portCheck(hostOf(host) || host, PAYLOAD_MANAGER_PORT).catch(() => false));
         if (cancelled) return;
         const settle = loaderSettled({
           loaderOpen,
@@ -879,7 +914,7 @@ function useAutoRedeployDownHelpers() {
         });
         if (settle === "closed") {
           delete loaderFirstOpenRef.current[key];
-          return; // nothing listens on :9021; a send could only fail
+          return; // nothing can take the helper; a send could only fail
         }
         if (settle === "settle") {
           if (loaderFirstOpenRef.current[key] === undefined) {
@@ -1018,7 +1053,7 @@ function useAutoRedeployDownHelpers() {
   }, [visible]);
 }
 
-/** Fire a TTL-gated update check on mount. The store debounces to
+/** Fire the TTL-gated update checks from mount on. The store debounces to
  *  one check per day and caches in sessionStorage, so this is safe to
  *  call unconditionally — subsequent tab switches hit cache. */
 function useUpdateCheckOnMount() {
@@ -1027,10 +1062,14 @@ function useUpdateCheckOnMount() {
     // Defer past first paint so the app window renders before we
     // touch the network. The updater's endpoint is GitHub, so a slow
     // DNS would otherwise delay the initial UI by up to a few seconds.
+    let stop: (() => void) | null = null;
     const id = window.setTimeout(() => {
-      void ensureChecked();
+      stop = startUpdateChecks(ensureChecked);
     }, 1500);
-    return () => window.clearTimeout(id);
+    return () => {
+      window.clearTimeout(id);
+      stop?.();
+    };
   }, [ensureChecked]);
 }
 
@@ -1053,6 +1092,42 @@ function useUpdateCheckOnMount() {
  *  can't let the console slip away.
  */
 const KEEP_PS5_AWAKE_TICK_MS = 2 * 60 * 1000;
+/** Tells the user when an agent they added still has the engine's old address, for the launch where
+ *  the engine moved. Agents' CLIs start only then, not on every launch. */
+function useAgentMcpStaleNotice() {
+  const tr = useTr();
+  const navigate = useNavigate();
+  const engineUp = useConnectionStore((s) => s.engineStatus === "up");
+  const checked = useRef(false);
+  useEffect(() => {
+    if (!engineUp || checked.current) return;
+    if (!isTauriEnv() || isMobile()) return;
+    checked.current = true;
+    void (async () => {
+      const engineUrl = await invoke<string>("engine_url_get");
+      if (!agentsMayBeStale(mcpUrl(engineUrl))) return;
+      const statuses = await invoke<AgentStatus[]>("agent_mcp_status");
+      rememberAgentUrls(statuses);
+      if (staleAgents(statuses).length === 0) return;
+      useToastStore.getState().push({
+        message: tr(
+          "mcp_stale_toast",
+          undefined,
+          "An agent still has the engine's old address, so it can't connect. Update it in MCP & API.",
+        ),
+        tone: "warn",
+        duration: 15000,
+        action: {
+          label: tr("mcp_stale_open", undefined, "Open"),
+          onClick: () => navigate("/mcp-api"),
+        },
+      });
+    })().catch(() => {
+      // Only a reminder: the page still shows where each agent stands.
+    });
+  }, [engineUp, navigate, tr]);
+}
+
 function useKeepPs5Awake() {
   const mode = useUploadSettingsStore((s) => s.keepPs5AwakeMode);
   const queueRunning = useUploadQueueStore((s) => s.running);
@@ -1344,7 +1419,8 @@ function HelperVersionBanner() {
             variant="primary"
             onClick={() => {
               if (appOlder) {
-                void useUpdateStore.getState().checkNow();
+                // The browser build updates with its container; Settings says how.
+                if (isTauriEnv()) void useUpdateStore.getState().checkNow();
                 navigate("/settings");
               } else {
                 // Send it right here: the banner already said what this does.
@@ -1474,7 +1550,9 @@ function AndroidStorageAccessBanner() {
                 })
             }
           >
-            {tr("picker_open_settings", undefined, "Open settings")}
+            {storageAccessUsesPrompt()
+              ? tr("picker_allow", undefined, "Allow")
+              : tr("picker_open_settings", undefined, "Open settings")}
           </Button>
           <Button
             variant="ghost"
@@ -1510,14 +1588,18 @@ function AndroidLocalNetworkBanner() {
     recheck();
     window.addEventListener("focus", recheck);
     document.addEventListener("visibilitychange", recheck);
-    // Android's prompt returns no event to the page; poll while it is open.
-    const t = window.setInterval(recheck, 2000);
     return () => {
       window.removeEventListener("focus", recheck);
       document.removeEventListener("visibilitychange", recheck);
-      window.clearInterval(t);
     };
   }, []);
+
+  // Android's prompt returns no event to the page; poll only while the banner is up.
+  useEffect(() => {
+    if (!blocked) return;
+    const t = window.setInterval(() => setBlocked(localNetworkBlocked()), 2000);
+    return () => window.clearInterval(t);
+  }, [blocked]);
 
   if (!blocked) return null;
 
@@ -1576,6 +1658,7 @@ export default function AppShell() {
   useAutoRedeployDownHelpers();
   useMovedConsoleWatch();
   useUpdateCheckOnMount();
+  useAgentMcpStaleNotice();
   useKeepPs5Awake();
   useRoutePersistence();
   useWindowStatePersistence();
@@ -1598,14 +1681,18 @@ export default function AppShell() {
     // Migrate single-host users into the multi-PS5 roster on first
     // start. Idempotent — no-op when the roster is already populated.
     ensureRosterMigrated();
-    // The self-hosted web UI keeps the console list in the engine, so every browser sees the
-    // same consoles. No-op in the desktop and mobile apps.
+    // The console list is kept in the engine too: every browser of the self-hosted web UI sees the
+    // same consoles, and an app's list reaches /api/consoles.
     const stopRosterShare = startRosterShare();
-    // ...and the settings every browser shares (lib/sharedPrefs). The sidebar follows another
-    // browser's change at once; the rest at the next page load.
-    const stopSharedPrefs = isTauriEnv()
-      ? () => {}
-      : startSharedPrefs(() => useNavSidebarStore.setState(navListsFromStorage()));
+    // Copies staged from this browser go when the upload they were for has.
+    const stopStagedRelease = isTauriEnv() ? () => {} : startStagedRelease();
+    // ...and the settings (lib/sharedPrefs, /api/settings). The sidebar follows a change made
+    // elsewhere at once; every store re-reads the rest.
+    const stopSharedPrefs = startSharedPrefs(
+      () => useNavSidebarStore.setState(navListsFromStorage()),
+      undefined,
+      isTauriEnv(),
+    );
     // 8.0.0: every device that uses a console shares the console list and set-up through it.
     // A change from another device applies at once (lib/liveSettings): no reload prompt.
     const stopMeshShare = startMeshShare(() => useNavSidebarStore.setState(navListsFromStorage()));
@@ -1629,6 +1716,7 @@ export default function AppShell() {
     return () => {
       window.clearInterval(pruneTimer);
       stopRosterShare();
+      stopStagedRelease();
       stopSharedPrefs();
       stopMeshShare();
       stopSaveBackupSync();
@@ -1674,12 +1762,13 @@ export default function AppShell() {
       <GlobalPackageViewer />
       {/* "Send to PS5": a link or file shared to the app, or a .pkg opened with it. */}
       <IncomingShareSheet />
+      <OpenLinks />
       {/* The app's own captures, large (desktop app only; opened from the status bar
           and the Bug report). */}
       {isTauriEnv() && <CaptureViewer />}
       {/* v5 mobile top bar — kept slim; primary nav is the bottom
           tab bar. Only renders below md. */}
-      <div className="h-top-bar flex items-center gap-2.5 px-4 pb-2 pt-[calc(env(safe-area-inset-top)_+_0.5rem)] md:hidden">
+      <div className="h-top-bar flex shrink-0 items-center gap-2.5 pb-2 pt-[calc(var(--safe-top)_+_0.5rem)] md:hidden">
         <NavigationControls />
         <AppLogo size={28} />
         <span className="text-base font-semibold tracking-[-0.02em]">PS5Upload</span>
@@ -1697,7 +1786,7 @@ export default function AppShell() {
       <AndroidStorageAccessBanner />
 
       {/* Desktop: the sidebar runs to the window edge, the content beside it. */}
-      <div className="flex min-h-0 flex-1">
+      <div className="shell-safe-x flex min-h-0 flex-1">
         <div className="flex min-h-0 min-w-0 flex-1">
           {/* Desktop defaults to labeled navigation again. Users who prefer the
               compact v5 rail can collapse it explicitly; that choice persists. */}
@@ -1708,7 +1797,7 @@ export default function AppShell() {
             tabIndex={-1}
             className="flex min-w-0 flex-1 flex-col overflow-hidden outline-none"
           >
-            <div className="flex min-w-0 items-center gap-3 px-3 md:px-6 md:pt-4">
+            <div className="flex min-w-0 items-center gap-3 px-3 md:px-6 md:pt-[calc(var(--safe-top)_+_1rem)]">
               {/* Browser-style history for a desktop app: route and workspace-tab
                   changes are first-class views, so users can retrace a workflow
                   without reopening More or rebuilding a search. */}
@@ -1754,7 +1843,9 @@ export default function AppShell() {
       <Toaster />
       <SignInNeededHost />
       <WakePasscodeHost />
+      <RemotePlayHost />
       <PairingDialog />
+      <InstallAskHost />
     </div>
   );
 }
@@ -1767,6 +1858,28 @@ function TopBarActions() {
   const theme = useThemeStore((s) => s.theme);
   const toggleTheme = useThemeStore((s) => s.toggleTheme);
   const searchLabel = tr("topbar_search_label", undefined, "Search screens and commands");
+  const { confirm: confirmReload, dialog: reloadDialog } = useConfirm();
+  // A reload restarts the app (lib/preventAccidentalReload.ts): the progress of running work
+  // disappears and a Remote Play stream or Play Together session ends. Ask only when it would.
+  const reloadPage = async () => {
+    const busy =
+      useTaskStore.getState().tasks.some((t) => t.status === "running") ||
+      useRemotePlayStore.getState().stream != null;
+    if (busy) {
+      const ok = await confirmReload({
+        title: tr("topbar_reload_confirm_title", undefined, "Reload while work is running?"),
+        message: tr(
+          "topbar_reload_confirm_body",
+          undefined,
+          "Reloading restarts the app window. A Remote Play stream or Play Together session ends, and running tasks disappear from this window until the app finds them again.",
+        ),
+        confirmLabel: tr("topbar_reload_page", undefined, "Reload page"),
+        destructive: true,
+      });
+      if (!ok) return;
+    }
+    window.location.reload();
+  };
   // With several consoles the tab strip shares this row. Between 1024 and
   // 1280 the full search field left it room for less than one tab (the pill
   // on show was cut mid-name), so there the field is the round button it
@@ -1795,13 +1908,14 @@ function TopBarActions() {
       </button>
       <button
         type="button"
-        onClick={() => window.location.reload()}
+        onClick={() => void reloadPage()}
         aria-label={tr("topbar_reload_page", undefined, "Reload page")}
         title={tr("topbar_reload_page", undefined, "Reload page")}
         className="icon-orb-button"
       >
         <RotateCw size={18} aria-hidden />
       </button>
+      {reloadDialog}
       <UpdateCheckButton variant="orb" />
       <NotificationInbox align="right" placement="below" variant="orb" />
       <button

@@ -4,7 +4,7 @@
 
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -186,7 +186,7 @@ pub fn upload_zip(
 /// Retained for the engine's error mapping; AVA1 no longer raises it. Duplicate paths,
 /// case clashes, file/directory clashes and unsafe paths in a RAR are terminal
 /// (`ava1_rar_unsupported`).
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 #[derive(Debug, thiserror::Error)]
 #[error("rar is not usable as an AVA1 source: {0}")]
 pub struct RarUnsupported(pub String);
@@ -195,7 +195,7 @@ pub struct RarUnsupported(pub String);
 /// ([`crate::rar_source::RarSource`]). `password` is held only in memory for this job;
 /// it is never logged. Failures that retrying cannot fix are [`UploadFailure`]s with
 /// the `ava1_rar_*` reasons in [`crate::rar_source::RarReason`].
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn upload_rar_in(
     pool: &Pool,
     cfg: &TransferConfig,
@@ -205,8 +205,14 @@ pub fn upload_rar_in(
     password: Option<&str>,
 ) -> Result<TransferResult> {
     use crate::rar_source::{rar_failure, RarOpenError, RarSource};
-    let (manifest, source) = match RarSource::open(archive, password, &cfg.excludes) {
+    let watch = ps5upload_core::transfer::RarLayoutWatch {
+        cancel: cfg.cancel.as_deref(),
+        live: cfg.progress_live.as_deref(),
+    };
+    let (manifest, source) = match RarSource::open_watched(archive, password, &cfg.excludes, watch)
+    {
         Ok(v) => v,
+        Err(RarOpenError::Cancelled) => return Err(anyhow!("transfer_cancelled")),
         Err(RarOpenError::Plan(f)) => return Err(rar_upload_failure(f.reason, f.message).into()),
         // A duplicate, a case clash, a file/dir clash or an unsafe path: terminal.
         Err(RarOpenError::Unsupported(m)) => {
@@ -217,6 +223,16 @@ pub fn upload_rar_in(
             .into())
         }
     };
+    // The headers do not give an unknown size, so the job's plan left those entries out: now
+    // that they are measured, the bar counts them.
+    if let Some(total) = &cfg.progress_total {
+        let measured = manifest
+            .entries
+            .iter()
+            .filter(|e| e.kind == gen::ENTRY_FILE)
+            .fold(0u64, |sum, e| sum.saturating_add(e.size));
+        total.store(measured, Ordering::Release);
+    }
     let source = Arc::new(source);
     let mut opts = SendOptions::upload(dest_root);
     opts.seq = Some(source.clone());
@@ -228,7 +244,7 @@ pub fn upload_rar_in(
     })
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 fn rar_upload_failure(reason: crate::rar_source::RarReason, message: String) -> UploadFailure {
     use crate::rar_source::RarReason::*;
     let detail = match reason {
@@ -247,7 +263,7 @@ fn rar_upload_failure(reason: crate::rar_source::RarReason, message: String) -> 
     }
 }
 
-#[cfg(not(target_os = "android"))]
+#[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn upload_rar(
     cfg: &TransferConfig,
     job_id: [u8; 16],
@@ -448,20 +464,42 @@ impl SessionGate {
 }
 
 pub(crate) fn refusal(status: u16, message: String) -> UploadFailure {
+    // The protocol has one code for any write failure; EFBIG (a file past FAT32's 4 GiB) cannot
+    // be fixed by trying again, so it is told apart by the console's words.
+    let reason = if status == gen::ERR_IO && message.contains("File too large") {
+        "ava1_file_too_large".into()
+    } else {
+        refusal_reason(status)
+    };
     UploadFailure {
-        reason: refusal_reason(status),
+        reason,
         detail: format!("console refused the transfer ({status}): {message}"),
     }
 }
 
-/// The console's own ENOSPC (its preallocation of a file, or a write) after the up-front check
-/// admitted the job: the same refusal the check gives, with the same figures and the pool
-/// sentence. The console keeps the journal and the `.ava-part`, so a retry resumes.
-pub(crate) fn late_no_space(job: &[u8; 16], console_message: String) -> UploadFailure {
-    UploadFailure {
-        reason: "preflight_insufficient_space".into(),
-        detail: crate::space::late_no_space_detail(job, &console_message),
+/// A drive that cannot take the job, with the figures behind it when they are known. The typed
+/// failure stays what callers downcast to; `downcast_ref::<SpaceRefusal>` finds the figures, so
+/// the client can word them in the user's language.
+fn no_room_failure(detail: String, refusal: Option<crate::space::SpaceRefusal>) -> anyhow::Error {
+    let reason = refusal
+        .as_ref()
+        .map_or("preflight_insufficient_space", |r| r.reason());
+    let failure = UploadFailure {
+        reason: reason.into(),
+        detail,
+    };
+    match refusal {
+        Some(r) => anyhow::Error::from(failure).context(r),
+        None => failure.into(),
     }
+}
+
+/// The console's own ENOSPC (its preallocation of a file, or a write) after the up-front check
+/// admitted the job: the same refusal the check gives, with the same figures and what explains
+/// them. The console keeps the journal and the `.ava-part`, so a retry resumes.
+pub(crate) fn late_no_space(job: &[u8; 16], console_message: String) -> anyhow::Error {
+    let (detail, refusal) = crate::space::late_no_space(job, &console_message);
+    no_room_failure(detail, refusal)
 }
 
 impl PostCommitError {
@@ -627,6 +665,23 @@ fn dir_source_for(cfg: &TransferConfig, root: &Path) -> Arc<dyn Source> {
     Arc::new(crate::source::RenamedSource::new(source, &cfg.renames))
 }
 
+/// `gate`, also storing in `resumed` the bytes the receiver held before this job's own
+/// sending: what it proves durable at an open (whole files in place plus durable ranges of
+/// unfinished ones) less what this job has had acknowledged so far. The first open of a
+/// resume gives it all; a later open can only raise it, when bytes an earlier run sent became
+/// durable after that open (a resume right after a cancel).
+fn record_resumed(
+    gate: ava1::send::SpaceGate,
+    progress: Arc<Progress>,
+    resumed: Arc<AtomicU64>,
+) -> ava1::send::SpaceGate {
+    Arc::new(move |figures: &ava1::send::SpaceFigures| {
+        let ours = progress.bytes_sent.load(Ordering::Relaxed);
+        resumed.fetch_max(figures.durable_bytes.saturating_sub(ours), Ordering::AcqRel);
+        gate(figures)
+    })
+}
+
 /// One upload, retried across connection loss with the same `job_id`: the console's
 /// journal resumes the job, and durable progress bounds the retries.
 pub fn upload_with_in(
@@ -671,11 +726,17 @@ pub fn upload_with_seq_in(
     let dest = opts.root.clone();
     // What this job promised the drive is released however it ends (design 015/02).
     let _promise = crate::space::Reservation::new(job_id);
-    let space_gate =
-        crate::space::gate(pool.room_probe(), console.to_string(), dest.clone(), job_id);
+    // What the console already held when the job first opened (a resume): read from the
+    // figures the sender hands the space check before any byte goes out.
+    let resumed = Arc::new(AtomicU64::new(0));
+    let space_gate = record_resumed(
+        crate::space::gate(pool.room_probe(), console.to_string(), dest.clone(), job_id),
+        progress.clone(),
+        resumed.clone(),
+    );
     crate::block_on(async {
         SessionGate::identity(pool)?;
-        let _bridge = Bridge::start(progress.clone(), cfg);
+        let _bridge = Bridge::start_resumed(progress.clone(), cfg, resumed.clone());
         let mut backoff = Duration::from_millis(250);
         let mut gate = SessionGate::default();
         let mut busy = 0u32;
@@ -753,6 +814,9 @@ pub fn upload_with_seq_in(
                         "skipped_files": skipped_files,
                         "skipped_bytes": skipped_bytes,
                         "files_sent": manifest_files.saturating_sub(skipped_files),
+                        // Every byte the console held when the job first opened, partly
+                        // written files included (a resumed single file has no skipped files).
+                        "resumed_bytes": resumed.load(Ordering::Acquire).max(skipped_bytes),
                     });
                     // The bytes are durable, but the console did not confirm its files settled in place
                     // (SPEC.md §15.7): the job's snapshot says so instead of a clean success.
@@ -775,7 +839,7 @@ pub fn upload_with_seq_in(
                     return Err(PostCommitError::new(PostCommitKind::CrossDevice, r.message).into());
                 }
                 Ok(r) if r.status == gen::ERR_NO_SPACE => {
-                    return Err(late_no_space(&job_id, r.message.unwrap_or_default()).into());
+                    return Err(late_no_space(&job_id, r.message.unwrap_or_default()));
                 }
                 Ok(r) => return Err(refusal(r.status, r.message.unwrap_or_default()).into()),
                 Err(SendError::Disconnected(why)) => {
@@ -820,7 +884,7 @@ pub fn upload_with_seq_in(
                     );
                 }
                 Err(SendError::Refused { status, message }) if status == gen::ERR_NO_SPACE => {
-                    return Err(late_no_space(&job_id, message).into());
+                    return Err(late_no_space(&job_id, message));
                 }
                 Err(SendError::Refused { status, message }) => {
                     return Err(refusal(status, message).into());
@@ -829,9 +893,14 @@ pub fn upload_with_seq_in(
                 // The rest of the job does not fit the drive: said once, up front, with the
                 // numbers. The console keeps what it has, so freeing room and retrying resumes.
                 Err(SendError::NoRoom(detail)) => {
+                    return Err(no_room_failure(detail, crate::space::take_refusal(&job_id)));
+                }
+                // The source, not the connection: no helper re-send helps. A damaged archive
+                // keeps its own wording (InvalidData), see `seq.rs`.
+                Err(SendError::Source(e)) if e.kind() != std::io::ErrorKind::InvalidData => {
                     return Err(UploadFailure {
-                        reason: "preflight_insufficient_space".into(),
-                        detail,
+                        reason: "source_read_failed".into(),
+                        detail: format!("reading the source: {e}"),
                     }
                     .into());
                 }
@@ -1135,6 +1204,7 @@ struct Done {
     files: u64,
     files_finalized: u64,
     bytes_finalized: u64,
+    bytes_resumed: u64,
 }
 
 /// Runs one job of a list with private counters and mirrors `done + private` into the caller's
@@ -1152,8 +1222,15 @@ fn run_aggregated<T>(
     inner.progress_files = fresh(&cfg.progress_files);
     inner.progress_files_finalized = fresh(&cfg.progress_files_finalized);
     inner.progress_bytes_finalized = fresh(&cfg.progress_bytes_finalized);
+    inner.progress_bytes_resumed = fresh(&cfg.progress_bytes_resumed);
     let pairs = |d: Done| -> Vec<(C, C, u64)> {
         vec![
+            // First: `progress_bytes` includes it, so it must never lag behind them.
+            (
+                cfg.progress_bytes_resumed.clone(),
+                inner.progress_bytes_resumed.clone(),
+                d.bytes_resumed,
+            ),
             (
                 cfg.progress_bytes.clone(),
                 inner.progress_bytes.clone(),
@@ -1223,6 +1300,7 @@ fn run_aggregated<T>(
     done.files += get(&inner.progress_files);
     done.files_finalized += get(&inner.progress_files_finalized);
     done.bytes_finalized += get(&inner.progress_bytes_finalized);
+    done.bytes_resumed += get(&inner.progress_bytes_resumed);
     r
 }
 
@@ -1578,6 +1656,11 @@ mod failure_reason_tests {
         // Every typed refusal (upload, download, relay, copy) goes through `refusal`.
         let f = refusal(gen::ERR_STALLED, "no data".into());
         assert_eq!(f.reason, "ava1_stalled");
+        // One code for every write failure; a file too big for the drive is not retried.
+        let f = refusal(gen::ERR_IO, "write failed: File too large (a.bin)".into());
+        assert_eq!(f.reason, "ava1_file_too_large");
+        let f = refusal(gen::ERR_IO, "write failed: Input/output error".into());
+        assert_eq!(f.reason, format!("ava1_refused_{}", gen::ERR_IO));
     }
 }
 

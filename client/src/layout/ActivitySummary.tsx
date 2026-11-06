@@ -7,15 +7,22 @@ import { humanizeJobErrorReason } from "../api/ps5";
 import { KindIcon } from "../components/TaskList";
 import { ProgressBar } from "../components/ProgressBar";
 import { Spinner } from "../components/Spinner";
-import { formatBytes, formatDuration } from "../lib/format";
+import { formatBytes } from "../lib/format";
 import type { ActivitySummary, FinishedRow, ActivityRow, QueuedRow } from "../state/activitySummary";
 import { routeForTask, shortLabel, shortLabelKey } from "../state/activitySummary";
 import { useTr } from "../state/lang";
 import type { Task, TaskKind } from "../state/tasks";
+import { formatDuration } from "../lib/formatDate";
 
 type Tr = ReturnType<typeof useTr>;
 
 const kindName = (tr: Tr, kind: TaskKind) => tr(shortLabelKey(kind), undefined, shortLabel(kind));
+
+/** A time left worth showing: positive, finite and under 30 days (anything longer comes from a
+ *  speed too small to mean anything). */
+export function shownEta(eta: number | undefined | null): eta is number {
+  return eta != null && eta > 0 && Number.isFinite(eta) && eta < 30 * 86_400;
+}
 
 /** What a running job says about itself, in order: its step, how far, how fast, how long. A
  *  job that has gone quiet says only that. `long` adds the byte counts (the panel has room). */
@@ -41,8 +48,8 @@ export function rowFigures(row: ActivityRow, tr: Tr, long = false): string[] {
       );
     }
   }
-  if (task.rate && task.rate.bytesPerSec > 0) out.push(`${formatBytes(task.rate.bytesPerSec)}/s`);
-  if (task.eta != null && task.eta > 0 && isFinite(task.eta)) {
+  if (task.rate && task.rate.bytesPerSec >= 1) out.push(`${formatBytes(task.rate.bytesPerSec)}/s`);
+  if (shownEta(task.eta)) {
     const time = formatDuration(task.eta);
     out.push(tr("activity_left", { time }, `${time} left`));
   }
@@ -57,9 +64,9 @@ export function lineFigures(row: ActivityRow, tr: Tr): string[] {
   const out: string[] = [];
   if (pct != null) out.push(`${Math.floor(pct)}%`);
   if (task.stage && (pct == null || pct >= 100)) out.push(task.stage);
-  if (task.rate && task.rate.bytesPerSec > 0 && (pct == null || pct < 100))
+  if (task.rate && task.rate.bytesPerSec >= 1 && (pct == null || pct < 100))
     out.push(`${formatBytes(task.rate.bytesPerSec)}/s`);
-  if (task.eta != null && task.eta > 0 && isFinite(task.eta)) {
+  if (shownEta(task.eta)) {
     const time = formatDuration(task.eta);
     out.push(tr("activity_left", { time }, `${time} left`));
   }
@@ -353,7 +360,7 @@ function RunningRow({ row, onOpen, onCancel, canCancel, consoleOf }: { row: Acti
           type="button"
           onClick={() => onOpen(routeForTask(task))}
           title={tr("activity_open_owner", undefined, "Open its screen")}
-          className="flex min-w-0 flex-1 items-center gap-2 text-left hover:text-[var(--color-accent)]"
+          className="flex min-w-0 flex-1 items-center gap-2 text-start hover:text-[var(--color-accent)]"
         >
           <KindIcon kind={task.kind} size={13} />
           <span className="shrink-0 text-[var(--color-muted)]">{kindName(tr, task.kind)}</span>
@@ -409,7 +416,7 @@ function QueuedRowView({
         type="button"
         onClick={() => onOpen(row.route)}
         title={tr("activity_open_owner", undefined, "Open its screen")}
-        className="flex min-w-0 flex-1 items-center gap-2 text-left hover:text-[var(--color-accent)]"
+        className="flex min-w-0 flex-1 items-center gap-2 text-start hover:text-[var(--color-accent)]"
       >
         <KindIcon kind={row.kind} size={13} />
         <span className="shrink-0 text-[var(--color-muted)]">{kindName(tr, row.kind)}</span>
@@ -467,7 +474,7 @@ function FinishedRowView({ row, onOpen, onRetry, canRetry, consoleOf }: { row: F
           type="button"
           onClick={() => onOpen(routeForTask(task))}
           title={tr("activity_open_owner", undefined, "Open its screen")}
-          className="flex min-w-0 flex-1 items-center gap-2 text-left hover:text-[var(--color-accent)]"
+          className="flex min-w-0 flex-1 items-center gap-2 text-start hover:text-[var(--color-accent)]"
         >
           <span className="shrink-0 text-[var(--color-muted)]">{kindName(tr, task.kind)}</span>
           <span className="min-w-0 truncate text-[var(--color-text)]">{task.label}</span>

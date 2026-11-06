@@ -1,10 +1,10 @@
 [package]
 name = "ps5upload-desktop"
-version = "10.7.6"
+version = "11.2.5"
 description = "The all-in-one PS5 companion app."
 license = "GPL-3.0-or-later"
 edition = "2021"
-rust-version = "1.77"
+rust-version = "1.87"  # is_multiple_of (engine crates it links); CI builds on stable
 
 [lib]
 name = "ps5upload_desktop_lib"
@@ -12,10 +12,12 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
+# The embedded engine's stamp, hashed once at build time (build.rs), not on every launch.
+blake3 = "1"
 
 [dependencies]
 # Same version as engine/Cargo.toml (the third_party/ava1 submodule's tag).
-ava1 = "=1.0.5"
+ava1 = "=1.0.6"
 # Tauri core + the native file dialogs. File reads/writes go through our
 # own commands (see commands/save_text_file.rs), and links open through
 # tauri-plugin-opener below.
@@ -33,7 +35,7 @@ tauri-plugin-notification = "2"
 # the second-launch argv, so we can focus its window and let the
 # duplicate exit cleanly. Desktop-only — mobile targets don't ship
 # this path.
-tauri-plugin-single-instance = "2"
+tauri-plugin-single-instance = { version = "2", features = ["deep-link"] }
 
 # HTTP client for both the localhost engine sidecar (no TLS) and the
 # public GitHub update manifest/asset downloads (needs TLS via
@@ -58,13 +60,13 @@ open = "5"
 # `probes.rs::decompress_to_cache`. Pure-Rust miniz backend, no
 # system-lib linkage, so cross-compilation to arm64/Windows stays simple.
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
-# SHA-256 of a catalogue payload whose release publishes SHA256SUMS (commands/payloads.rs
-# CHECKSUM_FILES). Same version the engine crates already pull in.
+# SHA-256 of a downloaded update (commands/updates.rs). Same version the engine crates pull in.
 sha2 = "0.11"
 
 # Engine core modules invoked directly in-process by Tauri commands
 # (no HTTP hop). Same workspace, different manifest root.
-ps5upload-core = { path = "../../engine/crates/ps5upload-core" }
+# "mdns": console discovery, core's discover.rs.
+ps5upload-core = { path = "../../engine/crates/ps5upload-core", features = ["mdns"] }
 
 # BLAKE3 for hash-stamping the extracted engine binary + payload.
 # Replaces the previous full-byte compare on every launch — hashing
@@ -87,21 +89,8 @@ base64 = "0.23"
 # save folder into <title_id>.zip and validate/extract restore zips.
 zip = { version = "9", default-features = false, features = ["deflate"] }
 
-# mDNS service discovery for the Connection screen's "Find PS5s on the
-# network" button. Pure-Rust implementation — no system avahi/bonjour
-# linkage, so cross-compilation to all desktop targets (macOS arm64/x64,
-# Windows x64/arm64, Linux x64/arm64) stays single-toolchain. Used only
-# from `commands/discover.rs`; a discovery is a single 3-second LAN
-# browse, not a long-running daemon.
-mdns-sd = { version = "0.21", default-features = false, features = ["async"] }
-
-# Enumerate ALL local network interfaces (not just the default-route one) so
-# the LAN sweep in commands/discover.rs probes every subnet the host is on —
-# Ethernet + Wi-Fi + USB-tether simultaneously. Pure-Rust, cross-platform
-# (macOS/Windows/Linux), no system linkage; keeps the single-toolchain
-# cross-compile story intact.
-if-addrs = "0.15"
 tauri-plugin-opener = "2"
+tauri-plugin-deep-link = "2"
 
 # libc for `statvfs` in the USB autoloader's drive enumeration
 # (commands/usb_autoloader.rs). Already pulled in transitively via
@@ -212,7 +201,26 @@ opt-level = "s"
 # (~30 MB on Linux) and WebView2 (system-shared on Windows). If a
 # future size crunch ever justifies stripping, scope it to specific
 # packages via [profile.release.package.X] with `strip = true`.
-panic = "abort"
+#
+# No `panic = "abort"`: it would end the process before any `catch_unwind` or `Drop` runs. That
+# turned off the tray's guard on desktop and, because this profile builds the phone apps' whole
+# engine, every engine guard on phones (a panicking task took the app and its transfers down).
+# `cargo test` ignores the setting, so only `release_profile_keeps_unwinding` can see it.
+
+# The phone apps link the engine into this binary, so a size-first profile would run Remote Play's
+# per-packet crypto at its slowest level on the weakest CPUs. Measured with these crates on Apple
+# Silicon (2026-11-04): AES-GCM 893 MB/s at "s", 3,831 MB/s at 3 (AES blocks and HMAC-SHA256 differ
+# by under 6 %). GCM is generic, so the crate that instantiates it counts too. Only these.
+[profile.release.package.ps5upload-core]
+opt-level = 3
+[profile.release.package.aes-gcm]
+opt-level = 3
+[profile.release.package.ghash]
+opt-level = 3
+[profile.release.package.polyval]
+opt-level = 3
+[profile.release.package.ctr]
+opt-level = 3
 
 # No `unrar` here: UnRAR runs as the separate `ps5upload-unrar` program (built in
 # the engine workspace, embedded next to the engine by build.rs/engine.rs), never

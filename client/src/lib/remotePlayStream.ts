@@ -8,7 +8,7 @@
 // turns that into pixels on a canvas, sound, and input; the screen only drives it.
 
 import { isPasscode } from "./passcode";
-import { DEFAULT_PICTURE, PicturePass, PlaneReader, cropRect, isPlaneFormat, needsPass, sharpens, upscaleSize, upscales, type PictureTools } from "./rpPicture";
+import { DEFAULT_PICTURE, PicturePass, PlaneReader, chromaBlank, cropRect, isPlaneFormat, needsPass, sharpens, upscaleSize, upscales, type PictureTools } from "./rpPicture";
 import { isLinuxDesktop } from "./platform";
 import { linuxCompositingOff } from "./linuxGraphics";
 import { decoderStarting, linuxSoftwareVideo, withDecoderStart, type DecoderStart } from "./videoDecoderGuard";
@@ -25,6 +25,7 @@ import { decoderVerdict, FED_RECENT_MS, MAX_REBUILDS } from "./rpDecoderWatch";
 import type { RpKeyboardMsg, RpKeyboardSend } from "./rpKeyboard";
 import { parseSnapshotRequest, takeSnapshot } from "./rpSnapshot";
 import { OpusPipe } from "./rpAudioPipe";
+import { relayoutElement, watchRestore } from "./repaintOnRestore";
 // A file of the app's own: the apps' Content-Security-Policy refuses a worklet from a blob: URL.
 import audioWorkletUrl from "./rpAudioWorklet.js?url&no-inline";
 
@@ -60,6 +61,9 @@ export interface PadState {
   touch?: [number, number] | null;
   /** A phone's motion sensors in the controller's axes (lib/motion.ts), or none. */
   motion?: MotionReading | null;
+  /** The buttons the game's turbo is pressing above 10 a second: the engine holds them about a
+   *  frame instead of three (rp_stream/pad_pace.rs, lib/gameControls.ts). */
+  turbo?: number;
 }
 
 export const IDLE_PAD: PadState = { buttons: 0, l2: 0, r2: 0, lx: 0, ly: 0, rx: 0, ry: 0 };
@@ -200,7 +204,27 @@ const STANDARD_BUTTONS = [
 /** Where one control of the console's pad comes from on a controller: a button (by index), or
  *  half of an axis (index, the direction it moves when pressed, and where it rests: -1 for a
  *  trigger reported as an axis that rests at one end). */
-export type PadSource = { b: number } | { a: number; d: 1 | -1; rest?: number };
+export type PadSource = { b: number } | { a: number; d: 1 | -1; rest?: number } | HatSource;
+
+/** A d-pad reported as one axis (non-standard pads in Chromium and Firefox): 8 positions in
+ *  sevenths from -1 (up) clockwise to 1 (up left), resting outside -1..1 (9/7). `at`: the position,
+ *  0-7, this source means; its two neighbours (the diagonals) count too. */
+export interface HatSource {
+  h: number;
+  at: number;
+}
+
+/** Up, right, down and left on a hat. */
+export const HAT_UP = 0;
+export const HAT_RIGHT = 2;
+export const HAT_DOWN = 4;
+export const HAT_LEFT = 6;
+
+/** Where a hat axis's reading is, 0-7, or null at rest. */
+export function hatPosition(v: number): number | null {
+  if (!(Math.abs(v) <= 1.01)) return null;
+  return Math.round((v + 1) * 3.5) % 8;
+}
 
 /** A stick axis: the controller's axis index, inverted when it reads the other way round. */
 export interface PadAxis {
@@ -237,6 +261,12 @@ export function sourceValue(g: Gamepad, src: PadSource): number {
     const b = g.buttons[src.b];
     return b ? Math.max(b.pressed ? 1 : 0, b.value) : 0;
   }
+  if ("h" in src) {
+    const at = hatPosition(g.axes[src.h] ?? 9);
+    if (at === null) return 0;
+    const off = (at - src.at + 8) % 8;
+    return off === 0 || off === 1 || off === 7 ? 1 : 0;
+  }
   const v = g.axes[src.a];
   if (v === undefined) return 0;
   const rest = src.rest ?? 0;
@@ -245,7 +275,29 @@ export function sourceValue(g: Gamepad, src: PadSource): number {
 
 /** A controller the browser lays out the standard way, or one it does not recognize: then the
  *  standard order is the best guess (most controllers follow it), until it is mapped. */
-export const guessProfile = (_g: Gamepad): PadProfile => STANDARD_PROFILE;
+export function guessProfile(g: Gamepad): PadProfile {
+  if (g.mapping === "standard") return STANDARD_PROFILE;
+  const known = hatGuesses.get(g.id);
+  if (known) return known;
+  // Only a hat at rest reads outside -1..1: one seen once is that pad's for this run.
+  const hat = g.axes.findIndex((v) => Math.abs(v) > 1.05);
+  if (hat < 0) return STANDARD_PROFILE;
+  const prof: PadProfile = {
+    ...STANDARD_PROFILE,
+    buttons: [
+      ...STANDARD_PROFILE.buttons,
+      [PadButton.UP, { h: hat, at: HAT_UP }],
+      [PadButton.RIGHT, { h: hat, at: HAT_RIGHT }],
+      [PadButton.DOWN, { h: hat, at: HAT_DOWN }],
+      [PadButton.LEFT, { h: hat, at: HAT_LEFT }],
+    ],
+  };
+  hatGuesses.set(g.id, prof);
+  return prof;
+}
+
+/** The usual layout plus a hat d-pad, per controller seen with one. */
+const hatGuesses = new Map<string, PadProfile>();
 
 /** The pad the connected controllers amount to (all of them, merged), each read through its
  *  profile. */
@@ -289,9 +341,18 @@ export function mergePads(a: PadState, b: PadState): PadState {
 /** Play the console's rumble on every controller that can (Gamepad API "dual-rumble").
  *  Each message is the current level, so it is played for a while and replaced by the next;
  *  zero stops it. */
-export function playRumble(pads: ReadonlyArray<Gamepad | null>, strong: number, weak: number): void {
-  for (const g of pads) {
-    const act = (g as (Gamepad & { vibrationActuator?: GamepadHapticActuator | null }) | null)?.vibrationActuator;
+export function playRumble(
+  pads: ReadonlyArray<Gamepad | null>,
+  strong: number,
+  weak: number,
+  /** The browser's own list: the app's controller readers (lib/nativePad.ts) have no motors, and
+   *  the browser may see the same controller and be able to shake it. */
+  browserPads: () => ReadonlyArray<Gamepad | null> = () => globalThis.navigator?.getGamepads?.() ?? [],
+): void {
+  const actuator = (g: Gamepad | null) =>
+    (g as (Gamepad & { vibrationActuator?: GamepadHapticActuator | null }) | null)?.vibrationActuator;
+  for (const g of pads.some(actuator) ? pads : browserPads()) {
+    const act = actuator(g);
     if (!act) continue;
     if (strong === 0 && weak === 0) {
       void act.reset?.();
@@ -306,7 +367,7 @@ export function playRumble(pads: ReadonlyArray<Gamepad | null>, strong: number, 
 }
 
 export { avcCodecString, isKeyframe, supportedHevc } from "./rpCodec";
-import { avcCodecString, isKeyframe, supportedHevc } from "./rpCodec";
+import { avcCodecString, isKeyframe, noPictureStep, supportedHevc } from "./rpCodec";
 import { avcDescription, lengthPrefixed } from "./fmp4";
 
 function sameBytes(a: Uint8Array | null, b: Uint8Array): boolean {
@@ -372,15 +433,40 @@ export function canvasClass(fit: PictureFit): string {
   return `rp-picture pointer-events-none ${FIT_CLASS[fit] ?? FIT_CLASS.fit}`;
 }
 
+/**
+ * Nobody can see this frame and nothing reads it: the window is hidden, or the canvas is off the
+ * page (another screen, mini player off). Drawing it would still be a GPU upload and a shader pass,
+ * 60 times a second, on battery. The next frame someone can see draws as usual.
+ */
+export function pictureUnseen(s: {
+  hidden: boolean;
+  detached: boolean;
+  /** Someone waits for the next drawn frame (a snapshot). */
+  waiting: boolean;
+  holds: number;
+}): boolean {
+  return (s.hidden || s.detached) && !s.waiting && s.holds === 0;
+}
+
 /** True when this device can play a stream at all. */
 export function canStream(): boolean {
   return typeof VideoDecoder !== "undefined" && typeof WebSocket !== "undefined";
+}
+
+/** Why a stream can't play here: browsers only give VideoDecoder to a secure page, so on a plain
+ *  http:// address (the Docker web UI opened from another device) even a current Chrome has none,
+ *  and telling that visitor to get a newer browser can't help. */
+export function streamRefusal(): "insecure_page" | "no_decoder" | null {
+  if (canStream()) return null;
+  return typeof window !== "undefined" && window.isSecureContext === false ? "insecure_page" : "no_decoder";
 }
 
 export interface StreamStats {
   /** The browser holds the sound back until the page is clicked or a key pressed (autoplay
    *  rules: the session started without a click right before it). */
   soundBlocked?: boolean;
+  /** This device can't decode the stream's sound, so there is none. */
+  soundUnavailable?: boolean;
   fps: number;
   mbps: number;
   decodeMs: number;
@@ -461,9 +547,10 @@ export type StreamPhase =
   | "error";
 
 export interface StreamError {
-  /** Stable, from the engine: busy, busy_other, asleep, unreachable, keys, wake_failed,
-   *  passcode_cancelled, passcode_timeout, video_refused, lost (dropped mid-stream), other — or
-   *  client-side: decode, no_decoder, socket. */
+  /** Stable, from the engine: busy, in_use (another device has the console), busy_other, asleep,
+   *  unreachable, keys, wake_failed, passcode_cancelled, passcode_timeout, video_refused, lost
+   *  (dropped mid-stream), other — or client-side: decode, no_decoder, socket, console_ended (the
+   *  console ended it; `detail` is what it said), no_session (over while the socket was away). */
   code: string;
   retryS?: number;
   /** busy_other: the console that is streaming. */
@@ -509,12 +596,23 @@ export interface StreamOptions {
   /** "h264": never ask for HEVC; "hdr": the console's HDR stream where it can be shown in HDR
    *  here (Settings › Video format). */
   codec?: CodecPref;
+  /** The video bitrate to ask the console for, kbit/s (Settings › Picture); absent = the
+   *  engine's default for the resolution. */
+  bitrateKbps?: number;
   /** The picture tools' GPU pass turned itself off (no WebGL, or the device lags). */
   onPictureOff?: (why: "failed" | "slow" | "linux") => void;
   /** HDR was asked for and did not work here (`started`: the session is in HDR, shown as SDR). */
   onHdrOff?: (why: string, started: boolean) => void;
+  /** This device showed no picture from the console's HEVC, so the session ended: the next start
+   *  should ask for H.264. */
+  onHevcFailed?: () => void;
   /** How the picture fills the place it is shown in (default: the whole picture). */
   fit?: PictureFit;
+  /** False: this session starts with no picture, sound or controller on this device (#670,
+   *  #649). Absent: whatever the session already has (a page joining a running one). */
+  pictureHere?: boolean;
+  /** The picture on this device went on or off, from here or from the engine's API. */
+  onPictureHere?: (on: boolean) => void;
   /** False: the console's rumble is not played on the controllers. */
   rumble?: () => boolean;
   onPhase: (p: StreamPhase) => void;
@@ -523,6 +621,8 @@ export interface StreamOptions {
   /** The console's light-bar colour for this pad. Browsers cannot set a controller's light
    *  bar (the Gamepad API has no such control), so the screen shows it. */
   onLight?: (rgb: [number, number, number]) => void;
+  /** The page went to the background: let go of what only it can let go of. */
+  onHidden?: () => void;
   /** The engine's answer about native keyboard & mouse (`{"kbm": …}`, lib/kbmInput.ts). */
   onKbm?: (s: unknown) => void;
   /** A phone's touchpad & keyboard, forwarded by the engine (`{"pad_kbm": …}`, lib/kbmInput.ts). */
@@ -544,6 +644,11 @@ export interface StreamOptions {
  *  long in all. */
 const RECONNECT_WAITS_MS = [250, 500, 1000, 2000, 4000];
 const RECONNECT_FOR_MS = 30_000;
+/** A first socket that never opened is tried this many more times, this far apart. */
+const FIRST_SOCKET_TRIES = 2;
+const FIRST_SOCKET_WAIT_MS = 1000;
+/** Frames kept for a decoder not ready yet: 10 s at 60 fps. */
+const MAX_QUEUED_FRAMES = 600;
 /** Frames whose times are kept for the latency stages: ~2 s at 60 fps, far more than in flight. */
 const FRAME_SLOTS = 128;
 /** A "latency:" line in the logs this often while playing (and so in a bug report's logs). */
@@ -607,12 +712,19 @@ export class RemotePlayStream {
   private workletLoading = false;
   /** Stops listening for the click that starts held-back sound (watchSoundBlocked). */
   private soundUnlockOff: (() => void) | null = null;
+  /** Stops laying the picture out again after the Linux app's window comes back. */
+  private restoreOff: (() => void) | null = null;
+  private hiddenOff: (() => void) | null = null;
+  /** A socket has reached the engine (a later drop is a session to rejoin). */
+  private socketOpened = false;
+  private firstSocketTries = 0;
   /** The sound decoded on the page (no decoding worker here), made at the first header. */
   private audioPipe: OpusPipe | null = null;
   /** The sound decoded in a worker that feeds the worklet itself (rpAudioWorker.ts). */
   private audioWorker: Worker | null = null;
   /** The last audio header, for the page to take over if the worker fails. */
   private audioHeader: Uint8Array | null = null;
+  private soundUnavailable = false;
   /** No worklet: when the next scheduled buffer starts (AudioContext time). */
   private audioNext = 0;
   private audioMs = 0;
@@ -655,6 +767,8 @@ export class RemotePlayStream {
    *  client's snapshot (rpSnapshot.ts), and who waits for the next one. */
   private frameSeq = 0;
   private frameAt = 0;
+  /** See `holdPicture`. */
+  private pictureHolds = 0;
   private frameWaiters = new Set<() => void>();
 
   /** The visible picture the stream's SPS describes (rpSps.ts), to put right a decoder that
@@ -663,6 +777,8 @@ export class RemotePlayStream {
   private loggedVisibleFix = false;
   /** The hardware decoder gave a picture that could not be put right: software from now on. */
   private softwareAfterBadFrame = false;
+  /** Decoder failures in a row before any picture came. */
+  private noPictureFails = 0;
 
   /** The frame with the stream's own visible picture where the decoder reported a smaller one
    *  (hardware HEVC decoding in Chromium browsers on Windows: Edge, so the Windows app, and
@@ -734,7 +850,19 @@ export class RemotePlayStream {
   /** The picture's shape (width / height) its layout follows, as last set on the canvas. */
   private shape = 16 / 9;
 
+  /** The picture on this device (#670, #649). Off, nothing runs for it: no decoder, canvas
+   *  context, sound, or per-frame pad polling, and the engine sends none of it. */
+  private pictureOn = true;
+  /** What this page asked of the engine, repeated on every attach; null: it has not asked (a
+   *  reload takes what the session has). */
+  private pictureAsked: boolean | null = null;
+  private hdrOpening = false;
+
   constructor(private readonly o: StreamOptions) {
+    if (o.pictureHere === false) {
+      this.pictureOn = false;
+      this.pictureAsked = false;
+    }
     this.cv = document.createElement("canvas");
     this.cv.dataset.testid = "rp-canvas";
     // Until the first frame, a 16:9 picture.
@@ -787,6 +915,8 @@ export class RemotePlayStream {
   /** A copy is under way; the newest frame that came meanwhile waits (older ones are dropped). */
   private planesBusy = false;
   private planesNext: VideoFrame | null = null;
+  /** Copies in a row that came back empty (chromaBlank): a few and frames go as frames. */
+  private planesBlank = 0;
   /** How the last frame reached WebGL, for the log: "frame" (texImage2D) or "<format>-planes". */
   private input = "";
 
@@ -809,7 +939,8 @@ export class RemotePlayStream {
     // follows the window to a screen with another scaling (no resize there).
     const ro = new ResizeObserver((entries) => {
       const r = entries[entries.length - 1].contentRect;
-      this.boxCss = { w: r.width, h: r.height };
+      // A minimized window's 0x0 is not the picture's size (the next real size replaces it).
+      if (r.width > 0 && r.height > 0) this.boxCss = { w: r.width, h: r.height };
     });
     ro.observe(this.cv);
     this.boxWatch = ro;
@@ -982,9 +1113,8 @@ export class RemotePlayStream {
     return this.phase;
   }
 
-  /** Start the session (call from the click that asks for it, so sound may play). */
-  async start(): Promise<void> {
-    const { width, height } = this.o;
+  /** The sound's context and player. Made at the start, and when the picture comes back on. */
+  private openSound(): void {
     try {
       // The console sends 48 kHz: a context at that rate never resamples 10 ms pieces.
       this.audioCtx = new AudioContext({ sampleRate: 48000, latencyHint: "interactive" });
@@ -996,19 +1126,122 @@ export class RemotePlayStream {
     this.gainNode = this.audioCtx.createGain();
     this.gainNode.gain.value = this.volume;
     this.gainNode.connect(this.audioCtx.destination);
-    const pref = this.o.codec ?? "auto";
     // The sound's player loads alongside: the session does not wait for it (the first moment's
     // sound, before it is ready, is left out).
     this.workletLoading = true;
     void this.openWorklet().finally(() => {
       this.workletLoading = false;
     });
+  }
+
+  /** Whether this device shows the stream (see `pictureOn`). */
+  get pictureHere(): boolean {
+    return this.pictureOn;
+  }
+
+  /** Turn the picture, sound and controller on this device off, or back on, for this session.
+   *  The session and everyone else's stream go on; back on needs no restart (the engine sends
+   *  the headers again and the next keyframe). */
+  setPictureHere(on: boolean): void {
+    if (on === this.pictureOn) return;
+    this.pictureAsked = on;
+    this.applyPicture(on);
+    const ws = this.ws;
+    if (ws?.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ picture: on }));
+      // An older engine does not know `picture` and goes on sending: the next frames need a key.
+      if (on) ws.send(JSON.stringify({ keyframe: true }));
+    }
+  }
+
+  private applyPicture(on: boolean): void {
+    if (on === this.pictureOn) return;
+    this.pictureOn = on;
+    if (on) {
+      this.reopenPicture();
+    } else {
+      this.dropPicture();
+    }
+    this.o.onPictureHere?.(on);
+  }
+
+  /** Everything that works for this device's picture and sound goes. The codec headers stay. */
+  private dropPicture(): void {
+    this.ticking = false;
+    try {
+      this.rafWin.cancelAnimationFrame(this.raf);
+    } catch {
+      // That window is gone.
+    }
+    window.clearTimeout(this.glLostTimer);
+    const header = this.header;
+    const rect = this.spsRect;
+    this.resetMedia();
+    this.header = header;
+    this.spsRect = rect;
+    this.closeAudio();
+    this.audioHealth = { path: "scheduled", avgMs: 0, minMs: 0, corrMs: 0, concealed: 0, trimmedMs: 0 };
+    this.audioMs = 0;
+    this.releasePicture();
+    // A canvas keeps the first context it gave, and this one's was just given back.
+    this.replaceCanvas();
+    this.laidOut = "";
+    this.lastPad = "";
+    for (const w of [...this.frameWaiters]) w();
+  }
+
+  /** The picture and sound start over; the next keyframe brings the picture. */
+  private reopenPicture(): void {
+    this.planes = isTauriEnv() && isLinuxDesktop() ? new PlaneReader() : null;
+    this.openSound();
+    this.ticking = true;
+    this.schedule();
+    this.openHdr();
+    if (this.header && !this.video) this.openVideo();
+    if (this.audioHeader && !this.audioWorker) this.pipe().header(this.audioHeader);
+  }
+
+  /** The picture came back on in an HDR session: its presenter again, on the new canvas. */
+  private openHdr(): void {
+    if (this.codecChoice !== "h265_hdr" || this.hdr) return;
+    const cv = this.cv;
+    // A frame drawn meanwhile would take the canvas with another kind of context.
+    this.hdrOpening = true;
+    void HdrPresenter.create(cv).then(
+      (hdr) => {
+        this.hdrOpening = false;
+        if (this.ended || !this.pictureOn || this.cv !== cv) return hdr.dispose();
+        this.hdr = hdr;
+      },
+      (e) => {
+        this.hdrOpening = false;
+        this.hdrFailed(String(e));
+      },
+    );
+  }
+
+  /** Start the session (call from the click that asks for it, so sound may play). */
+  async start(): Promise<void> {
+    const { width, height } = this.o;
+    // The Linux app lays the picture out again when its window comes back (lib/repaintOnRestore.ts).
+    if (isTauriEnv() && isLinuxDesktop()) {
+      this.restoreOff = watchRestore(window, () => {
+        if (this.ended) return;
+        relayoutElement(this.cv);
+        // The next frame logs where the picture is now.
+        this.laidOut = "";
+      });
+    }
+    if (this.pictureOn) this.openSound();
+    const pref = this.o.codec ?? "auto";
     const [hevc, hdr] = await Promise.all([
       pref === "h264" ? Promise.resolve(false) : chooseCodec(width, height).then((c) => c === "h265"),
       pref === "hdr" ? hdrSupport(width, height) : Promise.resolve(null),
     ]);
+    // Stopped while waiting: no socket, no console woken, nothing behind a page that has gone on.
+    if (this.ended) return;
     let { codec, hdrOff } = pickCodec(pref, hevc, hdr);
-    if (codec === "h265_hdr") {
+    if (codec === "h265_hdr" && this.pictureOn) {
       // The HDR canvas is set up before the console is asked: if it cannot be, the session is
       // plain HEVC from the start.
       try {
@@ -1017,6 +1250,7 @@ export class RemotePlayStream {
         codec = hevc ? "h265" : "h264";
         hdrOff = String(e);
       }
+      if (this.ended) return;
     }
     if (hdrOff) {
       log.warn("remote-play", `HDR was asked for but is not used (${hdrOff}): streaming ${codec}`);
@@ -1024,20 +1258,24 @@ export class RemotePlayStream {
     }
     if (codec === "h264" && !(await canDecodeAvc(width, height))) {
       // Found before the console is woken or asked to stream.
+      if (this.ended) return;
       this.o.onError({ code: "no_decoder", detail: "" });
       this.finish();
       return;
     }
+    if (this.ended) return;
     this.codecChoice = codec;
     this.hevc = codec !== "h264";
     this.connect(!!this.o.attach);
-    this.ticking = true;
+    this.ticking = this.pictureOn;
     this.schedule();
+    this.watchHidden();
     let lastDecoded = 0;
     let lastBytes = 0;
     this.statsTimer = window.setInterval(() => {
       this.o.onStats({
         soundBlocked: this.soundBlocked(),
+        soundUnavailable: this.soundUnavailable,
         fps: this.decoded - lastDecoded,
         mbps: ((this.bytes - lastBytes) * 8) / 1e6,
         decodeMs: this.decodeMs,
@@ -1061,6 +1299,21 @@ export class RemotePlayStream {
         log.info("remote-play", `latency: ${this.linkLogText()}; ${this.audioLogLine()}`);
       }
     }, 1000);
+  }
+
+  /** A page in the background has no animation frames, so nothing would read the pad again: what
+   *  was held when it went away would stay held on the console until it comes back. */
+  private watchHidden(): void {
+    const away = () => {
+      if (document.visibilityState === "hidden") this.o.onHidden?.();
+      this.sendPad();
+    };
+    document.addEventListener("visibilitychange", away);
+    window.addEventListener("pagehide", away);
+    this.hiddenOff = () => {
+      document.removeEventListener("visibilitychange", away);
+      window.removeEventListener("pagehide", away);
+    };
   }
 
   /** Whether the browser holds the sound back (the context is not running). */
@@ -1186,7 +1439,9 @@ export class RemotePlayStream {
     }
     this.audioPipe?.reset();
     worker.onmessage = (e: MessageEvent) => {
-      const c = (e.data as { concealed?: unknown } | null)?.concealed;
+      const said = e.data as { concealed?: unknown; failed?: unknown } | null;
+      if (said?.failed) return this.audioWorkerFailed("its decoder failed");
+      const c = said?.concealed;
       if (typeof c === "number") this.workerConcealed = c;
     };
     worker.onerror = (e) => this.audioWorkerFailed(e.message || "error");
@@ -1232,7 +1487,16 @@ export class RemotePlayStream {
 
   /** The page's own decoder for the sound. */
   private pipe(): OpusPipe {
-    if (!this.audioPipe) this.audioPipe = new OpusPipe((planes, scale) => this.play(planes, scale));
+    if (!this.audioPipe) {
+      this.audioPipe = new OpusPipe(
+        (planes, scale) => this.play(planes, scale),
+        undefined,
+        () => {
+          this.soundUnavailable = true;
+          log.warn("remote-play", "sound: this device can't decode the stream's Opus sound, so there is none");
+        },
+      );
+    }
     return this.audioPipe;
   }
 
@@ -1302,8 +1566,11 @@ export class RemotePlayStream {
     const ws = new WebSocket(url);
     ws.binaryType = "arraybuffer";
     this.ws = ws;
+    // The engine let go of this page's pad when its last socket left: what is held goes again.
+    this.lastPad = "";
     if (!attachOnly) this.setPhase("connecting");
     ws.onopen = () => {
+      this.socketOpened = true;
       ws.send(
         JSON.stringify({
           host: this.o.host,
@@ -1313,6 +1580,7 @@ export class RemotePlayStream {
           height,
           fps: this.o.fps,
           codec: this.codecChoice,
+          ...(this.o.bitrateKbps ? { bitrate_kbps: this.o.bitrateKbps } : {}),
           keep_alive_s: this.o.keepAliveS,
           attach_only: attachOnly,
           low_latency: !!this.o.lowLatency,
@@ -1323,6 +1591,9 @@ export class RemotePlayStream {
           timing: true,
           // Typing into the console's keyboard (lib/rpKeyboard.ts; an older engine ignores this).
           keyboard: true,
+          // Off, or asked back on while the socket was away. An older engine ignores this and
+          // goes on sending; the page drops it.
+          ...(this.pictureAsked !== null ? { picture: this.pictureAsked } : {}),
         }),
       );
       // Attaching turns the console's mic off in the engine: a page that has it on says so.
@@ -1335,6 +1606,15 @@ export class RemotePlayStream {
       const b = new Uint8Array(m.data as ArrayBuffer);
       const kind = b[0];
       const payload = b.subarray(1);
+      if (!this.pictureOn) {
+        // Only what an older engine goes on sending, or what was on its way: the headers are
+        // kept for when the picture comes back.
+        if (kind === 0) {
+          this.header = payload.slice();
+          this.spsRect = spsVisibleRect(this.header, this.hevc);
+        } else if (kind === 3) this.audioHeader = payload.slice();
+        return;
+      }
       if (kind <= 1) this.onVideo(kind, payload, recv, NaN);
       else if (kind === 7) {
         if (b.length < 9) return;
@@ -1354,8 +1634,20 @@ export class RemotePlayStream {
       this.ws = null;
       if (this.stopping || this.engineEnded) return this.finish();
       if (this.moved) return this.setPhase("moved");
+      // Never reached the engine: nothing was started, so there is nothing to rejoin.
+      if (!this.socketOpened) return this.firstSocketFailed();
       this.reconnect();
     };
+  }
+
+  /** The first socket never opened: try the same start again, then say so. */
+  private firstSocketFailed(): void {
+    if (this.firstSocketTries >= FIRST_SOCKET_TRIES) {
+      this.o.onError({ code: "socket", detail: "" });
+      return this.finish();
+    }
+    this.firstSocketTries++;
+    this.reconnectTimer = window.setTimeout(() => this.connect(!!this.o.attach), FIRST_SOCKET_WAIT_MS);
   }
 
   /** The socket dropped while the session runs: rejoin it, a little later each time. */
@@ -1466,7 +1758,7 @@ export class RemotePlayStream {
   /** The picture as it is now, a PNG at the stream's own size (null before the first frame). */
   snapshot(): Promise<Blob | null> {
     const c = this.cv;
-    if (!this.decoded) return Promise.resolve(null);
+    if (!this.decoded || !this.pictureOn) return Promise.resolve(null);
     return new Promise((resolve) => c.toBlob((b) => resolve(b), "image/png"));
   }
 
@@ -1474,9 +1766,11 @@ export class RemotePlayStream {
    *  off before the volume (a muted player still records it) into a second output, so what
    *  plays is untouched. `release()` takes the tap off again. */
   captureMedia(fps: number): { stream: MediaStream; release: () => void } | null {
+    if (!this.pictureOn) return null;
     const c = this.cv as HTMLCanvasElement & { captureStream?: (fps?: number) => MediaStream };
     if (typeof c.captureStream !== "function") return null;
     const stream = c.captureStream(fps);
+    const letGo = this.holdPicture();
     const actx = this.audioCtx;
     const from: AudioNode | null = this.worklet ?? this.gainNode;
     let dest: MediaStreamAudioDestinationNode | null = null;
@@ -1492,6 +1786,7 @@ export class RemotePlayStream {
     return {
       stream,
       release: () => {
+        letGo();
         for (const t of stream.getTracks()) t.stop();
         try {
           if (dest) from?.disconnect(dest);
@@ -1505,7 +1800,7 @@ export class RemotePlayStream {
   /** Send the pad now if it changed (call on key events so short taps are not missed). */
   sendPad(): void {
     const ws = this.ws;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (!ws || ws.readyState !== WebSocket.OPEN || !this.pictureOn) return;
     const p = this.o.readPad();
     const s = JSON.stringify(p);
     if (s === this.lastPad) return;
@@ -1517,7 +1812,7 @@ export class RemotePlayStream {
    *  while the socket is down (the heartbeat sends it again). */
   sendKbm(msg: { kbm: unknown } | Uint8Array<ArrayBuffer>): boolean {
     const ws = this.ws;
-    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
+    if (!ws || ws.readyState !== WebSocket.OPEN || !this.pictureOn) return false;
     ws.send(msg instanceof Uint8Array ? msg : JSON.stringify(msg));
     return true;
   }
@@ -1558,7 +1853,7 @@ export class RemotePlayStream {
   /** Rumble on the controllers like the console's own (not when vibration is off in Settings):
    *  a DualSense's haptics where they cannot be played (lib/dualSense.ts). */
   vibrate(strong: number, weak: number): void {
-    if (this.o.rumble && !this.o.rumble()) return;
+    if (!this.pictureOn || (this.o.rumble && !this.o.rumble())) return;
     playRumble(this.o.gamepads?.() ?? navigator.getGamepads?.() ?? [], strong, weak);
   }
 
@@ -1615,6 +1910,10 @@ export class RemotePlayStream {
       );
     }
     this.watchBox(false);
+    this.restoreOff?.();
+    this.restoreOff = null;
+    this.hiddenOff?.();
+    this.hiddenOff = null;
     this.resetMedia();
     this.releasePicture();
     this.closeAudio();
@@ -1642,6 +1941,8 @@ export class RemotePlayStream {
       retry?: boolean;
       wait_s?: number;
       snapshot?: unknown;
+      reason?: unknown;
+      picture?: unknown;
     };
     try {
       s = JSON.parse(text);
@@ -1658,6 +1959,11 @@ export class RemotePlayStream {
       this.clock.push(s.pong, s.engine_us, now);
       return;
     }
+    if (typeof s.picture === "boolean") {
+      this.pictureAsked = s.picture;
+      this.applyPicture(s.picture);
+      return;
+    }
     if (s.kbm !== undefined) {
       this.o.onKbm?.(s.kbm);
       return;
@@ -1667,7 +1973,7 @@ export class RemotePlayStream {
       return;
     }
     if (s.rumble) {
-      if (this.o.rumble && !this.o.rumble()) return;
+      if (!this.pictureOn || (this.o.rumble && !this.o.rumble())) return;
       playRumble(this.o.gamepads?.() ?? navigator.getGamepads?.() ?? [], s.rumble[0], s.rumble[1]);
       return;
     }
@@ -1729,9 +2035,15 @@ export class RemotePlayStream {
       case "moved":
         this.moved = true;
         break;
-      case "ended":
+      case "ended": {
         this.engineEnded = true;
+        // The player's own Stop needs no word; anything else does, or the picture just goes.
+        if (this.stopping) break;
+        const why = typeof s.reason === "string" ? s.reason : "";
+        if (why === "no session") this.o.onError({ code: "no_session", detail: "" });
+        else if (why) this.o.onError({ code: "console_ended", detail: why });
         break;
+      }
       case "error":
         this.engineEnded = true;
         this.o.onError({
@@ -1803,6 +2115,11 @@ export class RemotePlayStream {
       // The HEVC codec string is still being probed: "queue" runs until it is handed in.
       this.slotSubmit[slot] = NaN;
       this.queued.push(chunk);
+      // Never that long for a real probe. Start over from a later keyframe, not memory for ever.
+      if (this.queued.length > MAX_QUEUED_FRAMES) {
+        this.queued = [];
+        this.sawKey = false;
+      }
       return;
     }
     this.slotSubmit[slot] = now;
@@ -1813,7 +2130,8 @@ export class RemotePlayStream {
    *  one from the codec header, and a keyframe asked for (rpDecoderWatch.ts). A few tries, a
    *  little further apart each time; then the player is told, once, and it waits for a picture. */
   private watchDecoder(): void {
-    if (this.gaveUp) return;
+    // Nothing goes in while the picture is off here: that is the point, not a stall.
+    if (this.gaveUp || !this.pictureOn) return;
     const verdict = decoderVerdict({
       now: performance.now(),
       haveHeader: !!this.header,
@@ -1857,7 +2175,31 @@ export class RemotePlayStream {
   /** Draw one decoded frame onto the canvas (it closes the frame). The canvas is the picture's
    *  own size (its visible part, at the display aspect), taken from each frame, never from the
    *  size asked for: the console may send another; upscaled, it is the size upscaled to. */
+  private pictureUnseen(): boolean {
+    return pictureUnseen({
+      hidden: this.cv.ownerDocument?.visibilityState === "hidden",
+      detached: this.cv.isConnected === false,
+      waiting: this.frameWaiters.size > 0,
+      holds: this.pictureHolds,
+    });
+  }
+
+  /** Something reads this canvas with no one looking at it (a clip, a video picture in picture):
+   *  frames keep being drawn until the returned function is called. */
+  holdPicture(): () => void {
+    this.pictureHolds++;
+    let held = true;
+    return () => {
+      if (held) this.pictureHolds--;
+      held = false;
+    };
+  }
+
   private drawFrame(frame: VideoFrame): void {
+    if (this.hdrOpening || !this.pictureOn) {
+      frame.close();
+      return;
+    }
     const fw = frame.displayWidth;
     const fh = frame.displayHeight;
     let out = { w: fw, h: fh };
@@ -1957,6 +2299,16 @@ export class RemotePlayStream {
           frame.close();
           return;
         }
+        if (chromaBlank(planes)) {
+          if (++this.planesBlank >= 3) {
+            // The copy gives nothing but zeros (a green picture): frames as frames from now on.
+            log.warn("remote-play", `picture: the frame's ${planes.format} planes came back empty: drawing frames as they are`);
+            this.planes = null;
+            this.drawFrame(frame);
+          } else frame.close();
+          return;
+        }
+        this.planesBlank = 0;
         const tools = this.passOff ? DEFAULT_PICTURE : this.tools;
         const band = cropRect(fw, fh, tools.crop219).h;
         const to = upscales(tools) ? upscaleSize({ w: fw, h: band }, this.boxPx()) : null;
@@ -2010,10 +2362,14 @@ export class RemotePlayStream {
         this.frameWaiters.delete(done);
         resolve(true);
       };
-      const t = window.setTimeout(() => {
-        this.frameWaiters.delete(done);
-        resolve(false);
-      }, ms);
+      // The wait comes from a request (rpSnapshot): never longer than 10 s.
+      const t = window.setTimeout(
+        () => {
+          this.frameWaiters.delete(done);
+          resolve(false);
+        },
+        Math.min(Math.max(0, ms), 10_000),
+      );
       this.frameWaiters.add(done);
     });
   }
@@ -2070,7 +2426,9 @@ export class RemotePlayStream {
         this.rebuilds = 0;
         this.gaveUp = false;
         const frame = this.withRealVisibleRect(decoded);
-        this.drawFrame(frame);
+        // Decoding has to go on (the next frames build on this one); showing it does not.
+        if (this.pictureUnseen()) frame.close();
+        else this.drawFrame(frame);
         this.outputPending = now;
         this.decoded++;
       },
@@ -2087,9 +2445,9 @@ export class RemotePlayStream {
         // A broken picture: start over from the next keyframe rather than give up.
         this.video = null;
         this.sawKey = false;
+        if (this.decoded === 0 && !this.nextAfterNoPicture(String(e))) return;
         if (this.header) this.openVideo();
         this.ws?.send(JSON.stringify({ keyframe: true }));
-        if (this.decoded === 0) this.o.onError({ code: "decode", detail: String(e) });
       },
     });
     this.video = video;
@@ -2145,19 +2503,50 @@ export class RemotePlayStream {
         if (c) void configure(c);
         else {
           this.o.onHdrOff?.("no HEVC Main10 decoder", true);
-          this.o.onError({ code: "decode", detail: "This device cannot decode the HDR stream (HEVC Main10)." });
+          this.cannotDecode("This device cannot decode the HDR stream (HEVC Main10).");
         }
       })();
     } else if (this.hevc) {
       void supportedHevc(this.o.width, this.o.height).then((c) => {
         if (c) void configure(c);
-        else this.o.onError({ code: "decode", detail: "This device cannot decode HEVC." });
+        else this.cannotDecode("This device cannot decode HEVC.");
       });
     } else if (this.header) {
       const description = avcDescription(this.header);
       if (description) void configure(avcCodecString(this.header), description);
-      else this.o.onError({ code: "decode", detail: "The stream's H.264 header has no SPS/PPS." });
+      else this.cannotDecode("The stream's H.264 header has no SPS/PPS.");
     }
+  }
+
+  /** A decoder failed with no picture yet. Starting the same one over forever only repeats the
+   *  error (#683), so a few tries lead to the next setup. False when the session ended. */
+  private nextAfterNoPicture(detail: string): boolean {
+    this.noPictureFails++;
+    const software = this.o.decoding === "software" || this.softwareAfterBadFrame || linuxSoftwareVideo();
+    const step = noPictureStep(this.noPictureFails, { hevc: this.hevc, software });
+    if (step === "retry") return true;
+    if (step === "software") {
+      log.warn("remote-play", `no picture from the hardware decoder (${detail}): decoding in software`);
+      this.softwareAfterBadFrame = true;
+      this.noPictureFails = 0;
+      return true;
+    }
+    if (step === "h264") {
+      log.warn("remote-play", `no picture from HEVC (${detail}): ending the stream, the next start asks for H.264`);
+      this.o.onHevcFailed?.();
+      this.stop();
+      return false;
+    }
+    log.warn("remote-play", `no picture with any decoder (${detail})`);
+    this.cannotDecode(detail);
+    return false;
+  }
+
+  /** No decoder will ever take this stream: said, and the session ends rather than go on streaming
+   *  to nothing (with its frames piling up). */
+  private cannotDecode(detail: string): void {
+    this.o.onError({ code: "decode", detail });
+    this.stop();
   }
 
   /** An audio record (3 header, 4 frame): to the decoding worker as it is (the socket's buffer

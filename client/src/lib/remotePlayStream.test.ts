@@ -1,3 +1,4 @@
+import { NO_PICTURE_TRIES, noPictureStep } from "./rpCodec";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   avcCodecString,
@@ -14,6 +15,7 @@ import {
   rebind,
   nextRtt,
   isPasscode,
+  streamRefusal,
 } from "./remotePlayStream";
 
 describe("rebind", () => {
@@ -112,6 +114,24 @@ describe("canDecodeAvc", () => {
   });
 });
 
+describe("streamRefusal", () => {
+  it("has nothing to refuse where a stream can play", () => {
+    vi.stubGlobal("VideoDecoder", class {});
+    vi.stubGlobal("window", { isSecureContext: false });
+    expect(streamRefusal()).toBeNull();
+  });
+  it("names a plain http page, where a newer browser would not help", () => {
+    vi.stubGlobal("VideoDecoder", undefined);
+    vi.stubGlobal("window", { isSecureContext: false });
+    expect(streamRefusal()).toBe("insecure_page");
+  });
+  it("blames the browser only on a secure page", () => {
+    vi.stubGlobal("VideoDecoder", undefined);
+    vi.stubGlobal("window", { isSecureContext: true });
+    expect(streamRefusal()).toBe("no_decoder");
+  });
+});
+
 describe("isNoDecoderError", () => {
   it("knows WebKitGTK's missing-decoder error", () => {
     const e = new DOMException("No decoder found for codec avc1.4d4032", "NotSupportedError");
@@ -147,5 +167,17 @@ describe("isPasscode", () => {
     expect(isPasscode("12345")).toBe(false);
     expect(isPasscode("12a4")).toBe(false);
     expect(isPasscode(" 1234")).toBe(false);
+  });
+});
+
+describe("noPictureStep (#683)", () => {
+  it("tries a setup a few times, then HEVC to H.264, hardware to software, then gives up", () => {
+    const hw = { hevc: false, software: false };
+    expect(noPictureStep(1, { hevc: true, software: false })).toBe("retry");
+    expect(noPictureStep(NO_PICTURE_TRIES - 1, hw)).toBe("retry");
+    expect(noPictureStep(NO_PICTURE_TRIES, { hevc: true, software: false })).toBe("h264");
+    expect(noPictureStep(NO_PICTURE_TRIES, { hevc: true, software: true })).toBe("h264");
+    expect(noPictureStep(NO_PICTURE_TRIES, hw)).toBe("software");
+    expect(noPictureStep(NO_PICTURE_TRIES, { hevc: false, software: true })).toBe("give_up");
   });
 });

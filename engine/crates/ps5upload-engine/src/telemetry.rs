@@ -388,6 +388,7 @@ pub fn build_record(
             "lanes_max",
             "chunk_avg_kib",
             "history",
+            "rate_history",
             "slow_drive_switch",
             "settle_ms",
             "unswept_peak",
@@ -678,9 +679,14 @@ pub(crate) async fn summary_handler(AxumPath(id): AxumPath<String>) -> impl Into
 /// `GET /api/jobs/summaries?limit=` (default 20, at most `MAX_SUMMARIES`), newest first.
 pub(crate) async fn summaries_handler(Query(q): Query<ListQuery>) -> impl IntoResponse {
     let limit = q.limit.unwrap_or(20).clamp(1, MAX_SUMMARIES);
-    let list = jobs_dir()
-        .map(|d| list_records(&d, limit))
-        .unwrap_or_default();
+    // Up to MAX_SUMMARIES files: not on the async runtime.
+    let list = tokio::task::spawn_blocking(move || {
+        jobs_dir()
+            .map(|d| list_records(&d, limit))
+            .unwrap_or_default()
+    })
+    .await
+    .unwrap_or_default();
     Json(json!({ "summaries": list }))
 }
 

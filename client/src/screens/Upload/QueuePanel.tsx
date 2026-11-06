@@ -1,4 +1,4 @@
-import { memo, useEffect, useMemo, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import {
   ArrowDown,
   ArrowUp,
@@ -22,6 +22,7 @@ import {
   HardDrive,
   Pause,
   Send,
+  AlertTriangle,
 } from "lucide-react";
 
 import {
@@ -54,14 +55,14 @@ import { usePackageViewer } from "../../state/packageViewer";
 import { GameIcon } from "../../components/GameIcon";
 import { PlatformBadge } from "../../components/PlatformBadge";
 import { humanizeJobErrorReason, listVolumes } from "../../api/ps5";
-import { humanizePs5Error } from "../../lib/humanizeError";
+import { humanizePs5Error, humanizeCaught } from "../../lib/humanizeError";
 import { hostOf, transferAddr } from "../../lib/addr";
 import {
   platformForTitleId,
-  titleIdFromContentId,
+  findTitleId,
 } from "../../lib/titleDetails";
 import { useTitleInfo } from "../../lib/useTitleInfo";
-import { formatBytes, formatDuration } from "../../lib/format";
+import { formatBytes } from "../../lib/format";
 import { MAX_AUTO_RECOVER_ATTEMPTS } from "../../lib/uploadRecovery";
 import { useTr } from "../../state/lang";
 import { queueStages } from "./queueStages";
@@ -73,11 +74,14 @@ import {
   installOrderPriority,
   moveGroupOf,
   canPauseItem,
+  isInstallWork,
   useUploadQueueStore,
   type QueueItem,
   type QueueItemStatus,
+  HANDED_TO_SMP,
 } from "../../state/uploadQueue";
 import { isRemotePath } from "../../lib/remotePath";
+import { recoveryResendsHelper } from "../../lib/uploadRecovery";
 import { useTransferStore } from "../../state/transfer";
 import { useUploadSettingsStore } from "../../state/uploadSettings";
 import {
@@ -93,8 +97,10 @@ import { partialUploadPath } from "../../lib/partialUpload";
 import { isStreamUnreachableError } from "../../lib/networkFix";
 import { streamInstallFailHelp } from "../../lib/streamInstallHint";
 import { convertFirstState, type WorkshopHandOver } from "../../lib/convertFirst";
+import { progressFigures, resumedShown } from "../../lib/resumedProgress";
 import { useInRouterContext, useNavigate } from "react-router";
 import { NetworkFixActions } from "../InstallPackage/NetworkFixActions";
+import { formatNumber, formatDuration } from "../../lib/formatDate";
 
 /** One console's slice of the queue, in first-seen order. */
 interface ConsoleGroup {
@@ -678,6 +684,24 @@ function ConsoleGroup({
     },
     onDrop: onMoveTo,
   });
+  // One object for every row and every render, reading the latest handlers: a row that did not
+  // change keeps its memo (QueueRowEntry). rowDrag's handlers read what they need when they fire.
+  const latest = useRef({ onMoveUp, onMoveDown, onRemove, onCancel, onRetry, onRetryViaUpload, rowDrag });
+  useEffect(() => {
+    latest.current = { onMoveUp, onMoveDown, onRemove, onCancel, onRetry, onRetryViaUpload, rowDrag };
+  });
+  const rowActions = useMemo<QueueRowActions>(
+    () => ({
+      moveUp: (id) => latest.current.onMoveUp(id),
+      moveDown: (id) => latest.current.onMoveDown(id),
+      remove: (id) => latest.current.onRemove(id),
+      cancel: (id) => latest.current.onCancel(id),
+      retry: (id) => latest.current.onRetry(id),
+      retryViaUpload: (id) => latest.current.onRetryViaUpload(id),
+      dragHandle: (id) => latest.current.rowDrag.handleProps(id),
+    }),
+    [],
+  );
   // Headings only earn their space once the list mixes states; a queue that
   // is all waiting (or all finished) reads fine without one.
   const labelled = sections.length > 1;
@@ -700,32 +724,19 @@ function ConsoleGroup({
             </div>
           )}
           <ul className="grid gap-1.5">
-            {section.items.map((item) => {
-              const position = positions.get(item.id);
-              return (
-                <QueueRow
-                  key={item.id}
-                  item={item}
-                  position={position}
-                  canMoveUp={movable.get(item.id)?.up ?? false}
-                  canMoveDown={movable.get(item.id)?.down ?? false}
-                  onMoveUp={() => onMoveUp(item.id)}
-                  onMoveDown={() => onMoveDown(item.id)}
-                  dragHandle={
-                    (movable.get(item.id)?.up || movable.get(item.id)?.down)
-                      ? rowDrag.handleProps(item.id)
-                      : undefined
-                  }
-                  dragging={rowDrag.dragId === item.id}
-                  dropSide={rowDrag.sideOf(item.id)}
-                  onRemove={() => onRemove(item.id)}
-                  onCancel={() => onCancel(item.id)}
-                  onRetry={() => onRetry(item.id)}
-                  onRetryViaUpload={() => onRetryViaUpload(item.id)}
-                  busy={busy}
-                />
-              );
-            })}
+            {section.items.map((item) => (
+              <QueueRowEntry
+                key={item.id}
+                item={item}
+                position={positions.get(item.id)}
+                canMoveUp={movable.get(item.id)?.up ?? false}
+                canMoveDown={movable.get(item.id)?.down ?? false}
+                dragging={rowDrag.dragId === item.id}
+                dropSide={rowDrag.sideOf(item.id)}
+                busy={busy}
+                actions={rowActions}
+              />
+            ))}
           </ul>
         </div>
       ))}
@@ -748,7 +759,7 @@ function ConsoleGroup({
         <button
           type="button"
           onClick={() => setCollapsed((c) => !c)}
-          className="flex min-w-0 items-center gap-2 rounded-full px-1 py-0.5 text-left transition-colors hover:bg-[var(--color-surface-3)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)]"
+          className="flex min-w-0 items-center gap-2 rounded-full px-1 py-0.5 text-start transition-colors hover:bg-[var(--color-surface-3)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-accent)]"
           title={
             collapsed
               ? tr("queue_group_expand", undefined, "Show this console's queue")
@@ -855,6 +866,111 @@ function ConsoleGroup({
   );
 }
 
+/** What a finished upload left to say: warnings from its mount, register or install, and where
+ *  a game stands: on the home screen, or what to do next. Exported for tests. */
+export function FinishedRowNotes({
+  item,
+}: {
+  item: Pick<QueueItem, "sourceKind" | "registeredAs" | "mountWarnings" | "mountedAt">;
+}) {
+  const tr = useTr();
+  const warnings = item.mountWarnings ?? [];
+  const isGame = item.sourceKind === "folder" || item.sourceKind === "image";
+  return (
+    <>
+      {warnings.length > 0 && (
+        <ul
+          data-testid="queue-row-warnings"
+          className="mt-2 space-y-1 text-xs text-[var(--color-warn)]"
+        >
+          {warnings.map((w) => (
+            <li key={w} className="flex items-start gap-1.5">
+              <AlertTriangle size={12} aria-hidden className="mt-px shrink-0" />
+              <span className="min-w-0 break-words">{w}</span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {item.registeredAs ? (
+        <div className="mt-1 text-xs text-[var(--color-muted)]">
+          {tr(
+            "upload_done_registered",
+            { name: item.registeredAs },
+            `On your PS5 home screen as "${item.registeredAs}" — ready to launch.`,
+          )}
+        </div>
+      ) : (
+        isGame &&
+        !item.mountedAt && (
+          <div className="mt-1 text-xs text-[var(--color-muted)]">
+            {tr(
+              "upload_done_next_hint2",
+              undefined,
+              "Next: open the game in Games and, under On the PS5's drives, add it to the home screen or mount it.",
+            )}
+          </div>
+        )
+      )}
+    </>
+  );
+}
+
+/** What a row can ask of the queue, by id: one stable object for all of them. */
+interface QueueRowActions {
+  moveUp: (id: string) => void;
+  moveDown: (id: string) => void;
+  remove: (id: string) => void;
+  cancel: (id: string) => void;
+  retry: (id: string) => void;
+  retryViaUpload: (id: string) => void;
+  dragHandle: (id: string) => ReturnType<ReturnType<typeof useRowDrag>["handleProps"]>;
+}
+
+/**
+ * A row that re-renders only when something about it changed. One running item patches the queue
+ * twice a second; without this, a batch of 200 rendered all 200 (each with its art, its dialogs and
+ * a dozen buttons) on every tick, for the whole run, on the screen people watch during it.
+ */
+const QueueRowEntry = memo(function QueueRowEntry({
+  item,
+  position,
+  canMoveUp,
+  canMoveDown,
+  dragging,
+  dropSide,
+  busy,
+  actions,
+}: {
+  item: QueueItem;
+  position?: number;
+  canMoveUp: boolean;
+  canMoveDown: boolean;
+  dragging: boolean;
+  dropSide: "before" | "after" | null;
+  busy: ReadonlySet<string>;
+  actions: QueueRowActions;
+}) {
+  const id = item.id;
+  return (
+    <QueueRow
+      item={item}
+      position={position}
+      canMoveUp={canMoveUp}
+      canMoveDown={canMoveDown}
+      onMoveUp={() => actions.moveUp(id)}
+      onMoveDown={() => actions.moveDown(id)}
+      dragHandle={canMoveUp || canMoveDown ? actions.dragHandle(id) : undefined}
+      dragging={dragging}
+      dropSide={dropSide}
+      onRemove={() => actions.remove(id)}
+      onCancel={() => actions.cancel(id)}
+      onRetry={() => actions.retry(id)}
+      onRetryViaUpload={() => actions.retryViaUpload(id)}
+      busy={busy}
+    />
+  );
+});
+
 export function QueueRow({
   item,
   position,
@@ -958,10 +1074,10 @@ export function QueueRow({
     !!icon.sourceSrc ||
     !!titleId;
   const rowName = queueRowName(item, titleInfo?.title, art?.title, artPath);
-  const pct =
-    item.totalBytes > 0
-      ? Math.max(0, Math.min(100, (item.bytesSent / item.totalBytes) * 100))
-      : 0;
+  // `bytesSent` includes what a resumed upload found already on the PS5, so the bar, the
+  // percent and the bytes left start where the last run stopped; the speed is this run's.
+  const { pct, etaSec } = progressFigures(item.bytesSent, item.totalBytes, item.bytesPerSec);
+  const resumedHave = resumedShown(item.resumedBytes, item.totalBytes);
   const isActive = item.status === "running";
   const isPending = item.status === "pending";
   // Between auto-recovery attempts: the prior attempt failed for a
@@ -982,14 +1098,9 @@ export function QueueRow({
   // waiting on — lives in this row rather than in a banner elsewhere.
   const showInstallProgress =
     isActive && !isRecovering && (isInstall || phase === "installing");
-  // Show ETA only when we have a real total + a real rate; otherwise
-  // the readout would print "ETA Infinity" or "ETA 0s" right at the
-  // start of a transfer where the smoother hasn't seen two samples yet.
-  const remainingBytes = Math.max(0, item.totalBytes - item.bytesSent);
-  const etaSec =
-    item.bytesPerSec > 0 && remainingBytes > 0
-      ? remainingBytes / item.bytesPerSec
-      : null;
+  // `etaSec` (above) is null without a real total and a real rate; otherwise the readout
+  // would print "ETA Infinity" or "ETA 0s" right at the start of a transfer where the
+  // smoother hasn't seen two samples yet.
   const kind = packageKindLabel(item.category, tr);
   const finished = item.status === "done" || item.status === "failed";
 
@@ -1026,7 +1137,7 @@ export function QueueRow({
             aria-hidden
             data-testid="queue-drag-handle"
             title={tr("queue_drag", undefined, "Drag to reorder")}
-            className="-ml-2 -mr-1 flex shrink-0 cursor-grab touch-none items-center self-stretch px-0.5 text-[var(--color-muted)] hover:text-[var(--color-text)] active:cursor-grabbing"
+            className="-ms-2 -me-1 flex shrink-0 cursor-grab touch-none items-center self-stretch px-0.5 text-[var(--color-muted)] hover:text-[var(--color-text)] active:cursor-grabbing"
           >
             <GripVertical size={14} />
           </span>
@@ -1147,11 +1258,13 @@ export function QueueRow({
             {item.mountedAt && (
               <span className="font-mono text-[var(--color-accent)]">
                 ·{" "}
-                {tr(
-                  "queue_mounted_at",
-                  { mount: item.mountedAt },
-                  "mounted at {mount}",
-                )}
+                {item.mountedAt === HANDED_TO_SMP
+                  ? tr("queue_handed_to_smp", undefined, "handed to ShadowMount+")
+                  : tr(
+                      "queue_mounted_at",
+                      { mount: item.mountedAt },
+                      "mounted at {mount}",
+                    )}
               </span>
             )}
             {item.sourceKind === "pkg" &&
@@ -1255,7 +1368,7 @@ export function QueueRow({
               <ScanSearch size={14} />
             </button>
           )}
-          {isActive && isInstall ? (
+          {isActive && isInstallWork(item) ? (
             item.stopping ? (
               <span className="px-1 text-xs text-[var(--color-muted)]">
                 {tr("queue_stopping", undefined, "Stopping…")}
@@ -1326,7 +1439,8 @@ export function QueueRow({
         <div className="mt-2 flex items-center gap-2 rounded-[var(--radius-field)] bg-[var(--color-warn)]/10 px-2 py-1.5 text-xs text-[var(--color-warn)]">
           <Spinner size={12} className="shrink-0" />
           <span>
-            {tr(
+            {recoveryResendsHelper(item.errorReason)
+              ? tr(
               "queue_recovering",
               {
                 attempt: item.recoverAttempt ?? 1,
@@ -1335,8 +1449,26 @@ export function QueueRow({
               `Connection lost — re-deploying payload & resuming (${
                 item.recoverAttempt ?? 1
               }/${MAX_AUTO_RECOVER_ATTEMPTS})…`,
-            )}
+            )
+              : tr(
+                  "queue_recovering_retry",
+                  {
+                    attempt: item.recoverAttempt ?? 1,
+                    max: MAX_AUTO_RECOVER_ATTEMPTS,
+                  },
+                  "Trying again ({attempt}/{max})…",
+                )}
           </span>
+        </div>
+      )}
+
+      {isActive && !isRecovering && !isInstall && item.verifying && (
+        <div className="mt-2 text-xs text-[var(--color-muted)]" data-testid="queue-verifying">
+          {tr(
+            "queue_verifying_pct",
+            { pct: Math.floor((100 * item.verifying.done) / item.verifying.total) },
+            "Comparing with what is on the PS5: {pct}%",
+          )}
         </div>
       )}
 
@@ -1384,6 +1516,19 @@ export function QueueRow({
               "The PS5 is in rest mode. This upload carries on by itself once the helper is back.",
             )}
           </span>
+        </div>
+      )}
+
+      {isPending && item.waitingForEngineQueue && (
+        <div
+          data-testid="queue-waiting-for-engine-queue"
+          className="mt-2 text-xs text-[var(--color-muted)]"
+        >
+          {tr(
+            "queue_waiting_for_engine_queue",
+            undefined,
+            "Waiting: a script or agent is using this PS5 through the engine's queue. This carries on by itself after.",
+          )}
         </div>
       )}
 
@@ -1441,6 +1586,15 @@ export function QueueRow({
 
       {isActive && !showInstallProgress && !isRecovering && (
         <div className="mt-2">
+          {resumedHave !== null && (
+            <div className="mb-1 text-xs text-[var(--color-muted)]" data-testid="queue-resumed">
+              {tr(
+                "upload_resumed_have",
+                { have: formatBytes(resumedHave) },
+                "Resumed: {have} was already on the PS5.",
+              )}
+            </div>
+          )}
           <div className="mb-1 flex flex-wrap items-baseline justify-between gap-x-3 text-xs text-[var(--color-muted)]">
             <span>
               {formatBytes(item.bytesSent)} / {formatBytes(item.totalBytes)}
@@ -1487,10 +1641,10 @@ export function QueueRow({
                       ? tr(
                           "queue_phase_finalizing_with_counter",
                           {
-                            done: item.filesFinalized.toLocaleString(),
-                            total: item.filesFinalizingTotal.toLocaleString(),
+                            done: formatNumber(item.filesFinalized),
+                            total: formatNumber(item.filesFinalizingTotal),
                           },
-                          `Finalizing on PS5 — ${item.filesFinalized.toLocaleString()} / ${item.filesFinalizingTotal.toLocaleString()}`,
+                          `Finalizing on PS5 — ${formatNumber(item.filesFinalized)} / ${formatNumber(item.filesFinalizingTotal)}`,
                         )
                       : tr(
                           "queue_phase_finalizing",
@@ -1546,6 +1700,7 @@ export function QueueRow({
           {item.installNote}
         </div>
       )}
+      {item.status === "done" && !isInstall && <FinishedRowNotes item={item} />}
 
       {item.status === "failed" && item.error && (
         <FailedRowErrorCard
@@ -1850,8 +2005,8 @@ export function queueRowIcon(
   sourceSrc: string | null;
 } {
   const titleId =
-    titleIdFromContentId(item.contentId) ||
-    titleIdFromContentId(art?.contentId) ||
+    findTitleId(item.contentId) ||
+    findTitleId(art?.contentId) ||
     art?.titleId ||
     null;
   const gamePath =
@@ -2114,7 +2269,7 @@ function PartialFileNote({ id, path }: { id: string; path: string }) {
       setState("gone");
     } catch (e) {
       setState("idle");
-      setFailed(e instanceof Error ? e.message : String(e));
+      setFailed(humanizeCaught(e));
     }
   };
   return (

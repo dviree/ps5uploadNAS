@@ -13,6 +13,7 @@ import {
   meshLock,
   postMeshActivity,
   type MeshActivityItem,
+  type MeshJoin,
   type MeshDevice,
   type MeshEvent,
   type MeshMe,
@@ -175,7 +176,8 @@ export async function loadMeshMe(): Promise<MeshMe | null> {
 export function presenceItems(tasks: readonly Task[], host: string): MeshActivityItem[] {
   const key = hostOf(host);
   return tasks
-    .filter((t) => !isTerminal(t.status) && t.status !== "queued" && hostOf(t.consoleId) === key)
+    // A console page's task is every device's to see on its own (state/consoleTasks), not this one's work.
+    .filter((t) => !isTerminal(t.status) && t.status !== "queued" && t.kind !== "console-task" && hostOf(t.consoleId) === key)
     .slice(0, 8)
     .map((t) => {
       const total = t.progress?.total ?? 0;
@@ -241,6 +243,18 @@ export function remotePlayPads(state: MeshState | null): Array<{ device: MeshDev
   return othersBusy(state).flatMap((x) => {
     const pad = x.items.find((a) => a.kind === RP_ACTIVITY)?.pad;
     return typeof pad === "string" && pad.startsWith("ws://") ? [{ device: x.device, pad }] : [];
+  });
+}
+
+/** The other devices hosting Play Together (#641), each once; never this app's own engine
+ *  (`ownWs`: the socket this app publishes). */
+export function nearbyJoins(state: MeshState | null, ownWs: string | null = null): Array<{ device: MeshDevice; join: MeshJoin }> {
+  const seen = new Set<string>();
+  return othersBusy(state).flatMap((x) => {
+    const join = x.items.find((a) => a.kind === RP_ACTIVITY)?.join;
+    if (!join || typeof join.ws !== "string" || !/^wss?:\/\//.test(join.ws) || join.ws === ownWs || seen.has(join.ws)) return [];
+    seen.add(join.ws);
+    return [{ device: x.device, join }];
   });
 }
 

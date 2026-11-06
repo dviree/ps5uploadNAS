@@ -31,6 +31,7 @@ pub mod guard;
 pub mod keyboard;
 pub mod mic;
 pub mod orientation;
+pub mod pad_pace;
 pub mod proto;
 pub mod takion;
 pub mod video;
@@ -76,8 +77,6 @@ const RTT_MS: u32 = 1;
 const TAKION_VERSION_PS5: u32 = 12;
 
 const CTRL_SESSION_ID: u16 = 0x0033;
-/// The shortest a button press lasts on the console (about three frames).
-const MIN_HOLD: Duration = Duration::from_millis(50);
 /// Tries at the ctrl connection for one nonce, a second apart.
 const CTRL_ATTEMPTS: u32 = 8;
 const CTRL_HEARTBEAT_REQ: u16 = 0x00fe;
@@ -272,9 +271,14 @@ fn ctrl_open(
     let mut counter_local = counter;
 
     let addr = resolve(host, SESSION_PORT)?;
+    let t0 = Instant::now();
     let mut s = TcpStream::connect_timeout(&addr, Duration::from_secs(10))
         .context("connecting for ctrl")?;
     s.set_nodelay(true).ok();
+    crate::core_debug!(
+        "rp ctrl: {host}: connected in {} ms; asking with codec {codec:?}",
+        t0.elapsed().as_millis()
+    );
     let req = format!(
         "GET /sie/ps5/rp/sess/ctrl HTTP/1.1\r\n\
          Host: {host}:{SESSION_PORT}\r\n\
@@ -307,6 +311,11 @@ fn ctrl_open(
         }
     };
     let reply = split_http(&raw[..header_end])?;
+    crate::core_debug!(
+        "rp ctrl: {host}: {} in {} ms",
+        crate::rp_regist::reply_for_log(&reply),
+        t0.elapsed().as_millis()
+    );
     if reply.code != 200 {
         let reason = reply
             .headers
@@ -642,6 +651,14 @@ pub trait StreamSink {
     fn progress(&mut self, _p: Progress) {}
     /// One Annex-B access unit (`header` = codec parameter sets). False stops.
     fn video(&mut self, au: &[u8], header: bool) -> bool;
+    /// One whole frame's access unit with the console's 16-bit frame index (it wraps). A sink
+    /// that has no use for the index keeps this default. False stops.
+    fn video_frame(&mut self, au: &[u8], _index: u16) -> bool {
+        self.video(au, false)
+    }
+    /// Frames `from..=to` (16-bit, wrapping) will never come: the frames after them may show
+    /// damage until the next keyframe, which the stream asks the console for.
+    fn video_lost(&mut self, _from: u16, _to: u16) {}
     /// One audio frame: its frame index (u16 BE) then one Opus packet; or, with
     /// `header`, the 14-byte audio header (channels, bits, rate, frame size).
     /// False stops.
@@ -806,15 +823,33 @@ pub fn run_stream(
     max: Duration,
     sink: &mut impl StreamSink,
 ) -> Result<StreamReport> {
+    // Stopped already (the page left, or Stop): no need to touch the console at all.
+    if sink.stopped() {
+        return Ok(StreamReport::default());
+    }
     // Readiness without touching the Remote Play slot (see guard.rs).
-    guard::prepare(host, creds, cfg.wake, Duration::from_secs(60), &mut || {
-        sink.progress(Progress::Waking)
-    })?;
+    let hooks = std::cell::RefCell::new(&mut *sink);
+    let ready = guard::prepare(
+        host,
+        creds,
+        cfg.wake,
+        Duration::from_secs(60),
+        &mut || hooks.borrow_mut().progress(Progress::Waking),
+        &mut || hooks.borrow_mut().stopped(),
+    );
+    match ready {
+        Err(e) if e.is::<guard::Cancelled>() => return Ok(StreamReport::default()),
+        r => r?,
+    }
+    // A stop during the wake: a session init would reserve the console's one slot for nobody.
+    if sink.stopped() {
+        return Ok(StreamReport::default());
+    }
     let nonce = match session_init(host, &creds.regist_key) {
         Ok(n) => n,
         Err(e) if format!("{e:#}").contains(guard::REASON_IN_USE) => {
             guard::hold_off(host, guard::IN_USE_BACKOFF);
-            return Err(guard::NotReady::Busy(guard::IN_USE_BACKOFF).into());
+            return Err(guard::NotReady::InUse(guard::IN_USE_BACKOFF).into());
         }
         Err(e) => return Err(e),
     };
@@ -846,7 +881,14 @@ pub fn run_stream(
                     && (format!("{e:#}").contains("ctrl reply")
                         || format!("{e:#}").contains("connecting for ctrl")) =>
             {
+                crate::core_debug!(
+                    "rp ctrl: {host}: attempt {attempt}/{CTRL_ATTEMPTS} failed: {e:#}; again in 1 s"
+                );
                 std::thread::sleep(Duration::from_secs(1));
+                if sink.stopped() {
+                    // The slot stays reserved for a while (`_release` holds off a new session).
+                    return Ok(StreamReport::default());
+                }
             }
             r => break r,
         }
@@ -868,6 +910,9 @@ pub fn run_stream(
         Err(e) => return Err(e),
     };
     sink.progress(Progress::SessionId);
+    if sink.stopped() {
+        return Ok(StreamReport::default());
+    }
     // DualSense features and the keyboard on, the mic muted twice (chiaki
     // `ctrl_enable_features`); like chiaki, a failed send is not fatal.
     for (kind, payload) in start_ctrl_messages(cfg.mic, cfg.dualsense, cfg.keyboard) {
@@ -875,6 +920,7 @@ pub fn run_stream(
     }
 
     let mut takion = Takion::connect(resolve(host, STREAM_PORT)?)?;
+    crate::core_debug!("rp stream: {host}: takion connected (ctrl took {attempt} attempt(s))");
     sink.progress(Progress::TakionConnected);
 
     let mut handshake_key = [0u8; HANDSHAKE_KEY_SIZE];
@@ -906,6 +952,13 @@ pub fn run_stream(
     let mut stream_info: Option<proto::StreamInfo> = None;
     let deadline = Instant::now() + Duration::from_secs(10);
     while stream_info.is_none() {
+        if sink.stopped() {
+            // As a stop during the stream: DISCONNECT over Takion, then ctrl closes.
+            takion.close();
+            drop(ctrl);
+            _release.clean.set(true);
+            return Ok(report);
+        }
         if Instant::now() > deadline {
             bail!(if have_bang {
                 "the console never sent STREAMINFO"
@@ -943,11 +996,23 @@ pub fn run_stream(
             }
             Message::StreamInfo(si) if have_bang => stream_info = Some(si),
             Message::StreamInfo(_) => early_streaminfo = Some(buf),
-            Message::Disconnect(r) => bail!("the console ended the stream: {r}"),
+            Message::Disconnect(r) => {
+                crate::core_debug!(
+                    "rp stream: {host}: the console disconnected during the handshake: {r}"
+                );
+                bail!("the console ended the stream: {r}")
+            }
             _ => {}
         }
     }
     let si = stream_info.unwrap();
+    crate::core_debug!(
+        "rp stream: {host}: STREAMINFO resolutions {:?}",
+        si.resolutions
+            .iter()
+            .map(|r| (r.width, r.height))
+            .collect::<Vec<_>>()
+    );
     report.resolutions = si.resolutions.iter().map(|r| (r.width, r.height)).collect();
     sink.progress(Progress::StreamInfo(report.resolutions.clone()));
     for (channel, msg) in after_streaminfo_messages(cfg.mic, cfg.dualsense) {
@@ -968,9 +1033,7 @@ pub fn run_stream(
     let started = Instant::now();
     let mut last_heartbeat = Instant::now();
     let mut feedback = FeedbackSender::new();
-    let mut pad_queue: std::collections::VecDeque<ControllerState> = Default::default();
-    let mut applied = ControllerState::default();
-    let mut last_press = Instant::now();
+    let mut pads = pad_pace::PadPacer::new();
     let mut reorder = VideoReorder::default();
     let mut last_congestion = Instant::now();
     let mut last_stats = Instant::now();
@@ -984,8 +1047,8 @@ pub fn run_stream(
         if started.elapsed() > max || sink.stopped() {
             break Ok(());
         }
-        // Before, a console that went quiet, or closed ctrl, left the page on a frozen
-        // picture until the four-hour limit: end the stream and say why.
+        // A console that went quiet, or closed ctrl, would leave the page on a frozen picture
+        // for as long as it stayed open: end the stream and say why.
         if takion.last_rx.elapsed() > SILENCE_LIMIT {
             break Err(anyhow!(
                 "the console stopped sending: nothing for {} s (the network dropped, or the console ended the stream)",
@@ -1004,27 +1067,13 @@ pub fn run_stream(
             last_heartbeat = Instant::now();
             takion.send_message(1, &proto::bare(proto::kind::HEARTBEAT))?;
         }
-        // Every pad state, in order. A press is held for at least MIN_HOLD before
-        // its release is applied: the console reads the pad about once a frame,
-        // and a tap whose press and release land in one frame never registers
-        // (seen: 3 quick taps moved the home screen 1 tile).
+        // Every pad state, in order, paced so the console sees each press and release
+        // (pad_pace.rs).
         while let Some(pad) = sink.input() {
-            pad_queue.push_back(pad);
+            pads.push(pad);
         }
-        while let Some(next) = pad_queue.front().copied() {
-            let releases = applied.buttons & !next.buttons != 0
-                || (applied.touch.is_some() && next.touch.is_none());
-            if releases && last_press.elapsed() < MIN_HOLD {
-                break;
-            }
-            if next.buttons & !applied.buttons != 0
-                || (applied.touch.is_none() && next.touch.is_some())
-            {
-                last_press = Instant::now();
-            }
+        while let Some(next) = pads.next(Instant::now()) {
             feedback.set(next);
-            applied = next;
-            pad_queue.pop_front();
         }
         // The microphone (chiaki StreamSession::ToggleMute and the audio
         // sender): CONNECT once, then unmute/mute; frames only while live.
@@ -1138,16 +1187,17 @@ pub fn run_stream(
         for p in reorder.pull(Instant::now()) {
             for out in assembler.push(&p) {
                 match out {
-                    video::Output::Frame(frame) => {
+                    video::Output::Frame { index, au: frame } => {
                         if first_frame {
                             first_frame = false;
                             sink.progress(Progress::FirstFrame(frame.len()));
                         }
-                        if !sink.video(&frame, false) {
+                        if !sink.video_frame(&frame, index) {
                             stop = true;
                         }
                     }
                     video::Output::Lost { from, to } => {
+                        sink.video_lost(from, to);
                         // Tell the console which frames are gone, and ask for a
                         // keyframe so the picture repairs itself quickly.
                         takion.send_message(2, &proto::corrupt_frame(from, to))?;
@@ -1254,6 +1304,44 @@ pub fn run_stream(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A page that already said stop: nothing goes to the console, not even discovery.
+    #[test]
+    fn a_stream_stopped_before_it_starts_never_touches_the_console() {
+        struct Stopped;
+        impl StreamSink for Stopped {
+            fn progress(&mut self, _: Progress) {
+                panic!("nothing to report");
+            }
+            fn video(&mut self, _: &[u8], _: bool) -> bool {
+                false
+            }
+            fn audio(&mut self, _: &[u8], _: bool) -> bool {
+                false
+            }
+            fn input(&mut self) -> Option<ControllerState> {
+                None
+            }
+            fn stopped(&mut self) -> bool {
+                true
+            }
+        }
+        let creds = SessionCreds {
+            regist_key: [0; 16],
+            morning: [0; 16],
+        };
+        let t0 = Instant::now();
+        // An address nothing answers on: a probe would take its 2 s.
+        let r = run_stream(
+            "192.0.2.1",
+            &creds,
+            StreamConfig::default(),
+            Duration::MAX,
+            &mut Stopped,
+        );
+        assert_eq!(r.unwrap().video.frames, 0);
+        assert!(t0.elapsed() < Duration::from_secs(1));
+    }
 
     #[test]
     fn launch_spec_is_valid_json() {

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import {
   ScrollText,
   Trash2,
@@ -15,12 +15,13 @@ import {
   type LogEntry,
   type LogLevel,
 } from "../../state/logs";
-import { useDiagSettingsStore, LOG_LEVELS } from "../../state/diagSettings";
-import { EmptyState, Button, Callout } from "../../components";
+import { useDiagSettingsStore, LOG_LEVELS, detailedActive } from "../../state/diagSettings";
+import { EmptyState, Button, Callout, Toggle } from "../../components";
 import { useTr } from "../../state/lang";
 import { writeClipboard } from "../../lib/clipboard";
 import { isTauriEnv } from "../../lib/tauriEnv";
 import { browserDownloadText } from "../../lib/browserDownload";
+import { formatDate } from "../../lib/formatDate";
 
 const LEVEL_ORDER: LogLevel[] = ["error", "warn", "info", "debug", "trace"];
 
@@ -78,6 +79,9 @@ export default function AppLogsPanel() {
   const clearLogs = useLogsStore((s) => s.clear);
   const logLevel = useDiagSettingsStore((s) => s.logLevel);
   const setLogLevel = useDiagSettingsStore((s) => s.setLogLevel);
+  const detailedUntil = useDiagSettingsStore((s) => s.detailedUntil);
+  const setDetailed = useDiagSettingsStore((s) => s.setDetailed);
+  const detailedOn = detailedActive(detailedUntil);
 
   // Transient button feedback. A silent success looked identical to a silent
   // failure, which is why Copy/Download read as "not working".
@@ -237,6 +241,26 @@ export default function AppLogsPanel() {
         </Button>
       </div>
 
+      {/* "Detailed logs": extra engine lines for the hard-to-diagnose paths (Remote Play
+          start-up, Play Together) and debug lines recorded, for a day at most (lib/detailedLogs).
+          Every platform: it changes what the engine writes, which the browser build reads too. */}
+      <div className="mb-3 rounded-[var(--radius-card)] border border-[var(--glass-edge)] bg-[var(--color-surface-raised)] px-4 py-2.5 text-xs shadow-[var(--edge-highlight)]">
+        <Toggle
+          checked={detailedOn}
+          onChange={(on) => setDetailed(on)}
+          label={tr("logs_detailed", undefined, "Detailed logs")}
+          hint={
+            detailedOn && detailedUntil !== null
+              ? tr("logs_detailed_on_until", { time: formatDate(detailedUntil) }, "On until {time}. Turns itself off then.")
+              : tr(
+                  "logs_detailed_hint",
+                  undefined,
+                  "Records extra detail about Remote Play start-up and Play Together to help find a problem. Never keys, codes or passwords. Turns itself off after 24 hours.",
+                )
+          }
+        />
+      </div>
+
       {/* Persistent disk-log controls. These logs are written to
           ~/.ps5upload/logs/ so a bug report can package a time window; the
           level here gates the MINIMUM severity recorded (not what's shown
@@ -265,7 +289,7 @@ export default function AppLogsPanel() {
         <Button
           variant="ghost"
           size="sm"
-          className="ml-auto"
+          className="ms-auto"
           onClick={() => void openLogsDir()}
         >
           {tr("logs_open_folder", undefined, "Open logs folder")}
@@ -366,7 +390,7 @@ function FilterPill({
   );
 }
 
-function LogRow({ entry }: { entry: LogEntry }) {
+const LogRow = memo(function LogRow({ entry }: { entry: LogEntry }) {
   const [expanded, setExpanded] = useState(false);
   const meta = LEVEL_META[entry.level];
   const hasDetail = !!entry.detail;
@@ -375,7 +399,7 @@ function LogRow({ entry }: { entry: LogEntry }) {
       <button
         type="button"
         onClick={() => hasDetail && setExpanded((v) => !v)}
-        className={`group flex w-full items-start gap-3 text-left max-md:min-h-11 max-md:items-center ${
+        className={`group flex w-full items-start gap-3 text-start max-md:min-h-11 max-md:items-center ${
           hasDetail ? "cursor-pointer" : "cursor-default"
         }`}
       >
@@ -401,10 +425,10 @@ function LogRow({ entry }: { entry: LogEntry }) {
         </span>
       </button>
       {expanded && entry.detail && (
-        <pre className="mt-2 ml-[54px] max-h-64 overflow-auto rounded-[var(--radius-field)] border border-[var(--color-border)] bg-[var(--color-surface)] p-3 font-mono text-xs text-[var(--color-muted)]">
+        <pre className="mt-2 ms-[54px] max-h-64 overflow-auto rounded-[var(--radius-field)] border border-[var(--color-border)] bg-[var(--color-surface)] p-3 font-mono text-xs text-[var(--color-muted)]">
           {entry.detail}
         </pre>
       )}
     </li>
   );
-}
+});

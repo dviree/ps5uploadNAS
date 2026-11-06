@@ -16,6 +16,14 @@
 //!
 //! `/pad` and `/api/pad/` are the only routes a LAN peer reaches besides `/pkg-host/`
 //! (`loopback_allows` in lib.rs), and the socket checks the key or the computer's yes itself.
+//! A phone also names its device (`d=`, random, kept on the phone): a device the computer allowed
+//! comes back after a dropped socket without asking again, and one it disconnected stays out until
+//! the link is closed.
+//!
+//! A phone that vanishes (out of Wi-Fi range, asleep with a thumb on the stick) must not stay on
+//! the console's pad: the socket hears a WebSocket ping every second and ends when nothing at all
+//! comes back for a few, and a page that says it keeps sending (`"ka"` on its pad messages, every
+//! 250 ms) is let go after a second without one.
 //! A phone sends pad states and, for its touchpad & keyboard, native keyboard & mouse input
 //! (`{"kbm": {"on", "mouse", "keyboard"}}` repeated every 500 ms as a heartbeat, and binary
 //! `[8][16-byte report]`). That input is only forwarded to the computer's page as `{"pad_kbm":
@@ -30,8 +38,8 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
-use axum::extract::Query;
-use axum::http::HeaderMap;
+use axum::extract::{ConnectInfo, Query};
+use axum::http::{HeaderMap, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use axum::Json;
 use ps5upload_core::rp_stream::ControllerState;
@@ -45,8 +53,18 @@ const MAX_PENDING: usize = 4;
 const MAX_PADS: usize = 4;
 /// Watchers at once (watch party): each is a full copy of the stream on the LAN.
 const MAX_WATCHERS: usize = 4;
-/// How often a phone hears whether the session is playing.
-const STATE_EVERY: Duration = Duration::from_secs(1);
+/// The least time between a watcher's keyframe requests that reach the console.
+const WATCH_KEY_GAP: Duration = Duration::from_secs(1);
+/// How often a phone hears whether the session is playing (and a WebSocket ping).
+const STATE_EVERY: Duration = crate::rp_stream_api::PEER_PING_EVERY;
+/// A page that keeps sending (`"ka"`) and has not for this long: its pad is let go. The socket may
+/// well be fine (a hidden page's timers, a busy phone): it comes back with its next state.
+const PAD_SILENT_AFTER: Duration = Duration::from_millis(if cfg!(test) { 300 } else { 1000 });
+/// The largest message a phone's socket takes. Its pad states are small JSON, its keyboard and
+/// mouse reports 17 bytes; what it receives (a watcher's pictures) is not limited by this.
+const PHONE_MSG_MAX: usize = crate::join::GUEST_MSG_MAX;
+/// Asks waiting from one address.
+const MAX_PENDING_PER_IP: usize = 2;
 
 /// Merge controller states into the one pad the console gets: buttons from all, the deeper
 /// trigger, and for each stick axis the one pushed furthest (a resting controller never cancels
@@ -62,6 +80,7 @@ pub fn merge_pads<'a>(states: impl IntoIterator<Item = &'a ControllerState>) -> 
     };
     for s in states {
         m.buttons |= s.buttons;
+        m.turbo |= s.turbo;
         m.l2 = m.l2.max(s.l2);
         m.r2 = m.r2.max(s.r2);
         m.lx = far(m.lx, s.lx);
@@ -84,6 +103,10 @@ pub fn merge_pads<'a>(states: impl IntoIterator<Item = &'a ControllerState>) -> 
 pub struct PadSources(Mutex<BTreeMap<u64, ControllerState>>);
 
 impl PadSources {
+    pub fn is_empty(&self) -> bool {
+        self.0.lock().map(|g| g.is_empty()).unwrap_or(true)
+    }
+
     /// Record `source`'s state (None: it left) and return the merged pad.
     pub fn set(&self, source: u64, state: Option<ControllerState>) -> ControllerState {
         let Ok(mut g) = self.0.lock() else {
@@ -104,6 +127,8 @@ impl PadSources {
 struct Pad {
     id: u64,
     name: String,
+    /// The device's own id, when it gave one.
+    device: Option<String>,
     since_ms: u128,
     tx: mpsc::Sender<Message>,
     /// A watcher (watch party): it sees the stream, and plays only once handed the controller.
@@ -115,6 +140,7 @@ struct Pad {
 struct Pending {
     id: u64,
     name: String,
+    ip: std::net::IpAddr,
     answer: oneshot::Sender<bool>,
 }
 
@@ -124,6 +150,10 @@ struct Link {
     key: Option<String>,
     pads: Vec<Pad>,
     pending: Vec<Pending>,
+    /// Devices the computer allowed: back in without asking on a new socket.
+    allowed: std::collections::HashSet<String>,
+    /// Devices the computer disconnected: out until the link closes.
+    denied: std::collections::HashSet<String>,
 }
 
 static LINK: Mutex<Option<Link>> = Mutex::new(None);
@@ -135,14 +165,14 @@ fn with_link<R>(f: impl FnOnce(&mut Link) -> R) -> R {
     f(g.get_or_insert_with(Link::default))
 }
 
-fn random_key() -> Option<String> {
+pub(crate) fn random_key() -> Option<String> {
     let mut b = [0u8; 16];
     getrandom::fill(&mut b).ok()?;
     Some(b.iter().map(|x| format!("{x:02x}")).collect())
 }
 
 /// Equal without leaking where the first difference is.
-fn same_key(a: &str, b: &str) -> bool {
+pub(crate) fn same_key(a: &str, b: &str) -> bool {
     a.len() == b.len()
         && a.bytes()
             .zip(b.bytes())
@@ -161,13 +191,98 @@ fn lan_ip_toward(toward: &str) -> Option<std::net::IpAddr> {
 }
 
 /// The port this engine answers on, from the request the computer's page made to it.
-fn port_of(headers: &HeaderMap) -> u16 {
+pub(crate) fn port_of(headers: &HeaderMap) -> u16 {
     headers
         .get("host")
         .and_then(|h| h.to_str().ok())
         .and_then(|h| h.rsplit_once(':'))
         .and_then(|(_, p)| p.parse().ok())
+        .unwrap_or_else(listen_port)
+}
+
+/// The port this engine listens on, as the rest of the engine reads it (pkg_install.rs).
+fn listen_port() -> u16 {
+    std::env::var("PS5UPLOAD_ENGINE_PORT")
+        .ok()
+        .and_then(|s| s.parse().ok())
         .unwrap_or(19113)
+}
+
+/// The request came through a reverse proxy: its `Host` port is the proxy's, and nothing listens
+/// on that port at this engine's own addresses. (The engine has no TLS of its own, so an https
+/// page is always proxied.)
+fn proxied(headers: &HeaderMap) -> bool {
+    [
+        "x-forwarded-for",
+        "x-forwarded-host",
+        "x-forwarded-proto",
+        "forwarded",
+    ]
+    .iter()
+    .any(|h| headers.contains_key(*h))
+        || headers
+            .get("origin")
+            .and_then(|o| o.to_str().ok())
+            .is_some_and(|o| o.to_ascii_lowercase().starts_with("https://"))
+}
+
+/// The port for links that name this engine's own addresses.
+pub(crate) fn lan_port(headers: &HeaderMap) -> u16 {
+    if proxied(headers) {
+        listen_port()
+    } else {
+        port_of(headers)
+    }
+}
+
+/// `http://<ip>:<port>`, IPv6 in brackets.
+pub(crate) fn ip_base(ip: std::net::IpAddr, port: u16) -> String {
+    format!("http://{}", std::net::SocketAddr::new(ip, port))
+}
+
+/// What the page's own address says to send people to: scheme, name and port as the browser sees
+/// them, from `Origin` (already compared with `Host` by the origin guard), else from `Host` and a
+/// proxy's `X-Forwarded-*`. None for this computer's loopback names, which mean something else on
+/// every other device, and for what cannot be part of a link.
+pub(crate) fn web_base(headers: &HeaderMap) -> Option<String> {
+    let text = |name: &str| headers.get(name).and_then(|v| v.to_str().ok());
+    let base = text("origin")
+        .filter(|o| {
+            let o = o.to_ascii_lowercase();
+            o.starts_with("http://") || o.starts_with("https://")
+        })
+        .map(str::to_string)
+        .or_else(|| {
+            let host = crate::host_guard::first_forwarded(headers, "x-forwarded-host")
+                .or_else(|| text("host"))?
+                .trim();
+            let scheme = crate::host_guard::first_forwarded(headers, "x-forwarded-proto")
+                .filter(|p| p.eq_ignore_ascii_case("https"))
+                .map_or("http", |_| "https");
+            Some(format!("{scheme}://{host}"))
+        })?;
+    let (_, authority) = base.split_once("://")?;
+    let usable = !authority.is_empty()
+        && authority.len() <= 255
+        && authority
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b".-:[]".contains(&b));
+    let (name, _) = crate::host_guard::split_authority(authority);
+    let local = name == "localhost"
+        || name.ends_with(".localhost")
+        || name
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback() || ip.is_unspecified());
+    (usable && !local).then_some(base)
+}
+
+/// `PS5UPLOAD_PKG_HOST_IP`, when it is an address.
+fn pinned_ip() -> Option<std::net::IpAddr> {
+    std::env::var("PS5UPLOAD_PKG_HOST_IP")
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 /// A home network's address (10/8, 172.16/12, 192.168/16): where a phone on the same Wi-Fi
@@ -180,13 +295,23 @@ fn is_home_lan(ip: std::net::IpAddr) -> bool {
 /// phones usually are), then on the network the default route goes out on. A computer on two
 /// networks (the PS5 on one, the phone's Wi-Fi on the other) needs the second: the QR code
 /// carried only the first, which the phone could not reach.
-fn lan_ips(console: Option<&str>) -> Vec<std::net::IpAddr> {
+pub(crate) fn lan_ips(console: Option<&str>) -> Vec<std::net::IpAddr> {
     let toward = console
         .map(str::to_string)
         .or_else(crate::rp_stream_api::live_host);
     let mut out = Vec::new();
-    if let Some(ip) = toward.as_deref().and_then(lan_ip_toward) {
+    // The address the operator pinned for this machine (a bridged container: the routing guesses
+    // below only find the container's own address, which nothing outside it can reach).
+    if let Some(ip) = pinned_ip() {
         out.push(ip);
+        if crate::pkg_install::in_container() {
+            return out;
+        }
+    }
+    if let Some(ip) = toward.as_deref().and_then(lan_ip_toward) {
+        if !out.contains(&ip) {
+            out.push(ip);
+        }
     }
     // Any outside address picks the default route's interface; nothing is sent.
     if let Some(ip) = lan_ip_toward("1.1.1.1").filter(|ip| is_home_lan(*ip)) {
@@ -197,42 +322,193 @@ fn lan_ips(console: Option<&str>) -> Vec<std::net::IpAddr> {
     out
 }
 
-/// Where phones reach this engine, toward the console being played (or `console`).
-fn base_url(headers: &HeaderMap, console: Option<&str>) -> Option<String> {
-    let ip = *lan_ips(console).first()?;
-    Some(format!("http://{ip}:{}", port_of(headers)))
+/// Tailscale's shared range (100.64.0.0/10), where every tailnet address is.
+fn in_tailnet_range(ip: std::net::IpAddr) -> bool {
+    matches!(ip, std::net::IpAddr::V4(v4) if v4.octets()[0] == 100 && (v4.octets()[1] & 0xc0) == 64)
+}
+
+/// The address `via` (what reaches Tailscale's own 100.100.100.100) is this computer's tailnet
+/// address when it is in Tailscale's range and is not simply the default route's address too
+/// (a carrier's CGNAT can hand a computer a 100.64/10 address of its own).
+fn tailnet_choice(
+    via: Option<std::net::IpAddr>,
+    default: Option<std::net::IpAddr>,
+) -> Option<std::net::IpAddr> {
+    via.filter(|ip| in_tailnet_range(*ip) && default != Some(*ip))
+}
+
+/// This computer's Tailscale address, while the Tailscale app is connected: friends on Tailscale
+/// (this computer shared with them) reach the engine there. The system picks the interface
+/// toward Tailscale's 100.100.100.100, which only the Tailscale interface routes; nothing is sent.
+pub(crate) fn tailscale_ip() -> Option<std::net::IpAddr> {
+    tailnet_choice(lan_ip_toward("100.100.100.100"), lan_ip_toward("1.1.1.1"))
+}
+
+/// Virtual adapters nobody joins through (containers, virtual machines): their addresses would
+/// only be noise among the choices.
+fn virtual_adapter(name: &str) -> bool {
+    let n = name.to_ascii_lowercase();
+    [
+        "docker",
+        "br-",
+        "veth",
+        "vethernet",
+        "vmnet",
+        "vboxnet",
+        "virbr",
+        "lxc",
+        "lxd",
+        "cni",
+        "flannel",
+        "podman",
+        "vmware",
+        "virtualbox",
+        "hyper-v",
+        "default switch",
+        "wsl",
+        "bridge10",
+    ]
+    .iter()
+    .any(|p| n.starts_with(p) || n.contains(&format!("({p}")))
+}
+
+/// A private address someone could reach this computer on through a VPN of their own
+/// (WireGuard, OpenVPN, ZeroTier…): home-network ranges and the shared 100.64/10 range.
+fn vpn_reachable(ip: std::net::Ipv4Addr) -> bool {
+    ip.is_private() || (ip.octets()[0] == 100 && (ip.octets()[1] & 0xc0) == 64)
+}
+
+/// This computer's other private addresses, from its network interfaces: a WireGuard (or other
+/// VPN) interface a friend reaches it on. Not loopback, not link-local, not virtual adapters, and
+/// not `skip` (the addresses already offered).
+fn other_private_ips(skip: &[std::net::IpAddr]) -> Vec<std::net::IpAddr> {
+    let Ok(ifaces) = if_addrs::get_if_addrs() else {
+        return Vec::new();
+    };
+    let mut out: Vec<std::net::IpAddr> = Vec::new();
+    for i in ifaces {
+        let std::net::IpAddr::V4(v4) = i.ip() else {
+            continue;
+        };
+        let ip = std::net::IpAddr::V4(v4);
+        if i.is_loopback()
+            || v4.is_link_local()
+            || !vpn_reachable(v4)
+            || virtual_adapter(&i.name)
+            || skip.contains(&ip)
+            || out.contains(&ip)
+        {
+            continue;
+        }
+        out.push(ip);
+    }
+    out
+}
+
+/// Every address of this computer a phone or friend may use, best first: the home network's
+/// (`lan_ips`), then other private ones (a VPN such as WireGuard), then Tailscale's last.
+pub(crate) fn reach_ips(
+    console: Option<&str>,
+) -> (Vec<std::net::IpAddr>, Option<std::net::IpAddr>) {
+    let mut ips = lan_ips(console);
+    let tailscale = tailscale_ip();
+    let mut skip = ips.clone();
+    skip.extend(tailscale);
+    // Inside a container with a pinned address, its other addresses are its own.
+    if !(pinned_ip().is_some() && crate::pkg_install::in_container()) {
+        ips.extend(other_private_ips(&skip));
+    }
+    if let Some(ip) = tailscale.filter(|ip| !ips.contains(ip)) {
+        ips.push(ip);
+    }
+    (ips, tailscale)
+}
+
+/// Where a phone is sent, best first. A QR code goes to this machine's address, since a phone may
+/// not resolve the name the computer's browser used (`.local` on Android). The name comes first
+/// when those addresses cannot work (a bridged container with no pinned address) or when the page
+/// is on https, which only the name's certificate can serve.
+fn phone_bases(web: Option<String>, ip_bases: Vec<String>, name_first: bool) -> Vec<String> {
+    let mut out = Vec::new();
+    let web_first = name_first || web.as_deref().is_some_and(|w| w.starts_with("https://"));
+    if web_first {
+        out.extend(web.clone());
+    }
+    for b in ip_bases {
+        if !out.contains(&b) {
+            out.push(b);
+        }
+    }
+    if let Some(w) = web {
+        if !out.contains(&w) {
+            out.push(w);
+        }
+    }
+    out
 }
 
 fn status(headers: &HeaderMap, console: Option<&str>) -> serde_json::Value {
-    let base = base_url(headers, console);
-    let port = port_of(headers);
-    let ips = lan_ips(console);
+    let port = lan_port(headers);
+    // Home network first (the QR code's), then a VPN's, Tailscale's last: the host picks.
+    let (ips, tailscale) = reach_ips(console);
+    let ip_bases: Vec<String> = ips.iter().map(|ip| ip_base(*ip, port)).collect();
+    let prefix = crate::host_guard::base_path();
+    // What the phone app connects to: an address, which its engine's relay accepts as is.
+    let pad_ws = ip_bases
+        .first()
+        .map(|b| format!("{}{prefix}/api/pad/ws", b.replacen("http://", "ws://", 1)));
+    let bases = phone_bases(
+        web_base(headers),
+        ip_bases,
+        crate::pkg_install::bridged_container_without_pkg_host_ip(),
+    );
     with_link(|l| {
         serde_json::json!({
             "open": l.key.is_some(),
-            "url": match (&base, &l.key) {
-                (Some(b), Some(k)) => serde_json::Value::String(format!("{b}/pad#t={k}")),
+            "url": match (bases.first(), &l.key) {
+                (Some(b), Some(k)) => serde_json::Value::String(format!("{b}{prefix}/pad#t={k}")),
                 _ => serde_json::Value::Null,
             },
+            // This computer's Tailscale address (one of `urls`), for the page to label.
+            "tailscale": tailscale.map(|ip| ip.to_string()),
             // Every address, best first (the first is `url`): for a computer on two networks.
             "urls": match &l.key {
-                Some(k) => ips
+                Some(k) => bases
                     .iter()
-                    .map(|ip| serde_json::Value::String(format!("http://{ip}:{port}/pad#t={k}")))
+                    .map(|b| serde_json::Value::String(format!("{b}{prefix}/pad#t={k}")))
                     .collect::<Vec<_>>(),
                 None => Vec::new(),
             },
             // What the phone app connects to (it asks; the computer allows).
-            "pad_ws": base.as_ref().map(|b| format!("{}/api/pad/ws", b.replacen("http://", "ws://", 1))),
+            "pad_ws": pad_ws,
             "pads": l.pads.iter().map(|p| serde_json::json!({"id": p.id, "name": p.name, "since_ms": p.since_ms, "watch": p.watch, "control": p.control})).collect::<Vec<_>>(),
             "pending": l.pending.iter().map(|p| serde_json::json!({"id": p.id, "name": p.name})).collect::<Vec<_>>(),
         })
     })
 }
 
+/// Phone controllers and the watch party for a bug report: counts and switches, never the link's
+/// key, an address or a phone's name. `tailscale` says only whether a Tailscale address exists.
+pub(crate) fn diag_summary() -> serde_json::Value {
+    let tailscale = tailscale_ip().is_some();
+    with_link(|l| diag_of(l, tailscale))
+}
+
+fn diag_of(l: &Link, tailscale: bool) -> serde_json::Value {
+    serde_json::json!({
+        "open": l.key.is_some(),
+        "phones": l.pads.iter().filter(|p| !p.watch).count(),
+        "watchers": l.pads.iter().filter(|p| p.watch).count(),
+        "watchers_in_control": l.pads.iter().filter(|p| p.watch && p.control).count(),
+        "asking": l.pending.len(),
+        "tailscale_ip_present": tailscale,
+    })
+}
+
 #[derive(serde::Deserialize, Default)]
 pub struct StatusQuery {
     #[serde(default)]
+    #[serde(alias = "addr", alias = "host")]
     console: Option<String>,
 }
 
@@ -248,27 +524,54 @@ pub async fn get_status(
 pub struct OpenReq {
     open: bool,
     #[serde(default)]
+    #[serde(alias = "addr", alias = "host")]
     console: Option<String>,
+}
+
+/// `pad`'s input off the console now, whatever its socket is doing: a stalled one may not read
+/// its Close for minutes (or its queue is full and the Close was dropped).
+fn release(id: u64, watch: bool) {
+    crate::rp_stream_api::push_pad(id, None);
+    crate::rp_stream_api::push_pad_kbm(kbm_left(id));
+    if watch {
+        crate::rp_stream_api::remove_spectator(id);
+    }
+}
+
+/// `p` is told why, and goes.
+fn let_go(p: &Pad, why: &str) {
+    let _ =
+        p.tx.try_send(say(serde_json::json!({"stage": "refused", "why": why})));
+    let _ = p.tx.try_send(Message::Close(None));
 }
 
 /// `POST /api/ps5/rp/pad-link {open, console?}`: open the QR link (a new key), or close it,
 /// which also lets every phone go.
 pub async fn set_open(headers: HeaderMap, Json(r): Json<OpenReq>) -> Json<serde_json::Value> {
-    with_link(|l| {
+    let gone = with_link(|l| {
         if r.open {
             if l.key.is_none() {
                 l.key = random_key();
             }
-        } else {
-            l.key = None;
-            for p in l.pads.drain(..) {
-                let _ = p.tx.try_send(Message::Close(None));
-            }
-            for p in l.pending.drain(..) {
-                let _ = p.answer.send(false);
-            }
+            return Vec::new();
         }
+        l.key = None;
+        l.allowed.clear();
+        l.denied.clear();
+        for p in l.pending.drain(..) {
+            let _ = p.answer.send(false);
+        }
+        l.pads
+            .drain(..)
+            .map(|p| {
+                let_go(&p, "closed");
+                (p.id, p.watch)
+            })
+            .collect()
     });
+    for (id, watch) in gone {
+        release(id, watch);
+    }
     Json(status(&headers, r.console.as_deref()))
 }
 
@@ -284,10 +587,11 @@ pub async fn decide(Json(r): Json<DecideReq>) -> Json<serde_json::Value> {
         let i = l.pending.iter().position(|p| p.id == r.id)?;
         Some(l.pending.remove(i))
     });
+    let ok = found.is_some();
     if let Some(p) = found {
         let _ = p.answer.send(r.allow);
     }
-    Json(serde_json::json!({"ok": true}))
+    Json(serde_json::json!({ "ok": ok }))
 }
 
 #[derive(serde::Deserialize)]
@@ -295,15 +599,24 @@ pub struct KickReq {
     id: u64,
 }
 
-/// `POST /api/ps5/rp/pad-link/kick {id}`: let a phone go.
+/// `POST /api/ps5/rp/pad-link/kick {id}`: let a phone go, and keep it out until the link closes
+/// (the link's key alone would let it back in with one tap).
 pub async fn kick(Json(r): Json<KickReq>) -> Json<serde_json::Value> {
-    with_link(|l| {
-        if let Some(i) = l.pads.iter().position(|p| p.id == r.id) {
-            let p = l.pads.remove(i);
-            let _ = p.tx.try_send(Message::Close(None));
+    let gone = with_link(|l| {
+        let i = l.pads.iter().position(|p| p.id == r.id)?;
+        let p = l.pads.remove(i);
+        let_go(&p, "kicked");
+        if let Some(d) = &p.device {
+            l.allowed.remove(d);
+            l.denied.insert(d.clone());
         }
+        Some((p.id, p.watch))
     });
-    Json(serde_json::json!({"ok": true}))
+    let ok = gone.is_some();
+    if let Some((id, watch)) = gone {
+        release(id, watch);
+    }
+    Json(serde_json::json!({ "ok": ok }))
 }
 
 #[derive(serde::Deserialize)]
@@ -356,9 +669,13 @@ pub struct PadQuery {
     /// `w=1`: join to watch (watch party), not to play.
     #[serde(default)]
     w: Option<u8>,
+    /// This device's own id (random, kept on the device).
+    #[serde(default)]
+    d: Option<String>,
 }
 
-/// A phone's name as it gave it: printable, short.
+/// A phone's name as it gave it: printable, short. Empty when it gave none, and the /pad page sends
+/// a word for what it is (`iphone`, `android`...): the computer's own app says those in its language.
 fn clean_name(n: Option<&str>) -> String {
     let n: String = n
         .unwrap_or("")
@@ -366,17 +683,53 @@ fn clean_name(n: Option<&str>) -> String {
         .filter(|c| !c.is_control())
         .take(40)
         .collect();
-    let n = n.trim();
-    if n.is_empty() {
-        "Phone".into()
-    } else {
-        n.to_string()
-    }
+    n.trim().to_string()
 }
 
-/// `GET /api/pad/ws?t=&name=`: a phone's controller socket.
-pub async fn ws(upgrade: WebSocketUpgrade, Query(q): Query<PadQuery>) -> Response {
-    upgrade.on_upgrade(move |s| pad_session(s, q))
+/// A device id when it looks like one (hex, as the page makes them).
+fn clean_device(d: Option<&str>) -> Option<String> {
+    d.filter(|d| (8..=128).contains(&d.len()) && d.bytes().all(|b| b.is_ascii_hexdigit()))
+        .map(str::to_string)
+}
+
+static CONNECTS: crate::join::ConnectLimit = crate::join::ConnectLimit::new();
+
+/// A socket that has the computer's word already: the link's key, or a device it allowed. Those
+/// come back as often as a flaky Wi-Fi drops them; the limit is for everyone else.
+fn is_expected(q: &PadQuery) -> bool {
+    let device = clean_device(q.d.as_deref());
+    with_link(|l| {
+        q.t.as_deref()
+            .is_some_and(|t| l.key.as_deref().is_some_and(|k| same_key(k, t)))
+            || device.is_some_and(|d| l.allowed.contains(&d))
+    })
+}
+
+/// `GET /api/pad/ws?t=&name=&d=`: a phone's controller socket. Any device on the LAN reaches it, so
+/// the same limits as a Play Together guest's (join.rs): sockets per address, and small messages.
+pub async fn ws(
+    upgrade: WebSocketUpgrade,
+    ConnectInfo(peer): ConnectInfo<std::net::SocketAddr>,
+    Query(q): Query<PadQuery>,
+) -> Response {
+    let ip = peer.ip();
+    if !is_expected(&q)
+        && !CONNECTS.allow(
+            ip,
+            crate::join::connects_per_min(ip),
+            std::time::Instant::now(),
+        )
+    {
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            "too many tries, wait a minute",
+        )
+            .into_response();
+    }
+    upgrade
+        .max_message_size(PHONE_MSG_MAX)
+        .max_frame_size(PHONE_MSG_MAX)
+        .on_upgrade(move |s| pad_session(s, q, ip))
 }
 
 fn say(v: serde_json::Value) -> Message {
@@ -432,56 +785,68 @@ fn plays(id: u64) -> bool {
     with_link(|l| l.pads.iter().any(|x| x.id == id && (!x.watch || x.control)))
 }
 
-async fn pad_session(mut socket: WebSocket, q: PadQuery) {
+async fn pad_session(mut socket: WebSocket, q: PadQuery, ip: std::net::IpAddr) {
+    use crate::rp_stream_api::send_limited;
     let name = clean_name(q.name.as_deref());
+    let device = clean_device(q.d.as_deref());
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
-    let keyed =
-        q.t.as_deref()
-            .is_some_and(|t| with_link(|l| l.key.as_deref().is_some_and(|k| same_key(k, t))));
+    let refuse = |why: &str| say(serde_json::json!({"stage": "refused", "why": why}));
+    let out = device
+        .as_ref()
+        .is_some_and(|d| with_link(|l| l.denied.contains(d)));
+    if out {
+        send_limited(&mut socket, refuse("kicked")).await;
+        return;
+    }
+    let keyed = is_expected(&q);
     if !keyed {
         if q.t.is_some() {
             // A QR code from a link closed since (or a guess).
-            let _ = socket
-                .send(say(serde_json::json!({"stage": "refused", "why": "key"})))
-                .await;
+            send_limited(&mut socket, refuse("key")).await;
             return;
         }
         // Asking: the computer's page shows it; wait for the answer.
         let (tx, rx) = oneshot::channel();
         let queued = with_link(|l| {
-            if l.pending.len() >= MAX_PENDING {
+            if l.pending.len() >= MAX_PENDING
+                || l.pending.iter().filter(|p| p.ip == ip).count() >= MAX_PENDING_PER_IP
+            {
                 return false;
             }
             l.pending.push(Pending {
                 id,
                 name: name.clone(),
+                ip,
                 answer: tx,
             });
             true
         });
         if !queued {
-            let _ = socket
-                .send(say(serde_json::json!({"stage": "refused", "why": "busy"})))
-                .await;
+            send_limited(&mut socket, refuse("busy")).await;
             return;
         }
-        let _ = socket
-            .send(say(serde_json::json!({"stage": "asking"})))
-            .await;
-        let allowed = tokio::select! {
-            a = rx => a.unwrap_or(false),
-            _ = tokio::time::sleep(ASK_WAIT) => false,
+        send_limited(&mut socket, say(serde_json::json!({"stage": "asking"}))).await;
+        let answer = tokio::select! {
+            a = rx => a.ok(),
+            _ = tokio::time::sleep(ASK_WAIT) => None,
             // The phone gave up.
-            _ = async { loop { match socket.recv().await { Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break, _ => {} } } } => false,
+            _ = async { loop { match socket.recv().await { Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break, _ => {} } } } => Some(false),
         };
         with_link(|l| l.pending.retain(|p| p.id != id));
-        if !allowed {
-            let _ = socket
-                .send(say(
-                    serde_json::json!({"stage": "refused", "why": "denied"}),
-                ))
-                .await;
-            return;
+        match answer {
+            None => {
+                send_limited(&mut socket, refuse("no_answer")).await;
+                return;
+            }
+            Some(false) => {
+                send_limited(&mut socket, refuse("denied")).await;
+                return;
+            }
+            Some(true) => {
+                if let Some(d) = &device {
+                    with_link(|l| l.allowed.insert(d.clone()));
+                }
+            }
         }
     }
     let watch = q.w == Some(1);
@@ -490,11 +855,7 @@ async fn pad_session(mut socket: WebSocket, q: PadQuery) {
         match crate::rp_stream_api::add_spectator(id) {
             Some(r) => Some(r),
             None => {
-                let _ = socket
-                    .send(say(
-                        serde_json::json!({"stage": "refused", "why": "no_stream"}),
-                    ))
-                    .await;
+                send_limited(&mut socket, refuse("no_stream")).await;
                 return;
             }
         }
@@ -522,6 +883,7 @@ async fn pad_session(mut socket: WebSocket, q: PadQuery) {
         l.pads.push(Pad {
             id,
             name: name.clone(),
+            device: device.clone(),
             since_ms,
             tx,
             watch,
@@ -533,21 +895,27 @@ async fn pad_session(mut socket: WebSocket, q: PadQuery) {
         if watch {
             crate::rp_stream_api::remove_spectator(id);
         }
-        let _ = socket
-            .send(say(serde_json::json!({"stage": "refused", "why": "full"})))
-            .await;
+        send_limited(&mut socket, refuse("full")).await;
         return;
     }
+    // By number at this level: a bug report is posted in public (names under Detailed logs).
     crate::log_info!(
-        "pad_link: {name} joined as {} {id}",
+        "pad_link: phone {id} joined as {}",
         if watch { "watcher" } else { "controller" }
     );
+    crate::log_detail!("pad_link: phone {id} is {name}");
     let mut tick = tokio::time::interval(STATE_EVERY);
+    tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    // Rounds since anything came from the phone (counted, not timed: see rp_stream_api's page).
+    let mut quiet = 0u32;
+    // When a page that keeps sending is let go of if it hasn't.
+    let mut pad_due: Option<tokio::time::Instant> = None;
+    let mut key_asked: Option<std::time::Instant> = None;
     loop {
         tokio::select! {
             out = rx.recv() => match out {
                 Some(Message::Close(_)) | None => break,
-                Some(m) => if socket.send(m).await.is_err() { break },
+                Some(m) => if !send_limited(&mut socket, m).await { break },
             },
             // A watcher's picture and sound (pending forever for a controller).
             f = async {
@@ -556,31 +924,56 @@ async fn pad_session(mut socket: WebSocket, q: PadQuery) {
                     None => std::future::pending().await,
                 }
             } => match f {
-                Some(m) => if socket.send(m).await.is_err() { break },
+                Some(m) => if !send_limited(&mut socket, m).await { break },
                 None => frames = None,
             },
             _ = tick.tick() => {
+                quiet += 1;
+                if quiet > crate::rp_stream_api::PEER_QUIET_PINGS {
+                    crate::log_info!("pad_link: phone {id} went silent; letting it go");
+                    break;
+                }
                 let s = crate::rp_stream_api::live_state();
                 let host = crate::rp_stream_api::live_host();
                 if host.is_some() && host != caps_host {
                     caps_host = host.clone();
                     ask_kbm_caps(host.unwrap_or_default(), caps_tx.clone());
                 }
-                if socket.send(say(serde_json::json!({"stage": "joined", "session": s}))).await.is_err() {
+                if !send_limited(&mut socket, say(serde_json::json!({"stage": "joined", "session": s}))).await
+                    || !send_limited(&mut socket, Message::Ping(Vec::new().into())).await
+                {
                     break;
                 }
             },
-            inc = socket.recv() => match inc {
+            _ = async {
+                match pad_due {
+                    Some(t) => tokio::time::sleep_until(t).await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                pad_due = None;
+                crate::rp_stream_api::push_pad(id, None);
+            },
+            inc = socket.recv() => { quiet = 0; match inc {
                 Some(Ok(Message::Text(t))) => {
                     #[derive(serde::Deserialize)]
                     struct In {
                         #[serde(default)] pad: Option<ControllerState>,
                         #[serde(default)] kbm: Option<crate::vinput_api::KbmMsg>,
+                        /// This page sends its pad at least every 250 ms.
+                        #[serde(default)] ka: Option<serde_json::Value>,
+                        /// A watcher's picture needs a keyframe.
+                        #[serde(default)] keyframe: bool,
                     }
                     if let Ok(m) = serde_json::from_str::<In>(t.as_str()) {
+                        if m.keyframe && watch && key_asked.is_none_or(|t| t.elapsed() >= WATCH_KEY_GAP) {
+                            key_asked = Some(std::time::Instant::now());
+                            crate::rp_stream_api::request_spectator_keyframe(id);
+                        }
                         if let Some(p) = m.pad {
                             if plays(id) {
                                 crate::rp_stream_api::push_pad(id, Some(p));
+                                pad_due = m.ka.is_some().then(|| tokio::time::Instant::now() + PAD_SILENT_AFTER);
                             }
                         }
                         if let Some(k) = m.kbm {
@@ -599,16 +992,12 @@ async fn pad_session(mut socket: WebSocket, q: PadQuery) {
                 }
                 Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
                 _ => {}
-            },
+            }},
         }
     }
-    crate::rp_stream_api::push_pad(id, None);
-    crate::rp_stream_api::push_pad_kbm(kbm_left(id));
-    if watch {
-        crate::rp_stream_api::remove_spectator(id);
-    }
+    release(id, watch);
     with_link(|l| l.pads.retain(|p| p.id != id));
-    crate::log_info!("pad_link: controller {id} ({name}) left");
+    crate::log_info!("pad_link: phone {id} left");
 }
 
 #[derive(serde::Deserialize)]
@@ -616,38 +1005,223 @@ pub struct RelayQuery {
     url: String,
     #[serde(default)]
     name: Option<String>,
+    /// The computer's link key (a QR code or link opened in the app): in without asking.
+    #[serde(default)]
+    t: Option<String>,
+    /// `w=1`: join to watch.
+    #[serde(default)]
+    w: Option<u8>,
+    /// The device's own id.
+    #[serde(default)]
+    d: Option<String>,
+}
+
+/// The pad socket's query for a relayed phone: its name, then the link's key and watch flag when
+/// it came from a link. A key is passed only when it looks like one (hex, as `random_key` makes);
+/// so is the device's id.
+fn relay_query(name: &str, t: Option<&str>, d: Option<&str>, watch: bool) -> String {
+    let mut q = format!(
+        "?name={}",
+        name.bytes()
+            .map(|b| if b.is_ascii_alphanumeric() {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            })
+            .collect::<String>()
+    );
+    if let Some(t) =
+        t.filter(|t| (8..=128).contains(&t.len()) && t.bytes().all(|b| b.is_ascii_hexdigit()))
+    {
+        q.push_str("&t=");
+        q.push_str(t);
+    }
+    if let Some(d) = clean_device(d) {
+        q.push_str("&d=");
+        q.push_str(&d);
+    }
+    if watch {
+        q.push_str("&w=1");
+    }
+    q
 }
 
 /// Only another engine's pad socket on the LAN may be relayed to.
 fn relay_target(url: &str) -> Option<String> {
-    let rest = url.strip_prefix("ws://")?;
-    let (authority, path) = rest.split_once('/')?;
-    if path.split('?').next() != Some("api/pad/ws") {
-        return None;
-    }
-    let host = authority
-        .rsplit_once(':')
-        .map(|(h, _)| h)
-        .unwrap_or(authority);
-    let ip: std::net::IpAddr = host.trim_matches(['[', ']']).parse().ok()?;
-    let private = match ip {
-        std::net::IpAddr::V4(v) => v.is_private() || v.is_link_local(),
+    lan_ws_target(url, "api/pad/ws")
+}
+
+/// A private address: a home network, link-local, or a Tailscale-style shared 100.64/10 one.
+fn is_lan_ip(ip: std::net::IpAddr) -> bool {
+    match ip.to_canonical() {
+        std::net::IpAddr::V4(v) => {
+            v.is_private()
+                || v.is_link_local()
+                || (v.octets()[0] == 100 && (v.octets()[1] & 0xc0) == 64)
+        }
         std::net::IpAddr::V6(v) => {
             (v.segments()[0] & 0xfe00) == 0xfc00 || (v.segments()[0] & 0xffc0) == 0xfe80
         }
+    }
+}
+
+/// A DNS name a relay may look up: letters, digits and hyphens in dot-separated labels, and not
+/// a number in disguise (`192.168.010.5`, `3232235781`) or this computer's own name.
+fn lan_name(name: &str) -> bool {
+    let labels_ok = !name.is_empty()
+        && name.len() <= 253
+        && name.split('.').all(|l| {
+            !l.is_empty()
+                && l.len() <= 63
+                && !l.starts_with('-')
+                && !l.ends_with('-')
+                && l.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+        });
+    let last_is_word = name
+        .rsplit('.')
+        .next()
+        .is_some_and(|l| l.bytes().any(|b| !b.is_ascii_digit()));
+    let lower = name.to_ascii_lowercase();
+    labels_ok && last_is_word && lower != "localhost" && !lower.ends_with(".localhost")
+}
+
+/// `url` when it is exactly `ws[s]://<private IP or name>[:port][/<prefix>]/<want>`: another
+/// engine's socket on the LAN. Rebuilt from what was parsed, so what is connected to is what was
+/// checked. Never a public address, user info (`@`), a query or fragment, an escape, or another
+/// route. A name is looked up at connect time and every address it has must be private
+/// ([`connect_lan`] connects to the address it checked, not to the name again).
+pub(crate) fn lan_ws_target(url: &str, want: &str) -> Option<String> {
+    let (scheme, rest) = match url.strip_prefix("wss://") {
+        Some(rest) => ("wss", rest),
+        None => ("ws", url.strip_prefix("ws://")?),
     };
-    private.then(|| format!("ws://{authority}/api/pad/ws"))
+    if !rest
+        .bytes()
+        .all(|b| b.is_ascii_graphic() && !matches!(b, b'@' | b'?' | b'#' | b'%' | b'\\'))
+    {
+        return None;
+    }
+    let (authority, path) = rest.split_once('/')?;
+    // An engine hosted below a path (PS5UPLOAD_BASE_URL): its prefix, then the route.
+    let prefix = path.strip_suffix(want)?;
+    if !prefix.is_empty()
+        && crate::host_guard::normalize_base(prefix)
+            .is_none_or(|p| p.is_empty() || format!("{}/", &p[1..]) != prefix)
+    {
+        return None;
+    }
+    let (host, port): (String, Option<&str>) = if let Some(v6) = authority.strip_prefix('[') {
+        let (h, tail) = v6.split_once(']')?;
+        let port = match tail {
+            "" => None,
+            t => Some(t.strip_prefix(':')?),
+        };
+        let ip: std::net::Ipv6Addr = h.parse().ok()?;
+        if !is_lan_ip(std::net::IpAddr::V6(ip)) {
+            return None;
+        }
+        (format!("[{ip}]"), port)
+    } else {
+        let (h, port) = match authority.split_once(':') {
+            Some((h, p)) => (h, Some(p)),
+            None => (authority, None),
+        };
+        match h.parse::<std::net::Ipv4Addr>() {
+            Ok(ip) if is_lan_ip(std::net::IpAddr::V4(ip)) => (ip.to_string(), port),
+            Ok(_) => return None,
+            Err(_) if lan_name(h) => (h.to_ascii_lowercase(), port),
+            Err(_) => return None,
+        }
+    };
+    let port = match port {
+        None => None,
+        Some(p) if !p.is_empty() && p.len() <= 5 && p.bytes().all(|b| b.is_ascii_digit()) => {
+            Some(p.parse::<u16>().ok().filter(|&n| n != 0)?)
+        }
+        Some(_) => return None,
+    };
+    let authority = match port {
+        Some(p) => format!("{host}:{p}"),
+        None => host,
+    };
+    Some(format!("{scheme}://{authority}/{prefix}{want}"))
+}
+
+/// A relay's connection refused by its address, or not reached at all.
+#[derive(Debug, PartialEq, Eq, Clone, Copy)]
+enum RelayRefusal {
+    Address,
+    Unreachable,
+}
+
+impl RelayRefusal {
+    fn why(self) -> &'static str {
+        match self {
+            RelayRefusal::Address => "address",
+            RelayRefusal::Unreachable => "unreachable",
+        }
+    }
+}
+
+/// Every address a name has must be private: one public answer among them could be the one that
+/// gets used, and a name can be made to answer anything.
+fn only_lan(addrs: Vec<std::net::SocketAddr>) -> Result<Vec<std::net::SocketAddr>, RelayRefusal> {
+    if addrs.is_empty() {
+        return Err(RelayRefusal::Unreachable);
+    }
+    if addrs.iter().all(|a| is_lan_ip(a.ip())) {
+        Ok(addrs)
+    } else {
+        Err(RelayRefusal::Address)
+    }
+}
+
+/// A TCP connection to the address `host` was checked to have.
+async fn connect_lan(host: &str, port: u16) -> Result<tokio::net::TcpStream, RelayRefusal> {
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let addrs = match host.parse::<std::net::IpAddr>() {
+        Ok(ip) => vec![std::net::SocketAddr::new(ip, port)],
+        Err(_) => tokio::net::lookup_host((host, port))
+            .await
+            .map_err(|_| RelayRefusal::Unreachable)?
+            .collect(),
+    };
+    for addr in only_lan(addrs)? {
+        if let Ok(stream) = tokio::net::TcpStream::connect(addr).await {
+            let _ = stream.set_nodelay(true);
+            return Ok(stream);
+        }
+    }
+    Err(RelayRefusal::Unreachable)
+}
+
+/// TLS for a `wss://` engine behind a proxy, checked against the public roots as any browser's
+/// visit would be. A private CA's certificate is refused here; the host's LAN address still works.
+fn relay_tls() -> Option<tokio_rustls::TlsConnector> {
+    let mut roots = rustls::RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    let config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
+        rustls::crypto::ring::default_provider(),
+    ))
+    .with_safe_default_protocol_versions()
+    .ok()?
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    Some(tokio_rustls::TlsConnector::from(std::sync::Arc::new(
+        config,
+    )))
 }
 
 /// `GET /api/ps5/rp/pad-relay?url=ws://<computer>/api/pad/ws&name=` (loopback only): the phone
 /// app's controller page talks to this, and this to the computer's engine.
 pub async fn relay(upgrade: WebSocketUpgrade, Query(q): Query<RelayQuery>) -> Response {
-    upgrade.on_upgrade(move |s| relay_session(s, q))
+    upgrade
+        .max_message_size(PHONE_MSG_MAX)
+        .max_frame_size(PHONE_MSG_MAX)
+        .on_upgrade(move |s| relay_session(s, q))
 }
 
 async fn relay_session(mut socket: WebSocket, q: RelayQuery) {
-    use futures_util::{SinkExt, StreamExt};
-    use tokio_tungstenite::tungstenite::Message as TMsg;
     let Some(target) = relay_target(&q.url) else {
         let _ = socket
             .send(say(
@@ -661,31 +1235,72 @@ async fn relay_session(mut socket: WebSocket, q: RelayQuery) {
         q.name.unwrap_or_else(crate::mesh_api::device_name).as_str(),
     ));
     let url = format!(
-        "{target}?name={}",
-        name.bytes()
-            .map(|b| if b.is_ascii_alphanumeric() {
-                (b as char).to_string()
-            } else {
-                format!("%{b:02X}")
-            })
-            .collect::<String>()
+        "{target}{}",
+        relay_query(&name, q.t.as_deref(), q.d.as_deref(), q.w == Some(1))
     );
-    let far = match tokio::time::timeout(
-        Duration::from_secs(5),
-        tokio_tungstenite::connect_async(url.as_str()),
-    )
+    relay_to(socket, &url).await;
+}
+
+/// Connects to `url` (another engine's socket, already checked) and passes every text and binary
+/// message both ways unchanged until either side closes; `{"stage": "refused", "why":
+/// "unreachable"}` when it cannot connect, `"address"` when a name turned out to lead off the LAN.
+pub(crate) async fn relay_to(mut socket: WebSocket, url: &str) {
+    let opened = tokio::time::timeout(Duration::from_secs(5), async {
+        let uri: axum::http::Uri = url.parse().map_err(|_| RelayRefusal::Address)?;
+        let host = uri.host().ok_or(RelayRefusal::Address)?;
+        let tls = uri.scheme_str() == Some("wss");
+        let port = uri.port_u16().unwrap_or(if tls { 443 } else { 80 });
+        let tcp = connect_lan(host, port).await?;
+        if !tls {
+            let (far, _) = tokio_tungstenite::client_async(url, tcp)
+                .await
+                .map_err(|_| RelayRefusal::Unreachable)?;
+            return Ok(Far::Plain(Box::new(far)));
+        }
+        let name = rustls::pki_types::ServerName::try_from(host.to_string())
+            .map_err(|_| RelayRefusal::Address)?;
+        let stream = relay_tls()
+            .ok_or(RelayRefusal::Unreachable)?
+            .connect(name, tcp)
+            .await
+            .map_err(|_| RelayRefusal::Unreachable)?;
+        let (far, _) = tokio_tungstenite::client_async(url, stream)
+            .await
+            .map_err(|_| RelayRefusal::Unreachable)?;
+        Ok(Far::Tls(Box::new(far)))
+    })
     .await
-    {
-        Ok(Ok((s, _))) => s,
-        _ => {
+    .unwrap_or(Err(RelayRefusal::Unreachable));
+    match opened {
+        Ok(Far::Plain(far)) => pump(socket, *far).await,
+        Ok(Far::Tls(far)) => pump(socket, *far).await,
+        Err(why) => {
             let _ = socket
                 .send(say(
-                    serde_json::json!({"stage": "refused", "why": "unreachable"}),
+                    serde_json::json!({"stage": "refused", "why": why.why()}),
                 ))
                 .await;
-            return;
         }
-    };
+    }
+}
+
+enum Far {
+    Plain(Box<tokio_tungstenite::WebSocketStream<tokio::net::TcpStream>>),
+    Tls(
+        Box<
+            tokio_tungstenite::WebSocketStream<
+                tokio_rustls::client::TlsStream<tokio::net::TcpStream>,
+            >,
+        >,
+    ),
+}
+
+async fn pump<S>(mut socket: WebSocket, far: tokio_tungstenite::WebSocketStream<S>)
+where
+    S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
+{
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message as TMsg;
     let (mut far_tx, mut far_rx) = far.split();
     loop {
         tokio::select! {
@@ -711,6 +1326,125 @@ async fn relay_session(mut socket: WebSocket, q: RelayQuery) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vpn_addresses_are_private_and_not_virtual_adapters() {
+        let v4 = |s: &str| s.parse::<std::net::Ipv4Addr>().unwrap();
+        assert!(vpn_reachable(v4("10.8.0.1"))); // WireGuard's usual server address
+        assert!(vpn_reachable(v4("172.16.5.1")));
+        assert!(vpn_reachable(v4("100.64.0.7")));
+        assert!(!vpn_reachable(v4("8.8.8.8")));
+        assert!(!vpn_reachable(v4("100.128.0.1")));
+        for name in [
+            "docker0",
+            "br-1a2b",
+            "veth9f",
+            "vEthernet (WSL)",
+            "vmnet8",
+            "vboxnet0",
+            "virbr0",
+            "bridge100",
+        ] {
+            assert!(virtual_adapter(name), "{name}");
+        }
+        for name in [
+            "wg0",
+            "utun4",
+            "WireGuard Tunnel",
+            "tun0",
+            "en0",
+            "Ethernet",
+            "Wi-Fi",
+        ] {
+            assert!(!virtual_adapter(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn this_computer_lists_its_addresses_without_repeats() {
+        let (ips, _) = reach_ips(Some("127.0.0.1"));
+        let mut seen = ips.clone();
+        seen.sort();
+        seen.dedup();
+        assert_eq!(seen.len(), ips.len());
+        assert!(ips.iter().all(|ip| !ip.is_loopback()));
+    }
+
+    /// A bug report gets the link's counts, never its key or a phone's name.
+    #[test]
+    fn the_bug_report_summary_has_no_key_or_names() {
+        let (tx, _rx) = mpsc::channel(1);
+        let l = Link {
+            key: Some("a1b2c3d4e5f60718a1b2c3d4e5f60718".into()),
+            pads: vec![
+                Pad {
+                    id: 1,
+                    name: "Ann's phone".into(),
+                    device: None,
+                    since_ms: 0,
+                    tx: tx.clone(),
+                    watch: false,
+                    control: false,
+                },
+                Pad {
+                    id: 2,
+                    name: "Bob's tablet".into(),
+                    device: None,
+                    since_ms: 0,
+                    tx,
+                    watch: true,
+                    control: true,
+                },
+            ],
+            ..Default::default()
+        };
+        let v = diag_of(&l, true);
+        let text = v.to_string();
+        assert!(!text.contains("a1b2c3d4"), "{text}");
+        assert!(!text.contains("Ann") && !text.contains("Bob"), "{text}");
+        assert_eq!(v["open"], true);
+        assert_eq!(v["phones"], 1);
+        assert_eq!(v["watchers"], 1);
+        assert_eq!(v["watchers_in_control"], 1);
+        assert_eq!(v["tailscale_ip_present"], true);
+    }
+
+    #[test]
+    fn relayed_link_passes_its_key_and_watch_flag_only_when_sound() {
+        assert_eq!(
+            relay_query("Ann's phone", None, None, false),
+            "?name=Ann%27s%20phone"
+        );
+        assert_eq!(
+            relay_query("A", Some("0f0f0f0f0f0f0f0f"), None, true),
+            "?name=A&t=0f0f0f0f0f0f0f0f&w=1"
+        );
+        assert_eq!(
+            relay_query("A", None, Some("abcdef0123456789"), false),
+            "?name=A&d=abcdef0123456789"
+        );
+        assert_eq!(relay_query("A", None, Some("ab&w=1zzzz"), false), "?name=A");
+        // not a key: dropped (the computer then asks, as for any unkeyed phone)
+        assert_eq!(relay_query("A", Some("0f0f&w=1"), None, false), "?name=A");
+        assert_eq!(relay_query("A", Some("short"), None, false), "?name=A");
+    }
+
+    #[test]
+    fn tailnet_address_only_when_tailscale_routes_it() {
+        let ip = |s: &str| Some(s.parse::<std::net::IpAddr>().unwrap());
+        // Tailscale up: 100.100.100.100 goes out on the tailnet address, the default route on Wi-Fi.
+        assert_eq!(
+            tailnet_choice(ip("100.101.102.103"), ip("192.168.1.20")),
+            ip("100.101.102.103")
+        );
+        // Tailscale off: both go out on Wi-Fi.
+        assert_eq!(tailnet_choice(ip("192.168.1.20"), ip("192.168.1.20")), None);
+        // A carrier's CGNAT address on the computer itself is not Tailscale.
+        assert_eq!(tailnet_choice(ip("100.70.1.2"), ip("100.70.1.2")), None);
+        // Outside 100.64/10 (100.128.x is not shared space).
+        assert_eq!(tailnet_choice(ip("100.128.0.1"), ip("192.168.1.20")), None);
+        assert_eq!(tailnet_choice(None, ip("192.168.1.20")), None);
+    }
 
     #[test]
     fn a_phone_is_offered_home_network_addresses_only() {
@@ -778,7 +1512,11 @@ mod tests {
     #[test]
     fn names_are_printable_and_short() {
         assert_eq!(clean_name(Some("  Pixel 8\u{7}  ")), "Pixel 8");
-        assert_eq!(clean_name(None), "Phone");
+        assert_eq!(
+            clean_name(None),
+            "",
+            "the computer's app names it in its language"
+        );
         assert_eq!(clean_name(Some(&"x".repeat(100))).len(), 40);
     }
 
@@ -790,8 +1528,214 @@ mod tests {
         );
         assert_eq!(relay_target("ws://192.168.1.20:19113/api/ps5/rp/ws"), None);
         assert_eq!(relay_target("ws://8.8.8.8:19113/api/pad/ws"), None);
-        assert_eq!(relay_target("wss://192.168.1.20/api/pad/ws"), None);
-        assert_eq!(relay_target("ws://example.com/api/pad/ws"), None);
+        assert_eq!(relay_target("wss://8.8.8.8/api/pad/ws"), None);
+        assert_eq!(
+            relay_target("wss://192.168.1.20/api/pad/ws").as_deref(),
+            Some("wss://192.168.1.20/api/pad/ws")
+        );
+        assert_eq!(
+            relay_target("ws://192.168.1.20:19113/ps5/api/pad/ws").as_deref(),
+            Some("ws://192.168.1.20:19113/ps5/api/pad/ws")
+        );
+        assert_eq!(relay_target("ws://192.168.1.20/a//api/pad/ws"), None);
+        assert_eq!(relay_target("ws://192.168.1.20//api/pad/ws"), None);
+        assert_eq!(relay_target("ws://192.168.1.20/../api/pad/ws"), None);
+        for bad in [
+            "ws://192.168.1.20:19113/../api/pad/ws",
+            "ws://192.168.1.20:19113/a/../api/pad/ws",
+            "ws://192.168.1.20:19113/xapi/pad/ws",
+            "ws://192.168.1.20:19113/api/pad/ws/x",
+            "ws://192.168.1.20:19113/api/other",
+        ] {
+            assert_eq!(relay_target(bad), None, "{bad}");
+        }
+        assert_eq!(
+            lan_ws_target("ws://100.101.2.3:19113/api/join/ws", "api/join/ws").as_deref(),
+            Some("ws://100.101.2.3:19113/api/join/ws")
+        );
+        assert_eq!(
+            lan_ws_target("ws://100.128.0.1:1/api/join/ws", "api/join/ws"),
+            None
+        );
+        assert_eq!(
+            lan_ws_target("ws://10.0.0.2:1/api/pad/ws", "api/join/ws"),
+            None
+        );
+    }
+
+    #[test]
+    fn relay_targets_are_parsed_whole_not_guessed_at() {
+        let j = |u: &str| lan_ws_target(u, "api/join/ws");
+        // user info: the host is what follows the '@' (8.8.8.8), whatever the private-looking
+        // part before it says
+        assert_eq!(j("ws://192.168.1.5:80@8.8.8.8/api/join/ws"), None);
+        assert_eq!(j("ws://192.168.1.5@8.8.8.8:19113/api/join/ws"), None);
+        assert_eq!(j("ws://user:pw@192.168.1.5:19113/api/join/ws"), None);
+        // a query, a fragment, an escape, a backslash, a space, extra path
+        assert_eq!(j("ws://192.168.1.5:19113/api/join/ws?x=1"), None);
+        assert_eq!(j("ws://192.168.1.5:19113/api/join/ws#x"), None);
+        assert_eq!(j("ws://192.168.1.5:19113/api/join/w%73"), None);
+        assert_eq!(j("ws://192.168.1.5\\@8.8.8.8/api/join/ws"), None);
+        assert_eq!(j("ws://192.168.1.5 :19113/api/join/ws"), None);
+        assert_eq!(j("ws://192.168.1.5:19113/api/join/ws/"), None);
+        assert_eq!(j("ws://192.168.1.5:19113//api/join/ws"), None);
+        // ports: digits only, 1-65535
+        assert_eq!(j("ws://192.168.1.5:0/api/join/ws"), None);
+        assert_eq!(j("ws://192.168.1.5:65536/api/join/ws"), None);
+        assert_eq!(j("ws://192.168.1.5:+80/api/join/ws"), None);
+        assert_eq!(j("ws://192.168.1.5:/api/join/ws"), None);
+        assert_eq!(j("ws://192.168.1.5:1:2/api/join/ws"), None);
+        // names are taken as far as this: what they resolve to decides (only_lan)
+        assert_eq!(
+            j("ws://My-PC.tail1234.ts.net:19113/api/join/ws").as_deref(),
+            Some("ws://my-pc.tail1234.ts.net:19113/api/join/ws")
+        );
+        assert_eq!(
+            j("wss://ps5upload.home/api/join/ws").as_deref(),
+            Some("wss://ps5upload.home/api/join/ws")
+        );
+        assert_eq!(j("ws://bad_name!/api/join/ws"), None);
+        assert_eq!(j("ws://-x.lan/api/join/ws"), None);
+        // and odd address spellings, and this computer
+        assert_eq!(j("ws://localhost:19113/api/join/ws"), None);
+        assert_eq!(j("ws://a.localhost:19113/api/join/ws"), None);
+        assert_eq!(j("ws://192.168.010.5:19113/api/join/ws"), None);
+        assert_eq!(j("ws://3232235781:19113/api/join/ws"), None);
+        assert_eq!(j("ws://[::ffff:8.8.8.8]:19113/api/join/ws"), None);
+        assert_eq!(j("ws://[2001:db8::1]:19113/api/join/ws"), None);
+        // the good ones, rebuilt from the parsed address
+        assert_eq!(
+            j("ws://192.168.1.5/api/join/ws").as_deref(),
+            Some("ws://192.168.1.5/api/join/ws")
+        );
+        assert_eq!(
+            j("ws://[fd7a:115c:a1e0::1]:19113/api/join/ws").as_deref(),
+            Some("ws://[fd7a:115c:a1e0::1]:19113/api/join/ws")
+        );
+        assert_eq!(
+            j("ws://169.254.3.4:19113/api/join/ws").as_deref(),
+            Some("ws://169.254.3.4:19113/api/join/ws")
+        );
+        // the pad relay reads them the same way
+        assert_eq!(relay_target("ws://192.168.1.5:80@8.8.8.8/api/pad/ws"), None);
+        assert_eq!(relay_target("ws://192.168.1.5:19113/api/pad/ws?t=k"), None);
+    }
+
+    #[test]
+    fn a_name_counts_only_when_every_address_it_has_is_private() {
+        let a = |s: &str| s.parse::<std::net::SocketAddr>().unwrap();
+        let lan = a("192.168.1.5:80");
+        assert_eq!(only_lan(vec![lan]), Ok(vec![lan]));
+        assert_eq!(
+            only_lan(vec![lan, a("[fd00::1]:80")]).map(|v| v.len()),
+            Ok(2)
+        );
+        assert_eq!(
+            only_lan(vec![lan, a("8.8.8.8:80")]),
+            Err(RelayRefusal::Address)
+        );
+        assert_eq!(
+            only_lan(vec![a("127.0.0.1:80")]),
+            Err(RelayRefusal::Address)
+        );
+        assert_eq!(
+            only_lan(vec![a("[::ffff:8.8.8.8]:80")]),
+            Err(RelayRefusal::Address)
+        );
+        assert_eq!(only_lan(Vec::new()), Err(RelayRefusal::Unreachable));
+    }
+
+    fn headers(pairs: &[(&'static str, &'static str)]) -> HeaderMap {
+        let mut h = HeaderMap::new();
+        for (k, v) in pairs {
+            h.insert(*k, v.parse().unwrap());
+        }
+        h
+    }
+
+    #[test]
+    fn links_use_what_the_browser_used_except_this_computers_own_names() {
+        let web = |p: &[(&'static str, &'static str)]| web_base(&headers(p));
+        assert_eq!(
+            web(&[("host", "nas.local:19113")]).as_deref(),
+            Some("http://nas.local:19113")
+        );
+        // the bridged engine used from its own computer: the first invite was localhost
+        assert_eq!(web(&[("host", "localhost:19113")]), None);
+        assert_eq!(web(&[("host", "127.0.0.1:19113")]), None);
+        assert_eq!(web(&[("host", "[::1]:19113")]), None);
+        assert_eq!(web(&[("host", "bad host/x")]), None);
+        // behind https: scheme and port as the browser sees them
+        assert_eq!(
+            web(&[("host", "x:80"), ("origin", "https://ps5.home:8443")]).as_deref(),
+            Some("https://ps5.home:8443")
+        );
+        assert_eq!(
+            web(&[("host", "ps5.home"), ("x-forwarded-proto", "https")]).as_deref(),
+            Some("https://ps5.home")
+        );
+        assert_eq!(
+            web(&[
+                ("host", "10.0.0.2:19113"),
+                ("x-forwarded-host", "ps5.home"),
+                ("x-forwarded-proto", "https, http"),
+            ])
+            .as_deref(),
+            Some("https://ps5.home")
+        );
+        // the app's own renderer is not an address for anyone else
+        assert_eq!(
+            web(&[
+                ("host", "127.0.0.1:19113"),
+                ("origin", "http://tauri.localhost")
+            ]),
+            None
+        );
+        assert_eq!(
+            web(&[("host", "127.0.0.1:19113"), ("origin", "tauri://localhost")]),
+            None
+        );
+    }
+
+    #[test]
+    fn a_proxied_request_says_nothing_about_this_machines_port() {
+        let direct = headers(&[("host", "192.168.1.10:8080")]);
+        assert_eq!(lan_port(&direct), 8080);
+        let proxied = headers(&[("host", "ps5.home:8443"), ("x-forwarded-proto", "https")]);
+        assert_eq!(lan_port(&proxied), listen_port());
+        let https = headers(&[
+            ("host", "ps5.home:8443"),
+            ("origin", "https://ps5.home:8443"),
+        ]);
+        assert_eq!(lan_port(&https), listen_port());
+        assert_eq!(
+            ip_base("192.168.1.5".parse().unwrap(), 19113),
+            "http://192.168.1.5:19113"
+        );
+        assert_eq!(
+            ip_base("fd00::1".parse().unwrap(), 80),
+            "http://[fd00::1]:80"
+        );
+    }
+
+    #[test]
+    fn a_qr_code_prefers_the_address_unless_it_cannot_work() {
+        let ip = || vec!["http://10.0.0.2:1".to_string()];
+        let name = || Some("http://nas.local:1".to_string());
+        let https = || Some("https://ps5.home".to_string());
+        assert_eq!(
+            phone_bases(name(), ip(), false),
+            vec!["http://10.0.0.2:1", "http://nas.local:1"]
+        );
+        assert_eq!(
+            phone_bases(name(), ip(), true),
+            vec!["http://nas.local:1", "http://10.0.0.2:1"]
+        );
+        assert_eq!(
+            phone_bases(https(), ip(), false),
+            vec!["https://ps5.home", "http://10.0.0.2:1"]
+        );
+        assert_eq!(phone_bases(None, ip(), true), vec!["http://10.0.0.2:1"]);
     }
 
     #[test]
@@ -840,6 +1784,303 @@ mod tests {
             kbm_caps(Err(anyhow::anyhow!("down"))),
             serde_json::json!({"kbm_caps": {"mouse": false, "keyboard": false, "reason": "unreachable"}})
         );
+    }
+
+    // ---- A phone's socket, for real ----
+
+    mod socket {
+        use super::*;
+        use crate::rp_stream_api::{test_live, LIVE_TEST_LOCK};
+        use futures_util::{SinkExt, StreamExt};
+        use tokio_tungstenite::tungstenite::Message as TMsg;
+
+        type Phone = tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >;
+
+        async fn serve() -> String {
+            let app = axum::Router::new().route("/api/pad/ws", axum::routing::get(ws));
+            let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let addr = l.local_addr().unwrap();
+            tokio::spawn(async move {
+                axum::serve(
+                    l,
+                    app.into_make_service_with_connect_info::<std::net::SocketAddr>(),
+                )
+                .await
+                .unwrap();
+            });
+            format!("ws://{addr}/api/pad/ws")
+        }
+
+        /// The link as a new engine has it, its key open.
+        fn fresh_link() -> String {
+            let key = random_key().unwrap();
+            let k = key.clone();
+            *LINK.lock().unwrap_or_else(|e| e.into_inner()) = Some(Link {
+                key: Some(k),
+                ..Default::default()
+            });
+            key
+        }
+
+        async fn phone(url: &str) -> Phone {
+            tokio_tungstenite::connect_async(url).await.unwrap().0
+        }
+
+        const PRESS: &str = r#"{"pad":{"buttons":1,"l2":0,"r2":0,"lx":0,"ly":0,"rx":0,"ry":0}}"#;
+        const PRESS_KA: &str =
+            r#"{"pad":{"buttons":1,"l2":0,"r2":0,"lx":0,"ly":0,"rx":0,"ry":0},"ka":1}"#;
+
+        /// Reads until `key`'s value says what is wanted (answering pings as a browser does).
+        async fn hear(
+            ws: &mut Phone,
+            want: impl Fn(&serde_json::Value) -> bool,
+        ) -> serde_json::Value {
+            let f = async {
+                loop {
+                    match ws.next().await {
+                        Some(Ok(TMsg::Text(t))) => {
+                            let v: serde_json::Value = serde_json::from_str(t.as_str()).unwrap();
+                            if want(&v) {
+                                return v;
+                            }
+                        }
+                        Some(Ok(_)) => {}
+                        other => panic!("closed: {other:?}"),
+                    }
+                }
+            };
+            tokio::time::timeout(Duration::from_secs(5), f)
+                .await
+                .expect("in time")
+        }
+
+        async fn until(what: &str, f: impl Fn() -> bool) {
+            let end = std::time::Instant::now() + Duration::from_secs(5);
+            while !f() {
+                assert!(std::time::Instant::now() < end, "timed out: {what}");
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        }
+
+        fn joined(v: &serde_json::Value) -> bool {
+            v["stage"] == "joined"
+        }
+
+        fn pads() -> usize {
+            with_link(|l| l.pads.len())
+        }
+
+        /// In the game, holding ✕, with the session's merged pad saying so.
+        async fn holding(url: &str, live: &test_live::Session) -> (Phone, u64) {
+            let mut ws = phone(url).await;
+            hear(&mut ws, joined).await;
+            let id = with_link(|l| l.pads.last().unwrap().id);
+            ws.send(TMsg::Text(PRESS.into())).await.unwrap();
+            until("pressed", || live.merged().buttons == 1).await;
+            (ws, id)
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn disconnecting_a_phone_lets_go_at_once_and_keeps_it_out() {
+            let _turn = LIVE_TEST_LOCK.lock().await;
+            let live = test_live::Session::start("10.0.77.3");
+            let key = fresh_link();
+            let base = serve().await;
+            let url = format!("{base}?t={key}&name=iphone&d=00112233445566778899aabbccddeeff");
+            let (mut ws, id) = holding(&url, &live).await;
+            let r = kick(Json(KickReq { id })).await;
+            assert_eq!(r.0["ok"], true);
+            // The engine itself, not the socket's loop.
+            assert_eq!(live.merged().buttons, 0);
+            let v = hear(&mut ws, |v| v["stage"] == "refused").await;
+            assert_eq!(v["why"], "kicked");
+            // Unknown now: says so.
+            assert_eq!(kick(Json(KickReq { id })).await.0["ok"], false);
+            assert_eq!(
+                decide(Json(DecideReq {
+                    id: 999_999,
+                    allow: true
+                }))
+                .await
+                .0["ok"],
+                false
+            );
+            // One tap on Try again: out, while the link's key still works for others.
+            let mut again = phone(&url).await;
+            assert_eq!(
+                hear(&mut again, |v| v["stage"] == "refused").await["why"],
+                "kicked"
+            );
+            let other = format!("{base}?t={key}&name=android&d=ffeeddccbbaa99887766554433221100");
+            let mut ws2 = phone(&other).await;
+            hear(&mut ws2, joined).await;
+            // The link closed: everyone told why, and the key void; a new link starts afresh.
+            let h = HeaderMap::new();
+            let _ = set_open(
+                h.clone(),
+                Json(OpenReq {
+                    open: false,
+                    console: Some("127.0.0.1".into()),
+                }),
+            )
+            .await;
+            assert_eq!(
+                hear(&mut ws2, |v| v["stage"] == "refused").await["why"],
+                "closed"
+            );
+            let mut after = phone(&url).await;
+            assert_eq!(
+                hear(&mut after, |v| v["stage"] == "refused").await["why"],
+                "key",
+                "the old code; the kicked mark went with the link"
+            );
+        }
+
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn closing_the_link_lets_go_of_every_phone_at_once() {
+            let _turn = LIVE_TEST_LOCK.lock().await;
+            let live = test_live::Session::start("10.0.77.3");
+            let key = fresh_link();
+            let base = serve().await;
+            let (_ws, _id) = holding(&format!("{base}?t={key}"), &live).await;
+            let _ = set_open(
+                HeaderMap::new(),
+                Json(OpenReq {
+                    open: false,
+                    console: Some("127.0.0.1".into()),
+                }),
+            )
+            .await;
+            assert_eq!(live.merged().buttons, 0);
+        }
+
+        /// Out of Wi-Fi range mid-press: no close ever comes, and it answers no ping (the client
+        /// library answers only while it is read).
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn a_phone_that_vanished_lets_go_within_seconds() {
+            let _turn = LIVE_TEST_LOCK.lock().await;
+            let live = test_live::Session::start("10.0.77.3");
+            let key = fresh_link();
+            let base = serve().await;
+            let (ws, _id) = holding(&format!("{base}?t={key}"), &live).await;
+            until("let go", || live.merged().buttons == 0 && pads() == 0).await;
+            drop(ws);
+        }
+
+        /// A phone that answers pings stays, as long as it wants.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn a_quiet_phone_that_answers_pings_stays_holding() {
+            let _turn = LIVE_TEST_LOCK.lock().await;
+            let live = test_live::Session::start("10.0.77.3");
+            let key = fresh_link();
+            let base = serve().await;
+            let (mut ws, _id) = holding(&format!("{base}?t={key}"), &live).await;
+            let end = std::time::Instant::now()
+                + STATE_EVERY * (crate::rp_stream_api::PEER_QUIET_PINGS + 3);
+            while std::time::Instant::now() < end {
+                let _ = tokio::time::timeout(Duration::from_millis(20), ws.next()).await;
+            }
+            assert_eq!(pads(), 1);
+            // An older app's page sends only changes: held is held.
+            assert_eq!(live.merged().buttons, 1);
+        }
+
+        /// A page that says it keeps sending and stopped (hidden, stuck): the pad goes, the socket
+        /// stays, and the next state brings it back.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn a_page_that_stopped_sending_is_let_go_of_and_comes_back() {
+            let _turn = LIVE_TEST_LOCK.lock().await;
+            let live = test_live::Session::start("10.0.77.3");
+            let key = fresh_link();
+            let base = serve().await;
+            let mut ws = phone(&format!("{base}?t={key}")).await;
+            hear(&mut ws, joined).await;
+            ws.send(TMsg::Text(PRESS_KA.into())).await.unwrap();
+            until("pressed", || live.merged().buttons == 1).await;
+            // Reading (so pings are answered), not sending.
+            let f = async {
+                while live.merged().buttons == 1 {
+                    let _ = tokio::time::timeout(Duration::from_millis(20), ws.next()).await;
+                }
+            };
+            tokio::time::timeout(Duration::from_secs(3), f)
+                .await
+                .expect("let go");
+            assert_eq!(pads(), 1, "the socket is fine");
+            ws.send(TMsg::Text(PRESS_KA.into())).await.unwrap();
+            until("back", || live.merged().buttons == 1).await;
+        }
+
+        /// A device the computer allowed comes back without asking again.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn an_allowed_phone_comes_back_without_asking() {
+            let _turn = LIVE_TEST_LOCK.lock().await;
+            let _live = test_live::Session::start("10.0.77.3");
+            fresh_link();
+            let base = serve().await;
+            let url = format!("{base}?name=Pixel&d=00112233445566778899aabbccddeeff");
+            let mut ws = phone(&url).await;
+            hear(&mut ws, |v| v["stage"] == "asking").await;
+            let ask = with_link(|l| l.pending[0].id);
+            assert_eq!(
+                decide(Json(DecideReq {
+                    id: ask,
+                    allow: true
+                }))
+                .await
+                .0["ok"],
+                true
+            );
+            hear(&mut ws, joined).await;
+            drop(ws);
+            until("gone", || pads() == 0).await;
+            let mut ws = phone(&url).await;
+            hear(&mut ws, joined).await;
+            // Someone else, no id: still asks.
+            let mut other = phone(&format!("{base}?name=Other")).await;
+            hear(&mut other, |v| v["stage"] == "asking").await;
+        }
+
+        /// Any device on the LAN reaches this socket: asks and sizes have a limit.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn the_lan_cannot_flood_the_asks_or_send_huge_messages() {
+            let _turn = LIVE_TEST_LOCK.lock().await;
+            let _live = test_live::Session::start("10.0.77.3");
+            fresh_link();
+            let base = serve().await;
+            let mut a = phone(&base).await;
+            hear(&mut a, |v| v["stage"] == "asking").await;
+            let mut b = phone(&base).await;
+            hear(&mut b, |v| v["stage"] == "asking").await;
+            // A third from the same address, however the list stands.
+            let mut c = phone(&base).await;
+            assert_eq!(
+                hear(&mut c, |v| v["stage"] == "refused").await["why"],
+                "busy"
+            );
+            // An ask that sends a huge message is cut off.
+            let huge = "x".repeat(PHONE_MSG_MAX + 1);
+            let _ = a.send(TMsg::Text(huge.into())).await;
+            until("cut off", || with_link(|l| l.pending.len()) == 1).await;
+            // Sockets per address: over the limit an upgrade is refused outright.
+            let ip: std::net::IpAddr = "192.0.2.92".parse().unwrap();
+            let t = std::time::Instant::now();
+            let limit = crate::join::connects_per_min(ip);
+            for _ in 0..limit {
+                assert!(CONNECTS.allow(ip, limit, t));
+            }
+            assert!(!CONNECTS.allow(ip, limit, t));
+        }
+
+        #[test]
+        fn a_device_id_is_hex_or_nothing() {
+            assert_eq!(clean_device(None), None);
+            assert_eq!(clean_device(Some("short")), None);
+            assert_eq!(clean_device(Some("00112233&w=1")), None);
+            assert_eq!(clean_device(Some("00112233")).as_deref(), Some("00112233"));
+        }
     }
 
     #[test]

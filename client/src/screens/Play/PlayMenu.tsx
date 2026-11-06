@@ -2,10 +2,13 @@ import {
   BarChart3,
   Gamepad2,
   Minimize,
+  Monitor,
+  MonitorOff,
   PictureInPicture2,
   Scaling,
   Settings2,
   Square,
+  Users,
   Volume2,
   VolumeX,
   X,
@@ -108,6 +111,7 @@ export function PlayMenu({
   onSettings,
   onStop,
   onGame,
+  onTogether,
 }: {
   inFull: boolean;
   pipKind: unknown;
@@ -118,6 +122,8 @@ export function PlayMenu({
   onStop: () => void;
   /** The Game panel (the running game, its cheats, the console). */
   onGame: () => void;
+  /** Play Together (#641): friends as Player 2–4. */
+  onTogether?: () => void;
 }) {
   const tr = useTr();
   const prefs = useRemotePlayStore((s) => s.prefs);
@@ -125,13 +131,15 @@ export function PlayMenu({
   const pip = useRemotePlayStore((s) => s.pip);
   const name = useRemotePlayStore((s) => s.target?.name ?? "");
   const muted = prefs.muted || prefs.volume === 0;
+  const pictureHere = useRemotePlayStore((s) => s.pictureHere);
+  const setPictureHere = useRemotePlayStore((s) => s.setPictureHere);
   return (
     <div className="space-y-2" data-testid="rp-menu">
       {inFull && (
         <div className="flex items-center gap-2 px-1 pb-1 text-sm font-medium text-white">
           <span className="inline-block h-2 w-2 shrink-0 rounded-full bg-[var(--color-success,#22c55e)]" />
           <span className="min-w-0 flex-1 truncate">{name}</span>
-          <CaptureRow icons onDone={onClose} />
+          {pictureHere && <CaptureRow icons onDone={onClose} />}
           <button
             type="button"
             onClick={(e) => {
@@ -156,15 +164,32 @@ export function PlayMenu({
             active
           />
         )}
-        <Tile
-          label={tr("rp_show_stats_short", undefined, "Stats")}
-          icon={<BarChart3 size={18} />}
-          onClick={() => setPrefs({ showStats: !prefs.showStats })}
-          testId="rp-toggle-stats"
-          active={prefs.showStats}
-        />
+        {pictureHere && (
+          <Tile
+            label={tr("rp_show_stats_short", undefined, "Stats")}
+            icon={<BarChart3 size={18} />}
+            onClick={() => setPrefs({ showStats: !prefs.showStats })}
+            testId="rp-toggle-stats"
+            active={prefs.showStats}
+          />
+        )}
+        {/* Under the picture, where the menu has the room: in full screen every tile has to fit a
+            sideways phone, and the placeholder has the way back on. */}
+        {!inFull && (
+          <Tile
+            label={
+              pictureHere
+                ? tr("rp_picture_turn_off", undefined, "Turn the picture off on this device")
+                : tr("rp_picture_turn_on", undefined, "Turn the picture on")
+            }
+            icon={pictureHere ? <Monitor size={18} /> : <MonitorOff size={18} />}
+            onClick={() => setPictureHere(!pictureHere)}
+            testId="rp-menu-picture"
+            active={!pictureHere}
+          />
+        )}
         <MicTile />
-        {!!pipKind && (
+        {!!pipKind && pictureHere && (
           <Tile
             label={
               pip
@@ -183,6 +208,14 @@ export function PlayMenu({
           onClick={onGame}
           testId="rp-menu-game"
         />
+        {onTogether && !inFull && (
+          <Tile
+            label={tr("pt_button", undefined, "Play Together")}
+            icon={<Users size={18} />}
+            onClick={onTogether}
+            testId="rp-menu-together"
+          />
+        )}
         <Tile
           label={tr("rp_settings", undefined, "Settings")}
           icon={<Settings2 size={18} />}
@@ -199,8 +232,8 @@ export function PlayMenu({
           />
         )}
       </div>
-      {!inFull && <CaptureRow onDone={onClose} />}
-      {inFull && (
+      {!inFull && pictureHere && <CaptureRow onDone={onClose} />}
+      {inFull && pictureHere && (
         // Picture size where it shows: in full screen.
         <div className="flex items-center gap-1 rounded-xl bg-white/10 p-1" role="group" data-testid="rp-menu-fit">
           <Scaling size={16} className="mx-1.5 shrink-0 text-white/70" aria-hidden />
@@ -225,6 +258,7 @@ export function PlayMenu({
           ))}
         </div>
       )}
+      {pictureHere && (
       <div className="flex items-center gap-3 rounded-xl bg-white/10 px-2 py-1.5">
         <button
           type="button"
@@ -245,6 +279,7 @@ export function PlayMenu({
         </button>
         <VolumeSlider className="h-10 min-w-0 flex-1 accent-white" />
       </div>
+      )}
     </div>
   );
 }

@@ -9,10 +9,10 @@ import {
 import type { LucideIcon } from "lucide-react";
 import { openExternalUrl as openExternal } from "../../lib/openExternalUrl";
 import { COFFEE_URL } from "../../lib/supportLinks";
-import { SupportButton } from "../../components/SupportButton";
 import { getAppVersion } from "../../lib/appVersion";
-import { isTauriEnv } from "../../lib/tauriEnv";
-import { visibleFeatures } from "./features";
+import { FEATURES } from "./features";
+
+import { useNavigate } from "react-router";
 
 import { useTr } from "../../state/lang";
 import { Button, Card, Badge } from "../../components";
@@ -37,6 +37,7 @@ const URLS = {
 /** `embedded`: shown as the About tab of Help, under that screen's own header. */
 export default function AboutScreen({ embedded = false }: { embedded?: boolean } = {}) {
   const tr = useTr();
+  const navigate = useNavigate();
   const [version, setVersion] = useState<string>("");
 
   useEffect(() => {
@@ -96,8 +97,15 @@ export default function AboutScreen({ embedded = false }: { embedded?: boolean }
             label="Discord"
             onClick={() => openExternal(URLS.discord)}
           />
-          <SupportButton className="min-h-10 px-5 text-sm" />
         </div>
+        <button
+          type="button"
+          onClick={() => navigate("/thanks")}
+          className="mt-3 text-xs text-[var(--color-muted)] underline-offset-2 hover:text-[var(--color-text)] hover:underline"
+          data-testid="about-thanks"
+        >
+          {tr("about_thanks_link", undefined, "Thank you to everyone who supports PS5Upload →")}
+        </button>
       </header>
 
       {/* Features — 2-wide grid on sm+, 3-wide on lg+. Compact icon
@@ -107,7 +115,7 @@ export default function AboutScreen({ embedded = false }: { embedded?: boolean }
           {tr("about_what_it_does", undefined, "What it does")}
         </SectionTitle>
         <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
-          {visibleFeatures(isTauriEnv()).map((f) => (
+          {FEATURES.map((f) => (
             <FeatureTile
               key={f.titleKey}
               icon={f.icon}
@@ -137,7 +145,7 @@ export default function AboutScreen({ embedded = false }: { embedded?: boolean }
               <button
                 type="button"
                 onClick={() => openExternal(URLS.authorSite)}
-                className="ml-2 text-xs text-[var(--color-muted)] hover:text-[var(--color-accent)] max-md:inline-flex max-md:min-h-11 max-md:items-center"
+                className="ms-2 text-xs text-[var(--color-muted)] hover:text-[var(--color-accent)] max-md:inline-flex max-md:min-h-11 max-md:items-center"
               >
                 {AUTHOR_SITE}
               </button>

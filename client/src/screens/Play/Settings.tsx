@@ -9,9 +9,9 @@ import { androidPipAvailable } from "../../lib/androidPip";
 import { appSavesToPhotos } from "../../lib/rpCapture";
 import { gameModeKind } from "../../lib/gameMode";
 import { keysFor, rebind, PAD_ACTIONS, type KeyAction } from "../../lib/remotePlayStream";
-import { useRemotePlayStore, type RpPrefs } from "../../state/remotePlay";
+import { RP_BITRATES, useRemotePlayStore, type RpPrefs, padsCannotVibrate } from "../../state/remotePlay";
 import { askMotion, motionAvailable } from "../../lib/motion";
-import { dualSenseCapable } from "../../lib/dualSense";
+import { dualSenseBlocked, dualSenseCapable } from "../../lib/dualSense";
 import { connectWebHidTouchpad, webHidTouchpadAvailable, webHidTouchpadConnected } from "../../lib/padTouchpad";
 import { MicSetting } from "./MicControl";
 import { ControllerSetup } from "./ControllerSetup";
@@ -265,6 +265,29 @@ function Hint({ children }: { children: React.ReactNode }) {
 
 /** One tab of Remote Play's settings. While a stream runs, what only applies on the next start
  *  says so; everything else applies at once. */
+/** Linux with no udev rule for the DualSense: said, not a pad that silently lacks half of itself. */
+function DualSenseBlockedNote() {
+  const tr = useTr();
+  const [blocked, setBlocked] = useState(false);
+  useEffect(() => {
+    let live = true;
+    void dualSenseBlocked().then((b) => live && setBlocked(b));
+    return () => {
+      live = false;
+    };
+  }, []);
+  if (!blocked) return null;
+  return (
+    <p className="text-xs text-[var(--color-warn)]" data-testid="rp-dualsense-blocked">
+      {tr(
+        "rp_dualsense_blocked",
+        undefined,
+        "This computer doesn't let the app open your DualSense, so its touchpad, motion and adaptive triggers are off. The FAQ has the one line to add (a udev rule).",
+      )}
+    </p>
+  );
+}
+
 export function SettingsBody({ tab, running }: { tab: SettingsTab; running: boolean }) {
   const tr = useTr();
   const prefs = useRemotePlayStore((s) => s.prefs);
@@ -342,6 +365,23 @@ export function SettingsBody({ tab, running }: { tab: SettingsTab; running: bool
             ]}
           />
           <HdrNote support={hdr} chosen={prefs.codec === "hdr"} />
+          <Select
+            label={tr("rp_bitrate", undefined, "Bitrate")}
+            value={String(prefs.bitrateKbps)}
+            hint={tr(
+              "rp_bitrate_hint",
+              undefined,
+              "Lower uses less network. Going live sends this on as it is: Twitch takes up to 6 Mbps, Kick 8. Applies the next time you start.",
+            )}
+            onChange={(e) => setPrefs({ bitrateKbps: num(e.target.value) })}
+            data-testid="rp-bitrate"
+            options={RP_BITRATES.map((b) => ({
+              value: String(b),
+              label: b
+                ? `${b / 1000} Mbps`
+                : tr("rp_bitrate_auto", undefined, "Auto (15 Mbps at 1080p)"),
+            }))}
+          />
           <Hint>
             {tr(
               "rp_decoding_hint",
@@ -431,6 +471,18 @@ export function SettingsBody({ tab, running }: { tab: SettingsTab; running: bool
         </Section>
         <Section>
           <Toggle
+            checked={prefs.pictureHere !== false}
+            onChange={(v) => setPrefs({ pictureHere: v })}
+            label={tr("rp_picture_here", undefined, "Picture on this device")}
+            hint={tr(
+              "rp_picture_here_hint",
+              undefined,
+              "Off, new streams start with no picture, sound or controller here, which saves this device's CPU and battery. Friends in Play Together and Go live still get the stream, and you can turn it on from the stream at any time.",
+            )}
+          />
+        </Section>
+        <Section>
+          <Toggle
             checked={prefs.miniPlayer !== false}
             onChange={(v) => setPrefs({ miniPlayer: v })}
             label={tr("rp_mini_setting", undefined, "Mini player on other screens")}
@@ -514,6 +566,11 @@ export function SettingsBody({ tab, running }: { tab: SettingsTab; running: bool
           checked={prefs.rumble}
           onChange={(v) => setPrefs({ rumble: v })}
           label={tr("rp_rumble", undefined, "Controller vibration")}
+          hint={
+            padsCannotVibrate()
+              ? tr("rp_rumble_none", undefined, "This controller can't vibrate here: this app reads it without the browser, which has no way to reach its motors.")
+              : undefined
+          }
         />
         {dualSenseCapable() && (
           <Toggle
@@ -527,6 +584,7 @@ export function SettingsBody({ tab, running }: { tab: SettingsTab; running: bool
             )}
           />
         )}
+        {dualSenseCapable() && <DualSenseBlockedNote />}
         {motionAvailable() && typeof window !== "undefined" && !!window.matchMedia?.("(pointer: coarse)").matches && (
           <Toggle
             checked={prefs.motion}

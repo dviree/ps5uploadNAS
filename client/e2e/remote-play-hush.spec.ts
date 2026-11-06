@@ -22,6 +22,8 @@ async function hushConsole(page: Page): Promise<Console> {
       ["/data/hush/config.ini", CONFIG],
       ["/data/hush/pid.lock", "142\n"],
       ["/data/hush/log.txt", LOG],
+      // Hush's patch is in place (#651: Hush blocks only while state.txt is there).
+      ["/data/hush/state.txt", "pid=60\n"],
     ]),
     running: true,
     writes: [],
@@ -67,6 +69,18 @@ async function hushConsole(page: Page): Promise<Console> {
         );
         body = { entries: [...names].map((name) => ({ name })) };
       }
+      if (path === "/api/ps5/fs/stat") {
+        const asked = (req.postDataJSON() as { path: string }).path;
+        if (![...c.files.keys()].some((f) => f === asked || f.startsWith(`${asked}/`))) {
+          await route.fulfill({
+            status: 502,
+            contentType: "application/json",
+            body: JSON.stringify({ error: "payload rejected FS_STAT: fs_stat_failed_errno_2" }),
+          });
+          return;
+        }
+        body = { kind: "file", size: 1, mtime: 1, mode: 420, dev: 1 };
+      }
       if (path === "/api/ps5/fs/read-preview") {
         const text = c.files.get((req.postDataJSON() as { path: string }).path);
         if (text === undefined) {
@@ -87,6 +101,7 @@ async function hushConsole(page: Page): Promise<Console> {
             `${LOG}2026-10-31 10:00:20 sceVencStartEncode restored in 4 slot(s)\n2026-10-31 10:00:20 disabled in config, exiting\n`,
           );
           c.files.delete("/data/hush/pid.lock");
+          c.files.delete("/data/hush/state.txt");
           c.running = false;
         }
         body = { ok: true, size: text.length };

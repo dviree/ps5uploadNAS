@@ -202,6 +202,21 @@ async fn upload_zip_with_colliding_paths_is_refused_whole() {
     );
 }
 
+/// The plan and the source must agree: an archive the upload refuses is refused at planning, not
+/// previewed as fine and failed after Start.
+#[test]
+fn zip_plan_preview_refuses_colliding_paths_as_the_upload_does() {
+    let zip = build_zip(&[("x/y.txt", b"AAAA"), ("x/./y.txt", b"BBBBBBBB")], true);
+    let e = zip_plan_preview(&zip.0, &[]).unwrap_err();
+    assert!(
+        format!("{e:#}").contains("two zip entries name the same file"),
+        "{e:#}"
+    );
+    // Both excluded: neither is sent, so nothing collides (the source skips them first too).
+    let (total, files) = zip_plan_preview(&zip.0, &["y.txt".to_string()]).unwrap();
+    assert_eq!((total, files.len()), (0, 0));
+}
+
 /// Ports `transfer_zip_rejects_path_traversal` (zip-slip).
 #[tokio::test(flavor = "multi_thread")]
 async fn upload_zip_rejects_path_traversal() {
@@ -246,6 +261,36 @@ fn inspect_zip_reports_sizes_and_game_meta() {
     assert_eq!(inspect.title_id.as_deref(), Some("PPSA01234"));
     assert_eq!(inspect.application_category_type, Some(0));
     assert_eq!(inspect.game_root.as_deref(), Some("MyGame"));
+    assert_eq!(
+        inspect.entry_names.as_deref(),
+        Some(
+            &[
+                "MyGame/eboot.bin".to_string(),
+                "MyGame/sce_sys/param.json".to_string()
+            ][..]
+        )
+    );
+    assert!(inspect.entry_names_complete);
+}
+
+/// #645: the inspect lists a non-game archive's files so the client can
+/// offer to send it as it is (a jailbreak update, payloads).
+#[test]
+fn inspect_zip_lists_entry_names() {
+    let zip = build_zip(
+        &[("y2jb/payload.js", b"js"), ("y2jb/main.elf", b"elf")],
+        true,
+    );
+    let inspect = inspect_zip(&zip.0).unwrap();
+    assert_eq!(inspect.game_root, None);
+    assert_eq!(
+        inspect.entry_names,
+        Some(vec![
+            "y2jb/payload.js".to_string(),
+            "y2jb/main.elf".to_string()
+        ])
+    );
+    assert!(inspect.entry_names_complete);
 }
 
 #[test]

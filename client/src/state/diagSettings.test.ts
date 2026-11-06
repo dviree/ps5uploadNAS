@@ -5,7 +5,11 @@ import {
   DEFAULT_LOG_LEVEL,
   currentMinRank,
   useDiagSettingsStore,
+  DETAILED_LOGS_MS,
+  KEY_DETAILED_UNTIL,
+  detailedActive,
 } from "./diagSettings";
+import { installWindowStub } from "../test-utils/storage";
 
 /**
  * The disk-log sink in `logs.ts` writes an entry only when its level rank is
@@ -30,25 +34,10 @@ describe("diagSettings level ranks", () => {
   });
 });
 
-// vitest's default node env has no `window`; the store reads
-// `window.localStorage`. Install a tiny in-memory stub (mirrors the pattern
-// in lib/fsLastPath.test.ts — cheaper than pulling in jsdom) so the real
-// persist/clear branches run.
-function installWindowStub() {
-  const store = new globalThis.Map<string, string>();
-  const localStorage = {
-    getItem: (k: string) => (store.has(k) ? (store.get(k) as string) : null),
-    setItem: (k: string, v: string) => void store.set(k, String(v)),
-    removeItem: (k: string) => void store.delete(k),
-    clear: () => store.clear(),
-  };
-  (globalThis as { window?: unknown }).window = { localStorage };
-}
-
 describe("diagSettings store", () => {
   beforeEach(() => {
     installWindowStub();
-    useDiagSettingsStore.setState({ logLevel: DEFAULT_LOG_LEVEL });
+    useDiagSettingsStore.setState({ logLevel: DEFAULT_LOG_LEVEL, detailedUntil: null });
   });
 
   afterEach(() => {
@@ -68,5 +57,25 @@ describe("diagSettings store", () => {
     // Returning to the default removes the key (absence = default).
     useDiagSettingsStore.getState().setLogLevel("info");
     expect(window.localStorage.getItem("ps5upload.log_level")).toBeNull();
+  });
+
+  it("Detailed logs record debug lines for a day, then stop by themselves", () => {
+    const now = 1_800_000_000_000;
+    useDiagSettingsStore.getState().setDetailed(true, now);
+    const until = useDiagSettingsStore.getState().detailedUntil;
+    expect(until).toBe(now + DETAILED_LOGS_MS);
+    expect(window.localStorage.getItem(KEY_DETAILED_UNTIL)).toBe(String(now + DETAILED_LOGS_MS));
+    // info is the chosen level, but debug lines are recorded while it is on…
+    expect(currentMinRank(now + 1000)).toBe(LEVEL_RANK.debug);
+    // …and a more verbose choice stays.
+    useDiagSettingsStore.getState().setLogLevel("trace");
+    expect(currentMinRank(now + 1000)).toBe(LEVEL_RANK.trace);
+    useDiagSettingsStore.getState().setLogLevel("info");
+    // Its time is up: back to the chosen level even before the timer turns it off.
+    expect(detailedActive(until, now + DETAILED_LOGS_MS)).toBe(false);
+    expect(currentMinRank(now + DETAILED_LOGS_MS + 1)).toBe(LEVEL_RANK.info);
+    useDiagSettingsStore.getState().setDetailed(false);
+    expect(useDiagSettingsStore.getState().detailedUntil).toBeNull();
+    expect(window.localStorage.getItem(KEY_DETAILED_UNTIL)).toBeNull();
   });
 });

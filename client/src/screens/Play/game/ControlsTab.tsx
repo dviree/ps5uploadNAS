@@ -7,6 +7,7 @@ import {
   L2_BIT,
   R2_BIT,
   TURBO_BUTTONS,
+  TURBO_MAX_HZ,
   type GameControls,
   type Macro,
 } from "../../../lib/gameControls";
@@ -17,6 +18,13 @@ const BUTTONS = [...TURBO_BUTTONS, { bit: L2_BIT, name: "L2" }, { bit: R2_BIT, n
 
 /** A key as people say it: "Q", "Space", "F1". */
 const keyName = (code: string) => code.replace(/^Key/, "").replace(/^Digit/, "");
+
+/** Which macro row is waiting for a key once row `removed` is gone: rows below it move up one, so
+ *  the wait follows its row instead of landing on the next macro; the removed row's wait ends. */
+export function listeningAfterRemove(listening: number | null, removed: number): number | null {
+  if (listening === null || listening === removed) return null;
+  return listening > removed ? listening - 1 : listening;
+}
 
 /** Game panel › Controls: this game's turbo buttons, mouse aim and macros (kept per game on
  *  this device; they switch by themselves with the running game). */
@@ -80,13 +88,16 @@ export function ControlsTab({ name }: { name: (id: string) => string }) {
           <input
             type="range"
             min={2}
-            max={30}
+            max={TURBO_MAX_HZ}
             value={c.turboHz}
             onChange={(e) => set({ turboHz: Number(e.target.value) })}
             className="flex-1 accent-white"
             aria-label={tr("rp_controls_rate_label", undefined, "Turbo speed")}
           />
         </label>
+        <p className="text-xs text-white/60" data-testid="rp-controls-rate-hint">
+          {tr("rp_controls_rate_hint", undefined, "Above 10 a second, only games running fast see every press.")}
+        </p>
       </section>
 
       <section className="space-y-2">
@@ -151,7 +162,10 @@ export function ControlsTab({ name }: { name: (id: string) => string }) {
               <span className="flex-1" />
               <button
                 type="button"
-                onClick={() => setMacro(i, null)}
+                onClick={() => {
+                  setMacro(i, null);
+                  setListening((l) => listeningAfterRemove(l, i));
+                }}
                 aria-label={tr("rp_controls_macro_remove", undefined, "Remove this macro")}
                 className="flex h-7 w-7 items-center justify-center rounded-full hover:bg-white/15"
               >

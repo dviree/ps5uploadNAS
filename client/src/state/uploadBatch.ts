@@ -11,9 +11,20 @@ import {
   zipInspectStream,
 } from "../api/ps5";
 import { remoteApi } from "../api/remote";
+import { localFs } from "../api/localFs";
+import { archiveDefault, type ArchiveChoice } from "../lib/archiveDefault";
+import {
+  collapseRarVolumes,
+  diagnoseArchiveSet,
+  isSpannedZip,
+  parseArchivePart,
+  parseSplitVolume,
+  type ArchiveSetIssue,
+} from "../lib/archiveParts";
 import { invoke } from "../lib/invokeLogged";
 import { isInstallPackagePath } from "../lib/pkgDropDedupe";
 import { isRemotePath } from "../lib/remotePath";
+import { trStatic } from "../lib/trStatic";
 import { archiveFormat, isImagePath, type PickedSource } from "./upload";
 import { platformFromTitleId, titleIdFromContentId } from "./pkgLibrary";
 
@@ -32,6 +43,11 @@ export interface BatchRow {
   error: string | null;
   /** An encrypted .rar's password; memory only. */
   password: string | null;
+  /** An archive: unpack it or send it as it is (#645). Null until the user chooses, when its
+   *  listing could not tell; such a row holds the list back. Unused for other kinds. */
+  archiveChoice: ArchiveChoice | null;
+  /** What the files beside it say about the set it belongs to (as a single pick is told). */
+  setIssue?: ArchiveSetIssue | null;
 }
 
 export interface BatchEntry {
@@ -67,7 +83,14 @@ export async function inspectSource(
       parts?: unknown[];
       total_size?: number;
     };
-    if ((meta.parts?.length ?? 1) > 1) throw new Error("Split .pkg sets aren't supported — pick the single lead .pkg.");
+    if ((meta.parts?.length ?? 1) > 1) {
+      throw new Error(
+        trStatic(
+          "upload_split_pkg_unsupported",
+          "This is one part of a split package, and split packages can't be installed. Join the parts into one .pkg first.",
+        ),
+      );
+    }
     const cid = meta.head?.content_id ?? "";
     return {
       ...base,
@@ -100,6 +123,31 @@ export function setBatchInspector(f: Inspector) {
   inspector = f;
 }
 
+/** The file names in the folder holding `path` on this computer. */
+type SiblingLister = (dir: string) => Promise<string[]>;
+let siblings: SiblingLister = async (dir) =>
+  (await localFs.listDir(dir)).filter((e) => !e.is_dir).map((e) => e.name);
+/** Tests swap the folder listing. */
+export function setBatchSiblingLister(f: SiblingLister) {
+  siblings = f;
+}
+
+/** A name that can belong to a set: only then is the folder worth listing. A failed listing
+ *  says nothing: the row goes as it is, as a single pick does. */
+async function archiveSetIssue(path: string): Promise<ArchiveSetIssue | null> {
+  const at = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  if (at <= 0 || isRemotePath(path)) return null;
+  const name = path.slice(at + 1);
+  if (!parseArchivePart(name) && !parseSplitVolume(name) && !/\.zip$/i.test(name)) return null;
+  try {
+    const names = await siblings(path.slice(0, at));
+    if (/\.zip$/i.test(name) && !parseArchivePart(name) && !isSpannedZip(name, names)) return null;
+    return diagnoseArchiveSet(name, names);
+  } catch {
+    return null;
+  }
+}
+
 const LIMIT = 4;
 let seq = 0;
 /** Bumped per inspection of a row: only the newest result for a row lands. */
@@ -113,6 +161,7 @@ interface BatchState {
   remove: (id: string) => void;
   setInclude: (id: string, include: boolean) => void;
   setPassword: (id: string, password: string) => void;
+  setArchiveChoice: (id: string, choice: ArchiveChoice) => void;
   clear: () => void;
 }
 
@@ -131,7 +180,20 @@ export const useUploadBatch = create<BatchState>((set, get) => {
       void inspector(row.path, row.isDir, row.password)
         .then((source) => {
           if (generation.get(id) !== gen) return;
-          patch(id, { status: "ready", source, error: null });
+          // A choice the user made stays; otherwise the archive's listing picks one.
+          const chosen = get().rows.find((r) => r.id === id)?.archiveChoice ?? null;
+          patch(id, {
+            status: "ready",
+            source,
+            error: null,
+            archiveChoice:
+              source.kind === "archive" ? chosen ?? archiveDefault(source.zipInfo) : null,
+          });
+          if (source.kind === "archive" || source.kind === "file") {
+            void archiveSetIssue(row.path).then((setIssue) => {
+              if (setIssue && generation.get(id) === gen) patch(id, { setIssue });
+            });
+          }
         })
         .catch((e: unknown) => {
           if (generation.get(id) !== gen) return;
@@ -162,7 +224,7 @@ export const useUploadBatch = create<BatchState>((set, get) => {
     add: (entries) => {
       const have = new Set(get().rows.map((r) => r.path));
       const fresh: BatchRow[] = [];
-      for (const e of entries) {
+      for (const e of collapseRarVolumes(entries)) {
         if (have.has(e.path)) continue;
         have.add(e.path);
         fresh.push({
@@ -175,6 +237,7 @@ export const useUploadBatch = create<BatchState>((set, get) => {
           source: null,
           error: null,
           password: null,
+          archiveChoice: null,
         });
       }
       if (!fresh.length) return;
@@ -186,6 +249,7 @@ export const useUploadBatch = create<BatchState>((set, get) => {
       set({ rows: get().rows.filter((r) => r.id !== id) });
     },
     setInclude: (id, include) => patch(id, { include }),
+    setArchiveChoice: (id, archiveChoice) => patch(id, { archiveChoice }),
     setPassword: (id, password) => {
       patch(id, { password, status: "inspecting", error: null });
       inspect(id);

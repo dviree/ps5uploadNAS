@@ -51,7 +51,7 @@ const TAB_DEFS: TabDef[] = [
     icon: LayoutDashboard,
     to: "/home",
     sections: ["nav_section_connect", "nav_section_app"],
-    extra: ["/home", "/dashboard", "/first-run", "/bug-report"],
+    extra: ["/home", "/dashboard", "/first-run", "/bug-report", "/thanks"],
   },
   {
     id: "games",
@@ -121,7 +121,7 @@ function PlayingDot() {
   return (
     <span
       aria-hidden
-      className="absolute right-0 top-0 h-2 w-2 animate-pulse rounded-full bg-[var(--color-good)] ring-2 ring-[var(--color-float)]"
+      className="absolute end-0 top-0 h-2 w-2 animate-pulse rounded-full bg-[var(--color-good)] ring-2 ring-[var(--color-float)]"
     />
   );
 }

@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { expect, test, type Page } from "@playwright/test";
+import { routeEngine } from "./fixtures/engine";
 
 // Watch party (9.11): the computer playing shows a second code, to watch; a phone that scans it
 // gets the stream's picture (the engine forwards the session's own messages, rp_stream_api.rs
@@ -28,32 +29,27 @@ test("the computer shows a watch code and hands a watcher the controller", async
   });
   const control: unknown[] = [];
   let hasControl = false;
-  await page.route(
-    (url) => url.pathname.startsWith("/api/"),
-    async (route) => {
-      const req = route.request();
-      const path = new URL(req.url()).pathname;
-      let body: unknown = {};
-      if (path === "/api/version") body = { version: "9.11.0", caps: {} };
-      if (path === "/api/ps5/rp/session") body = { host: null };
-      if (path === "/api/ps5/rp/pad-link/control") {
-        const b = req.postDataJSON() as { on: boolean };
-        control.push(b);
-        hasControl = b.on;
-        body = { ok: true };
-      } else if (path === "/api/ps5/rp/pad-link") {
-        body = {
-          open: true,
-          url: PAD,
-          urls: [PAD],
-          pad_ws: "ws://192.168.1.9:19113/api/pad/ws",
-          pads: [{ id: 3, name: "iPad", watch: true, control: hasControl }],
-          pending: [],
-        };
-      }
-      await route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
-    },
-  );
+  await routeEngine(page, (path, req) => {
+    let body: unknown = {};
+    if (path === "/api/version") body = { version: "9.11.0", caps: {} };
+    if (path === "/api/ps5/rp/session") body = { host: null };
+    if (path === "/api/ps5/rp/pad-link/control") {
+      const b = req.postDataJSON() as { on: boolean };
+      control.push(b);
+      hasControl = b.on;
+      body = { ok: true };
+    } else if (path === "/api/ps5/rp/pad-link") {
+      body = {
+        open: true,
+        url: PAD,
+        urls: [PAD],
+        pad_ws: "ws://192.168.1.9:19113/api/pad/ws",
+        pads: [{ id: 3, name: "iPad", watch: true, control: hasControl }],
+        pending: [],
+      };
+    }
+    return body;
+  });
   await page.routeWebSocket(/\/api\/ps5\/rp\/ws/, (ws) => {
     ws.onMessage((m) => {
       if ((JSON.parse(String(m)) as { host?: string }).host) ws.send(JSON.stringify({ stage: "first_frame" }));
@@ -125,12 +121,21 @@ async function makeStream(page: Page): Promise<number[][]> {
   });
 }
 
+test("a controller link opened in a browser asks about the PS5Upload app first", async ({ page }) => {
+  const html = await readFile(new URL("../../engine/crates/ps5upload-engine/src/pad_page.html", import.meta.url), "utf8");
+  await page.route("**/pad", (route) => route.fulfill({ contentType: "text/html", body: html }));
+  await page.goto("/pad#t=0f0f0f0f0f0f0f0f", { waitUntil: "domcontentloaded" });
+  await expect(page.getByTestId("open-in-gate")).toContainText("Open in the PS5Upload app?");
+});
+
 test.describe("a phone watching", () => {
   test.use({ viewport: { width: 844, height: 390 }, hasTouch: true, isMobile: true });
 
   test("shows the picture, and plays once it is handed the controller", async ({ page }) => {
     // The engine's own pad page (npm run build:pad), served as the engine serves it.
     const html = await readFile(new URL("../../engine/crates/ps5upload-engine/src/pad_page.html", import.meta.url), "utf8");
+    // This browser already chose to stay in the browser (OpenInAppGate).
+    await page.addInitScript(() => localStorage.setItem("ps5upload.openIn", "browser"));
     await page.route("**/pad", (route) => route.fulfill({ contentType: "text/html", body: html }));
     let wsUrl = "";
     const pads: Array<{ buttons: number }> = [];

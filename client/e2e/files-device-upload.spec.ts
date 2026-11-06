@@ -60,6 +60,7 @@ test("Files uploads device files into the open PS5 folder", async ({ page }) => 
 test("the engine's copies of the phone's files are deleted once they are on the PS5", async ({ page }) => {
   const deleted: string[] = [];
   let staged = 0;
+  let polls = 0;
   await page.addInitScript(() => localStorage.setItem("ps5upload.host", "192.168.0.5"));
   await page.route((url) => url.pathname.startsWith("/api/"), async (route) => {
     const request = route.request();
@@ -87,8 +88,13 @@ test("the engine's copies of the phone's files are deleted once they are on the 
       body = { removed: true };
     }
     if (p === "/api/transfer/file-list") body = { job_id: "device-job" };
+    // A real phone file takes a while on its way to the PS5: running for a few polls, then done
+    // (the staged copies are released once they have been seen in use and then are not).
     if (p === "/api/jobs/device-job")
-      body = { status: "done", bytes_sent: 10, total_bytes: 10, files_sent: 2 };
+      body =
+        ++polls < 10
+          ? { status: "running", bytes_sent: 1, total_bytes: 10 }
+          : { status: "done", bytes_sent: 10, total_bytes: 10, files_sent: 2 };
     if (p === "/api/jobs") body = [];
     await route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
   });
@@ -101,5 +107,5 @@ test("the engine's copies of the phone's files are deleted once they are on the 
     { name: "photo-1.jpg", mimeType: "image/jpeg", buffer: Buffer.from("hello") },
     { name: "photo-2.jpg", mimeType: "image/jpeg", buffer: Buffer.from("world") },
   ]);
-  await expect.poll(() => [...deleted].sort(), { timeout: 20_000 }).toEqual(["upload-1", "upload-2"]);
+  await expect.poll(() => [...deleted].sort(), { timeout: 40_000 }).toEqual(["upload-1", "upload-2"]);
 });

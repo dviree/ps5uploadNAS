@@ -8,13 +8,14 @@
 #include <unistd.h>
 
 #include "proc_identity.h"
+#include "vpad.h"
 #include "webui_codec.h"
 
 /* ── The built-in backend: a stub ─────────────────────────────────────────────────────────────
  *
  * The console's own devices are relayed to the companion process (src/vinput_relay.c), which
- * runtime.c puts in place of this stub only when it is switched on (vinput_ps5.h: off by default). This stub is what every other helper answers: no devices,
- * "vinput_unsupported". */
+ * runtime.c puts in place of this stub unless they are switched off (vinput_ps5.c: on by
+ * default). This stub is what a helper with them off answers: no devices, "vinput_unsupported". */
 static void stub_caps(int *mouse, int *keyboard) {
     *mouse = 0;
     *keyboard = 0;
@@ -225,8 +226,9 @@ int vinput_caps_json(char *out, size_t cap) {
     g_be->caps(&mouse, &keyboard);
     if (g_be->status) status = g_be->status(&reason);
     if (!reason && !mouse && !keyboard) reason = "vinput_unsupported";
-    n = snprintf(out, cap, "{\"mouse\":%s,\"keyboard\":%s,\"open\":%s,\"backend\":\"%s\"%s%s%s%s%s%s}",
-                 mouse ? "true" : "false", keyboard ? "true" : "false", g_owner ? "true" : "false", g_be->name,
+    /* "vpad": how many Play Together controllers (vpad.h) this helper can make; absent from older ones. */
+    n = snprintf(out, cap, "{\"mouse\":%s,\"keyboard\":%s,\"open\":%s,\"backend\":\"%s\",\"vpad\":%d%s%s%s%s%s%s}",
+                 mouse ? "true" : "false", keyboard ? "true" : "false", g_owner ? "true" : "false", g_be->name, VPAD_SLOTS,
                  status ? ",\"companion\":\"" : "", status ? status : "", status ? "\"" : "",
                  reason ? ",\"reason\":\"" : "", reason ? reason : "", reason ? "\"" : "");
     pthread_mutex_unlock(&g_lock);

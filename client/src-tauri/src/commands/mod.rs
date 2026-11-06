@@ -18,6 +18,7 @@
 //!   companions  — TCP probe of known scene-tool ports
 //!   title_meta  — HTML scrape of public title-info site (cover art)
 
+pub mod agent_mcp;
 pub mod app_events;
 pub mod app_info;
 pub mod app_lifecycle;
@@ -29,6 +30,7 @@ pub mod diag_log;
 pub mod diagnostics;
 pub mod discover;
 pub mod dragout;
+mod drive_checks;
 pub mod folder_inspect;
 pub mod game_mode;
 pub mod heal_appmeta;
@@ -52,15 +54,23 @@ pub mod save_text_file;
 pub mod saves_screenshots;
 pub mod screenshot_convert;
 pub mod self_install;
+pub(crate) mod shell_error;
 pub mod smp;
 pub mod system_bars;
 pub mod system_power;
 pub mod title_meta;
 pub mod update_android;
+pub mod update_fetch;
 pub mod update_files;
 pub mod updates;
 pub mod usb_autoloader;
 pub mod user_config;
+
+/// A console's reply as the JSON the renderer reads. One that cannot be serialised is an error,
+/// never an empty success (`{}` read as "the console said nothing").
+pub(crate) fn reply_json<T: serde::Serialize>(reply: T) -> Result<serde_json::Value, String> {
+    serde_json::to_value(reply).map_err(|e| format!("serialize: {e}"))
+}
 
 pub(crate) fn replace_file(from: &std::path::Path, to: &std::path::Path) -> std::io::Result<()> {
     #[cfg(windows)]
@@ -90,6 +100,7 @@ pub(crate) fn replace_file(from: &std::path::Path, to: &std::path::Path) -> std:
 // Glob imports pull in both the command fn and the `#[tauri::command]`-
 // generated `__cmd__<name>` helper macros need to find via `commands::*`.
 // Explicit lists break `generate_handler!`.
+pub use agent_mcp::*;
 pub use app_info::*;
 pub use app_lifecycle::*;
 pub use companions::*;
@@ -121,6 +132,7 @@ pub use system_bars::*;
 pub use system_power::*;
 pub use title_meta::*;
 pub use update_android::*;
+pub use update_fetch::*;
 pub use update_files::*;
 pub use updates::*;
 pub use usb_autoloader::*;
