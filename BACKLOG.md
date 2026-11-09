@@ -11,9 +11,8 @@ Found bugs, stubs and ideas. Update it when a task is done or something new turn
     - `fpkg_api.rs` keeps upstream's zstd, update and destination steps next to `ampr_lz4`.
     - Phone upload now uses upstream's device pick.
   - Engine, fpkg and core tests, vitest, tsc and the e2e tests listed in the commit pass.
-- Next:
-  - Check that the Docker build of the merge is green.
-  - Tell the user to run the NAS update script.
+- The Docker build of the merge (run 43) is green: images `lz4`, `latest` and `lz4-2281602`.
+- Next: nothing pending. On "Uppdatera", merge the latest upstream and check the LZ4 original.
 
 ## Open
 
