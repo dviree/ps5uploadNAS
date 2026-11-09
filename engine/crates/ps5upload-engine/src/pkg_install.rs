@@ -261,7 +261,9 @@ impl PkgInstallState {
     pub fn restored() -> Self {
         let sessions = persist::load();
         if !sessions.is_empty() {
-            crate::log_info!(
+            crate::log_at!(
+                Info,
+                "install",
                 "pkg-host: resumed {} install session(s) from before the engine restarted",
                 sessions.len()
             );
@@ -361,7 +363,11 @@ mod persist {
         };
         let tmp = path.with_extension("json.tmp");
         if let Err(e) = std::fs::write(&tmp, json).and_then(|()| std::fs::rename(&tmp, path)) {
-            crate::log_warn!("pkg-host: could not save install sessions: {e}");
+            crate::log_at!(
+                Warn,
+                "install",
+                "pkg-host: could not save install sessions: {e}"
+            );
         }
     }
 
@@ -519,8 +525,14 @@ fn is_install_package_filename(name: &str) -> bool {
 ///
 /// Streamed to disk field-by-field, never buffered whole: packages run to tens
 /// of gigabytes.
-/// Removes a directory when dropped, unless it has been taken (set to `None`).
+/// Removes a directory (or a single file) when dropped, unless it has been taken (set to `None`).
 struct RemoveOnDrop(Option<PathBuf>);
+
+fn remove_dir_or_file(path: &std::path::Path) {
+    if std::fs::remove_dir_all(path).is_err() {
+        let _ = std::fs::remove_file(path);
+    }
+}
 
 impl Drop for RemoveOnDrop {
     fn drop(&mut self) {
@@ -528,35 +540,111 @@ impl Drop for RemoveOnDrop {
             // Tens of GB on a slow disk: not on an async worker, which serves every console.
             match tokio::runtime::Handle::try_current() {
                 Ok(rt) => {
-                    rt.spawn_blocking(move || std::fs::remove_dir_all(dir));
+                    rt.spawn_blocking(move || remove_dir_or_file(&dir));
                 }
-                Err(_) => {
-                    let _ = std::fs::remove_dir_all(dir);
-                }
+                Err(_) => remove_dir_or_file(&dir),
             }
         }
     }
 }
 
 async fn pkg_upload_handler(headers: HeaderMap, form: axum::extract::Multipart) -> Response<Body> {
-    stage_browser_upload(headers, form, true).await
+    stage_browser_upload(headers, form, true, FileUploadQuery::default()).await
 }
 
-async fn file_upload_handler(headers: HeaderMap, form: axum::extract::Multipart) -> Response<Body> {
-    stage_browser_upload(headers, form, false).await
+/// Where in a staged upload a file goes: how a browser sends a whole folder, one file per
+/// request, with each file's place in the folder kept (#730).
+#[derive(Debug, Default, Deserialize)]
+struct FileUploadQuery {
+    /// Add this file to an earlier upload (its `upload_id`) instead of starting a new one.
+    #[serde(default)]
+    upload_id: Option<String>,
+    /// The file's path inside the folder being sent, with `/` between names
+    /// (`Game/sce_sys/param.json`). The answer's `root` is then the folder's own path.
+    #[serde(default)]
+    relpath: Option<String>,
+}
+
+async fn file_upload_handler(
+    Query(q): Query<FileUploadQuery>,
+    headers: HeaderMap,
+    form: axum::extract::Multipart,
+) -> Response<Body> {
+    stage_browser_upload(headers, form, false, q).await
+}
+
+/// A path inside an upload, from the browser's `relpath`: its names in order, each one safe to
+/// be a path segment. `None` for one that climbs out (`..`) or names nothing.
+fn sanitize_relpath(rel: &str) -> Option<Vec<String>> {
+    let mut out = Vec::new();
+    for seg in rel.split(['/', '\\']) {
+        if seg.is_empty() || seg == "." {
+            continue;
+        }
+        let cleaned: String = seg.chars().filter(|c| !c.is_control()).collect();
+        // `..`, a name of only dots or a Windows drive (`C:`) would not stay inside the upload.
+        if cleaned.is_empty() || cleaned.chars().all(|c| c == '.') || cleaned.contains(':') {
+            return None;
+        }
+        out.push(cleaned);
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+fn bad_upload(msg: &str) -> Response<Body> {
+    json_response(StatusCode::BAD_REQUEST, serde_json::json!({ "error": msg }))
+}
+
+/// Removes what a failed upload left: its whole directory when this request started it, only
+/// the file when it was added to an earlier upload (the browser removes that one as a whole).
+async fn scrub_upload(path: &std::path::Path, whole_dir: bool) {
+    if whole_dir {
+        let _ = tokio::fs::remove_dir_all(path).await;
+    } else {
+        let _ = tokio::fs::remove_file(path).await;
+    }
 }
 
 async fn stage_browser_upload(
     headers: HeaderMap,
     mut form: axum::extract::Multipart,
     packages_only: bool,
+    q: FileUploadQuery,
 ) -> Response<Body> {
     use tokio::io::AsyncWriteExt;
 
+    let rel = match q
+        .relpath
+        .as_deref()
+        .map(str::trim)
+        .filter(|r| !r.is_empty())
+    {
+        Some(r) => match sanitize_relpath(r) {
+            Some(segs) => Some(segs),
+            None => return bad_upload("invalid relpath"),
+        },
+        None => None,
+    };
     // Removes week-old uploads, tens of GB each on a slow disk: not on an async worker.
     tokio::task::spawn_blocking(cleanup_stale_pkg_uploads);
-    let id = Uuid::new_v4();
-    let dir = pkg_upload_dir().join(id.to_string());
+    let (id, dir, fresh) = match q.upload_id.as_deref().filter(|s| !s.is_empty()) {
+        Some(existing) => {
+            let Some(dir) = pkg_upload_path(existing) else {
+                return bad_upload("invalid upload id");
+            };
+            if !tokio::fs::metadata(&dir).await.is_ok_and(|m| m.is_dir()) {
+                return json_response(
+                    StatusCode::NOT_FOUND,
+                    serde_json::json!({ "error": "no such upload" }),
+                );
+            }
+            (existing.to_string(), dir, false)
+        }
+        None => {
+            let id = Uuid::new_v4();
+            (id.to_string(), pkg_upload_dir().join(id.to_string()), true)
+        }
+    };
     if let Err(e) = tokio::fs::create_dir_all(&dir).await {
         return json_response(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -576,20 +664,25 @@ async fn stage_browser_upload(
             .ok()
             .flatten();
         if let Some(refusal) = free.and_then(|f| crate::remote::fetch::no_room(f, want)) {
-            let _ = tokio::fs::remove_dir_all(&dir).await;
+            if fresh {
+                let _ = tokio::fs::remove_dir_all(&dir).await;
+            }
             return refusal;
         }
     }
     // A browser that goes away mid-upload drops this handler at an await, past every cleanup
-    // below: the partial package (tens of GB) would sit in the temp dir for a week.
-    let mut partial = RemoveOnDrop(Some(dir.clone()));
+    // below: the partial package (tens of GB) would sit in the temp dir for a week. An upload
+    // that is added to keeps its directory; only its half-written file goes (below).
+    let mut partial = RemoveOnDrop(fresh.then(|| dir.clone()));
 
     loop {
         let field = match form.next_field().await {
             Ok(Some(f)) => f,
             Ok(None) => break,
             Err(e) => {
-                let _ = tokio::fs::remove_dir_all(&dir).await;
+                if fresh {
+                    let _ = tokio::fs::remove_dir_all(&dir).await;
+                }
                 return json_response(
                     StatusCode::BAD_REQUEST,
                     serde_json::json!({ "error": format!("malformed upload: {e}") }),
@@ -601,11 +694,33 @@ async fn stage_browser_upload(
         if packages_only && !is_install_package_filename(&filename) {
             continue;
         }
-        let dest = dir.join(&filename);
+        // A folder's file goes to its place in the folder; any other keeps the part's name.
+        let (dest, filename, root) = match &rel {
+            Some(segs) => {
+                let dest = segs.iter().fold(dir.clone(), |p, seg| p.join(seg));
+                let name = segs.last().cloned().unwrap_or(filename);
+                (dest, name, Some(dir.join(&segs[0])))
+            }
+            None => (dir.join(&filename), filename, None),
+        };
+        // What a failure removes: the whole upload when this request started it, else the file.
+        let scrub = if fresh { dir.clone() } else { dest.clone() };
+        if !fresh {
+            partial.0 = Some(dest.clone());
+        }
+        if let Some(parent) = dest.parent() {
+            if let Err(e) = tokio::fs::create_dir_all(parent).await {
+                scrub_upload(&scrub, fresh).await;
+                return json_response(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    serde_json::json!({ "error": format!("could not create {}: {e}", parent.display()) }),
+                );
+            }
+        }
         let mut file = match tokio::fs::File::create(&dest).await {
             Ok(f) => f,
             Err(e) => {
-                let _ = tokio::fs::remove_dir_all(&dir).await;
+                scrub_upload(&scrub, fresh).await;
                 return json_response(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     serde_json::json!({ "error": format!("could not open {}: {e}", dest.display()) }),
@@ -619,7 +734,7 @@ async fn stage_browser_upload(
                 Ok(Some(bytes)) => {
                     if let Err(e) = file.write_all(&bytes).await {
                         drop(file);
-                        let _ = tokio::fs::remove_dir_all(&dir).await;
+                        scrub_upload(&scrub, fresh).await;
                         return json_response(
                             StatusCode::INTERNAL_SERVER_ERROR,
                             serde_json::json!({ "error": format!("write failed: {e}") }),
@@ -630,7 +745,7 @@ async fn stage_browser_upload(
                 Ok(None) => break,
                 Err(e) => {
                     drop(file);
-                    let _ = tokio::fs::remove_dir_all(&dir).await;
+                    scrub_upload(&scrub, fresh).await;
                     return json_response(
                         StatusCode::BAD_REQUEST,
                         serde_json::json!({ "error": format!("upload stream error: {e}") }),
@@ -640,26 +755,29 @@ async fn stage_browser_upload(
         }
         if let Err(e) = file.flush().await {
             drop(file);
-            let _ = tokio::fs::remove_dir_all(&dir).await;
+            scrub_upload(&scrub, fresh).await;
             return json_response(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 serde_json::json!({ "error": format!("flush failed: {e}") }),
             );
         }
         partial.0 = None;
-        return json_response(
-            StatusCode::OK,
-            serde_json::json!({
-                "upload_id": id.to_string(),
-                "path": dest.to_string_lossy(),
-                "size": written,
-                "filename": filename,
-            }),
-        );
+        let mut reply = serde_json::json!({
+            "upload_id": id,
+            "path": dest.to_string_lossy(),
+            "size": written,
+            "filename": filename,
+        });
+        if let Some(root) = root {
+            reply["root"] = serde_json::json!(root.to_string_lossy());
+        }
+        return json_response(StatusCode::OK, reply);
     }
 
-    // No .pkg field arrived — clean up the empty dir.
-    let _ = tokio::fs::remove_dir_all(&dir).await;
+    // No .pkg field arrived — clean up the empty dir (when this request made it).
+    if fresh {
+        let _ = tokio::fs::remove_dir_all(&dir).await;
+    }
     json_response(
         StatusCode::BAD_REQUEST,
         serde_json::json!({ "error": if packages_only { "no .pkg or .fpkg file in the upload" } else { "no file in the upload" } }),
@@ -788,14 +906,14 @@ async fn payload_restore_handler(Json(req): Json<PayloadRestoreRequest>) -> Resp
     .await;
     match res {
         Ok(Ok(bytes)) => {
-            crate::log_info!("payload-restore: sent {bytes} bytes");
+            crate::log_at!(Info, "install", "payload-restore: sent {bytes} bytes");
             json_response(
                 StatusCode::OK,
                 serde_json::json!({"ok": true, "bytes": bytes}),
             )
         }
         Ok(Err(e)) => {
-            crate::log_warn!("payload-restore: {e}");
+            crate::log_at!(Warn, "install", "payload-restore: {e}");
             json_response(
                 StatusCode::OK,
                 serde_json::json!({"ok": false, "bytes": 0, "error": e}),
@@ -1958,7 +2076,9 @@ pub(crate) async fn install_start_handler(
         rival_info
     };
     if let Some((rid, served, total, reqs)) = rival {
-        crate::log_warn!(
+        crate::log_at!(
+            Warn,
+            "install",
             "install start refused: a live session for this exact package is \
              already serving (session={} served={}/{} bytes over {} requests). \
              A second session leaves the console able to fetch a URL we may \
@@ -1988,7 +2108,7 @@ pub(crate) async fn install_start_handler(
     // now live and the unified install state machine hands the URL to the
     // installer daemon. The in-process InstallByPackage cascade that used to
     // follow here is gone (on FW < 11 it hung the payload on an http:// URL).
-    crate::log_info!(
+    crate::log_at!(Info, "install", 
         "pkg_install serve-only: addr={} session={} url={} content_id={} title={:?} — skipping in-process install; DPI daemon will pull",
         req.ps5_addr,
         session_id,
@@ -2313,41 +2433,225 @@ pub(crate) fn wait_for_installed_artifact(
     expected_fingerprint: &str,
     idle: std::time::Duration,
     stop: &dyn Fn() -> bool,
-) -> ArtifactWait {
+) -> ArtifactWaitReport {
     const CEILING: std::time::Duration = std::time::Duration::from_secs(4 * 60 * 60);
-    const POLL: std::time::Duration = std::time::Duration::from_secs(5);
-    let started = std::time::Instant::now();
-    let mut idle_from = started;
-    let mut most_seen = 0u64;
     let title = ps5upload_core::pkg_install::title_id_from_content_id(content_id);
-    loop {
-        match verify_installed_artifact(
-            addr,
-            content_id,
-            package_type,
-            expected_size,
-            expected_fingerprint,
-        ) {
-            InstalledArtifactCheck::Match => return ArtifactWait::Landed,
-            InstalledArtifactCheck::Unsupported => return ArtifactWait::CannotTell,
-            InstalledArtifactCheck::Absent | InstalledArtifactCheck::Different => {}
-        }
-        let answered = ps5upload_core::volumes::list_volumes(addr).is_ok();
-        let seen = title.as_deref().map_or(0, |t| {
+    artifact_wait_loop(
+        &mut || {
+            observe_artifact(
+                addr,
+                content_id,
+                package_type,
+                expected_size,
+                expected_fingerprint,
+                title.as_deref(),
+            )
+        },
+        idle,
+        CEILING,
+        ARTIFACT_POLL,
+        stop,
+    )
+}
+
+const ARTIFACT_POLL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long an add-on gets to show up once the console has all of it, while nothing about it
+/// grows. An add-on that only unlocks content (#776: 1.2 MB each) leaves no `ac.pkg` under
+/// `/user/addcont` at all, so the base game's 4-minute wait at 99% was all it ever got, and then a
+/// warning. One with data still restarts the window each time its files grow.
+pub(crate) const ADDON_VERIFY_IDLE: std::time::Duration = std::time::Duration::from_secs(60);
+/// The longest an add-on's check runs, growing or not.
+pub(crate) const ADDON_VERIFY_CEILING: std::time::Duration =
+    std::time::Duration::from_secs(20 * 60);
+
+/// The add-on's label: the content id's last part (`EP3969-PPSA11386_00-007FLCOSTUME0001` →
+/// `007FLCOSTUME0001`). Sony names the add-on's folders after it.
+pub(crate) fn addon_label(content_id: &str) -> Option<String> {
+    let label = content_id.trim().splitn(3, '-').nth(2)?;
+    (!label.is_empty() && label.chars().all(|c| c.is_ascii_alphanumeric()))
+        .then(|| label.to_string())
+}
+
+/// Where Sony keeps an installed add-on's metadata, whether or not it carries data:
+/// `/user/appmeta/addcont/<title>/<label>` (the folder the dumper copies an add-on's sce_sys
+/// from). Not yet measured for an add-on that only unlocks content.
+pub(crate) fn addon_appmeta_path(title_id: &str, label: &str) -> String {
+    format!("/user/appmeta/addcont/{title_id}/{label}")
+}
+
+/// Whether the console holds the add-on's metadata folder.
+fn addon_registered(addr: &str, title_id: &str, label: &str) -> bool {
+    ps5upload_core::fs_ops::fs_stat(addr, &addon_appmeta_path(title_id, label))
+        .is_ok_and(|s| s.kind == "dir")
+}
+
+/// Wait for an add-on after the console has all of it: its `ac.pkg` under `/user/addcont`, or its
+/// metadata folder under `/user/appmeta/addcont`. Shorter than a game's wait (see
+/// [`ADDON_VERIFY_IDLE`]), so an add-on with nothing on a drive ends in a clear message instead of
+/// minutes at 99%.
+pub(crate) fn wait_for_installed_addon(
+    addr: &str,
+    content_id: &str,
+    package_type: &str,
+    expected_size: u64,
+    expected_fingerprint: &str,
+    stop: &dyn Fn() -> bool,
+) -> ArtifactWaitReport {
+    let title = ps5upload_core::pkg_install::title_id_from_content_id(content_id);
+    let label = addon_label(content_id);
+    artifact_wait_loop(
+        &mut || {
+            let mut o = observe_artifact(
+                addr,
+                content_id,
+                package_type,
+                expected_size,
+                expected_fingerprint,
+                title.as_deref(),
+            );
+            if !o.matched {
+                if let (Some(t), Some(l)) = (title.as_deref(), label.as_deref()) {
+                    if addon_registered(addr, t, l) {
+                        o.matched = true;
+                        o.check = "registered";
+                    }
+                }
+            }
+            o
+        },
+        ADDON_VERIFY_IDLE,
+        ADDON_VERIFY_CEILING,
+        ARTIFACT_POLL,
+        stop,
+    )
+}
+
+/// One look at the console for an installed package.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ArtifactObservation {
+    /// This package is installed.
+    pub matched: bool,
+    /// Nothing to check it against.
+    pub unsupported: bool,
+    /// The console answered at all (a silent console says nothing against the install).
+    pub answered: bool,
+    /// The title's package files, in bytes, all kinds together.
+    pub seen_bytes: u64,
+    /// What the check found, for the log: `match`, `registered`, `absent`, `different`,
+    /// `unsupported`.
+    pub check: &'static str,
+}
+
+fn observe_artifact(
+    addr: &str,
+    content_id: &str,
+    package_type: &str,
+    expected_size: u64,
+    expected_fingerprint: &str,
+    title: Option<&str>,
+) -> ArtifactObservation {
+    let c = verify_installed_artifact(
+        addr,
+        content_id,
+        package_type,
+        expected_size,
+        expected_fingerprint,
+    );
+    let check = match c {
+        InstalledArtifactCheck::Match => "match",
+        InstalledArtifactCheck::Absent => "absent",
+        InstalledArtifactCheck::Different => "different",
+        InstalledArtifactCheck::Unsupported => "unsupported",
+    };
+    if matches!(
+        c,
+        InstalledArtifactCheck::Match | InstalledArtifactCheck::Unsupported
+    ) {
+        return ArtifactObservation {
+            matched: c == InstalledArtifactCheck::Match,
+            unsupported: c == InstalledArtifactCheck::Unsupported,
+            answered: true,
+            seen_bytes: 0,
+            check,
+        };
+    }
+    ArtifactObservation {
+        matched: false,
+        unsupported: false,
+        answered: ps5upload_core::volumes::list_volumes(addr).is_ok(),
+        seen_bytes: title.map_or(0, |t| {
             installed_pkg_inventory(addr, t)
                 .artifacts
                 .iter()
                 .map(|a| a.size)
                 .sum()
-        });
-        if !answered || seen > most_seen {
-            most_seen = most_seen.max(seen);
+        }),
+        check,
+    }
+}
+
+/// What a wait for an installed package found, and enough about how it went to settle a report
+/// from the log alone (#776 had nothing that said what the 99% was waiting for).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct ArtifactWaitReport {
+    pub outcome: ArtifactWait,
+    pub waited_ms: u64,
+    pub checks: u32,
+    /// The last check's finding (see [`ArtifactObservation::check`]).
+    pub last_check: &'static str,
+    /// The most bytes of the title's package files seen.
+    pub most_seen: u64,
+    /// The ceiling ended it, not the idle window.
+    pub hit_ceiling: bool,
+}
+
+/// The waiting rules, apart from the console so they are tested without one. `idle` restarts
+/// whenever the title's files grow, or while the console does not answer; `ceiling` ends it
+/// regardless, so a console that never answers cannot hold the job for good.
+pub(crate) fn artifact_wait_loop(
+    observe: &mut dyn FnMut() -> ArtifactObservation,
+    idle: std::time::Duration,
+    ceiling: std::time::Duration,
+    poll: std::time::Duration,
+    stop: &dyn Fn() -> bool,
+) -> ArtifactWaitReport {
+    let started = std::time::Instant::now();
+    let mut idle_from = started;
+    let mut most_seen = 0u64;
+    let mut checks = 0u32;
+    let report = |outcome, checks, last_check, most_seen, hit_ceiling| ArtifactWaitReport {
+        outcome,
+        waited_ms: started.elapsed().as_millis() as u64,
+        checks,
+        last_check,
+        most_seen,
+        hit_ceiling,
+    };
+    loop {
+        let o = observe();
+        checks += 1;
+        if o.matched {
+            return report(ArtifactWait::Landed, checks, o.check, most_seen, false);
+        }
+        if o.unsupported {
+            return report(ArtifactWait::CannotTell, checks, o.check, most_seen, false);
+        }
+        if !o.answered || o.seen_bytes > most_seen {
+            most_seen = most_seen.max(o.seen_bytes);
             idle_from = std::time::Instant::now();
         }
-        if stop() || idle_from.elapsed() >= idle || started.elapsed() >= CEILING {
-            return ArtifactWait::NotSeen;
+        let hit_ceiling = started.elapsed() >= ceiling;
+        if stop() || idle_from.elapsed() >= idle || hit_ceiling {
+            return report(
+                ArtifactWait::NotSeen,
+                checks,
+                o.check,
+                most_seen,
+                hit_ceiling,
+            );
         }
-        std::thread::sleep(POLL);
+        std::thread::sleep(poll);
     }
 }
 
@@ -2624,7 +2928,9 @@ async fn serve_handler(
         && !console_host.is_empty()
         && !peer_is_console(&console_host, peer.ip()).await
     {
-        crate::log_warn!(
+        crate::log_at!(
+            Warn,
+            "install",
             "pkg-host fetch REJECTED: peer={} expected={} (is {:?}) session={} \
              (set PS5UPLOAD_ALLOW_IP to this peer if the console is behind NAT)",
             peer.ip(),
@@ -2652,7 +2958,7 @@ async fn serve_handler(
         {
             Ok(Ok(Some(src))) => src,
             Ok(Ok(None)) => {
-                crate::log_info!(
+                crate::log_at!(Info, "install", 
                     "pkg-host crc: no playgo-chunk.crc in the package or beside it: session={} name={}",
                     session.id,
                     filename,
@@ -2726,7 +3032,7 @@ async fn serve_handler(
             if now_s.saturating_sub(active.last_rate_log_unix) >= SERVE_RATE_LOG_SECS {
                 active.last_rate_log_unix = now_s;
                 let secs = now_s.saturating_sub(active.created_at_unix).max(1);
-                crate::log_info!(
+                crate::log_at!(Info, "install", 
                     "pkg-host serve rate: session={} served={} of {} bytes over {} requests in {}s = {:.1} MB/s average",
                     active.id,
                     active.bytes_served,
@@ -3040,7 +3346,9 @@ pub(crate) async fn open_remote_package(
     .map_err(|e| format!("could not open the package on the server: {e}"))?;
     let total_size = source.total_size();
     // Server host only; the path can name a user's folders.
-    crate::log_info!(
+    crate::log_at!(
+        Info,
+        "install",
         "remote install: host={} bytes={}",
         source.host(),
         total_size
@@ -5453,5 +5761,178 @@ mod browser_file_intake_tests {
         }).await;
         server.abort();
         result.unwrap();
+    }
+
+    #[test]
+    fn a_folder_path_from_the_browser_stays_inside_its_upload() {
+        assert_eq!(
+            sanitize_relpath("Game/sce_sys/param.json"),
+            Some(vec!["Game".into(), "sce_sys".into(), "param.json".into()])
+        );
+        assert_eq!(
+            sanitize_relpath("Game\\./.hidden"),
+            Some(vec!["Game".into(), ".hidden".into()])
+        );
+        assert_eq!(sanitize_relpath("Game/../../etc/passwd"), None);
+        assert_eq!(sanitize_relpath("C:/x"), None);
+        assert_eq!(sanitize_relpath("/"), None);
+    }
+
+    #[tokio::test]
+    async fn a_browser_can_stage_a_folder_one_file_at_a_time() {
+        let state = Arc::new(PkgInstallState::restored());
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server =
+            tokio::spawn(async move { axum::serve(listener, router(state)).await.unwrap() });
+        let result = tokio::task::spawn_blocking(move || {
+            let send = |query: &str, name: &str, data: &str| -> (u16, serde_json::Value) {
+                let body = format!("--b\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{name}\"\r\nContent-Type: application/octet-stream\r\n\r\n{data}\r\n--b--\r\n");
+                let mut response = ureq::post(format!("http://{address}/api/files/upload?{query}"))
+                    .header("content-type", "multipart/form-data; boundary=b")
+                    .config()
+                    .http_status_as_error(false)
+                    .build()
+                    .send(body.as_bytes())
+                    .unwrap();
+                let status = response.status().as_u16();
+                let v = serde_json::from_str(&response.body_mut().read_to_string().unwrap()).unwrap();
+                (status, v)
+            };
+            let (status, first) = send("relpath=Game%2Feboot.bin", "eboot.bin", "one");
+            assert_eq!(status, 200, "{first}");
+            let id = first["upload_id"].as_str().unwrap().to_string();
+            let root = std::path::PathBuf::from(first["root"].as_str().unwrap());
+            assert_eq!(root.file_name().unwrap(), "Game");
+            let (status, second) =
+                send(&format!("upload_id={id}&relpath=Game%2Fsce_sys%2Fparam.json"), "param.json", "two");
+            assert_eq!(status, 200, "{second}");
+            assert_eq!(second["upload_id"], id.as_str());
+            assert_eq!(std::fs::read(root.join("eboot.bin")).unwrap(), b"one");
+            assert_eq!(std::fs::read(root.join("sce_sys").join("param.json")).unwrap(), b"two");
+            let (status, _) = send(&format!("upload_id={id}&relpath=..%2Fescape"), "x", "x");
+            assert_eq!(status, 400);
+            let (status, _) = send(&format!("upload_id={}&relpath=a", Uuid::new_v4()), "a", "a");
+            assert_eq!(status, 404);
+            ureq::delete(format!("http://{address}/api/files/upload/{id}")).call().unwrap();
+            assert!(!root.exists());
+        })
+        .await;
+        server.abort();
+        result.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod addon_verify_tests {
+    use super::{
+        addon_appmeta_path, addon_label, artifact_wait_loop, ArtifactObservation, ArtifactWait,
+    };
+    use std::time::Duration;
+
+    fn obs(matched: bool, answered: bool, seen_bytes: u64) -> ArtifactObservation {
+        ArtifactObservation {
+            matched,
+            unsupported: false,
+            answered,
+            seen_bytes,
+            check: if matched { "match" } else { "absent" },
+        }
+    }
+
+    #[test]
+    fn the_label_is_the_content_ids_last_part() {
+        assert_eq!(
+            addon_label("EP3969-PPSA11386_00-007FLCOSTUME0001").as_deref(),
+            Some("007FLCOSTUME0001")
+        );
+        assert_eq!(
+            addon_appmeta_path("PPSA11386", "007FLCOSTUME0001"),
+            "/user/appmeta/addcont/PPSA11386/007FLCOSTUME0001"
+        );
+        assert_eq!(addon_label("EP3969-PPSA11386_00-"), None);
+        assert_eq!(addon_label("PPSA11386"), None);
+        assert_eq!(addon_label("EP3969-PPSA11386_00-../../x"), None);
+    }
+
+    /// #776: an add-on with nothing on a drive ends when the idle window runs out, with how the
+    /// wait went, instead of holding the job at 99%.
+    #[test]
+    fn nothing_found_ends_at_the_idle_window() {
+        let mut n = 0;
+        let r = artifact_wait_loop(
+            &mut || {
+                n += 1;
+                obs(false, true, 0)
+            },
+            Duration::from_millis(30),
+            Duration::from_secs(5),
+            Duration::from_millis(5),
+            &|| false,
+        );
+        assert_eq!(r.outcome, ArtifactWait::NotSeen);
+        assert!(!r.hit_ceiling);
+        assert!(r.checks >= 2 && r.checks as usize == n, "{r:?}");
+        assert_eq!(r.last_check, "absent");
+        assert!(r.waited_ms >= 30 && r.waited_ms < 5_000, "{r:?}");
+    }
+
+    #[test]
+    fn found_ends_at_once() {
+        let mut calls = 0;
+        let r = artifact_wait_loop(
+            &mut || {
+                calls += 1;
+                obs(calls == 3, true, 0)
+            },
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+            Duration::from_millis(1),
+            &|| false,
+        );
+        assert_eq!(r.outcome, ArtifactWait::Landed);
+        assert_eq!(r.checks, 3);
+    }
+
+    /// Growth and a silent console both restart the window; the ceiling still ends it.
+    #[test]
+    fn growth_or_silence_waits_but_the_ceiling_ends_it() {
+        let mut seen = 0u64;
+        let r = artifact_wait_loop(
+            &mut || {
+                seen += 1;
+                obs(false, true, seen)
+            },
+            Duration::from_millis(20),
+            Duration::from_millis(80),
+            Duration::from_millis(2),
+            &|| false,
+        );
+        assert_eq!(r.outcome, ArtifactWait::NotSeen);
+        assert!(r.hit_ceiling, "{r:?}");
+        assert!(r.most_seen > 1);
+
+        let r = artifact_wait_loop(
+            &mut || obs(false, false, 0),
+            Duration::from_millis(20),
+            Duration::from_millis(80),
+            Duration::from_millis(2),
+            &|| false,
+        );
+        assert_eq!(r.outcome, ArtifactWait::NotSeen);
+        assert!(r.hit_ceiling, "{r:?}");
+    }
+
+    #[test]
+    fn a_stop_ends_it() {
+        let r = artifact_wait_loop(
+            &mut || obs(false, false, 0),
+            Duration::from_secs(60),
+            Duration::from_secs(60),
+            Duration::from_millis(1),
+            &|| true,
+        );
+        assert_eq!(r.outcome, ArtifactWait::NotSeen);
+        assert_eq!(r.checks, 1);
     }
 }

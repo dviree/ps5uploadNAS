@@ -148,7 +148,11 @@ pub(crate) fn name_problem(name: &str) -> Option<&'static str> {
 /// file may also be a folder, and on a case-insensitive drive (`fold_case`) no two may differ
 /// only by case. The error names the file.
 fn check_paths(tree: &dyn SourceTree, fold_case: bool) -> Result<(), String> {
-    let windows = cfg!(windows);
+    check_paths_for(tree, fold_case, cfg!(windows))
+}
+
+/// [`check_paths`] for a drive that holds Windows names only when `windows` (a share).
+fn check_paths_for(tree: &dyn SourceTree, fold_case: bool, windows: bool) -> Result<(), String> {
     let mut seen: HashSet<String> = HashSet::new();
     let mut dirs: HashSet<String> = HashSet::new();
     let key = |p: &str| {
@@ -413,17 +417,242 @@ fn verify(
 }
 
 /// Writes `tree` as the folder `target`: checked, written into `<target>.partial/`, read back
-/// against a source `reopen` opens afresh (or, without `reopen`, against `tree` itself: an LZ4
-/// pack overlay, which no fresh source reproduces), then renamed. `stage(id, done, total)` reports
+/// against a source `reopen` opens afresh, then renamed. `stage(id, done, total)` reports
 /// `write` and `verify`. The caller has claimed the `.partial` (`fpkg_api::Writing`); on any
 /// failure it is removed here.
+#[cfg(test)]
 pub(crate) fn build(
     tree: &mut dyn SourceTree,
-    reopen: Option<&dyn Fn() -> Result<Box<dyn SourceTree>, String>>,
+    reopen: &dyn Fn() -> Result<Box<dyn SourceTree>, String>,
     target: &Path,
     mode: VerifyMode,
     cancel: &AtomicBool,
     stage: &mut dyn FnMut(&str, u64, u64),
+) -> Result<FolderBuilt, String> {
+    build_to(tree, reopen, &FolderOut::Local(target), mode, cancel, stage)
+}
+
+/// [`build`], to a folder on this computer or on a saved server.
+pub(crate) fn build_to(
+    tree: &mut dyn SourceTree,
+    reopen: &dyn Fn() -> Result<Box<dyn SourceTree>, String>,
+    out: &FolderOut,
+    mode: VerifyMode,
+    cancel: &AtomicBool,
+    stage: &mut dyn FnMut(&str, u64, u64),
+) -> Result<FolderBuilt, String> {
+    // A libSceAmpr game gets a fresh ampr_emu.index, as an image and a package do (#449): a stale
+    // one crashes the game. The read-back makes the same index from the source opened again.
+    let mtime = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs() as i64);
+    // A PS4 game's folder needs the param.json ShadowMount+ reads, as its image does. The
+    // read-back adds the same file to the source opened again.
+    let mut ps4 =
+        ps5upload_fpkg::ps4_param::Ps4Params::wrap(&mut *tree).map_err(|e| e.to_string())?;
+    let tree: &mut dyn SourceTree = match ps4.as_mut() {
+        Some(p) => p,
+        None => tree,
+    };
+    if let Some(mut indexed) = crate::image_build::AmprIndexed::wrap_at(&mut *tree, mtime)? {
+        return build_tree(&mut indexed, reopen, Some(mtime), out, mode, cancel, stage);
+    }
+    build_tree(tree, reopen, None, out, mode, cancel, stage)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_tree(
+    tree: &mut dyn SourceTree,
+    reopen: &dyn Fn() -> Result<Box<dyn SourceTree>, String>,
+    index_mtime: Option<i64>,
+    out: &FolderOut,
+    mode: VerifyMode,
+    cancel: &AtomicBool,
+    stage: &mut dyn FnMut(&str, u64, u64),
+) -> Result<FolderBuilt, String> {
+    write_checked_to(
+        tree,
+        out,
+        cancel,
+        stage,
+        &mut |written, listed, empty_dirs, stage| {
+            let mut fresh = reopen()?;
+            let mut ps4 = ps5upload_fpkg::ps4_param::Ps4Params::wrap(&mut *fresh)
+                .map_err(|e| e.to_string())?;
+            let plain: &mut dyn SourceTree = match ps4.as_mut() {
+                Some(p) => p,
+                None => &mut *fresh,
+            };
+            let mut indexed = match index_mtime {
+                Some(m) => crate::image_build::AmprIndexed::wrap_at(&mut *plain, m)?,
+                None => None,
+            };
+            let source: &mut dyn SourceTree = match indexed.as_mut() {
+                Some(i) => i,
+                None => plain,
+            };
+            match written {
+                Written::Dir(partial) => {
+                    let summary = verify(
+                        partial,
+                        listed,
+                        empty_dirs,
+                        source,
+                        mode,
+                        cancel,
+                        &mut |d, t| stage("verify", d, t),
+                    )?;
+                    Ok(describe(&summary))
+                }
+                Written::Tree(mut got) => {
+                    same_empty_dirs(&*got, empty_dirs)?;
+                    verify_trees(&mut *got, source, mode, cancel, &mut |d, t| {
+                        stage("verify", d, t)
+                    })
+                }
+            }
+        },
+    )
+}
+
+/// The empty folders read back are the ones written.
+fn same_empty_dirs(got: &dyn SourceTree, want: &[String]) -> Result<(), String> {
+    let norm = |v: &[String]| {
+        let mut v: Vec<String> = v.iter().map(|d| d.trim_matches('/').to_string()).collect();
+        v.sort();
+        v
+    };
+    let (got, want) = (norm(got.empty_dirs()), norm(want));
+    match want.iter().find(|d| got.binary_search(d).is_err()) {
+        Some(d) => Err(format!("the empty folder {d} is missing")),
+        None => Ok(()),
+    }
+}
+
+/// How a read-back went, for the job's detail.
+fn describe(summary: &VerifySummary) -> String {
+    match summary.mode {
+        VerifyMode::Full => "SHA-256 checked in full".to_string(),
+        VerifyMode::Fast { .. } => summary.describe(),
+    }
+}
+
+/// The folder a build wrote, as its check gets it: the `.partial` folder on this computer, or
+/// the folder on a server read back as a tree.
+pub(crate) enum Written<'a> {
+    Dir(&'a Path),
+    Tree(Box<dyn SourceTree>),
+}
+
+/// The read-back of a folder [`write_checked_to`] wrote: given the folder written, the files
+/// written (path, size), the empty folders and the stage reporter, the check's description or
+/// why it failed.
+pub(crate) type Check<'a> = dyn FnMut(
+        Written<'_>,
+        &[(String, u64)],
+        &[String],
+        &mut dyn FnMut(&str, u64, u64),
+    ) -> Result<String, String>
+    + 'a;
+
+/// Writes `tree` as a folder: its paths checked, written into `<target>.partial/` on this
+/// computer (or, on a server, as [`crate::server_out::write_folder`] writes it), `check`ed there,
+/// then renamed. `stage` reports `write` (and whatever `check` reports). The caller has claimed
+/// the `.partial`; on any failure it is removed here.
+pub(crate) fn write_checked_to(
+    tree: &mut dyn SourceTree,
+    out: &FolderOut,
+    cancel: &AtomicBool,
+    stage: &mut dyn FnMut(&str, u64, u64),
+    check: &mut Check,
+) -> Result<FolderBuilt, String> {
+    match out {
+        FolderOut::Local(target) => write_checked_here(tree, target, cancel, stage, check),
+        FolderOut::Server(to) => crate::server_out::write_folder(tree, to, cancel, stage, check),
+    }
+}
+
+/// Where a folder build writes.
+pub(crate) enum FolderOut<'a> {
+    /// A folder on this computer, written as `<target>.partial/` and renamed.
+    Local(&'a Path),
+    /// A folder on a saved server.
+    Server(&'a crate::server_out::ServerFolder<'a>),
+}
+
+impl FolderOut<'_> {
+    /// For logs.
+    pub(crate) fn describe(&self) -> String {
+        match self {
+            Self::Local(p) => p.display().to_string(),
+            Self::Server(to) => to.dest.url(&to.dest.path_of(&to.name)),
+        }
+    }
+}
+
+/// [`check_paths_for`] for the server folder builds.
+pub(crate) fn check_server_paths(tree: &dyn SourceTree, windows: bool) -> Result<(), String> {
+    // A share folds case; other servers may: two names one case apart are refused everywhere.
+    check_paths_for(tree, true, windows)
+}
+
+fn write_checked_here(
+    tree: &mut dyn SourceTree,
+    target: &Path,
+    cancel: &AtomicBool,
+    stage: &mut dyn FnMut(&str, u64, u64),
+    check: &mut Check,
+) -> Result<FolderBuilt, String> {
+    write_checked_here_with(tree, target, cancel, stage, &mut |_, w, l, e, s| check(w, l, e, s))
+}
+
+/// [`Check`] given the tree written too (this fork: the LZ4 folder build reads back against it).
+type CheckWith<'a> = dyn FnMut(
+        &mut dyn SourceTree,
+        Written<'_>,
+        &[(String, u64)],
+        &[String],
+        &mut dyn FnMut(&str, u64, u64),
+    ) -> Result<String, String>
+    + 'a;
+
+/// This fork: writes an LZ4 pack overlay as the folder `target` and reads it back against the
+/// overlay itself, which no freshly opened source reproduces. No ampr_emu.index or PS4
+/// param.json is added: the packs' own ampr_assets.index is the game's index.
+pub(crate) fn build_packed(
+    tree: &mut dyn SourceTree,
+    target: &Path,
+    mode: VerifyMode,
+    cancel: &AtomicBool,
+    stage: &mut dyn FnMut(&str, u64, u64),
+) -> Result<FolderBuilt, String> {
+    write_checked_here_with(
+        tree,
+        target,
+        cancel,
+        stage,
+        &mut |tree, written, listed, empty_dirs, stage| match written {
+            Written::Dir(partial) => verify(
+                partial,
+                listed,
+                empty_dirs,
+                tree,
+                mode,
+                cancel,
+                &mut |d, t| stage("verify", d, t),
+            )
+            .map(|s| describe(&s)),
+            Written::Tree(_) => Err("an LZ4 folder is written on this computer only".into()),
+        },
+    )
+}
+
+fn write_checked_here_with(
+    tree: &mut dyn SourceTree,
+    target: &Path,
+    cancel: &AtomicBool,
+    stage: &mut dyn FnMut(&str, u64, u64),
+    check: &mut CheckWith,
 ) -> Result<FolderBuilt, String> {
     if tree.files().is_empty() {
         return Err(format!("{} has no files in it", tree.describe()));
@@ -469,20 +698,7 @@ pub(crate) fn build(
             return Err("cancelled".into());
         }
 
-        let mut fresh = reopen.map(|r| r()).transpose()?;
-        let summary = verify(
-            &partial,
-            &listed,
-            &empty_dirs,
-            match fresh.as_mut() {
-                Some(f) => &mut **f,
-                None => &mut *tree,
-            },
-            mode,
-            cancel,
-            &mut |d, t| stage("verify", d, t),
-        )?;
-        drop(fresh);
+        let checked = check(&mut *tree, Written::Dir(&partial), &listed, &empty_dirs, stage)?;
         std::fs::remove_file(partial.join(MARKER)).map_err(|e| e.to_string())?;
         if target.exists() {
             return Err(format!(
@@ -495,13 +711,9 @@ pub(crate) fn build(
             files: listed.len() as u64,
             bytes: total,
             detail: format!(
-                "{} files, {} empty folders, {total} bytes, {}",
+                "{} files, {} empty folders, {total} bytes, {checked}",
                 listed.len(),
                 empty_dirs.len(),
-                match summary.mode {
-                    VerifyMode::Full => "SHA-256 checked in full".to_string(),
-                    VerifyMode::Fast { .. } => summary.describe(),
-                }
             ),
         })
     })();
@@ -512,6 +724,79 @@ pub(crate) fn build(
         Err(_) if cancel.load(Ordering::Relaxed) => Err("cancelled".into()),
         r => r,
     }
+}
+
+/// Compares two trees: `got` must hold exactly `want`'s files at their sizes (a file named
+/// [`MARKER`] in `got` aside), and the SHA-256 of what `mode` samples (or of every byte) must
+/// match. `progress(done, total)` as [`verify`] reports it. The description of the check.
+pub(crate) fn verify_trees(
+    got: &mut dyn SourceTree,
+    want: &mut dyn SourceTree,
+    mode: VerifyMode,
+    cancel: &AtomicBool,
+    progress: &mut dyn FnMut(u64, u64),
+) -> Result<String, String> {
+    let mut listed: Vec<(String, u64)> = want
+        .files()
+        .iter()
+        .map(|f| (f.path.clone(), f.size))
+        .collect();
+    listed.sort();
+    let mut have: Vec<(String, u64)> = got
+        .files()
+        .iter()
+        .filter(|f| f.path != MARKER)
+        .map(|f| (f.path.clone(), f.size))
+        .collect();
+    have.sort();
+    if have != listed {
+        // Both sorted: a binary search each, not a scan of one list per entry of the other
+        // (hundreds of thousands of files).
+        let missing = listed.iter().find(|f| have.binary_search(f).is_err());
+        let extra = have.iter().find(|f| listed.binary_search(f).is_err());
+        return Err(match (missing, extra) {
+            (Some((p, s)), _) => format!("{p} ({s} bytes) did not read back"),
+            (None, Some((p, s))) => format!("{p} ({s} bytes) read back but is not in the source"),
+            (None, None) => "the files read back differ from the source".to_string(),
+        });
+    }
+    let summary = sample::summary(&listed, mode);
+    let pieces: Vec<(usize, u64, u64)> = match mode {
+        VerifyMode::Full => listed
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.1 > 0)
+            .map(|(i, f)| (i, 0, f.1))
+            .collect(),
+        VerifyMode::Fast { seed, seam } => sample::plan(&listed, seed, seam)
+            .into_iter()
+            .map(|s| {
+                let (at, len) = s.range(listed[s.file_idx].1);
+                (s.file_idx, at, len)
+            })
+            .collect(),
+    };
+    let total = summary.checked_bytes;
+    let mut done = 0u64;
+    progress(0, total);
+    for (i, at, len) in pieces {
+        let path = &listed[i].0;
+        let (a, b) = {
+            let mut sides = BothSides::new(done, total, &mut *progress);
+            let a = hash_source(want, path, at, len, cancel, &mut |n| sides.read(n))?;
+            let b = hash_source(got, path, at, len, cancel, &mut |n| sides.read(n))?;
+            (a, b)
+        };
+        if a != b {
+            return Err(format!(
+                "{path} (bytes {at}..{}) reads back differently from the source",
+                at + len
+            ));
+        }
+        done += len;
+        progress(done, total);
+    }
+    Ok(describe(&summary))
 }
 
 /// Saves the one file `path` (`size` bytes) of `tree` as the file `target` (#479, the image
@@ -670,9 +955,8 @@ mod tests {
             &mut control,
         )
         .unwrap();
-        build(
+        build_packed(
             &mut overlay,
-            None,
             &target,
             VerifyMode::Full,
             &cancel,
@@ -746,7 +1030,7 @@ mod tests {
         let mut stages: Vec<String> = Vec::new();
         let r = build(
             &mut *tree,
-            Some(&reopen),
+            &reopen,
             target,
             mode,
             &cancel,
@@ -760,6 +1044,187 @@ mod tests {
             assert_eq!(stages, ["write", "verify"]);
         }
         r
+    }
+
+    /// A PS4 fixture package of ps5upload-fpkg (tests/fixtures/ps4), written to `dir`.
+    fn ps4_fixture(dir: &Path, name: &str) -> std::path::PathBuf {
+        let gz: &[u8] = match name {
+            "synthetic" => {
+                include_bytes!("../../ps5upload-fpkg/tests/fixtures/ps4/synthetic.pkg.gz")
+            }
+            "update" => include_bytes!("../../ps5upload-fpkg/tests/fixtures/ps4/update.pkg.gz"),
+            "addon" => include_bytes!("../../ps5upload-fpkg/tests/fixtures/ps4/addon.pkg.gz"),
+            _ => panic!("no fixture {name}"),
+        };
+        let mut bytes = Vec::new();
+        std::io::Read::read_to_end(&mut flate2::read::GzDecoder::new(gz), &mut bytes).unwrap();
+        let path = dir.join(format!("{name}.pkg"));
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    /// A PS4 game with its update merged in becomes one folder at the update's version, with
+    /// the param.json ShadowMount+ reads, and reads back against the merge opened again; an
+    /// add-on becomes a folder of its files alone.
+    #[test]
+    fn a_ps4_update_merges_into_its_game_folder_and_an_addon_unpacks() {
+        let root = scratch("ps4merge");
+        let (game, update, addon) = (
+            ps4_fixture(&root, "synthetic"),
+            ps4_fixture(&root, "update"),
+            ps4_fixture(&root, "addon"),
+        );
+        let target = root.join("merged");
+        let (mut tree, _, _) =
+            ps5upload_fpkg::module_case::open_with_update(&game, Some(&update)).unwrap();
+        let (g, u) = (game.clone(), update.clone());
+        let reopen = move || {
+            ps5upload_fpkg::module_case::open_with_update(&g, Some(&u))
+                .map(|(t, _, _)| t)
+                .map_err(|e| e.to_string())
+        };
+        let cancel = AtomicBool::new(false);
+        build(
+            &mut *tree,
+            &reopen,
+            &target,
+            VerifyMode::Full,
+            &cancel,
+            &mut |_, _, _| {},
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(target.join("eboot.bin")).unwrap(),
+            b"\x7fELF patched eboot 01.05"
+        );
+        assert_eq!(
+            std::fs::read(target.join("data/added.bin")).unwrap(),
+            b"added by the update"
+        );
+        assert!(
+            target.join("data/empty.bin").is_file(),
+            "the game's own file"
+        );
+        let sfo = std::fs::read(target.join("sce_sys/param.sfo")).unwrap();
+        let params = ps5upload_pkg::sfo_params(&sfo).unwrap();
+        let text = |k: &str| ps5upload_fpkg::ps4_pkg::sfo_text(&params, k).unwrap();
+        assert_eq!(
+            (text("CATEGORY"), text("APP_VER")),
+            ("gd".into(), "01.05".into())
+        );
+        let json = std::fs::read_to_string(target.join("sce_sys/param.json")).unwrap();
+        assert!(json.contains("CUSA99990"), "{json}");
+
+        let target = root.join("addon");
+        let mut tree = ps5upload_fpkg::source::open(&addon).unwrap();
+        let a = addon.clone();
+        let reopen = move || ps5upload_fpkg::source::open(&a).map_err(|e| e.to_string());
+        build(
+            &mut *tree,
+            &reopen,
+            &target,
+            VerifyMode::Full,
+            &cancel,
+            &mut |_, _, _| {},
+        )
+        .unwrap();
+        let (files, _) = snapshot(&target);
+        let names: Vec<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
+        assert_eq!(
+            names,
+            ["dlc/map.bin", "dlc/readme.txt"],
+            "no sce_sys, no param.json"
+        );
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// A libSceAmpr game's stale index doesn't reach the folder, and the read-back sees the same
+    /// fresh one; an LZ4-packed game's index is kept, since it also lists what is in the packs.
+    #[test]
+    fn a_stale_ampr_index_is_replaced_unless_the_game_is_packed() {
+        let root = scratch("ampr");
+        let src = root.join("PPSA77778");
+        std::fs::create_dir_all(src.join("sce_sys")).unwrap();
+        let mut eboot = vec![7u8; 5000];
+        eboot[1000..1014].copy_from_slice(b"libSceAmpr.prx");
+        std::fs::write(src.join("eboot.bin"), &eboot).unwrap();
+        std::fs::write(src.join("sce_sys/param.json"), b"{}").unwrap();
+        std::fs::write(src.join("ampr_emu.index"), b"stale").unwrap();
+        let run = |name: &str| {
+            let target = root.join(name);
+            let mut tree = FolderSource::open(&src).unwrap();
+            let again = src.clone();
+            let reopen = move || -> Result<Box<dyn SourceTree>, String> {
+                Ok(Box::new(
+                    FolderSource::open(&again).map_err(|e| e.to_string())?,
+                ))
+            };
+            build(
+                &mut tree,
+                &reopen,
+                &target,
+                VerifyMode::Full,
+                &AtomicBool::new(false),
+                &mut |_, _, _| {},
+            )
+            .unwrap();
+            std::fs::read(target.join("ampr_emu.index")).unwrap()
+        };
+        let fresh = ps5upload_fpkg::ampr_index::parse(&run("fresh")).expect("a real index");
+        assert!(fresh
+            .iter()
+            .any(|e| e.path == "eboot.bin" && e.size == 5000));
+        std::fs::write(src.join("ampr_assets.index"), b"AMPRPAK4 and the rest").unwrap();
+        assert_eq!(run("packed"), b"stale");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// An unsigned eboot in a game unpacked to a folder comes out fake-signed, and the folder
+    /// verifies: the verify stage reopens the source and must see the same bytes the write did.
+    #[test]
+    fn an_unsigned_eboot_is_fake_signed_and_the_folder_verifies() {
+        let root = scratch("unsigned");
+        let src = root.join("PPSA77776");
+        std::fs::create_dir_all(src.join("sce_sys")).unwrap();
+        let mut elf: Vec<u8> = (0..0x3000u32).map(|i| (i * 7 + 3) as u8).collect();
+        elf[..0x78].fill(0);
+        elf[..8].copy_from_slice(&[0x7F, b'E', b'L', b'F', 2, 1, 1, 9]);
+        elf[0x10..0x12].copy_from_slice(&0xFE10u16.to_le_bytes());
+        elf[0x12..0x14].copy_from_slice(&0x3Eu16.to_le_bytes());
+        elf[0x14..0x18].copy_from_slice(&1u32.to_le_bytes());
+        elf[0x20..0x28].copy_from_slice(&0x40u64.to_le_bytes());
+        elf[0x34..0x36].copy_from_slice(&0x40u16.to_le_bytes());
+        elf[0x36..0x38].copy_from_slice(&0x38u16.to_le_bytes());
+        elf[0x38..0x3A].copy_from_slice(&1u16.to_le_bytes());
+        elf[0x40..0x44].copy_from_slice(&1u32.to_le_bytes());
+        elf[0x48..0x50].copy_from_slice(&0x1000u64.to_le_bytes());
+        elf[0x60..0x68].copy_from_slice(&0x2000u64.to_le_bytes());
+        std::fs::write(src.join("eboot.bin"), &elf).unwrap();
+        std::fs::write(src.join("sce_sys/param.json"), b"{}").unwrap();
+
+        let (mut tree, _, signing) = ps5upload_fpkg::module_case::open(&src).unwrap();
+        assert_eq!(signing.signed, ["eboot.bin"]);
+        let path = src.clone();
+        let reopen = move || {
+            ps5upload_fpkg::module_case::open(&path)
+                .map(|(t, _, _)| t)
+                .map_err(|e| e.to_string())
+        };
+        let target = root.join("out");
+        build(
+            &mut *tree,
+            &reopen,
+            &target,
+            VerifyMode::Full,
+            &AtomicBool::new(false),
+            &mut |_, _, _| {},
+        )
+        .unwrap();
+        let out = std::fs::read(target.join("eboot.bin")).unwrap();
+        assert_eq!(out[..4], [0x4F, 0x15, 0x3D, 0x1D]);
+        assert!(out.windows(0x2000).any(|w| w == &elf[0x1000..0x3000]));
+        assert_eq!(std::fs::read(src.join("eboot.bin")).unwrap(), elf);
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     /// An image whose module the eboot loads in another letter case unpacks with the eboot's
@@ -791,17 +1256,17 @@ mod tests {
         )
         .unwrap();
         let target = root.join("out");
-        let (mut tree, renamed) = ps5upload_fpkg::module_case::open(&image).unwrap();
+        let (mut tree, renamed, _) = ps5upload_fpkg::module_case::open(&image).unwrap();
         assert_eq!(renamed.len(), 1);
         let path = image.clone();
         let reopen = move || {
             ps5upload_fpkg::module_case::open(&path)
-                .map(|(t, _)| t)
+                .map(|(t, _, _)| t)
                 .map_err(|e| e.to_string())
         };
         build(
             &mut *tree,
-            Some(&reopen),
+            &reopen,
             &target,
             VerifyMode::Full,
             &AtomicBool::new(false),
@@ -890,7 +1355,7 @@ mod tests {
         let cancel = AtomicBool::new(false);
         let err = build(
             &mut tree,
-            Some(&reopen),
+            &reopen,
             &target,
             VerifyMode::Full,
             &cancel,
@@ -1025,7 +1490,7 @@ mod tests {
             let mut tree = listed(&paths);
             let err = build(
                 &mut tree,
-                Some(&reopen),
+                &reopen,
                 &target,
                 VerifyMode::Full,
                 &AtomicBool::new(false),
@@ -1041,7 +1506,7 @@ mod tests {
             let mut tree = listed(paths);
             assert!(build(
                 &mut tree,
-                Some(&reopen),
+                &reopen,
                 &target,
                 VerifyMode::Full,
                 &AtomicBool::new(false),

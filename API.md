@@ -71,7 +71,7 @@ Every operation in the document carries `x-ps5upload.access`:
 | `loopback` | Most routes. This computer and the `PS5UPLOAD_ALLOW_IP` addresses. |
 | `strict-local` | Also tagged `strict-local`. Remote Play start, stop, frame, input, passcode, keyboard, microphone, the live feed, virtual keyboard and mouse. This computer alone, unless `PS5UPLOAD_ALLOW_AUTOMATION=1`. |
 | `host-checked` | Play Together's and Go live's host routes. This computer, addressed by a loopback name or one in `PS5UPLOAD_ALLOW_HOST`, and the `PS5UPLOAD_ALLOW_IP` addresses. |
-| `lan-open` | `/pkg-host/*` (package bytes for the console), `/pad`, `/api/pad/ws`, `/join`, `/api/join/ws` (a phone or a friend, which check their own key or invite). |
+| `lan-open` | `/pkg-host/*` (package bytes for the console), `/pad`, `/api/pad/ws`, `/join`, `/api/join/ws`, `/share`, `/api/share/ws` (a phone or a friend, which check their own key or invite; a Share serves only what the sender allowed). |
 | `mcp` | `/mcp`. Like `loopback`, and a browser may reach it only from this computer. |
 
 Two routes are left out of the document and refused by the MCP tools, because they hand out the
@@ -249,6 +249,37 @@ curl -N http://127.0.0.1:19113/api/events
 
 `GET /api/event-journal?since_seq=&limit=` reads the same journal as a list.
 
+## Log levels
+
+The app, the engine and the PS5 helper share one setting: a level (`error`, `warn`, `info`,
+`debug`, `trace`) for everything, plus per-category overrides. The categories are `general`, `api`,
+`connection`, `helper`, `rp` (Remote Play), `pairing`, `wake`, `transfer`, `install`, `cleanup`,
+`files`, `convert`, `together`, `golive`, `mesh` and `ui`. A line is written when its level is at
+most its category's.
+
+Anything above `info` is a raise and ends by itself: after `minutes` (default 60) or at `until_ms`,
+never more than a day. Levels at `info` or below stay until changed. The engine keeps the setting
+on disk, the app follows it, and the engine hands it to each helper it talks to (a helper from
+before 11.5 keeps its own fixed level).
+
+```sh
+curl http://127.0.0.1:19113/api/logs/level
+# Remote Play and the helper at trace for 30 minutes, the rest unchanged:
+curl -X PUT http://127.0.0.1:19113/api/logs/level -H 'Content-Type: application/json' \
+  -d '{"categories":{"rp":"trace","helper":"trace"},"merge":true,"minutes":30}'
+# Back to info everywhere:
+curl -X PUT http://127.0.0.1:19113/api/logs/level -H 'Content-Type: application/json' -d '{"reset":true}'
+# The engine's newest Remote Play lines at debug or more severe, from the last 10 minutes:
+curl "http://127.0.0.1:19113/api/logs/recent?level=debug&category=rp&since_ms=$(( ($(date +%s) - 600) * 1000 ))"
+```
+
+`/api/logs/recent` answers `{lines: [{seq, ts_ms, level, cat, msg}], count, next_seq, levels}`; pass
+`since_seq=<next_seq>` to read on. Every line has its secrets taken out where it is written
+(passwords in URLs, secret-named fields, bearer tokens, pairing PINs). The engine's request log
+(one `debug` line per call, category `api`) is always kept in `engine.log`, whatever the level, as
+the trace for a crash. `POST /api/diag/log-level` (Detailed logs) still works: on raises the global
+level to `debug`.
+
 ## Route families
 
 Each operation's first tag is its family. `GET /api/openapi.json` has every route; these are the
@@ -256,8 +287,8 @@ places to start.
 
 | Family | Routes | What it's for |
 |---|---|---|
-| `engine` | `/api/version`, `/api/events`, `/api/event-journal`, `/api/engine-logs`, `/api/diag/*`, `/api/metrics`, `/api/openapi.json`, `/api/mgmt/call` | The engine itself. `/api/mgmt/call` is the raw helper call, for when nothing else fits. |
-| `consoles` | `/api/consoles`, `/api/discover`, `/api/ps5/status`, `/api/ps5/readiness`, `/api/ps5/volumes` | Which consoles there are and how they stand. |
+| `engine` | `/api/version`, `/api/events`, `/api/event-journal`, `/api/engine-logs`, `/api/logs/*`, `/api/diag/*`, `/api/metrics`, `/api/openapi.json`, `/api/mgmt/call` | The engine itself. `/api/mgmt/call` is the raw helper call, for when nothing else fits. |
+| `consoles` | `/api/consoles`, `/api/discover`, `/api/ps5/status`, `/api/ps5/readiness`, `/api/ps5/volumes`, `/api/ps5/connect-timings` | Which consoles there are and how they stand. See [Consoles, Tailscale and new devices](#consoles-tailscale-and-new-devices). |
 | `console-files` | `/api/ps5/list-dir`, `/api/ps5/fs/*`, `/api/ps5/disk-usage`, `/api/ps5/console-shares` | Files on the console. |
 | `transfer` | `/api/transfer/*`, `/api/files/upload`, `/api/link/*`, `/api/zip/*`, `/api/7z/*`, `/api/rar/*` | Uploads and downloads. |
 | `jobs` | `/api/jobs/*`, `/api/ops/*`, `/api/ps5/console-tasks`, `/api/activity` | Following and stopping work. |
@@ -270,12 +301,61 @@ places to start.
 | `health` | `/api/ps5/health/*`, `/api/ps5/cleanup/*`, `/api/net/*` | Checks, clean-up, network diagnosis. |
 | `remote-play` | `/api/ps5/rp/*`, `/api/ps5/vinput/*`, `/api/ps5/remoteplay/*` | Sessions, picture, input. See [AUTOMATION.md](AUTOMATION.md). |
 | `play-together`, `go-live` | `/api/join/*`; `/api/stream/*` | Friends joining; streaming to other sites. |
+| `share` | `/api/share/*` | An app's things sent to a friend, and things received. See [Share](#share). |
 | `workshop` | `/api/fpkg/*`, `/api/exfat/*`, `/api/folder/*`, `/api/fakelibs/*`, `/api/ampr/*`, `/api/backport/*` | Package conversion, images, backporting. |
 | `collection`, `this-computer` | `/api/collection/*`; `/api/local/*` | Game folders and files on this computer. |
 | `mesh` | `/api/mesh/*`, `/api/drive/*` | Devices sharing a console, and Mesh Drive. |
 | `remote-sources` | `/api/remote/*` | NAS and other servers. |
+| `tailnet` | `/api/tailnet`, `/api/tailnet/*` | This device on Tailscale, and the consoles on its tailnet. (The console's own node is `/api/ps5/tailnet`.) |
 | `settings`, `users`, `pairing` | `/api/settings`, `/api/shared/*`; `/api/profile/*`; `/api/ava1/*` | Settings, console users, pairing. |
 | `console-tools`, `hearbridge`, `shadowmount` | `/api/ps5/shell/run`, `/api/ps5/klog`, `/api/ps5/net/*` and the rest of `/api/ps5/*`; `/api/ps5/hearbridge/*`; `/api/ps5/smp/*` | Everything else on the console. |
+
+## Consoles, Tailscale and new devices
+
+- `GET /api/ps5/connect-timings[?addr=]`: the last status check of each console, phase by phase
+  (session reused or opened, a remembered verdict, a plain connect, the status call), with the path
+  (`lan` or `tailnet`) and the helper version. It sends nothing to a console. A status read that
+  times out while the helper is only busy answers `reason: "status_slow"`: hold what you knew.
+- `GET /api/ava1/console?addr=`: which console answers at an address, as `{key, name}` (its AVA1
+  identity key in hex, the same at every address), without pairing. 502 when nothing answers.
+- `GET /api/tailnet/consoles[?refresh=1&all=1&addr=]`: the PS5Upload consoles on this device's
+  Tailscale network, each with its tailnet and home address, whether its helper answered over
+  Tailscale (`reachable`), its key (`id`) and its console-list entry (`listed`). `backend` says how
+  this device is on Tailscale and `can_list` whether a device list could be read (not with only
+  the system Tailscale app: pass `addr=` instead). Answered from the last minute unless
+  `refresh=1`. Asking pairs nothing and shows nothing on the PS5.
+- `POST /api/tailnet/consoles/add {addr, name?}`: puts a console found on Tailscale (or a typed
+  `100.x` address or MagicDNS name) on the console list, one entry per console, at its home address
+  when one is known. `action` is `added`, `linked`, `merged` or `exists`; 400 `not_tailnet` for an
+  address that is neither.
+- The console's own Tailscale (`GET/POST /api/ps5/tailnet`) lists `blocked_recent`: devices its
+  list turned away. `op: "allow_add", ip` adds one to the list, `op: "blocked_ignore", ip` drops
+  it from the notice. This device's `POST /api/tailnet {op: "test_path", host, secs}` sends that
+  console through Tailscale for `secs` seconds (0 ends it); `GET /api/tailnet`'s
+  `consoles[].tested_at` (unix ms, 0 never) records the last time it was reached that way.
+- New devices: with `require_approval` on (`POST /api/mesh/settings`), a device that isn't on a
+  console's list is listed in `asks` of `GET /api/mesh` instead of being let in. `POST
+  /api/mesh/device {addr, op: "allow" | "decline", id}` answers it, from any device the console
+  already trusts; an allowed device gets in on its next try, within ten minutes. With approval off,
+  any device that reaches the helper is let in, as before. Each device in `devices` says how it was
+  let in (`via`: `network`, `tailscale`, `approved`, or empty for paired with a code).
+
+## Game frame rate
+
+The running game's frame rate is sampled: the engine reads the console display's frame count once
+a second and divides the frames by the time between reads (both taken on the console). It is the
+frames shown in each second, not single-frame times.
+
+- `GET /api/ps5/hw/fps?addr=`: `{state, fps, frames, interval_ms, at_ms, capture}`. Each call keeps
+  the engine sampling for 15 seconds, so the first one may answer `state: "starting"` with no `fps`.
+  `state` is `ok`, `no_game` (no game picture to count), `unsupported` (a helper older than this),
+  `offline` (with `error`), `no_device` or `failed`.
+- `POST /api/ps5/hw/fps/capture/start {addr}` and `.../capture/stop {addr}`: a capture keeps one row
+  a second (and the console's temperatures every 5 seconds) in the engine's memory until the next
+  start, for up to six hours. `capture.stats` has `min_fps`, `avg_fps` (all frames over all the
+  time), `low_1pct_fps` (the slowest 1% of seconds) and `max_fps`.
+- `GET /api/ps5/hw/fps/capture?addr=&since=N`: the rows from `N` on; `GET
+  /api/ps5/hw/fps/capture/csv?addr=`: the same as CSV. 404 `no_capture` when there is none.
 
 ## How far to trust the document
 
@@ -304,6 +384,66 @@ cd engine && cargo run -p ps5upload-apidoc
 Words the source can't give (a summary for a handler with no doc comment) go in
 `engine/crates/ps5upload-engine/api/overrides.json`.
 
+## Share
+
+Share sends an app's things to a friend: the app itself (homebrew only), its saves, screenshots and
+clips, cheats and which are on, controls, stream settings, and a note. The sender makes a link; the
+friend opens it and asks for some of the items; the sender allows or declines; only then do files go,
+directly between the two computers (a WebRTC data channel, DTLS-encrypted; the signalling hub only
+introduces them, and on the same network the friend may use the sender's `/api/share/ws`).
+
+**Retail games are refused by the engine**, whatever the request says. It reads how the app was
+built from its own PARAM (the folder's `sce_sys`, the package or the image; for an app installed on a
+console, `/user/app/<Title ID>`, the copy in `/user/appmeta/<Title ID>/` when the app's own is
+encrypted), never the Title ID or the publisher code, which homebrew often borrows, and never a field
+the request sends. Updates and add-ons carry their game's build and are refused too. The answer is
+403:
+
+```json
+{"error": "This is a retail game (PPSA01234). PS5Upload only shares homebrew.", "code": "retail", "title_id": "PPSA01234", "item": 0}
+```
+
+An app with no readable PARAM (an archive, an encrypted package) is refused the same way, with
+`"error": "PS5Upload can't confirm this is homebrew, so it can't share it."` and no `title_id`. Each
+app item in a share's view carries `build: {read, marks}` (the marks found), which the friend's
+engine checks again.
+
+The sender's side:
+
+```sh
+# Make a share: an app folder on the console, a save, a note. One friend, 24 hours.
+curl -s localhost:19113/api/share -H 'content-type: application/json' -d '{
+  "from": "Sam", "title": "My App", "title_id": "PSUP00001",
+  "items": [
+    {"kind": "app", "console": "192.168.1.20", "path": "/data/homebrew/PSUP00001"},
+    {"kind": "save", "console": "192.168.1.20", "folder": "/user/home/10000000/savedata_prospero/PSUP00001"},
+    {"kind": "note", "text": "Have fun"}
+  ]}'
+# {"id": "…", "state": "open", "url": "https://ps5upload.phantomptr.com/share/#room=…&fp=…&hub=…&lan=…", "works": "anywhere", …}
+
+curl -s localhost:19113/api/share                      # shares, receives, history
+curl -s localhost:19113/api/share/<id>/decide -d '{"request": 1, "allow": true}' -H 'content-type: application/json'
+curl -s -X DELETE localhost:19113/api/share/<id>       # stop it
+```
+
+`POST /api/share/check` takes the same body and answers each item's verdict without making
+anything. A share's `requests` say who asked (`name`), for what (`wants_names`), and how far it got
+(`state`: asking, allowed, sending, done, declined, cancelled, left; `bytes_done`, `bytes_total`).
+`expires_in_s` is 60 s to 7 days (default a day); `one_use` (default true) takes one Allow, after
+which the link takes nobody new. The friend can only ask for the files listed when the share was
+made, by item and path; a path with `..`, an absolute path, or a symbolic link is refused.
+
+The receiver's side: `POST /api/share/receive {link, name}` → `{id}`; `GET /api/share/receive/{id}`
+shows the offer (`state: offered`, `from`, `items`); `POST /api/share/receive/{id}/accept {items,
+dest?}` asks the sender (the default folder is `Received` in the Collection's first folder);
+`DELETE /api/share/receive/{id}` stops. When `state` is `done`, `received` says where each item is;
+`POST /api/share/receive/{id}/use-save {addr, folder, user_id?, item}` puts a received save into a
+user's own save of the same game (the save stays that user's: trophies and the account are not
+carried over), and `GET /api/share/receive/{id}/data/{item}` reads the small data items.
+
+Transfers show in `GET /api/activity` (kinds `share` and `receive`), and each change is an event
+named `share` on `GET /api/events`. Read through MCP, `/api/share` leaves the links out.
+
 ## What the API can't do
 
 The API covers what the engine does. Some things in the app aren't the engine's, so no route reaches
@@ -316,6 +456,7 @@ them:
 | **The notification inbox** | Likewise per device. | `GET /api/ps5/notif/list` is the helper's log; `GET /api/event-journal` is the engine's. |
 | **A phone as a controller** | `/pad` and `/api/pad/ws`, for a person holding the phone that scanned the code. | `POST /api/ps5/rp/input` drives the session from a script. `/api/ps5/rp/pad-link` opens and closes the link. |
 | **A guest joining Play Together** | `/join` and `/api/join/ws`, for a person who has the invite. | `/api/join/*` is the host's side: open, invite, let in, let go. |
+| **A friend receiving a Share in a browser** | `/share` and `/api/share/ws`, for a person with the link on the same network. | `/api/share/receive` receives one engine to another. |
 | **Your file picker, drag and drop, keep-awake, game mode, screenshots of the app, controller haptics, the app's updater** | The device itself. | Name paths directly. `GET /api/engine/update` says if there's a new release. |
 
 Other limits worth knowing:

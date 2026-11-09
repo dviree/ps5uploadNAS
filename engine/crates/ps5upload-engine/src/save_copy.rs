@@ -54,6 +54,8 @@ use crate::save_backup::{
 
 /// The tag of the backup taken of a save before a backup of another user's replaced it.
 pub const BEFORE_COPY_TAG: &str = "beforecopy";
+/// The `parts` answer of Load a save file when the file was a backup, put back whole.
+pub const RESTORED_WHOLE: &str = "restored-backup";
 /// The manifest `kind` of a shared save holding every image of the game, one folder each. A
 /// version before 10.6.0 refuses it ("only PS5 saves can be shared") instead of misreading it.
 pub const SHARE_KIND: &str = "ps5-saves";
@@ -181,10 +183,15 @@ fn close_save(c: &dyn Console, changed: bool) -> Result<(), String> {
     Err(format!("the save could not be closed ({last})"))
 }
 
+/// How `read_image` says the save image would not open (its first words).
+const IMAGE_OPEN_FAILED: &str = "the save image would not open";
+
 /// Copies the files of the save image `image`, opened decrypted, into the new local folder
 /// `dest`; closed again after.
 fn read_image(c: &dyn Console, image: &str, dest: &Path) -> Result<(), String> {
-    let mount = c.open_image(image)?;
+    let mount = c
+        .open_image(image)
+        .map_err(|e| format!("{IMAGE_OPEN_FAILED} ({e})"))?;
     let copied = c.copy_out(&mount, dest);
     // Read only: closing it changes nothing on the console.
     let closed = close_save(c, false);
@@ -559,10 +566,7 @@ fn wrapper_of(zip: &Path, title_id: &str) -> Option<String> {
 /// sealed images, which only the PS5 that made it can use), and a folder per part named as the
 /// target's `images` (a shared save whose manifest was lost, zipped again by hand) is taken.
 fn unlabelled_parts(zip: &Path, dir: &Path, images: &[String]) -> Result<Vec<Part>, String> {
-    let noted = ps5upload_core::save_archive::zip_comment(zip)
-        .ok()
-        .and_then(|c| serde_json::from_str::<Value>(&c).ok())
-        .is_some_and(|n| n.get("ps5upload").and_then(Value::as_str) == Some("save-backup"));
+    let noted = local::noted_backup(zip);
     let entries: Vec<(String, bool)> = std::fs::read_dir(dir)
         .map(|d| {
             d.flatten()
@@ -674,10 +678,24 @@ pub fn match_parts(
 /// The error for parts a user's save doesn't have yet.
 fn missing_error(title_id: &str, who: &str, missing: Vec<String>) -> Failed {
     let labels: Vec<String> = missing.iter().map(|m| part_label(m)).collect();
+    // A game makes each save slot the first time it saves there (RDR2 has several, #729), and
+    // the console only knows the slots a user has: one can't be added from here.
+    let (what, how) = match labels.as_slice() {
+        [one] if one == "main save" => ("main save".to_string(), "once"),
+        [one] => (format!("save slot {one}"), "in that slot"),
+        many => (
+            format!("save slots {}", many.join(", ")),
+            "in each of those slots",
+        ),
+    };
+    let mut cap = who.chars();
+    let who_cap: String = cap
+        .next()
+        .map(|c| c.to_uppercase().chain(cap).collect())
+        .unwrap_or_default();
     Failed {
         msg: format!(
-            "{title_id}'s {} isn't on {who} yet: start the game once as {who} and save, then try again.",
-            labels.join(", ")
+            "{who_cap} doesn't have {title_id}'s {what} yet, and a save can only replace one {who} already has. Start the game as {who} and save {how}, then try again."
         ),
         missing,
     }
@@ -970,7 +988,13 @@ pub fn restore_to_user(
         let shared = (|| {
             c.put_raw(&title_id, &src, &to.path, to_user)?;
             share(c, &to.path).map(|(_, z)| z).map_err(|e| {
-                format!("the backup could not be opened on this PS5 (was it made on another console?): {e}")
+                // Only a save that would not open hints at another PS5: one that opened and
+                // could not be copied (#729) was made here.
+                if e.starts_with(IMAGE_OPEN_FAILED) {
+                    format!("the backup could not be opened on this PS5 (was it made on another console?): {e}")
+                } else {
+                    format!("the backup could not be read: {e}")
+                }
             })
         })();
         // Their own save back, whatever happened.
@@ -1007,6 +1031,9 @@ pub struct Live<'a> {
     host: &'a str,
     /// Where the copies for putting a save back live when backups go only to a server.
     scratch: ScratchDirs,
+    /// With no backup folder set, where the save a restore replaces is kept. A console just reset
+    /// has none set, and the person holds a backup in a folder they chose.
+    keep_in: Option<PathBuf>,
 }
 
 /// Temp folders removed when the change they were made for is over.
@@ -1027,6 +1054,15 @@ impl<'a> Live<'a> {
         Self {
             host,
             scratch: Default::default(),
+            keep_in: None,
+        }
+    }
+
+    /// As `new`, keeping replaced saves in `dir` if no backup folder is set.
+    pub fn keeping_in(host: &'a str, dir: PathBuf) -> Self {
+        Self {
+            keep_in: Some(dir),
+            ..Self::new(host)
         }
     }
 }
@@ -1066,7 +1102,10 @@ impl Console for Live<'_> {
         )
     }
     fn can_back_up(&self) -> Result<(), String> {
-        if local::settings().dir.trim().is_empty() && !crate::save_backup_server::configured() {
+        if self.keep_in.is_none()
+            && local::settings().dir.trim().is_empty()
+            && !crate::save_backup_server::configured()
+        {
             return Err("Choose a folder or a server for save backups first (Save Data › Automatic backups): the save there now is kept there before its files are replaced.".into());
         }
         Ok(())
@@ -1075,6 +1114,16 @@ impl Console for Live<'_> {
         let s = local::settings();
         if !s.dir.trim().is_empty() {
             return local::back_up_one(self.host, entry, &s.dir, s.keep, Some(tag), &|| Ok(()));
+        }
+        if let Some(dir) = &self.keep_in {
+            return local::back_up_one(
+                self.host,
+                entry,
+                &dir.to_string_lossy(),
+                local::DEFAULT_KEEP,
+                Some(tag),
+                &|| Ok(()),
+            );
         }
         // Backups go only to a server: kept there, with a copy here until this is over, to put
         // the save back from.
@@ -1103,16 +1152,11 @@ impl Console for Live<'_> {
         let dl = make_temp_dir("share")?;
         let dl_s = dl.to_string_lossy().into_owned();
         let r = (|| {
-            let start = local::post(
-                "/api/transfer/download",
-                json!({ "addr": self.host, "src_path": mount, "dest_dir": dl_s, "kind": "folder" }),
+            // Names this computer can't hold are kept reversibly, and `fill` puts them back (#729).
+            local::download(self.host, mount, &dl, "folder")?;
+            let leaf = ps5upload_core::host_names::escape_name(
+                mount.rsplit('/').next().unwrap_or("save_mount"),
             )?;
-            let job = start
-                .get("job_id")
-                .and_then(Value::as_str)
-                .ok_or("download did not start")?;
-            local::wait_job(job)?;
-            let leaf = mount.rsplit('/').next().unwrap_or("save_mount");
             std::fs::rename(dl.join(leaf), dest).map_err(|e| format!("copy: {e}"))
         })();
         let _ = cleanup_temp_dir(&dl_s);
@@ -1134,15 +1178,7 @@ impl Console for Live<'_> {
                 json!({ "addr": host, "path": format!("{mount}/{name}") }),
             )?;
         }
-        let start = local::post(
-            "/api/transfer/dir",
-            json!({ "addr": host, "src_dir": src.to_string_lossy(), "dest_root": mount, "excludes": [] }),
-        )?;
-        let job = start
-            .get("job_id")
-            .and_then(Value::as_str)
-            .ok_or("upload did not start")?;
-        local::wait_job(job)
+        local::upload_kept(host, src, mount)
     }
     fn close_once(&self) -> Result<Closed, String> {
         local::close_save(self.host).map(|was_open| Closed { was_open })
@@ -1358,30 +1394,54 @@ pub async fn post_use_shared(Query(q): Query<UseSharedQuery>, body: axum::body::
         return local::json_error(status, why);
     }
     let response = blocking(
-        move || {
-            let folder = folder_asked(q.folder.as_deref(), q.image.as_deref())?;
-            let compat = q
-                .image
-                .as_deref()
-                .and_then(|i| i.rsplit('/').next())
-                .map(String::from);
-            let user_id = user_of_folder(&folder, q.user_id)?;
-            let host = q.addr.trim().to_string();
-            import_as(
-                &Live::new(&host),
-                &folder,
-                user_id,
-                "this user",
-                ZipIn::File(&incoming),
-                None,
-                compat.as_deref(),
-            )
-        },
+        move || use_shared_file(&q, &incoming),
         |parts| Json(json!({ "ok": true, "parts": parts })).into_response(),
     )
     .await;
     let _ = tokio::task::spawn_blocking(move || cleanup_temp_dir(&tmp_s)).await;
     response
+}
+
+/// A shared save on this computer's disk (`incoming`) into the user's save `q` names: what
+/// `POST /api/save-backup/use-shared` does with its body, and Share's received saves
+/// (share/mod.rs). Blocking.
+pub fn use_shared_file(q: &UseSharedQuery, incoming: &Path) -> Result<Vec<String>, Failed> {
+    let folder = folder_asked(q.folder.as_deref(), q.image.as_deref())?;
+    let compat = q
+        .image
+        .as_deref()
+        .and_then(|i| i.rsplit('/').next())
+        .map(String::from);
+    let user_id = user_of_folder(&folder, q.user_id)?;
+    let host = q.addr.trim().to_string();
+    // A backup this app made, picked here (after a reset its user is gone, and Load a
+    // save file is where a person with a backup .zip goes): put back as Restore does,
+    // into this user's save even when it was another user's. The console it was made on
+    // is still checked, and the save there now is kept first.
+    if local::noted_backup(incoming) {
+        let title_id = title_of_folder(folder.trim_end_matches('/'))?;
+        let beside =
+            crate::remote::store::data_dir().map(|d| d.join("save-backups").join("before-restore"));
+        local::restore_zip_any_user(
+            &host,
+            &title_id,
+            incoming,
+            folder.trim_end_matches('/'),
+            user_id,
+            beside,
+        )?;
+        crate::log_info!("save backup: a backup loaded as a save file into {folder}");
+        return Ok(vec![RESTORED_WHOLE.to_string()]);
+    }
+    import_as(
+        &Live::new(&host),
+        &folder,
+        user_id,
+        "this user",
+        ZipIn::File(incoming),
+        None,
+        compat.as_deref(),
+    )
 }
 
 /// `POST /api/save-backup/copy` `{addr, title_id, from_user, to_user}`: one user's PS5 save into
@@ -1397,6 +1457,168 @@ pub async fn post_copy(Json(b): Json<CopyBody>) -> Response {
         done_json,
     )
     .await
+}
+
+/// Copies `from_user`'s PS5 save of `title_id` into `to_user`'s on another console (#709): shared
+/// there, used here, so it's theirs when it arrives. Their folder is backed up first and put back
+/// if it fails, and a game running on either console stops it before anything changes.
+pub fn copy_to_console(
+    from: &dyn Console,
+    to: &dyn Console,
+    title_id: &str,
+    from_user: u32,
+    to_user: u32,
+) -> Result<Done, Failed> {
+    let title_id = title_id.trim().to_ascii_uppercase();
+    if !plain(&title_id) {
+        return Err("unexpected title ID".into());
+    }
+    to.can_back_up()?;
+    let source = from.saves()?;
+    let there = to.saves()?;
+    let src = ps5_save_of(&source, &title_id, from_user, "This user")?;
+    let dst = target_save(&there, &title_id, to_user)?;
+    checks(from, &title_id)?;
+    checks(to, &title_id)?;
+    let missing = lacking(&from.images(&src.path)?, &to.images(&dst.path)?);
+    if !missing.is_empty() {
+        return Err(missing_error(&title_id, "the other user", missing));
+    }
+    let (_, zip) = share(from, &src.path)?;
+    let parts = import_as(
+        to,
+        &dst.path,
+        to_user,
+        "the other user",
+        ZipIn::Bytes(&zip),
+        None,
+        None,
+    )?;
+    Ok(Done {
+        from: src.path.clone(),
+        to: dst.path.clone(),
+        parts,
+    })
+}
+
+/// An emulator's save onto another console: plain files, so they go as they are, through the
+/// backup and restore every other emulator save uses (the one there is backed up first).
+fn copy_emulator_save(
+    from: &str,
+    to: &str,
+    entry: &SaveEntry,
+    to_path: &str,
+    to_user: u32,
+) -> Result<(), String> {
+    let titles = crate::emulator_saves::titles_of(crate::emulator_saves::app_of(entry));
+    if local::running_of(from, &titles)?.is_some() {
+        return Err(running_error(&entry.title_id));
+    }
+    let tmp = make_temp_dir(&entry.title_id)?;
+    let result = local::back_up_one(from, entry, &tmp.to_string_lossy(), 1, None, &|| Ok(()))
+        .and_then(|zip| local::restore_zip(to, &entry.title_id, &zip, to_path, to_user));
+    let _ = cleanup_temp_dir(&tmp.to_string_lossy());
+    result
+}
+
+#[derive(Deserialize)]
+pub struct CopyConsoleBody {
+    /// The console the save is on.
+    pub from: String,
+    /// The console it goes to.
+    pub to: String,
+    /// The save folder on `from` (from the saves list).
+    pub from_path: String,
+    /// A PS5 save: the user there. An emulator's: who the folder there belongs to.
+    pub to_user: u32,
+    /// An emulator's save: the folder on `to`. Left out, the same path.
+    #[serde(default)]
+    pub to_path: Option<String>,
+}
+
+/// `POST /api/save-backup/copy-console` `{from, to, from_path, to_user, to_path?}` (#709).
+pub async fn post_copy_console(Json(b): Json<CopyConsoleBody>) -> Response {
+    blocking(
+        move || {
+            let (from, to) = (b.from.trim().to_string(), b.to.trim().to_string());
+            if from == to {
+                return Err("Pick another console: the save is already on this one.".into());
+            }
+            let source = Live::new(&from);
+            let entry = source
+                .saves()?
+                .into_iter()
+                .find(|s| s.path == b.from_path.trim())
+                .ok_or_else(|| "That save is no longer on this PS5.".to_string())?;
+            let d = match entry.kind.as_str() {
+                "ps5" => copy_to_console(
+                    &source,
+                    &Live::new(&to),
+                    &entry.title_id,
+                    entry.user_id as u32,
+                    b.to_user,
+                )?,
+                "ps4" => {
+                    return Err(
+                        "A PS4 save can't be copied to another console this way yet.".into(),
+                    )
+                }
+                _ => {
+                    let to_path = b
+                        .to_path
+                        .as_deref()
+                        .unwrap_or(&entry.path)
+                        .trim()
+                        .to_string();
+                    copy_emulator_save(&from, &to, &entry, &to_path, b.to_user)?;
+                    Done {
+                        from: entry.path.clone(),
+                        to: to_path,
+                        parts: Vec::new(),
+                    }
+                }
+            };
+            crate::log_info!(
+                "save backup: copied {} on {from} to {} on {to}",
+                d.from,
+                d.to
+            );
+            Ok(d)
+        },
+        done_json,
+    )
+    .await
+}
+
+#[derive(Deserialize)]
+pub struct CopyTargetsQuery {
+    /// The console to copy to.
+    pub to: String,
+    pub title_id: String,
+}
+
+/// `GET /api/save-backup/copy-console/targets?to=&title_id=`: that console's saves of the game,
+/// of every kind, and its users, for picking where a save goes.
+pub async fn get_copy_targets(Query(q): Query<CopyTargetsQuery>) -> Response {
+    let r = tokio::task::spawn_blocking(move || {
+        let host = q.to.trim().to_string();
+        let title = q.title_id.trim().to_string();
+        let saves: Vec<SaveEntry> = local::list_saves(&host)?
+            .into_iter()
+            .filter(|s| s.title_id.eq_ignore_ascii_case(&title))
+            .collect();
+        let users = local::get(&format!("/api/profile/info?addr={}", local::enc(&host)))
+            .ok()
+            .and_then(|v| v.get("users").cloned())
+            .unwrap_or(Value::Array(vec![]));
+        Ok::<_, String>(json!({ "saves": saves, "users": users }))
+    })
+    .await;
+    match r {
+        Ok(Ok(v)) => Json(v).into_response(),
+        Ok(Err(e)) => local::json_error(StatusCode::BAD_GATEWAY, e),
+        Err(e) => local::json_error(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()),
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1433,12 +1655,8 @@ pub async fn post_restore_to_user(Json(b): Json<RestoreToUserBody>) -> Response 
                 let _ = cleanup_temp_dir(&tmp.to_string_lossy());
                 r?
             } else {
-                let zip = Path::new(&local::settings().dir)
-                    .join(&title_id)
-                    .join(&file);
-                if !zip.is_file() {
-                    return Err(format!("no backup {}", zip.display()).into());
-                }
+                let zip = local::find_backup(&local::settings().read_dirs(), &title_id, &file)
+                    .ok_or_else(|| format!("no backup {file}"))?;
                 restore_to_user(&live, &title_id, &file, &zip, b.to_user)?
             };
             crate::log_info!("save backup: {} restored into {}", d.from, d.to);
@@ -1564,6 +1782,8 @@ mod tests {
         /// Replacing this image fails.
         fail_replace: Option<String>,
         fail_read: bool,
+        /// Opening an image fails (the console would not mount it).
+        fail_open: bool,
         /// The image open now.
         mounted: RefCell<Option<String>>,
         /// What the next closes say before one works: "reset" (the connection dropped before
@@ -1598,6 +1818,7 @@ mod tests {
                 images: BTreeMap::from([(folder(A), v(a)), (folder(B), v(b))]),
                 fail_replace: None,
                 fail_read: false,
+                fail_open: false,
                 mounted: RefCell::default(),
                 close_errors: RefCell::default(),
                 close_stuck: false,
@@ -1676,6 +1897,9 @@ mod tests {
                 self.mounted.borrow().is_none(),
                 "{image} opened over another"
             );
+            if self.fail_open {
+                return Err("mount failed".into());
+            }
             *self.mounted.borrow_mut() = Some(image.to_string());
             Ok("/mnt/save".into())
         }
@@ -1684,7 +1908,7 @@ mod tests {
             let image = self.mounted.borrow().clone().unwrap();
             self.log(format!("read {image}"));
             if self.fail_read {
-                return Err("mount failed".into());
+                return Err("the console sent a download this computer will not write".into());
             }
             std::fs::create_dir_all(dest.join(SYS_DIR)).unwrap();
             std::fs::write(dest.join(SYS_DIR).join("param.sfo"), b"owner").unwrap();
@@ -1872,7 +2096,9 @@ mod tests {
         let e = copy_to_user(&c, &body(A, B)).unwrap_err();
         assert_eq!(e.missing, vec![STAR.to_string()]);
         assert!(
-            e.msg.contains("STARBOARD isn't on the other user yet"),
+            e.msg
+                .starts_with("The other user doesn't have PPSA01650's save slot STARBOARD yet")
+                && e.msg.contains("save in that slot"),
             "{}",
             e.msg
         );
@@ -2295,17 +2521,20 @@ mod tests {
         let tmp = make_temp_dir("restoretest").unwrap();
         let zip = backup_zip(&tmp, &[MAIN, STAR]);
         let file = zip.file_name().unwrap().to_string_lossy().into_owned();
-        let c = Fake {
-            fail_read: true,
-            ..Fake::both(&[MAIN, STAR])
-        };
-        let e = restore_to_user(&c, T, &file, &zip, B).unwrap_err().msg;
-        assert!(
-            e.contains("another console") && e.contains("put back"),
-            "{e}"
-        );
-        assert!(c.calls().last().unwrap().starts_with("put_back"));
-        assert!(!c.calls().iter().any(|x| x.starts_with("replace")));
+        // A save that won't open may be another PS5's; one that opened and could not be
+        // copied (#729) is not, and the message doesn't guess so.
+        for (fail_open, guess) in [(true, true), (false, false)] {
+            let c = Fake {
+                fail_open,
+                fail_read: !fail_open,
+                ..Fake::both(&[MAIN, STAR])
+            };
+            let e = restore_to_user(&c, T, &file, &zip, B).unwrap_err().msg;
+            assert_eq!(e.contains("another console"), guess, "{e}");
+            assert!(e.contains("put back"), "{e}");
+            assert!(c.calls().last().unwrap().starts_with("put_back"));
+            assert!(!c.calls().iter().any(|x| x.starts_with("replace")));
+        }
         let c = Fake {
             fail_replace: Some(STAR.into()),
             ..Fake::both(&[MAIN, STAR])
@@ -2380,5 +2609,42 @@ mod tests {
         assert!(!c.wrote());
         assert!(restore_to_user(&Fake::both(&[MAIN]), T, "x.zip", &zip, B).is_err());
         let _ = cleanup_temp_dir(&tmp.to_string_lossy());
+    }
+
+    #[test]
+    fn a_copy_to_another_console_stops_before_anything_changes_when_it_must() {
+        let from = Fake::two_users(&["sdimg_a"], &["sdimg_a"]);
+        // A game running on the console it goes to.
+        let mut to = Fake::two_users(&["sdimg_a"], &["sdimg_a"]);
+        to.running = true;
+        let e = copy_to_console(&from, &to, "PPSA01650", A, B).unwrap_err();
+        assert!(
+            e.msg.contains("running") || e.msg.contains("close"),
+            "{}",
+            e.msg
+        );
+        // A part of the save the user there hasn't got yet.
+        let to = Fake::two_users(&["sdimg_a"], &[]);
+        let e = copy_to_console(
+            &Fake::two_users(&["sdimg_a"], &["sdimg_a"]),
+            &to,
+            "PPSA01650",
+            A,
+            B,
+        )
+        .unwrap_err();
+        assert_eq!(e.missing, vec!["sdimg_a".to_string()]);
+        // Nobody there has a save of the game.
+        let mut to = Fake::two_users(&["sdimg_a"], &["sdimg_a"]);
+        to.saves.clear();
+        let e = copy_to_console(
+            &Fake::two_users(&["sdimg_a"], &["sdimg_a"]),
+            &to,
+            "PPSA01650",
+            A,
+            B,
+        )
+        .unwrap_err();
+        assert!(e.msg.contains("Start the game once"), "{}", e.msg);
     }
 }

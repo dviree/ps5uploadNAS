@@ -80,7 +80,13 @@ describe("engine messages", () => {
       player: 2,
       token: "abc",
       hevc: true,
+      track: false,
+      audio: false,
     });
+    // …and the sound on its audio track (#720).
+    expect(readServerMessage('{"stage":"joined","player":2,"token":"abc","hevc":false,"track":true,"audio":true}')).toMatchObject({ audio: true });
+    // The pictures on the internet connection's video track.
+    expect(readServerMessage('{"stage":"joined","player":2,"token":"abc","hevc":false,"track":true}')).toMatchObject({ track: true });
     for (const why of ["key", "full", "denied", "closed", "old_helper", "not_playing"]) {
       expect(readServerMessage(JSON.stringify({ stage: "refused", why }))).toEqual({ kind: "refused", why });
     }
@@ -103,8 +109,22 @@ describe("engine messages", () => {
       readServerMessage('{"status":{"player":3,"state":"picking_user","rtt_ms":42,"host":"Ann","block_system":true}}'),
     ).toEqual({
       kind: "status",
-      status: { player: 3, state: "picking_user", rttMs: 42, host: "Ann", blockSystem: true },
+      status: { player: 3, state: "picking_user", rttMs: 42, host: "Ann", blockSystem: true, streamSeat: false, playsAs: null, seatNote: null },
     });
+    // Seated in the profile the host chose ("Guests play as"), or told the TV asks instead.
+    expect(readServerMessage('{"status":{"player":2,"state":"playing","plays_as":"Guest 1"}}')).toMatchObject({
+      status: { player: 2, playsAs: "Guest 1", seatNote: null },
+    });
+    expect(readServerMessage('{"status":{"player":3,"state":"picking_user","seat_note":"signed_out","plays_as":null}}')).toMatchObject({
+      status: { playsAs: null, seatNote: "signed_out" },
+    });
+    // On the host's stream's own controller (#687): playing as the host's PS5 user.
+    expect(readServerMessage('{"status":{"player":1,"state":"playing","stream_seat":true}}')).toMatchObject({
+      status: { player: 1, streamSeat: true },
+    });
+    // The host needed it back, with no controller free (#720): said, as a bye and as a refusal.
+    expect(readServerMessage('{"bye":"seat_taken"}')).toEqual({ kind: "bye", why: "seat_taken" });
+    expect(readServerMessage('{"stage":"refused","why":"seat_taken"}')).toEqual({ kind: "refused", why: "seat_taken" });
     expect(readServerMessage('{"rumble":[300,-1],"light":[1,2,3]}')).toEqual({
       kind: "feedback",
       rumble: [255, 0],
@@ -131,7 +151,12 @@ describe("links and timing", () => {
       invite: "00112233445566778899aabbccddeeff",
       name: "Ann",
       code: null,
+      fp: null,
     });
+    // Since 12.4 the Wi-Fi's link names the engine's certificate: its WebRTC join checks it.
+    const fp = `${"ab:".repeat(31)}cd`;
+    expect(parseJoinLink(`http://192.168.1.9:19113/join#i=abcdefgh12&fp=${fp}`)?.fp).toBe(fp.toUpperCase());
+    expect(parseJoinLink("http://192.168.1.9:19113/join#i=abcdefgh12&fp=AB:CD")?.fp).toBeNull();
     expect(parseJoinLink(" 10.0.0.2:19113/join#i=abcdefgh12 ")?.origin).toBe("http://10.0.0.2:19113");
     expect(parseJoinLink("http://192.168.1.9:19113/pad#t=00112233445566778899aabbccddeeff")).toBeNull();
     expect(parseJoinLink("http://192.168.1.9:19113/join")).toBeNull();
@@ -143,6 +168,35 @@ describe("links and timing", () => {
     expect(joinSocketUrl(linkFromSocket("ws://10.0.0.2:19113/ps5/api/join/ws", "Ann")!)).toBe(
       "ws://10.0.0.2:19113/ps5/api/join/ws",
     );
+  });
+
+  it("parses the one link for everywhere (12.1): the internet invite, with the host's own page", () => {
+    // A made-up invite, built here so it does not read as a real one.
+    const inv = "0f".repeat(16);
+    const fp = `${"AB:".repeat(31)}CD`;
+    const lan = encodeURIComponent("http://192.168.1.20:19113/join");
+    const link = `https://ps5upload.phantomptr.com/join/#room=Demo0Room0Not0Real0000&k=${inv}&fp=${fp}&hub=hub.example.com&n=Ann&lan=${lan}`;
+    expect(parseJoinLink(link)).toEqual({
+      origin: "http://192.168.1.20:19113",
+      invite: inv,
+      name: "Ann",
+      code: null,
+      net: { room: "Demo0Room0Not0Real0000", key: inv, fp, hub: "hub.example.com" },
+      lan: "http://192.168.1.20:19113/join",
+      ts: null,
+    });
+    // With the host's Tailscale page too (`ts`): where the app also signals without the hub.
+    const ts = encodeURIComponent("http://100.101.2.3:19113/join");
+    expect(parseJoinLink(`${link}&ts=${ts}`)?.ts).toBe("http://100.101.2.3:19113/join");
+    expect(parseJoinLink(`${link}&ts=${encodeURIComponent("http://100.101.2.3:19113/x")}`)?.ts).toBeNull();
+    // Without its page: the hub's address stands in, the invite still reads.
+    const away = parseJoinLink(link.replace(/&lan=.*$/, ""))!;
+    expect(away.origin).toBe("https://hub.example.com");
+    expect(away.net?.room).toBe("Demo0Room0Not0Real0000");
+    // A page that isn't the engine's join page is ignored, not followed.
+    expect(parseJoinLink(link.replace(lan, encodeURIComponent("http://evil.example/x")))!.origin).toBe("https://hub.example.com");
+    // A broken fingerprint is no invite.
+    expect(parseJoinLink(link.replace(fp, "AB:CD"))).toBeNull();
   });
 
   it("colours a delay", () => {

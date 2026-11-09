@@ -1,3 +1,4 @@
+import { gameFormatLabel, gameFormatTag } from "../../lib/gameFormatTag";
 import { splitPkgBytes } from "../../lib/splitPkgSize";
 import { FileProperties } from "./FileProperties";
 import { consoleAddr, hostOf } from "../../lib/addr";
@@ -8,6 +9,8 @@ import { ExtractDialog, type ExtractAfter, type ExtractChoice } from "./ExtractD
 import { extractCause, isExtractableArchive, needsPassword } from "../../lib/archiveName";
 import { extractedNext } from "../../lib/extractNext";
 import { SendToConsoleDialog } from "./SendToConsoleDialog";
+import { RenameFromTitleDialog } from "./RenameFromTitleDialog";
+import { hiddenName, nameOverLimit, shownName } from "../../lib/nameFormats";
 import {
   RowActionButtons,
   RowActionsMenu,
@@ -138,8 +141,14 @@ import {
   FS_DEFAULT_PATH,
 } from "../../lib/fsLastPath";
 import { useFsNavStore } from "../../state/fsNavigation";
-import { stageBrowserFile } from "../../api/pkgUpload";
-import { isStagingCancelled, noteStaged, stageWithTask } from "../../lib/browserStaging";
+import { isStagingCancelled } from "../../lib/browserStaging";
+import {
+  droppedItems,
+  picksFromDrop,
+  picksFromInput,
+  stagePicksWithTask,
+  type DevicePick,
+} from "../../lib/devicePick";
 import { dragOut, dragOutAvailable, isDragOutCopy } from "../../lib/dragOut";
 import { beginTask, trackTask } from "../../state/trackTask";
 import { useActivityHistoryStore } from "../../state/activityHistory";
@@ -1112,8 +1121,10 @@ export default function FileSystemScreen() {
     }
   };
 
-  const runRename = async (oldName: string) => {
-    const newName = renameDraft.trim();
+  const [titleRename, setTitleRename] = useState<{ name: string; folder: boolean } | null>(null);
+
+  const runRename = async (oldName: string, chosen?: string) => {
+    const newName = (chosen ?? renameDraft).trim();
     if (!newName || newName === oldName) {
       setRenaming(null);
       return;
@@ -1126,6 +1137,21 @@ export default function FileSystemScreen() {
           'Name can\'t contain / or \\ and can\'t be "." or "..".',
         ),
       );
+      return;
+    }
+    // A typed name ShadowMount+ wouldn't mount is asked about; the name is still the user's.
+    const over = chosen === undefined ? nameOverLimit(newName) : 0;
+    if (
+      over > 0 &&
+      !(await confirmDialog({
+        title: tr(
+          "fs_name_too_long_smp",
+          { over },
+          "{over} bytes too long for ShadowMount+ to mount. It won't show up on the console under this name.",
+        ),
+        confirmLabel: tr("fs_name_too_long_confirm", undefined, "Rename anyway"),
+      }))
+    ) {
       return;
     }
     // Say so before asking the console, which would refuse an existing name anyway
@@ -1441,53 +1467,6 @@ export default function FileSystemScreen() {
    *  before the next file. What already landed stays; the half-written file does not. */
   const cancelUpload = () => { pauseFsUploadQueue(host); return cancelFsUpload(host, fsUploadDeps); };
 
-  const deviceInput = useRef<HTMLInputElement>(null);
-  const deviceStagingLock = useRef(false);
-  const [deviceStaging, setDeviceStaging] = useState(false);
-  /** The phone's file on its way to the engine: "2/3 · 45%". */
-  const [deviceProgress, setDeviceProgress] = useState("");
-
-  // Capture this render's destination before staging: browsing to another folder must
-  // never redirect files already selected on the phone. A console switch cancels intake.
-  const addDeviceFilesHere = async (files: File[]) => {
-    if (deviceStagingLock.current || files.length === 0) return;
-    deviceStagingLock.current = true;
-    setDeviceStaging(true);
-    setError(null);
-    const probe = guard.capture();
-    const paths: string[] = [];
-    let stagingError: string | null = null;
-    try {
-      for (const [i, file] of files.entries()) {
-        if (probe.isStale()) break;
-        const count = files.length > 1 ? `${i + 1}/${files.length} · ` : "";
-        setDeviceProgress(`${count}0%`);
-        // As a task with Cancel, and the engine's copy is deleted once its upload to the PS5 is
-        // done (lib/browserStaging), as a file dropped on this screen.
-        const staged = await stageWithTask(file, stageBrowserFile, (sent, total) =>
-          setDeviceProgress(`${count}${total > 0 ? Math.floor((sent / total) * 100) : 0}%`),
-        );
-        noteStaged(staged);
-        paths.push(staged.path);
-      }
-    } catch (e) {
-      if (!isStagingCancelled(e)) stagingError = e instanceof Error ? e.message : String(e);
-    } finally {
-      try {
-        if (!probe.isStale()) {
-          if (paths.length > 0) await addPicked(paths, "file");
-          if (stagingError) setError(stagingError);
-        }
-      } catch (e) {
-        if (!probe.isStale()) setError(e instanceof Error ? e.message : String(e));
-      } finally {
-        deviceStagingLock.current = false;
-        setDeviceStaging(false);
-        setDeviceProgress("");
-      }
-    }
-  };
-
   /** Toolbar: pick one or more local files and copy them into this folder. */
   const addFilesHere = async () => {
     const picked = await pickPaths({
@@ -1522,8 +1501,42 @@ export default function FileSystemScreen() {
     (paths) => void addPicked(paths.filter((p) => !isDragOutCopy(p))),
     canDropHere,
   );
-  // The web UI gets the browser's own file drop instead: each file goes up to the server the
-  // engine runs on, then into this folder like any picked file. A folder cannot be read that way.
+  /** Web UI, "This device…" and a drop: the picks go up to the server the engine runs on (one
+   *  task, with a Cancel), then into this folder like any picked file or folder. A cancel or a
+   *  failure removes every copy made on the server. */
+  const addFromDevice = async (picks: DevicePick[]) => {
+    const sendable = picks.filter((p) => p.kind === "file" || p.files.length > 0);
+    if (sendable.length < picks.length)
+      pushNotification(
+        "info",
+        tr("fs_device_empty_folder", undefined, "Empty folders aren't sent from a browser"),
+      );
+    if (sendable.length === 0) return;
+    setError(null);
+    let paths: string[];
+    try {
+      paths = await stagePicksWithTask(sendable);
+    } catch (e) {
+      if (!isStagingCancelled(e)) setError(humanizeCaught(e));
+      return;
+    }
+    const kind = sendable.every((p) => p.kind === "file")
+      ? "file"
+      : sendable.every((p) => p.kind === "folder")
+        ? "folder"
+        : undefined;
+    await addPicked(paths, kind);
+  };
+  const deviceFilesInput = useRef<HTMLInputElement>(null);
+  const deviceFolderInput = useRef<HTMLInputElement>(null);
+  const onDeviceInput = (ev: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(ev.currentTarget.files ?? []);
+    ev.currentTarget.value = "";
+    if (files.length > 0) void addFromDevice(picksFromInput(files));
+  };
+
+  // The web UI gets the browser's own file drop instead: files and folders go up to the server
+  // the engine runs on, then into this folder like any picked file.
   const [browserDropOver, setBrowserDropOver] = useState(false);
   const browserDrop = !isTauriEnv()
     ? {
@@ -1541,35 +1554,17 @@ export default function FileSystemScreen() {
           ev.preventDefault();
           setBrowserDropOver(false);
           if (!canDropHere) return;
-          const entries = Array.from(ev.dataTransfer.items ?? []);
-          const files = Array.from(ev.dataTransfer.files).filter(
-            (_, i) => !entries[i]?.webkitGetAsEntry?.()?.isDirectory,
-          );
-          if (files.length < ev.dataTransfer.files.length)
-            pushNotification(
-              "info",
-              tr("fs_browser_drop_folder", undefined, "Folders can't be dropped in a browser"),
-              {
-                body: tr(
-                  "fs_browser_drop_folder_body",
-                  undefined,
-                  "Drop the files inside it, or use the desktop app to copy whole folders.",
-                ),
-              },
-            );
-          if (files.length === 0) return;
+          // The items are only readable while the event lasts: take them now, read them after.
+          const items = droppedItems(ev.dataTransfer);
           void (async () => {
-            const paths: string[] = [];
+            let picks: DevicePick[];
             try {
-              for (const f of files) {
-                const staged = await stageWithTask(f, stageBrowserFile);
-                noteStaged(staged);
-                paths.push(staged.path);
-              }
+              picks = await picksFromDrop(items);
             } catch (e) {
-              if (!isStagingCancelled(e)) setError(humanizeCaught(e));
+              setError(humanizeCaught(e));
+              return;
             }
-            if (paths.length > 0) await addPicked(paths, "file");
+            await addFromDevice(picks);
           })();
         },
       }
@@ -1583,7 +1578,7 @@ export default function FileSystemScreen() {
    *  Two or more local files then go up as ONE job, a folder as its own job, all of it one
    *  run (one task, one progress bar, one Cancel). `kind`: what the picker returned, when it
    *  only returns one kind (a drop is asked about). */
-  const addPicked = async (picked: string[], kind?: "file" | "folder", onDone?: () => void) => {
+  const addPicked = async (picked: string[], kind?: "file" | "folder") => {
     if (picked.length === 0) return;
     setError(null);
     // The console can change while this waits on the listing or on the user: the plan is
@@ -1615,7 +1610,6 @@ export default function FileSystemScreen() {
       { host, addr, destDir, srcPaths: [], steps: plan.steps },
       {
         ...fsUploadDeps,
-        onDone,
         onFailed: (raw) =>
           pushNotification(
             "error",
@@ -2970,6 +2964,9 @@ export default function FileSystemScreen() {
     properties: openProperties,
     viewable: viewableEntry,
     download: (e, asZip) => void runDownload(e, asZip),
+    renameFromTitle: (e) => setTitleRename({ name: e.name, folder: e.kind === "dir" }),
+    toggleHidden: (e) =>
+      void runRename(e.name, e.name.startsWith(".") ? shownName(e.name) : hiddenName(e.name)),
     rename: (e) => {
       setRenaming(e.name);
       setRenameDraft(e.name);
@@ -3200,6 +3197,19 @@ export default function FileSystemScreen() {
           onClose={() => setActionsMenu(null)}
         />
       )}
+      {titleRename && (
+        <RenameFromTitleDialog
+          source={`ps5://${hostOf(host)}${joinPath(path, titleRename.name)}`}
+          name={titleRename.name}
+          folder={titleRename.folder}
+          onCancel={() => setTitleRename(null)}
+          onRename={(newName) => {
+            const from = titleRename.name;
+            setTitleRename(null);
+            void runRename(from, newName);
+          }}
+        />
+      )}
       {rowMenu && !menuEntry && (
         <RowMenu
           x={rowMenu.x}
@@ -3337,22 +3347,64 @@ export default function FileSystemScreen() {
               disabled={loading || !host?.trim() || localBusy !== null}
               onMainClick={() => void addFilesHere()}
               onPick={(p) => void addPicked([p], "file")}
+              // Web UI: the server (the default) or the device the browser runs on (#730).
+              thisDevice={!isTauriEnv() ? () => deviceFilesInput.current?.click() : undefined}
             />
-            <Button
-              variant="secondary"
-              size="sm"
-              leftIcon={<FolderUp size={12} />}
-              onClick={() => void addFolderHere()}
-              className="max-sm:min-w-10! max-sm:px-0 max-sm:[&>span]:sr-only"
-              disabled={loading || !host?.trim() || localBusy !== null}
-              title={tr(
-                "fs_add_folder_dialog_title",
-                undefined,
-                "Pick a folder to copy onto the PS5",
-              )}
-            >
-              {tr("fs_add_folder", undefined, "Add folder")}
-            </Button>
+            {isTauriEnv() ? (
+              <Button
+                variant="secondary"
+                size="sm"
+                leftIcon={<FolderUp size={12} />}
+                onClick={() => void addFolderHere()}
+                className="max-sm:min-w-10! max-sm:px-0 max-sm:[&>span]:sr-only"
+                disabled={loading || !host?.trim() || localBusy !== null}
+                title={tr(
+                  "fs_add_folder_dialog_title",
+                  undefined,
+                  "Pick a folder to copy onto the PS5",
+                )}
+              >
+                {tr("fs_add_folder", undefined, "Add folder")}
+              </Button>
+            ) : (
+              <BrowseButton
+                mode="folder"
+                icon={<FolderUp size={12} />}
+                label={tr("fs_add_folder", undefined, "Add folder")}
+                title={tr(
+                  "fs_add_folder_dialog_title",
+                  undefined,
+                  "Pick a folder to copy onto the PS5",
+                )}
+                disabled={loading || !host?.trim() || localBusy !== null}
+                onMainClick={() => void addFolderHere()}
+                onPick={(p) => void addPicked([p], "folder")}
+                thisDevice={() => deviceFolderInput.current?.click()}
+              />
+            )}
+            {!isTauriEnv() && (
+              <>
+                <input
+                  ref={deviceFilesInput}
+                  type="file"
+                  multiple
+                  hidden
+                  onChange={onDeviceInput}
+                  data-testid="fs-device-files"
+                />
+                <input
+                  ref={(el) => {
+                    deviceFolderInput.current = el;
+                    // React has no prop for it: a folder picker, its files with their paths.
+                    el?.setAttribute("webkitdirectory", "");
+                  }}
+                  type="file"
+                  hidden
+                  onChange={onDeviceInput}
+                  data-testid="fs-device-folder"
+                />
+              </>
+            )}
             <Button
               variant="secondary"
               size="sm"
@@ -3400,32 +3452,6 @@ export default function FileSystemScreen() {
       />
 
       <ConnectionGate require="payload">
-        {!isTauriEnv() && (
-          <div className="mb-3">
-            <input
-              ref={deviceInput}
-              type="file"
-              multiple
-              hidden
-              aria-label={tr("browserFile.choose", "From this device…")}
-              onChange={(event) => {
-                const files = Array.from(event.currentTarget.files ?? []);
-                event.currentTarget.value = "";
-                void addDeviceFilesHere(files);
-              }}
-            />
-            <Button
-              variant="secondary"
-              leftIcon={<Upload size={14} />}
-              disabled={loading || !host?.trim() || localBusy !== null || deviceStaging}
-              onClick={() => deviceInput.current?.click()}
-            >
-              {deviceStaging
-                ? `${tr("browserFile.staging", "Uploading to server…")} ${deviceProgress}`
-                : tr("browserFile.choose", "From this device…")}
-            </Button>
-          </div>
-        )}
         {/* An open edit session means the browsed mount is a game image
             checked out of ShadowMount+ — and that the game is missing from
             the PS5 home screen until it's finished. This is the screen the
@@ -4322,6 +4348,22 @@ export default function FileSystemScreen() {
                         {e.name}
                       </button>
                     )}
+                    {(() => {
+                      const tag = gameFormatTag(e.name, isDir);
+                      if (!tag) return null;
+                      return (
+                        <span
+                          data-testid="fs-format-tag"
+                          className={
+                            "shrink-0 rounded border border-[var(--glass-edge)] px-1 text-[10px] leading-4 font-medium text-[var(--color-muted)] sm:text-[11px] " +
+                            // A folder already shows its icon: the word only where there is room.
+                            (tag === "folder" ? "hidden sm:inline" : "")
+                          }
+                        >
+                          {gameFormatLabel(tag, tr("fs_tag_folder", undefined, "Folder"))}
+                        </span>
+                      );
+                    })()}
                     <span className="shrink-0 text-xs text-[var(--color-muted)] tabular-nums">
                       {isDir ? "—" : formatBytes(e.size)}
                     </span>

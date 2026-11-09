@@ -1,6 +1,6 @@
 import { consoleAddr, hostOf } from "../../lib/addr";
 import { isAndroid } from "../../lib/platform";
-import { backupStamp } from "./backupStamp";
+import { backupStamp, inBackupFolder } from "./backupStamp";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 // useEffect is consumed inside SaveThumbnail below.
 import { Link, useLocation, useNavigate } from "react-router";
@@ -34,6 +34,8 @@ import {
   SaveCopyError,
   shareSave,
 } from "../../api/saveShare";
+import { useRosterStore } from "../../state/roster";
+import { CopyToConsoleDialog, isEmulatorSave } from "./CopyToConsoleDialog";
 import CopyToUserDialog from "./CopyToUserDialog";
 import { canCopyToOtherUser, copyTargets, localUserCount } from "./copyTargets";
 import { saveImagesOf } from "./saveImages";
@@ -101,6 +103,8 @@ import { pickPath } from "../../lib/pickPath";
 import { pushNotification } from "../../state/notifications";
 import { withConsolePrefix } from "../../state/roster";
 import { isTauriEnv } from "../../lib/tauriEnv";
+import { useAutoSaveBackupStore } from "../../state/autoSaveBackup";
+import { engineIsOnThisDevice } from "../../state/engine";
 import AutoBackupCard from "./AutoBackupCard";
 import ServerBackupCard from "./ServerBackupCard";
 import MoveFromPs4 from "./MoveFromPs4";
@@ -143,6 +147,8 @@ export default function SavesScreen() {
   const [useTarget, setUseTarget] = useState<SaveEntry | null>(null);
   // Copy to another user: the save being copied.
   const [copyFrom, setCopyFrom] = useState<SaveEntry | null>(null);
+  const [copyToConsole, setCopyToConsole] = useState<SaveEntry | null>(null);
+  const hasOtherConsole = useRosterStore((r) => r.profiles.length > 1);
   // Restore…: the save whose backups are shown.
   const [restoreOf, setRestoreOf] = useState<SaveEntry | null>(null);
   // The newest backup of each game and user ("Backed up 2 h ago"), and Back up now in flight.
@@ -228,7 +234,7 @@ export default function SavesScreen() {
     return tr(
       "saves_part_missing",
       { game, part, user },
-      "{game}'s {part} isn't on {user} yet: start the game once as {user} and save, then try again.",
+      "{user} doesn't have {game}'s {part} yet, and a save can only replace a save slot {user} already has. Start the game as {user}, save in the same slot, then try again.",
     );
   };
   // A file for a friend or another PS5: every part of this save in one .zip.
@@ -392,6 +398,8 @@ export default function SavesScreen() {
   };
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  // A restore or copy that failed: not the list failing, and Try again wouldn't redo it.
+  const [actionError, setActionError] = useState<string | null>(null);
   // Bumped by each refresh, so the Switch emulator's saves are looked at again too.
   const [refreshCount, setRefreshCount] = useState(0);
   // Opened from a game's page: that game's saves are scrolled to and marked.
@@ -469,6 +477,7 @@ export default function SavesScreen() {
   useEffect(() => {
     setSaves(null);
     setError(null);
+    setActionError(null);
     setUsers([]);
     setUserFilter("all");
     filterChosen.current = false;
@@ -538,7 +547,11 @@ export default function SavesScreen() {
       const destZip = android
         ? ""
         : await saveDialog({
-            defaultPath: destZipName,
+            // The save backup folder, where the automatic ones are (on this computer only).
+            defaultPath: inBackupFolder(
+              engineIsOnThisDevice() ? useAutoSaveBackupStore.getState().settings?.dir : null,
+              destZipName,
+            ),
             filters: [{ name: tr("saves_zip_filter", undefined, "ZIP archive"), extensions: ["zip"] }],
             title: tr("saves_download_picker", undefined, "Save backup as…"),
           });
@@ -573,7 +586,7 @@ export default function SavesScreen() {
     } catch (e) {
       task?.fail(e);
       const msg = humanizeCaught(e);
-      setError(msg);
+      setActionError(msg);
       pushNotification(
         "error",
         withConsolePrefix(host, tr("saves_notif_backup_failed", { id: entry.title_id }, "Backup failed: {id}")),
@@ -663,7 +676,7 @@ export default function SavesScreen() {
     } catch (e) {
       task?.fail(e);
       const msg = humanizeCaught(e);
-      setError(msg);
+      setActionError(msg);
       pushNotification(
         "error",
         withConsolePrefix(restoreHost, tr("saves_notif_restore_failed", { id: entry.title_id }, "Restore failed: {id}")),
@@ -771,7 +784,7 @@ export default function SavesScreen() {
     } catch (e) {
       task?.fail(e);
       const msg = humanizeCaught(e);
-      setError(msg);
+      setActionError(msg);
       pushNotification(
         "error",
         withConsolePrefix(backupHost, tr("saves_notif_usb_backup_failed", { id: entry.title_id }, "USB backup failed: {id}")),
@@ -912,7 +925,7 @@ export default function SavesScreen() {
     } catch (e) {
       task?.fail(e);
       const msg = humanizeCaught(e);
-      setError(msg);
+      setActionError(msg);
       pushNotification(
         "error",
         withConsolePrefix(restoreHost, tr("saves_notif_usb_restore_failed", { id: entry.title_id }, "USB restore failed: {id}")),
@@ -969,7 +982,7 @@ export default function SavesScreen() {
           { path: base },
           `No USB/external drive found at ${base}. Plug it into the PS5 and try again.`,
         );
-        setError(msg);
+        setActionError(msg);
         pushNotification("error", withConsolePrefix(restoreHost, tr("saves_notif_usb_restore_failed_plain", undefined, "USB restore failed")), {
           body: msg,
         });
@@ -1033,7 +1046,7 @@ export default function SavesScreen() {
           { path: base },
           `No writable USB/external drive found at ${base}. Plug it into the PS5 and try again.`,
         );
-        setError(msg);
+        setActionError(msg);
         pushNotification("error", withConsolePrefix(backupHost, tr("saves_notif_usb_backup_failed_plain", undefined, "USB backup failed")), {
           body: msg,
         });
@@ -1171,6 +1184,16 @@ export default function SavesScreen() {
           </div>
         )}
 
+        {actionError && (
+          <div className="mb-4">
+            <ErrorCard
+              title={tr("saves_action_failed", undefined, "That didn't work")}
+              detail={actionError}
+              onDismiss={() => setActionError(null)}
+            />
+          </div>
+        )}
+
         {saves && saves.length === 0 && (
           <EmptyState
             icon={Save}
@@ -1260,6 +1283,15 @@ export default function SavesScreen() {
                 setPicker(null);
                 void doOpenSave(img);
               }}
+            />
+          )}
+          {copyToConsole && host?.trim() && (
+            <CopyToConsoleDialog
+              entry={copyToConsole}
+              owner={whoseName(copyToConsole)}
+              fromHost={hostOf(host.trim())}
+              titleId={copyToConsole.title_id}
+              onClose={() => setCopyToConsole(null)}
             />
           )}
           {copyFrom && (
@@ -1425,6 +1457,22 @@ export default function SavesScreen() {
                                   },
                                 ]
                               : []),
+                            ...(hasOtherConsole
+                              ? [
+                                  {
+                                    label: tr("saves_copy_to_console", undefined, "Another console"),
+                                    description: tr(
+                                      "saves_copy_to_console_desc",
+                                      undefined,
+                                      "Put this save into a user's save of the game on your other PS5.",
+                                    ),
+                                    icon: <Share2 size={12} />,
+                                    onSelect: () => setCopyToConsole(e),
+                                    disabled: isBusy(e.path) || openBusy,
+                                    testId: "save-copy-to-console",
+                                  },
+                                ]
+                              : []),
                             {
                               label: tr("saves_share_file", undefined, "Save as a file for a friend or another PS5"),
                               description: tr(
@@ -1451,6 +1499,18 @@ export default function SavesScreen() {
                             },
                           ]}
                         />
+                      )}
+                      {hasOtherConsole && isEmulatorSave(e) && (
+                        <Button
+                          variant="ghost"
+                          size="sm"
+                          leftIcon={<Share2 size={11} />}
+                          onClick={() => setCopyToConsole(e)}
+                          disabled={isBusy(e.path) || openBusy}
+                          data-testid="save-copy-to-console"
+                        >
+                          {tr("saves_copy_to_console", undefined, "Another console")}
+                        </Button>
                       )}
                       <Button
                         variant="ghost"

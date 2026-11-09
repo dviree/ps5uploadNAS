@@ -6,6 +6,7 @@
 // picture and sound as binary messages (the watch party's kinds, pad/watchPlayer.ts).
 
 import type { PadState } from "./remotePlayStream";
+import { lanPage } from "../join/lanHint";
 
 /** Why the host's engine did not let a guest in. Anything else reads as "refused". */
 export type RefuseWhy =
@@ -22,6 +23,8 @@ export type RefuseWhy =
   | "unreachable"
   | "address"
   | "slow_down"
+  /** A resume to the stream's controller, which the host needed back, with no controller free. */
+  | "seat_taken"
   | "refused";
 
 /** How a joined guest's game ended, from the engine (`{"bye": …}`). */
@@ -32,7 +35,38 @@ export type ByeWhy =
   /** The same place was opened in another tab or on another device. */
   | "replaced"
   /** The console no longer has this guest's controller (`{"bye": "lost"}`). */
-  | "pad_lost";
+  | "pad_lost"
+  /** The host needed their stream's controller back and no other controller was free. */
+  | "seat_taken";
+
+/** Why an internet invite's connection could not be made (or was refused), join/rtcTransport. */
+export type NetWhy =
+  /** The answer's certificate is not the link's: someone in the middle, or an old link. */
+  | "mismatch"
+  /** ICE failed or did not finish in time: no direct path between the two networks. */
+  | "no_direct"
+  /** The hub has no such room (the invite closed, or the host is away). */
+  | "no_room"
+  /** The room (hub) or the host's engine has no space for another guest now. */
+  | "net_full"
+  /** The hub could not be reached, or dropped the page while connecting. */
+  | "no_hub"
+  /** The host's engine would not take this browser's offer. */
+  | "offer"
+  /** This browser has no WebRTC. */
+  | "no_webrtc";
+
+const NET_WHYS: readonly NetWhy[] = ["mismatch", "no_direct", "no_room", "net_full", "no_hub", "offer", "no_webrtc"];
+
+/** The close code a failed internet connection closes with (its reason `net:<why>`). */
+export const NET_CLOSE = 4100;
+
+/** The NetWhy a transport's close carried, or null (an ordinary close or drop). */
+export function netFailure(e: { code?: number; reason?: string } | null | undefined): NetWhy | null {
+  if (!e || e.code !== NET_CLOSE || typeof e.reason !== "string" || !e.reason.startsWith("net:")) return null;
+  const w = e.reason.slice(4) as NetWhy;
+  return NET_WHYS.includes(w) ? w : null;
+}
 
 /** What a guest is doing on the host's console, as the host's engine sees it. */
 export type GuestState = "asking" | "picking_user" | "playing" | "reconnecting" | "left";
@@ -44,13 +78,29 @@ export interface JoinStatus {
   rttMs: number | null;
   host: string | null;
   blockSystem: boolean;
+  /** On the host's stream's own controller (Player 1): playing as the host's PS5 user. */
+  streamSeat: boolean;
+  /** Seated in the PS5 profile the host chose for them: its name (no user to pick). */
+  playsAs: string | null;
+  /** The host chose a profile for them that couldn't be used: the TV asks who they are. */
+  seatNote: string | null;
+}
+
+/** The picture as an internet connection's video track (join/rtcTransport): the browser's own
+ *  stream, and its receiver for the numbers (getStats). */
+export interface TrackMedia {
+  stream: MediaStream;
+  receiver: RTCRtpReceiver;
+  /** The sound's track, when the answer has one (the engine says `audio` in `joined`). */
+  audio?: RTCRtpReceiver;
 }
 
 export type ServerMessage =
   | { kind: "asking" }
   /** A resume held until the host plays again (`{"stage":"waiting","why":"host_stopped"}`). */
   | { kind: "waiting" }
-  | { kind: "joined"; player: number; token: string; hevc: boolean }
+  /** `track`: the pictures come on the internet connection's video track (join/rtcTransport). */
+  | { kind: "joined"; player: number; token: string; hevc: boolean; track: boolean; audio: boolean }
   | { kind: "refused"; why: RefuseWhy }
   | { kind: "status"; status: JoinStatus }
   | { kind: "feedback"; rumble: [number, number] | null; light: [number, number, number] | null }
@@ -69,12 +119,14 @@ const REFUSE: ReadonlySet<string> = new Set([
   "unreachable",
   "slow_down",
   "address",
+  "seat_taken",
 ]);
 const BYE: Readonly<Record<string, ByeWhy>> = {
   kicked: "kicked",
   host_stopped: "host_stopped",
   replaced: "replaced",
   lost: "pad_lost",
+  seat_taken: "seat_taken",
 };
 const GUEST_STATES: ReadonlySet<string> = new Set(["asking", "picking_user", "playing", "reconnecting", "left"]);
 
@@ -94,7 +146,7 @@ export function readServerMessage(text: string): ServerMessage | null {
   if (v.stage === "asking") return { kind: "asking" };
   if (v.stage === "waiting") return { kind: "waiting" };
   if (v.stage === "joined" && typeof v.player === "number" && typeof v.token === "string") {
-    return { kind: "joined", player: v.player, token: v.token, hevc: v.hevc === true };
+    return { kind: "joined", player: v.player, token: v.token, hevc: v.hevc === true, track: v.track === true, audio: v.audio === true };
   }
   if (v.stage === "refused") {
     const why = String(v.why ?? "");
@@ -114,6 +166,9 @@ export function readServerMessage(text: string): ServerMessage | null {
         rttMs: typeof s.rtt_ms === "number" ? s.rtt_ms : null,
         host: typeof s.host === "string" && s.host ? s.host : null,
         blockSystem: s.block_system === true,
+        streamSeat: s.stream_seat === true,
+        playsAs: typeof s.plays_as === "string" && s.plays_as ? s.plays_as : null,
+        seatNote: typeof s.seat_note === "string" && s.seat_note ? s.seat_note : null,
       },
     };
   }
@@ -191,7 +246,38 @@ export const RESUME_WINDOW_MS = 60_000;
  *  HOST_RESTART_WINDOW): they wait for the host to play again. */
 export const HOST_RESTART_WINDOW_MS = 60_000;
 
-/** A Play Together link a friend shared: `http://<computer>:<port>/join#i=<key>[&n=<name>]`. */
+/** An internet invite: the hub's room, the invite key, the host's DTLS fingerprint and the hub. */
+export interface InternetInvite {
+  room: string;
+  key: string;
+  fp: string;
+  hub: string;
+}
+
+/** A SHA-256 DTLS fingerprint as a link carries it (32 hex pairs with colons), upper case; null
+ *  when it is not one. */
+export function fpOf(v: string | null | undefined): string | null {
+  return v && /^[0-9A-Fa-f]{2}(:[0-9A-Fa-f]{2}){31}$/.test(v) ? v.toUpperCase() : null;
+}
+
+/** The internet invite in a link's fragment (`location.hash`), or null when it is not one. */
+export function parseInternetFragment(hash: string): InternetInvite | null {
+  const p = new URLSearchParams(hash.replace(/^#/, ""));
+  const room = p.get("room") ?? "";
+  const key = p.get("k") ?? "";
+  const fp = p.get("fp") ?? "";
+  const hub = p.get("hub") ?? "";
+  if (!/^[A-Za-z0-9_-]{22}$/.test(room)) return null;
+  if (!/^[A-Za-z0-9_-]{8,128}$/.test(key)) return null;
+  if (!fpOf(fp)) return null;
+  // A host name or address, an optional port: nothing that could add a path, user or scheme.
+  if (!/^([A-Za-z0-9.-]{1,253}|\[[0-9A-Fa-f:.]{2,45}\])(:\d{1,5})?$/.test(hub)) return null;
+  return { room, key, fp: fp.toUpperCase(), hub };
+}
+
+/** A Play Together link a friend shared: `http://<computer>:<port>/join#i=<key>[&n=<name>]`, or
+ *  since 12.1 the one link for everywhere, `https://ps5upload.phantomptr.com/join/#room=…&k=…`
+ *  (its `net`, with the host's own page as `lan` when the link names it). */
 export interface JoinLink {
   /** `http://<computer>:<port>` */
   origin: string;
@@ -201,6 +287,15 @@ export interface JoinLink {
   code?: string | null;
   /** The host's name, when the link carries it. */
   name: string | null;
+  /** An internet invite: joined peer to peer through the hub (join/rtcTransport). */
+  net?: InternetInvite;
+  /** The host's own page on their Wi-Fi (`lan`) and on Tailscale (`ts`), when the internet link
+   *  names them: where the app signals without the hub (join/pathRace). */
+  lan?: string | null;
+  ts?: string | null;
+  /** A Wi-Fi link's engine certificate (`&fp=`, since 12.4): its WebRTC join checks the answer
+   *  against it (join/pathRace). */
+  fp?: string | null;
 }
 
 /** The link pasted into the app (or scanned), or null when it is not one. */
@@ -216,12 +311,29 @@ export function parseJoinLink(text: string): JoinLink | null {
   if (u.protocol !== "http:" && u.protocol !== "https:") return null;
   const path = /^(.*)\/join\/?$/.exec(u.pathname);
   if (!path) return null;
+  // The one link for everywhere (12.1): its origin is the host's own page when the link names it
+  // (an app on the same Wi-Fi can fall back to it), else the hub's.
+  const net = parseInternetFragment(u.hash);
+  if (net) {
+    const lan = lanPage(u.hash, "join");
+    const name = new URLSearchParams(u.hash.replace(/^#/, "")).get("n")?.trim() || null;
+    const ts = lanPage(u.hash, "join", "ts");
+    return {
+      origin: lan ? lan.replace(/\/join\/?$/, "") : `https://${net.hub}`,
+      invite: net.key,
+      name,
+      code: null,
+      net,
+      lan,
+      ts,
+    };
+  }
   const hash = new URLSearchParams(u.hash.replace(/^#/, ""));
   const invite = hash.get("i") ?? "";
   if (!/^[A-Za-z0-9_-]{8,128}$/.test(invite)) return null;
   const name = hash.get("n")?.trim() || null;
   // With the path the engine is served under (PS5UPLOAD_BASE_URL), if any.
-  return { origin: `${u.origin}${path[1]}`, invite, name, code: null };
+  return { origin: `${u.origin}${path[1]}`, invite, name, code: null, fp: fpOf(hash.get("fp")) };
 }
 
 /** "Open in the PS5Upload app": an invite link as the ps5upload:// link the app opens. */

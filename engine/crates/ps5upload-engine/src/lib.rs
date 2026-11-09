@@ -15,6 +15,7 @@
 //! The API is the route table in `build_app`, plus the sub-routers it merges.
 
 mod activity;
+mod ampr_emu_api;
 mod ampr_index_api;
 mod ampr_trace;
 mod api_errors;
@@ -27,6 +28,7 @@ mod collection;
 mod collection_api;
 mod collection_check_api;
 mod collection_tidy_api;
+mod console_backup;
 mod console_cleanup_api;
 mod console_files_api;
 mod console_move;
@@ -54,6 +56,7 @@ mod folder_build;
 mod fpkg_api;
 mod fpkg_firmware;
 mod frame_decode;
+mod game_fps_api;
 mod games_api;
 mod golive_dest;
 mod golive_ffmpeg;
@@ -68,10 +71,12 @@ mod image_build;
 mod inspect;
 mod install;
 mod join;
+mod join_net;
 mod link;
 mod link_lz4;
 mod local_fs;
 mod log_dedup;
+mod log_levels;
 mod lz4_api;
 mod lz4_compat;
 mod mcp;
@@ -85,6 +90,7 @@ mod net_health;
 mod openapi;
 mod ops;
 mod pad_link;
+mod payload_updates_api;
 mod payloads_api;
 mod pkg_install;
 mod pkg_sidecar;
@@ -95,6 +101,7 @@ mod queue_api;
 mod remote;
 mod remote_download;
 mod remote_pkg;
+mod rp_diag;
 mod rp_golive;
 mod rp_keyboard;
 mod rp_live_ts;
@@ -103,10 +110,16 @@ mod rp_stream_api;
 mod save_backup;
 mod save_backup_server;
 mod save_copy;
+mod server_out;
 mod settings_api;
 mod settings_backup;
+mod share;
 mod shared_state;
 mod state_io;
+mod tailnet_api;
+mod tailnet_discover;
+pub(crate) mod tailnet_engine;
+pub(crate) mod tailnet_system;
 mod telemetry;
 mod vinput_api;
 mod wake_login_api;
@@ -115,6 +128,8 @@ mod web_pages;
 mod webui;
 mod win_net;
 mod workshop_api;
+mod zstd_packs;
+mod zstd_runtime;
 
 #[cfg(test)]
 mod api_surface_tests;
@@ -732,7 +747,9 @@ async fn log_requests(req: Request, next: Next) -> axum::response::Response {
     // failure still gets through: only this debug line is skipped, and the 5xx
     // path below is untouched.
     if !is_constant_poll(&path) {
-        log_debug!("{method} {path} -> {status} ({ms}ms)");
+        // The access log: always kept (engine.log is the crash trace), whatever the level says,
+        // in a ring of its own so requests never push other debug lines out of the tail.
+        engine_log::record_access(format!("{method} {path} -> {status} ({ms}ms)"));
     }
 
     // A console that is switched off answers every status poll with 502,
@@ -878,6 +895,14 @@ fn loopback_allows(cfg: &LoopbackGuardConfig, peer: std::net::IpAddr, path: &str
         // the invite or the resume token itself. The rest of /api/join is the host's.
         || path == "/join"
         || path == "/api/join/ws"
+        // …and an internet invite's signalling straight to this engine (join_net/local_signal),
+        // for this engine's own rooms only: the guest still checks the certificate and the key.
+        || path == "/api/join/signal"
+        // A friend receiving a Share (share/mod.rs) on the home network: the page and its
+        // socket, which serves only what the sender allowed. The rest of /api/share is the
+        // sender's.
+        || path == "/share"
+        || path == "/api/share/ws"
         || peer.is_loopback()
         || allow_rules_contain(&cfg.allowed_ips, peer)
 }
@@ -1770,6 +1795,31 @@ pub(crate) fn set_job(
             let _ = events_tx.send(msg.to_string());
         }
     }
+    // A job's end at info (what a report needs), every other change at trace (a ticker updates a
+    // running job often). Only its state, reason and counters: never the file list.
+    let field = |k: &str| json.get(k).cloned().unwrap_or(serde_json::Value::Null);
+    if terminal {
+        log_at!(
+            Info,
+            "transfer",
+            "job {job_id}: {} after {} ms: reason {} error {} bytes {} files {}",
+            field("status"),
+            field("elapsed_ms"),
+            field("error_reason"),
+            field("error"),
+            field("bytes_sent"),
+            field("files_sent")
+        );
+    } else {
+        log_at!(
+            Trace,
+            "transfer",
+            "job {job_id}: {} bytes {} of {}",
+            field("status"),
+            field("bytes_sent"),
+            field("total_bytes")
+        );
+    }
     if terminal {
         activity::transfer_ended(&job_id.to_string(), &json);
         telemetry::on_state(job_id, &json);
@@ -1907,6 +1957,10 @@ struct TransferDirReq {
     /// sets it when it hands a job to this handler.
     #[serde(default)]
     skip_existing: Option<String>,
+    /// The folder was downloaded with `escape_names`: each file goes to the console under the
+    /// exact name its kept name stands for (`ps5upload_core::host_names`, #729).
+    #[serde(default)]
+    unescape_names: bool,
 }
 
 /// Upload a `.zip`'s contents, decompressing on the host so files land
@@ -2623,7 +2677,11 @@ async fn ps5_fs_delete(
     let path = req.path;
     let op_id = req.op_id;
     let started = std::time::Instant::now();
-    crate::log_info!("fs_delete: addr={addr} path={path} op_id={op_id}");
+    crate::log_at!(
+        Info,
+        "files",
+        "fs_delete: addr={addr} path={path} op_id={op_id}"
+    );
     let (check_addr, check_path) = (addr.clone(), path.clone());
     if let Ok(Some(title)) =
         tokio::task::spawn_blocking(move || running_title_from(&check_addr, &check_path)).await
@@ -2654,7 +2712,9 @@ async fn ps5_fs_delete(
     .and_then(|r| r)
     {
         Ok(()) => {
-            crate::log_info!(
+            crate::log_at!(
+                Info,
+                "files",
                 "fs_delete ok: {path_for_log} in {} ms",
                 started.elapsed().as_millis()
             );
@@ -2667,13 +2727,17 @@ async fn ps5_fs_delete(
             // real delete failure (different banner, different log).
             let msg = e.to_string();
             if msg == "cancelled" {
-                crate::log_info!(
+                crate::log_at!(
+                    Info,
+                    "files",
                     "fs_delete cancelled: {path_for_log} in {} ms",
                     started.elapsed().as_millis()
                 );
                 return json_err(StatusCode::CONFLICT, "cancelled").into_response();
             }
-            crate::log_warn!(
+            crate::log_at!(
+                Warn,
+                "files",
                 "fs_delete failed: {path_for_log} in {} ms: {e}",
                 started.elapsed().as_millis()
             );
@@ -2695,7 +2759,11 @@ async fn ps5_fs_unpack(
     };
     let (path, op_id) = (req.path, req.op_id);
     let started = std::time::Instant::now();
-    crate::log_info!("fs_unpack: addr={addr} path={path} op_id={op_id}");
+    crate::log_at!(
+        Info,
+        "files",
+        "fs_unpack: addr={addr} path={path} op_id={op_id}"
+    );
     let path_for_log = path.clone();
     // A 136 GB image inflates for many minutes; the job is followed, not timed out.
     let deadline = std::time::Duration::from_secs(12 * 60 * 60);
@@ -2709,7 +2777,9 @@ async fn ps5_fs_unpack(
     .and_then(|r| r)
     {
         Ok(done) => {
-            crate::log_info!(
+            crate::log_at!(
+                Info,
+                "files",
                 "fs_unpack ok: {path_for_log} -> {} ({} bytes) in {} ms",
                 done.path,
                 done.size,
@@ -2722,7 +2792,7 @@ async fn ps5_fs_unpack(
             json_err(StatusCode::CONFLICT, "cancelled").into_response()
         }
         Err(e) => {
-            crate::log_warn!("fs_unpack failed: {path_for_log}: {e:#}");
+            crate::log_at!(Warn, "files", "fs_unpack failed: {path_for_log}: {e:#}");
             json_err(StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response()
         }
     }
@@ -2766,7 +2836,9 @@ async fn ps5_fs_extract(
         replace: req.replace,
     };
     let started = std::time::Instant::now();
-    crate::log_info!(
+    crate::log_at!(
+        Info,
+        "files",
         "fs_extract: addr={addr} path={} dest={} merge={} replace={} password={} op_id={op_id}",
         x.path,
         x.dest,
@@ -2787,7 +2859,7 @@ async fn ps5_fs_extract(
     .and_then(|r| r)
     {
         Ok(done) => {
-            crate::log_info!(
+            crate::log_at!(Info, "files", 
                 "fs_extract ok: {path_for_log} -> {} ({} files, {} bytes, {} skipped, {} unsafe, {} links) in {} ms",
                 done.path,
                 done.files,
@@ -2813,7 +2885,7 @@ async fn ps5_fs_extract(
             json_err(StatusCode::CONFLICT, "cancelled").into_response()
         }
         Err(e) => {
-            crate::log_warn!("fs_extract failed: {path_for_log}: {e:#}");
+            crate::log_at!(Warn, "files", "fs_extract failed: {path_for_log}: {e:#}");
             json_err(StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response()
         }
     }
@@ -2830,7 +2902,7 @@ async fn ps5_fs_move(
     let from = req.from;
     let to = req.to;
     let started = std::time::Instant::now();
-    crate::log_info!("fs_move: addr={addr} from={from} to={to}");
+    crate::log_at!(Info, "files", "fs_move: addr={addr} from={from} to={to}");
     let from_for_log = from.clone();
     let to_for_log = to.clone();
     // 1-hour deadline: an intra-volume fs_move returns in milliseconds
@@ -2864,7 +2936,9 @@ async fn ps5_fs_move(
     .and_then(|r| r)
     {
         Ok(()) => {
-            crate::log_info!(
+            crate::log_at!(
+                Info,
+                "files",
                 "fs_move ok: {from_for_log} -> {to_for_log} in {} ms",
                 started.elapsed().as_millis()
             );
@@ -2872,13 +2946,17 @@ async fn ps5_fs_move(
         }
         Err(e) => {
             if e.to_string() == "cancelled" {
-                crate::log_info!(
+                crate::log_at!(
+                    Info,
+                    "files",
                     "fs_move cancelled: {from_for_log} -> {to_for_log} in {} ms",
                     started.elapsed().as_millis()
                 );
                 return json_err(StatusCode::CONFLICT, "cancelled").into_response();
             }
-            crate::log_warn!(
+            crate::log_at!(
+                Warn,
+                "files",
                 "fs_move failed: {from_for_log} -> {to_for_log} in {} ms: {e}",
                 started.elapsed().as_millis()
             );
@@ -2912,7 +2990,7 @@ async fn ps5_fs_copy(
     let from = req.from;
     let to = req.to;
     let started = std::time::Instant::now();
-    crate::log_info!("fs_copy: addr={addr} from={from} to={to}");
+    crate::log_at!(Info, "files", "fs_copy: addr={addr} from={from} to={to}");
     let from_for_log = from.clone();
     let to_for_log = to.clone();
     // The copy runs on the console as a job (`job.copy`): the engine polls it, so a connection
@@ -2935,7 +3013,9 @@ async fn ps5_fs_copy(
     .and_then(|r| r)
     {
         Ok(()) => {
-            crate::log_info!(
+            crate::log_at!(
+                Info,
+                "files",
                 "fs_copy ok: {from_for_log} -> {to_for_log} in {} ms",
                 started.elapsed().as_millis()
             );
@@ -2948,13 +3028,17 @@ async fn ps5_fs_copy(
             // FS_COPY failure (different banner, different log).
             let msg = e.to_string();
             if msg == "cancelled" {
-                crate::log_info!(
+                crate::log_at!(
+                    Info,
+                    "files",
                     "fs_copy cancelled: {from_for_log} -> {to_for_log} in {} ms",
                     started.elapsed().as_millis()
                 );
                 return json_err(StatusCode::CONFLICT, "cancelled").into_response();
             }
-            crate::log_warn!(
+            crate::log_at!(
+                Warn,
+                "files",
                 "fs_copy failed: {from_for_log} -> {to_for_log} in {} ms: {e}",
                 started.elapsed().as_millis()
             );
@@ -2990,7 +3074,7 @@ async fn ps5_fs_mount(Json(req): Json<FsMountReq>) -> impl IntoResponse {
     let mount_point = req.mount_point;
     let read_only = req.read_only.unwrap_or(false);
     let started = std::time::Instant::now();
-    crate::log_info!(
+    crate::log_at!(Info, "files", 
         "fs_mount: addr={addr} image_path={image_path} mount_name={:?} mount_point={:?} read_only={read_only}",
         mount_name,
         mount_point,
@@ -3011,7 +3095,9 @@ async fn ps5_fs_mount(Json(req): Json<FsMountReq>) -> impl IntoResponse {
     .and_then(|r| r);
     match result {
         Ok(r) => {
-            crate::log_info!(
+            crate::log_at!(
+                Info,
+                "files",
                 "fs_mount ok: {image_for_log} -> {} ({}, {}) in {} ms",
                 r.mount_point,
                 r.dev_node,
@@ -3021,7 +3107,9 @@ async fn ps5_fs_mount(Json(req): Json<FsMountReq>) -> impl IntoResponse {
             (StatusCode::OK, Json(r)).into_response()
         }
         Err(e) => {
-            crate::log_warn!(
+            crate::log_at!(
+                Warn,
+                "files",
                 "fs_mount failed: {image_for_log} in {} ms: {e}",
                 started.elapsed().as_millis()
             );
@@ -3055,7 +3143,7 @@ async fn ps5_app_launch(Json(req): Json<AppLaunchReq>) -> impl IntoResponse {
     };
     let title_id = req.title_id;
     let started = std::time::Instant::now();
-    crate::log_info!("app_launch: addr={addr} title_id={title_id}");
+    crate::log_at!(Info, "files", "app_launch: addr={addr} title_id={title_id}");
     let title_for_log = title_id.clone();
     match tokio::task::spawn_blocking(move || app_launch(&addr, &title_id))
         .await
@@ -3063,14 +3151,18 @@ async fn ps5_app_launch(Json(req): Json<AppLaunchReq>) -> impl IntoResponse {
         .and_then(|r| r)
     {
         Ok(()) => {
-            crate::log_info!(
+            crate::log_at!(
+                Info,
+                "files",
                 "app_launch ok: {title_for_log} in {} ms",
                 started.elapsed().as_millis()
             );
             (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
         }
         Err(e) => {
-            crate::log_warn!(
+            crate::log_at!(
+                Warn,
+                "files",
                 "app_launch failed: {title_for_log} in {} ms: {e}",
                 started.elapsed().as_millis()
             );
@@ -3108,7 +3200,9 @@ async fn ps5_app_register(
     let src_path = req.src_path;
     let patch_drm_type = req.patch_drm_type.unwrap_or(false);
     let started = std::time::Instant::now();
-    crate::log_info!(
+    crate::log_at!(
+        Info,
+        "files",
         "app_register: addr={addr} src_path={src_path} patch_drm_type={patch_drm_type}"
     );
     let path_for_log = src_path.clone();
@@ -3121,7 +3215,9 @@ async fn ps5_app_register(
     .and_then(|r| r)
     {
         Ok(result) => {
-            crate::log_info!(
+            crate::log_at!(
+                Info,
+                "files",
                 "app_register ok: {path_for_log} -> {} ({}) in {} ms",
                 result.title_id,
                 result.title_name,
@@ -3130,7 +3226,9 @@ async fn ps5_app_register(
             (StatusCode::OK, Json::<RegisterResult>(result)).into_response()
         }
         Err(e) => {
-            crate::log_warn!(
+            crate::log_at!(
+                Warn,
+                "files",
                 "app_register failed: {path_for_log} in {} ms: {e}",
                 started.elapsed().as_millis()
             );
@@ -3161,7 +3259,11 @@ async fn ps5_app_unregister(
     };
     let title_id = req.title_id;
     let started = std::time::Instant::now();
-    crate::log_info!("app_unregister: addr={addr} title_id={title_id}");
+    crate::log_at!(
+        Info,
+        "files",
+        "app_unregister: addr={addr} title_id={title_id}"
+    );
     let title_for_log = title_id.clone();
     // Uninstalling changes which artwork exists, so drop this console's
     // cached images now rather than letting them age out — the user would
@@ -3181,7 +3283,9 @@ async fn ps5_app_unregister(
             // 0x80B21B02 refusal masquerade as a successful uninstall while
             // the title stayed in Settings → Storage.
             if outcome.sony_refused() && !outcome.refusal_stands() {
-                crate::log_warn!(
+                crate::log_at!(
+                    Warn,
+                    "files",
                     "app_unregister: {title_for_log} — sceAppInstUtilAppUninstall refused with \
                      rc=0x{:08X}, but our registration is gone and the title is no longer listed \
                      ({} ms)",
@@ -3189,7 +3293,9 @@ async fn ps5_app_unregister(
                     started.elapsed().as_millis()
                 );
             } else if outcome.sony_refused() {
-                crate::log_warn!(
+                crate::log_at!(
+                    Warn,
+                    "files",
                     "app_unregister: {title_for_log} — our teardown ok in {} ms, but \
                      sceAppInstUtilAppUninstall REFUSED with rc=0x{:08X}; the title may \
                      remain in Settings → Storage",
@@ -3198,13 +3304,17 @@ async fn ps5_app_unregister(
                 );
             } else if outcome.still_present == Some(true) {
                 // WARN so a bug report carries it: the game is still listed (#476).
-                crate::log_warn!(
+                crate::log_at!(
+                    Warn,
+                    "files",
                     "app_unregister: {title_for_log} — Sony accepted in {} ms, but the \
                      title's folders are still on the console",
                     started.elapsed().as_millis()
                 );
             } else {
-                crate::log_info!(
+                crate::log_at!(
+                    Info,
+                    "files",
                     "app_unregister ok: {title_for_log} in {} ms",
                     started.elapsed().as_millis()
                 );
@@ -3221,7 +3331,9 @@ async fn ps5_app_unregister(
                 .into_response()
         }
         Err(e) => {
-            crate::log_warn!(
+            crate::log_at!(
+                Warn,
+                "files",
                 "app_unregister failed: {title_for_log} in {} ms: {e}",
                 started.elapsed().as_millis()
             );
@@ -3239,7 +3351,11 @@ async fn ps5_fs_unmount(
     };
     let mount_point = req.mount_point;
     let started = std::time::Instant::now();
-    crate::log_info!("fs_unmount: addr={addr} mount_point={mount_point}");
+    crate::log_at!(
+        Info,
+        "files",
+        "fs_unmount: addr={addr} mount_point={mount_point}"
+    );
     let mp_for_log = mount_point.clone();
     match tokio::task::spawn_blocking(move || fs_unmount(&addr, &mount_point))
         .await
@@ -3247,14 +3363,18 @@ async fn ps5_fs_unmount(
         .and_then(|r| r)
     {
         Ok(()) => {
-            crate::log_info!(
+            crate::log_at!(
+                Info,
+                "files",
                 "fs_unmount ok: {mp_for_log} in {} ms",
                 started.elapsed().as_millis()
             );
             (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
         }
         Err(e) => {
-            crate::log_warn!(
+            crate::log_at!(
+                Warn,
+                "files",
                 "fs_unmount failed: {mp_for_log} in {} ms: {e}",
                 started.elapsed().as_millis()
             );
@@ -3274,7 +3394,11 @@ async fn ps5_fs_chmod(
     let mode = req.mode;
     let recursive = req.recursive;
     let started = std::time::Instant::now();
-    crate::log_info!("fs_chmod: addr={addr} path={path} mode={mode} recursive={recursive}");
+    crate::log_at!(
+        Info,
+        "files",
+        "fs_chmod: addr={addr} path={path} mode={mode} recursive={recursive}"
+    );
     let path_for_log = path.clone();
     // Recursive chmod on a 20k-file game folder routinely runs past the
     // default 30 s socket timeout — the payload walks the tree serially
@@ -3297,14 +3421,18 @@ async fn ps5_fs_chmod(
     .and_then(|r| r)
     {
         Ok(()) => {
-            crate::log_info!(
+            crate::log_at!(
+                Info,
+                "files",
                 "fs_chmod ok: {path_for_log} in {} ms",
                 started.elapsed().as_millis()
             );
             (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
         }
         Err(e) => {
-            crate::log_warn!(
+            crate::log_at!(
+                Warn,
+                "files",
                 "fs_chmod failed: {path_for_log} in {} ms: {e}",
                 started.elapsed().as_millis()
             );
@@ -3396,7 +3524,7 @@ struct FsOpCancelReq {
 /// Stops a console file operation: this engine's own job if it runs one with that id, else the
 /// helper's. False when nothing with that id is running.
 async fn cancel_fs_op(addr: String, op_id: u64) -> anyhow::Result<bool> {
-    crate::log_info!("fs_op_cancel: op_id={op_id}");
+    crate::log_at!(Info, "files", "fs_op_cancel: op_id={op_id}");
     if ps5upload_ava1::copy::op_cancel(op_id) {
         return Ok(true);
     }
@@ -3426,7 +3554,7 @@ async fn ps5_fs_mkdir(Json(req): Json<FsPathReq>) -> impl IntoResponse {
     };
     let path = req.path;
     let started = std::time::Instant::now();
-    crate::log_info!("fs_mkdir: addr={addr} path={path}");
+    crate::log_at!(Info, "files", "fs_mkdir: addr={addr} path={path}");
     let path_for_log = path.clone();
     match tokio::task::spawn_blocking(move || fs_mkdir(&addr, &path))
         .await
@@ -3434,14 +3562,18 @@ async fn ps5_fs_mkdir(Json(req): Json<FsPathReq>) -> impl IntoResponse {
         .and_then(|r| r)
     {
         Ok(()) => {
-            crate::log_info!(
+            crate::log_at!(
+                Info,
+                "files",
                 "fs_mkdir ok: {path_for_log} in {} ms",
                 started.elapsed().as_millis()
             );
             (StatusCode::OK, Json(serde_json::json!({ "ok": true }))).into_response()
         }
         Err(e) => {
-            crate::log_warn!(
+            crate::log_at!(
+                Warn,
+                "files",
                 "fs_mkdir failed: {path_for_log} in {} ms: {e}",
                 started.elapsed().as_millis()
             );
@@ -4495,6 +4627,11 @@ struct PowerWakeLoginReq {
     regist_key: String,
     #[serde(default)]
     rp_key: String,
+    /// Which of the console's paired PS5 users to sign in (an account id, a name as
+    /// `GET /api/consoles` lists it under `rp_users`, or its number there), when the keys are left
+    /// out. Left out, the chosen user (the one Play starts as).
+    #[serde(default)]
+    user: Option<String>,
     /// Someone is there to type the user's login passcode if the console asks: the sign-in is
     /// held and the passcode asked for (wake_login_api). Otherwise (an automatic wake) a
     /// passcode request ends it with the console awake at its sign-in screen.
@@ -4511,9 +4648,27 @@ struct PowerWakeLoginReq {
 async fn ps5_power_wake_login(Json(mut req): Json<PowerWakeLoginReq>) -> impl IntoResponse {
     req.host = consoles_api::resolve(&req.host);
     if req.regist_key.trim().is_empty() && req.rp_key.trim().is_empty() {
-        if let Some((regist_key, rp_key)) = consoles_api::rp_keys(&req.host) {
-            req.regist_key = regist_key;
-            req.rp_key = rp_key;
+        match consoles_api::rp_keys_for(&req.host, req.user.as_deref()) {
+            Ok((regist_key, rp_key)) => {
+                req.regist_key = regist_key;
+                req.rp_key = rp_key;
+                // The wake credential goes with the user signed in.
+                if req.user.is_some() {
+                    req.credential.clear();
+                }
+            }
+            Err(consoles_api::NoKeys::NoSuchUser(names)) => {
+                return json_err(
+                    StatusCode::BAD_REQUEST,
+                    format!(
+                        "no paired user of this console is {:?}; paired: {}",
+                        req.user.as_deref().unwrap_or_default(),
+                        names.join(", ")
+                    ),
+                )
+                .into_response();
+            }
+            Err(consoles_api::NoKeys::NotPaired) => {}
         }
     }
     let host = req.host.clone();
@@ -4540,6 +4695,17 @@ async fn ps5_power_wake_login(Json(mut req): Json<PowerWakeLoginReq>) -> impl In
         if !credential.trim().is_empty() {
             ps5upload_core::ddp::wake(&host, &credential)?;
         }
+        log_at!(
+            Debug,
+            "wake",
+            "wake-login {host}: {} then waiting for the session port to sign in",
+            if credential.trim().is_empty() {
+                "no wake credential, not woken,"
+            } else {
+                "woken,"
+            }
+        );
+
         ps5upload_core::rp_session::login_session_when_ready(
             &host,
             &creds,
@@ -4557,15 +4723,35 @@ async fn ps5_power_wake_login(Json(mut req): Json<PowerWakeLoginReq>) -> impl In
 
 async fn ps5_power_wake(Json(req): Json<PowerWakeReq>) -> impl IntoResponse {
     let host = consoles_api::resolve(&req.host);
-    let cred = if req.credential.trim().is_empty() {
-        consoles_api::wake_credential(&host).unwrap_or_default()
-    } else {
+    let from_request = !req.credential.trim().is_empty();
+    let cred = if from_request {
         req.credential.clone()
+    } else {
+        consoles_api::wake_credential(&host).unwrap_or_default()
     };
+    // Where the key came from, never the key.
+    log_at!(
+        Debug,
+        "wake",
+        "power/wake {host}: credential {}",
+        if from_request {
+            "from the request"
+        } else if cred.is_empty() {
+            "missing (none saved for this console)"
+        } else {
+            "from the saved console"
+        }
+    );
+    // A PS5 on Tailscale whose home address is silent may be asleep at home (wake works) or
+    // away from this device's network (it cannot: a resting PS5 is off Tailscale, and a wake is
+    // a home-network broadcast). The wake goes out either way; the note says the second plainly.
+    let away_note = tailnet_engine::engine()
+        .home_silent(&host)
+        .then_some(tailnet_engine::WAKE_AWAY_NOTE);
     match tokio::task::spawn_blocking(move || ps5upload_core::ddp::wake(&host, &cred)).await {
         Ok(Ok(())) => (
             StatusCode::OK,
-            Json(serde_json::json!({ "ok": true, "sent": true })),
+            Json(serde_json::json!({ "ok": true, "sent": true, "tailnet_note": away_note })),
         )
             .into_response(),
         Ok(Err(e)) => json_err(StatusCode::BAD_REQUEST, format!("{e:#}")).into_response(),
@@ -4590,6 +4776,11 @@ struct PowerPairReq {
     /// The PSN account id (base64 of its 8 bytes) to pair, with `pin`.
     #[serde(default)]
     account_id: Option<String>,
+    /// The paired user's name, for telling a console's paired users apart. Left out, the helper's
+    /// name for the user is used when it can be read. Pairing another user adds to the console's
+    /// paired users; pairing one again replaces that user's keys.
+    #[serde(default)]
+    user_name: Option<String>,
 }
 
 /// POST /api/ps5/power/pair — pair with a console so it can be woken.
@@ -4610,6 +4801,8 @@ async fn ps5_power_pair(Json(req): Json<PowerPairReq>) -> impl IntoResponse {
         return missing_console_addr();
     };
     let manual = req.pin.filter(|p| !p.trim().is_empty());
+    let with = if manual.is_some() { "pin" } else { "helper" };
+    let tried_host = host.clone();
     crate::log_info!(
         "power_pair: addr={addr} host={host} with={}",
         if manual.is_some() {
@@ -4619,11 +4812,18 @@ async fn ps5_power_pair(Json(req): Json<PowerPairReq>) -> impl IntoResponse {
         }
     );
     let account_id = req.account_id.unwrap_or_default();
+    let user_name = req
+        .user_name
+        .map(|n| n.trim().chars().take(64).collect::<String>())
+        .filter(|n| !n.is_empty());
     let r = tokio::task::spawn_blocking(move || {
-        let p = match manual {
+        let mut p = match manual {
             Some(pin) => ps5upload_core::rp_regist::pair_with_pin(&host, &account_id, &pin),
             None => ps5upload_core::rp_regist::pair_with_console(&addr, &host),
         }?;
+        if let Some(name) = user_name {
+            p.user_name = name;
+        }
         // The engine keeps the keys too, so a script can start a stream by address alone.
         consoles_api::remember_pairing(&host, &p);
         Ok::<_, anyhow::Error>(p)
@@ -4631,6 +4831,12 @@ async fn ps5_power_pair(Json(req): Json<PowerPairReq>) -> impl IntoResponse {
     .await
     .map_err(anyhow::Error::from)
     .and_then(|r| r);
+    // Kept for GET /api/ps5/rp/pair/attempts and the log, scrubbed of anything like a PIN or key.
+    rp_diag::pair_attempt(
+        &tried_host,
+        with,
+        r.as_ref().err().map(|e| format!("{e:#}")).as_deref(),
+    );
     match r {
         Ok(p) => (StatusCode::OK, Json(p)).into_response(),
         Err(e) => json_err(StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
@@ -4763,6 +4969,32 @@ async fn ps5_smp_status(
             .and_then(|r| r);
     match r {
         Ok(v) => (StatusCode::OK, Json(v)).into_response(),
+        Err(e) => json_err(StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
+    }
+}
+
+/// POST /api/ps5/smp/rescan?addr= — ask ShadowMount+ to scan again now, with its retry counters
+/// cleared, so a new image of a game is picked up without deleting the game from the home screen.
+async fn ps5_smp_rescan(
+    State(state): State<AppState>,
+    Query(q): Query<AddrQuery>,
+) -> impl IntoResponse {
+    let addr = console_addr_or_default(q.addr, &state.default_ps5_addr);
+    let done = tokio::task::spawn_blocking(move || {
+        let (api, _) = ps5upload_core::smp_api::SmpApi::probe(&addr).ok_or_else(|| {
+            anyhow::anyhow!(
+                "ShadowMount+'s API doesn't answer from this computer: it needs ShadowMount+ \
+                 1.7 or later running, with api_enabled on and api_bind_address open to the \
+                 network in /data/shadowmount/config.ini"
+            )
+        })?;
+        api.rescan()
+    })
+    .await
+    .map_err(anyhow::Error::from)
+    .and_then(|r| r);
+    match done {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
         Err(e) => json_err(StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
     }
 }
@@ -6260,12 +6492,24 @@ async fn ps5_status(
     // legacy JSON (`ucred_elevated` a bool, `prior_instance` only when present). The old
     // transaction fields (runtime_port, shutdown, takeover_requested, active_transactions,
     // last_tx_seq, recovered_transactions) no longer exist; nothing reads them.
+    // A short bound per attempt (`STATUS_TIMEOUT`): the helper answers in milliseconds, and a
+    // session that went quiet is dropped and replaced rather than waited on (AvaTransport's
+    // status path), so a poll answers in seconds even when the console just went away.
     let result = tokio::task::spawn_blocking(move || {
-        let body = ps5upload_core::mgmt::call(&addr, ps5upload_core::mgmt::m::NODE_STATUS, b"")?;
+        let body = ps5upload_core::mgmt::call_with(
+            &addr,
+            ps5upload_core::mgmt::m::NODE_STATUS,
+            ps5upload_core::mgmt::m::NODE_STATUS.label,
+            b"",
+            Some(ps5upload_ava1::mgmt::STATUS_TIMEOUT),
+        )?;
         let json: serde_json::Value = serde_json::from_slice(&body)?;
         Ok::<_, anyhow::Error>(json)
     })
     .await;
+    // The path the check took, for its connect timings.
+    let path = connect_path(&ps5upload_core::route::via(&console));
+    ps5upload_ava1::timings::update(&console, |t| t.path = Some(path.to_string()));
 
     use ps5upload_core::events::{emit, Cat, Level};
     match result {
@@ -6301,6 +6545,39 @@ async fn ps5_status(
     }
 }
 
+/// The connect timings' name for how a console is reached.
+fn connect_path(via: &ps5upload_core::route::Via) -> &'static str {
+    use ps5upload_core::route::Via;
+    match via {
+        Via::Lan => "lan",
+        Via::TailnetDirect { .. } => "tailnet_direct",
+        Via::TailnetRelayed => "tailnet_relayed",
+        Via::System => "tailnet_system",
+    }
+}
+
+/// GET /api/ps5/connect-timings?addr=IP
+///
+/// The last status check of each console, phase by phase: whether a pooled session was reused
+/// or a new one opened (`handshake_ms`: the TCP connect, the AVA1 handshake and the pairing
+/// check), whether a verdict remembered from a moment ago answered (`cached_verdict`), the
+/// plain TCP connect that looks past such a verdict or checks a quiet session (`tcp_ms`,
+/// `tcp_ok`), the `node.status` call (`status_ms`), the helper's `version`, the `path` (`lan`,
+/// `tailnet_direct`, `tailnet_relayed`, `tailnet_system`), and whether a session that had gone
+/// quiet was dropped (`stale_session_dropped`). Read on demand; nothing is logged. With `addr`,
+/// that console only (`{ timing: null }` before its first check); without, `{ consoles: [...] }`,
+/// newest first.
+async fn ps5_connect_timings(Query(q): Query<AddrQuery>) -> impl IntoResponse {
+    match q.addr.filter(|a| !a.trim().is_empty()) {
+        Some(addr) => Json(serde_json::json!({
+            "timing": ps5upload_ava1::timings::last(&addr),
+        })),
+        None => Json(serde_json::json!({
+            "consoles": ps5upload_ava1::timings::all(),
+        })),
+    }
+}
+
 /// The 502 body of a failed status probe: `{ error, reason?, power? }`. `reason` is the token
 /// the error leads with (`console_rest_mode`, `ava1_unreachable`, `helper_not_ava1`,
 /// `not_paired`, ...); `power` is what DDP said (`awake` / `rest` / `unreachable`) when the
@@ -6322,6 +6599,70 @@ fn status_failure_body(
         body["power"] = p.as_str().into();
     }
     body
+}
+
+#[cfg(test)]
+mod connect_timings_tests {
+    use super::*;
+    use ps5upload_core::route::Via;
+
+    #[test]
+    fn each_way_to_a_console_has_its_name() {
+        assert_eq!(connect_path(&Via::Lan), "lan");
+        assert_eq!(
+            connect_path(&Via::TailnetDirect {
+                latency_ms: Some(3.0)
+            }),
+            "tailnet_direct"
+        );
+        assert_eq!(connect_path(&Via::TailnetRelayed), "tailnet_relayed");
+        assert_eq!(connect_path(&Via::System), "tailnet_system");
+    }
+
+    #[tokio::test]
+    async fn the_route_answers_one_console_or_all_without_asking_any() {
+        ps5upload_ava1::timings::record(ps5upload_ava1::timings::ConnectTiming {
+            console: "10.9.8.7".into(),
+            at_ms: 5,
+            ok: true,
+            status_ms: Some(4),
+            ..Default::default()
+        });
+        let one = ps5_connect_timings(Query(AddrQuery {
+            addr: Some("10.9.8.7:9120".into()),
+        }))
+        .await
+        .into_response();
+        assert_eq!(one.status(), StatusCode::OK);
+        let body = axum::body::to_bytes(one.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["timing"]["status_ms"], 4);
+        assert_eq!(v["timing"]["ok"], true);
+        let none = ps5_connect_timings(Query(AddrQuery {
+            addr: Some("10.9.8.6".into()),
+        }))
+        .await
+        .into_response();
+        let body = axum::body::to_bytes(none.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(v["timing"].is_null(), "{v}");
+        let all = ps5_connect_timings(Query(AddrQuery { addr: None }))
+            .await
+            .into_response();
+        let body = axum::body::to_bytes(all.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert!(v["consoles"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|t| t["console"] == "10.9.8.7"));
+    }
 }
 
 #[cfg(test)]
@@ -7165,6 +7506,7 @@ async fn transfer_dir_handler(
         cfg.cancel = Some(cancel);
         cfg.excludes = req.excludes;
         cfg.renames = renames;
+        cfg.unescape_names = req.unescape_names;
         cfg.progress_bytes = Some(Arc::clone(&progress));
         cfg.progress_files = Some(Arc::clone(&progress_files));
         cfg.progress_files_finalized = Some(Arc::clone(&progress_files_finalized));
@@ -8426,6 +8768,7 @@ async fn remoteplay_readiness_handler(
     Query(q): Query<AddrQuery>,
 ) -> impl IntoResponse {
     let addr = console_addr_or_default(q.addr, &state.default_ps5_addr);
+    let seen_addr = addr.clone();
     let r = tokio::task::spawn_blocking(move || {
         ps5upload_core::remoteplay::remoteplay_readiness(&addr)
     })
@@ -8433,7 +8776,11 @@ async fn remoteplay_readiness_handler(
     .map_err(anyhow::Error::from)
     .and_then(|r| r);
     match r {
-        Ok(result) => (StatusCode::OK, Json(result)).into_response(),
+        Ok(result) => {
+            // What the next pairing try's record says about the console (rp_diag.rs).
+            rp_diag::readiness_seen(&seen_addr, &result);
+            (StatusCode::OK, Json(result)).into_response()
+        }
         Err(e) => json_err(StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
     }
 }
@@ -9009,6 +9356,34 @@ struct AvatarCurrentQuery {
     uid: u32,
 }
 
+/// The image type of an avatar file by its first bytes: PNG or JPEG, or None (a .dds, say).
+fn avatar_mime(bytes: &[u8]) -> Option<&'static str> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some("image/png")
+    } else if bytes.starts_with(&[0xFF, 0xD8, 0xFF]) {
+        Some("image/jpeg")
+    } else {
+        None
+    }
+}
+
+#[cfg(test)]
+mod avatar_mime_tests {
+    #[test]
+    fn a_jpeg_named_png_is_shown_as_a_jpeg() {
+        assert_eq!(
+            super::avatar_mime(b"\x89PNG\r\n\x1a\nrest"),
+            Some("image/png")
+        );
+        assert_eq!(
+            super::avatar_mime(&[0xFF, 0xD8, 0xFF, 0xE0, 0, 0x10, b'J', b'F']),
+            Some("image/jpeg")
+        );
+        assert_eq!(super::avatar_mime(b"DDS |...."), None);
+        assert_eq!(super::avatar_mime(b""), None);
+    }
+}
+
 /// GET /api/profile/avatar/current?addr&uid — read the user's CURRENT avatar
 /// image from Sony's profile cache so the UI can show it before a change. The
 /// cache dir is `/system_data/priv/cache/profile/0x<UID>/` — UPPERCASE hex, to
@@ -9023,14 +9398,15 @@ async fn profile_avatar_current_handler(
 ) -> impl IntoResponse {
     let addr = console_addr_or_default(q.addr, &state.default_ps5_addr);
     let uid = q.uid;
-    let png: Option<Vec<u8>> = tokio::task::spawn_blocking(move || {
+    let found: Option<(Vec<u8>, &'static str)> = tokio::task::spawn_blocking(move || {
         let dir = format!("/system_data/priv/cache/profile/0x{uid:08X}");
         for name in ["avatar.png", "picture.png"] {
             let path = format!("{dir}/{name}");
             if let Ok(bytes) = ps5upload_core::fs_ops::fs_read(&addr, &path, 0, 2 * 1024 * 1024) {
-                // Only trust a real PNG (the cache also holds .dds we can't show).
-                if bytes.starts_with(b"\x89PNG") {
-                    return Some(bytes);
+                // By what the file is, not its name: a PSN avatar is often a JPEG named .png
+                // (#718). The cache also holds .dds we can't show.
+                if let Some(mime) = avatar_mime(&bytes) {
+                    return Some((bytes, mime));
                 }
             }
         }
@@ -9038,10 +9414,10 @@ async fn profile_avatar_current_handler(
     })
     .await
     .unwrap_or(None);
-    let data_url = png.map(|bytes| {
+    let data_url = found.map(|(bytes, mime)| {
         use base64::Engine as _;
         let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
-        format!("data:image/png;base64,{b64}")
+        format!("data:{mime};base64,{b64}")
     });
     (
         StatusCode::OK,
@@ -10090,12 +10466,18 @@ struct TransferDownloadReq {
     /// Read-only — the payload ignores this flag for destructive ops.
     #[serde(default)]
     unsafe_read: bool,
+    /// When true, a console name this computer can't hold (`a\b`, `a:b`, `CON`) is written
+    /// under its reversible form (`ps5upload_core::host_names`) instead of refused; an upload
+    /// with `unescape_names` puts it back exactly. The saves code's downloads (#729).
+    #[serde(default)]
+    escape_names: bool,
 }
 
 /// Where an AVA1 download lands (Task 25).
 enum Ava1DownloadTarget {
-    /// A tree under this directory: `dest_dir/<basename>`.
-    Folder(std::path::PathBuf),
+    /// A tree under this directory: `dest_dir/<basename>`; `true` keeps names this computer
+    /// can't hold under their reversible form (`TransferDownloadReq::escape_names`).
+    Folder(std::path::PathBuf, bool),
     /// One `.zip` at this path, Stored (resumable) or Deflated (cannot resume).
     Zip(std::path::PathBuf, ps5upload_ava1::download::ZipCompression),
     /// A folder on a saved server (`remote://id/dir`), through this engine (download_relay.rs).
@@ -10130,7 +10512,7 @@ fn start_ava1_download(
         .unwrap_or("")
         .to_string();
     let dest_display = match &target {
-        Ava1DownloadTarget::Folder(dir) => dir.join(&basename).to_string_lossy().to_string(),
+        Ava1DownloadTarget::Folder(dir, _) => dir.join(&basename).to_string_lossy().to_string(),
         Ava1DownloadTarget::Zip(zip, _) => zip.to_string_lossy().to_string(),
         Ava1DownloadTarget::Server(dir) => format!("{}/{basename}", dir.trim_end_matches('/')),
     };
@@ -10203,7 +10585,7 @@ fn start_ava1_download(
             &progress_files,
             ready,
             || match &target {
-                Ava1DownloadTarget::Folder(dir) => ps5upload_ava1::download::to_local(
+                Ava1DownloadTarget::Folder(dir, false) => ps5upload_ava1::download::to_local(
                     &addr,
                     &src,
                     kind,
@@ -10213,6 +10595,18 @@ fn start_ava1_download(
                     &counters,
                     Some(cancel),
                 ),
+                Ava1DownloadTarget::Folder(dir, true) => {
+                    ps5upload_ava1::download::to_local_escaped(
+                        &addr,
+                        &src,
+                        kind,
+                        dir,
+                        unsafe_read,
+                        id,
+                        &counters,
+                        Some(cancel),
+                    )
+                }
                 Ava1DownloadTarget::Zip(zip, compression) => ps5upload_ava1::download::to_zip_with(
                     &addr,
                     &src,
@@ -10369,7 +10763,9 @@ async fn transfer_download_handler(
         return json_err(StatusCode::BAD_REQUEST, "src_path cannot be empty or '/'")
             .into_response();
     };
-    if basename == "." || basename == ".." || basename.contains('/') || basename.contains('\\') {
+    // With `escape_names` the name lands under its reversible form (checked by the download).
+    let bad_char = basename.contains('/') || (basename.contains('\\') && !req.escape_names);
+    if basename == "." || basename == ".." || bad_char {
         return json_err(
             StatusCode::BAD_REQUEST,
             format!(
@@ -10378,7 +10774,9 @@ async fn transfer_download_handler(
         )
         .into_response();
     }
-    if let Some(why) = ps5upload_core::transfer::host_unsafe_component(basename) {
+    if let Some(why) =
+        ps5upload_core::transfer::host_unsafe_component(basename).filter(|_| !req.escape_names)
+    {
         return json_err(
             StatusCode::BAD_REQUEST,
             format!("{basename:?} cannot be saved on this computer: {why}."),
@@ -10416,7 +10814,7 @@ async fn transfer_download_handler(
         req.src_path.clone(),
         kind,
         req_unsafe,
-        Ava1DownloadTarget::Folder(dest_dir),
+        Ava1DownloadTarget::Folder(dest_dir, req.escape_names),
     )
 }
 
@@ -10652,6 +11050,7 @@ async fn transfer_dir_reconcile_handler(
         excludes: req.excludes,
         bandwidth_cap_mbps: req.bandwidth_cap_mbps,
         skip_existing: Some(skip.to_string()),
+        unescape_names: false,
     };
     transfer_dir_handler(State(state), Json(dir_req))
         .await
@@ -10815,18 +11214,35 @@ async fn ps5_port_check(Query(q): Query<PortCheckQuery>) -> impl IntoResponse {
         );
     }
     let timeout = Duration::from_millis(q.timeout_ms.unwrap_or(1500).clamp(100, 10_000));
+    // Home first, always; a port the console serves to Tailscale goes there only when the
+    // console is away (`ps5upload_core::route`). `via` says which path answered.
     let res = tokio::task::spawn_blocking(move || {
-        ps5upload_core::payload_lifecycle::probe_port(&ip, q.port, timeout)
+        let host = ps5upload_core::events::console_host(&ip);
+        match ps5upload_core::route::dial(&host, q.port, false) {
+            Some(a) => {
+                let (via, _) = tailnet_engine::via_json(&ps5upload_core::route::via(&host));
+                let r = ps5upload_core::payload_lifecycle::probe_port(
+                    &a.ip().to_string(),
+                    a.port(),
+                    timeout,
+                );
+                (r, via)
+            }
+            None => (
+                ps5upload_core::payload_lifecycle::probe_port(&ip, q.port, timeout),
+                "lan",
+            ),
+        }
     })
     .await;
     match res {
-        Ok(Ok(())) => (
+        Ok((Ok(()), via)) => (
             StatusCode::OK,
-            Json(serde_json::json!({ "open": true, "error": null })),
+            Json(serde_json::json!({ "open": true, "error": null, "via": via })),
         ),
-        Ok(Err(e)) => (
+        Ok((Err(e), via)) => (
             StatusCode::OK,
-            Json(serde_json::json!({ "open": false, "error": e })),
+            Json(serde_json::json!({ "open": false, "error": e, "via": via })),
         ),
         Err(e) => (
             StatusCode::OK,
@@ -10935,6 +11351,7 @@ async fn activity_handler(
             .collect()
     };
     active.extend(installs.jobs.running().iter().map(activity::install_active));
+    active.extend(share::activity());
     Json(activity::snapshot(q.since, active))
 }
 
@@ -11428,6 +11845,8 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
     host_guard::log_settings();
     // A console it cannot serve is a `helper_not_ava1` error, never another protocol.
     ps5upload_ava1::mgmt::install();
+    // The engine's own tailnet node (when turned on) and the away routing (tailnet_engine.rs).
+    tailnet_engine::boot();
     // Every new session says who this engine is, whatever opened it (Devices showed a phone
     // that had only checked the console's status as an app from before 8.0.0).
     ps5upload_ava1::pool::on_new_session(mesh_api::greet);
@@ -11471,8 +11890,11 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
     // (reconcile per-parent progress, transfer retries, etc.) without
     // having to install a separate pipe for core diagnostics.
     ps5upload_core::log::set_sink(|msg| engine_log::record("info", msg.to_string()));
-    // core_debug! lines (written only while "Detailed logs" is on) land at debug.
-    ps5upload_core::log::set_debug_sink(|msg| engine_log::record("debug", msg.to_string()));
+    // clog!/core_debug! lines, with their level and category. The level setting comes off disk
+    // first, so a raise made before a restart is still in force (until it runs out).
+    ps5upload_core::log::set_leveled_sink(engine_log::core_sink);
+    log_levels::load_saved();
+    diag_api::mark_started();
     // The bug-report journal: every crate's events (ps5upload_core::events) land on disk here.
     event_journal::install();
     ps5upload_core::events::emit(
@@ -11501,9 +11923,13 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
     };
     // "Use less of this computer" as it was last set (#632).
     workshop_api::load();
+    // Play Together's "Invites work" as it was last set.
+    join::load_invites();
 
     // The Collection's automatic refresh (a no-op until a folder is added).
     collection_api::spawn_auto_refresh();
+    // "Keep payloads up to date" (a no-op until the user turns it on).
+    payload_updates_api::spawn_scheduler();
     // Install sessions live in their own state (served by pkg_install::api_router below); the helper
     // log mirror also reads it, to stay off a console while an install runs.
     let pkg_state = std::sync::Arc::new(pkg_install::PkgInstallState::restored());
@@ -11656,6 +12082,7 @@ fn build_app_and_mcp(
         )
         .route("/api/activity/label", post(activity::label_handler))
         .route("/api/ps5/status", get(ps5_status))
+        .route("/api/ps5/connect-timings", get(ps5_connect_timings))
         .route("/api/ps5/port-check", get(ps5_port_check))
         .route("/api/ps5/toast", post(ps5_toast))
         .route("/api/ps5/readiness", get(ps5_readiness))
@@ -11684,6 +12111,19 @@ fn build_app_and_mcp(
         .route("/api/ps5/disk-usage/{id}", get(disk_usage::status))
         .route("/api/ps5/disk-usage/{id}/cancel", post(disk_usage::cancel))
         .route("/api/ps5/cleanup/scan", post(console_cleanup_api::scan))
+        .route(
+            "/api/ps5/tailnet",
+            get(tailnet_api::status).post(tailnet_api::op),
+        )
+        .route(
+            "/api/tailnet",
+            get(tailnet_api::engine_status).post(tailnet_api::engine_op),
+        )
+        .route("/api/tailnet/route", get(tailnet_api::route))
+        .route("/api/tailnet/check", get(tailnet_api::check))
+        .route("/api/tailnet/via", get(tailnet_api::via))
+        .route("/api/tailnet/consoles", get(tailnet_discover::consoles))
+        .route("/api/tailnet/consoles/add", post(tailnet_discover::add))
         .route(
             "/api/ps5/cleanup/scan/{id}",
             get(console_cleanup_api::scan_status),
@@ -11717,6 +12157,7 @@ fn build_app_and_mcp(
             post(console_shares_api::remove),
         )
         .route("/api/ava1/identity", get(ava1_api::identity_handler))
+        .route("/api/ava1/console", get(ava1_api::console_handler))
         .route("/api/ava1/pairing", get(ava1_api::pairing_handler))
         .route(
             "/api/ava1/pairing/confirm",
@@ -11758,6 +12199,7 @@ fn build_app_and_mcp(
         .route("/api/lz4/building", get(lz4_api::lz4_building_handler))
         .route("/api/fpkg/build", post(fpkg_api::fpkg_build_handler))
         .route("/api/fpkg/delete", post(fpkg_api::fpkg_delete_handler))
+        .route("/api/fpkg/ampr-emu", post(ampr_emu_api::ampr_emu_handler))
         .route(
             "/api/fpkg/ampr-index",
             post(ampr_index_api::ampr_index_handler),
@@ -11803,6 +12245,27 @@ fn build_app_and_mcp(
             post(collection_check_api::post_check_cancel),
         )
         .route("/api/games/installed", get(games_api::list_installed))
+        .route("/api/console-backup/scan", post(console_backup::post_scan))
+        .route(
+            "/api/console-backup/backup",
+            post(console_backup::post_backup),
+        )
+        .route(
+            "/api/console-backup/inspect",
+            post(console_backup::post_inspect),
+        )
+        .route(
+            "/api/console-backup/restore",
+            post(console_backup::post_restore),
+        )
+        .route(
+            "/api/console-backup/status",
+            get(console_backup::get_status),
+        )
+        .route(
+            "/api/console-backup/cancel",
+            post(console_backup::post_cancel),
+        )
         .route(
             "/api/save-backup",
             get(save_backup::get_view).put(save_backup::put_settings),
@@ -11856,6 +12319,14 @@ fn build_app_and_mcp(
             post(save_copy::post_restore_to_user),
         )
         .route(
+            "/api/save-backup/copy-console",
+            post(save_copy::post_copy_console),
+        )
+        .route(
+            "/api/save-backup/copy-console/targets",
+            get(save_copy::get_copy_targets),
+        )
+        .route(
             "/api/shared/{name}",
             get(shared_state::get_doc).put(shared_state::put_doc),
         )
@@ -11864,6 +12335,10 @@ fn build_app_and_mcp(
         .route(
             "/api/consoles",
             get(consoles_api::list).put(consoles_api::put),
+        )
+        .route(
+            "/api/consoles/settings",
+            axum::routing::patch(consoles_api::patch_settings),
         )
         .route(
             "/api/consoles/document",
@@ -11970,6 +12445,24 @@ fn build_app_and_mcp(
         .route("/api/ps5/hw/power", get(ps5_hw_power))
         .route("/api/ps5/hw/storage", get(ps5_hw_storage))
         .route("/api/ps5/hw/drive-sensors", get(ps5_hw_drive_sensors))
+        // the running game's sampled frame rate, live and captured (#774)
+        .route("/api/ps5/hw/fps", get(game_fps_api::fps_live))
+        .route(
+            "/api/ps5/hw/fps/capture",
+            get(game_fps_api::fps_capture_get),
+        )
+        .route(
+            "/api/ps5/hw/fps/capture/start",
+            post(game_fps_api::fps_capture_start),
+        )
+        .route(
+            "/api/ps5/hw/fps/capture/stop",
+            post(game_fps_api::fps_capture_stop),
+        )
+        .route(
+            "/api/ps5/hw/fps/capture/csv",
+            get(game_fps_api::fps_capture_csv),
+        )
         .route("/api/ps5/proc/list", get(ps5_proc_list))
         .route("/api/ps5/app/lifecycle", post(ps5_app_lifecycle))
         .route("/api/ps5/klog", get(ps5_klog))
@@ -12067,6 +12560,14 @@ fn build_app_and_mcp(
             "/api/ps5/helper/replace-copy",
             post(helper_copies_api::replace_copy_handler),
         )
+        .route(
+            "/api/ps5/helper/restore-previous",
+            post(helper_copies_api::restore_previous_handler),
+        )
+        .route(
+            "/api/ps5/helper/store-in-pldmgr",
+            post(helper_copies_api::store_in_pldmgr_handler),
+        )
         .route("/api/ps5/pldmgr", get(pldmgr_api::overview))
         .route("/api/ps5/pldmgr/launch", post(pldmgr_api::launch))
         .route("/api/ps5/pldmgr/delete", post(pldmgr_api::delete))
@@ -12096,6 +12597,11 @@ fn build_app_and_mcp(
         // Remote Play stream spike (rp_stream_api).
         .route("/api/ps5/rp/ws", get(rp_stream_api::ws))
         .route("/api/ps5/rp/session", get(rp_stream_api::current))
+        .route("/api/ps5/rp/controller", get(rp_stream_api::controller))
+        .route(
+            "/api/ps5/rp/pair/attempts",
+            get(rp_diag::pair_attempts_handler),
+        )
         // Remote Play with no app page (rp_control.rs), this computer only.
         .route("/api/ps5/rp/start", post(rp_stream_api::control::start))
         .route("/api/ps5/rp/stop", post(rp_stream_api::control::stop))
@@ -12160,6 +12666,7 @@ fn build_app_and_mcp(
         .route("/join", get(join::page))
         .route("/api/join/ws", get(join::ws))
         .route("/api/join/relay", get(join::relay))
+        .route("/api/join/signal", get(join::signal))
         .route("/api/join", get(join::get_state))
         .route("/api/join/open", post(join::open))
         .route("/api/join/close", post(join::close))
@@ -12168,6 +12675,31 @@ fn build_app_and_mcp(
         .route("/api/join/kick", post(join::kick))
         .route("/api/join/playing", post(join::playing))
         .route("/api/join/settings", post(join::set_settings))
+        .route("/api/join/profiles", get(join::profiles))
+        // Share: an app's things to a friend (share/mod.rs).
+        .route("/share", get(share::page))
+        .route("/api/share/ws", get(share::ws))
+        .route("/api/share", get(share::list).post(share::create))
+        .route("/api/share/check", post(share::check))
+        .route("/api/share/{id}", get(share::get_one).delete(share::cancel))
+        .route("/api/share/{id}/decide", post(share::decide))
+        .route("/api/share/receive", post(share::receive_open))
+        .route(
+            "/api/share/receive/{id}",
+            get(share::receive_get).delete(share::receive_cancel),
+        )
+        .route(
+            "/api/share/receive/{id}/accept",
+            post(share::receive_accept),
+        )
+        .route(
+            "/api/share/receive/{id}/use-save",
+            post(share::receive_use_save),
+        )
+        .route(
+            "/api/share/receive/{id}/data/{item}",
+            get(share::receive_data),
+        )
         .route(
             "/api/ps5/rp/pad-link",
             get(pad_link::get_status).post(pad_link::set_open),
@@ -12175,6 +12707,10 @@ fn build_app_and_mcp(
         .route("/api/ps5/rp/pad-link/decide", post(pad_link::decide))
         .route("/api/ps5/rp/pad-link/kick", post(pad_link::kick))
         .route("/api/ps5/rp/pad-link/control", post(pad_link::control))
+        .route(
+            "/api/ps5/rp/pad-link/internet",
+            post(pad_link::set_internet),
+        )
         .route("/api/ps5/rp/pad-relay", get(pad_link::relay))
         .route("/api/ps5/power/ddp-status", get(ps5_power_ddp_status))
         .route("/api/ps5/power/pair", post(ps5_power_pair))
@@ -12271,6 +12807,7 @@ fn build_app_and_mcp(
         .route("/api/ps5/screenshots/list", get(ps5_screenshots_list))
         .route("/api/ps5/videos/list", get(ps5_videos_list))
         .route("/api/ps5/smp/status", get(ps5_smp_status))
+        .route("/api/ps5/smp/rescan", post(ps5_smp_rescan))
         .route("/api/ps5/smp/checkout", get(ps5_smp_checkout_status))
         .route("/api/ps5/smp/checkout/begin", post(ps5_smp_checkout_begin))
         .route(
@@ -12418,6 +12955,11 @@ fn build_app_and_mcp(
             get(diag_api::log_level_get).post(diag_api::log_level_set),
         )
         .route("/api/diag/features", get(diag_api::features))
+        .route(
+            "/api/logs/level",
+            get(log_levels::get_level).put(log_levels::put_level),
+        )
+        .route("/api/logs/recent", get(log_levels::recent))
         .route("/api/event-journal", get(event_journal::events_handler))
         .route(
             "/api/ps5/helper-log-ftp",
@@ -12964,6 +13506,7 @@ mod loopback_guard_tests {
         for p in [
             "/api/ps5/rp/pad-link",
             "/api/ps5/rp/pad-link/decide",
+            "/api/ps5/rp/pad-link/internet",
             "/api/ps5/rp/pad-relay",
             "/api/ps5/rp/ws",
             "/api/ps5/rp/frame",
@@ -12995,6 +13538,7 @@ mod loopback_guard_tests {
         let c = cfg(&[]);
         assert!(loopback_allows(&c, ip("192.168.1.30"), "/join"));
         assert!(loopback_allows(&c, ip("192.168.1.30"), "/api/join/ws"));
+        assert!(loopback_allows(&c, ip("100.101.2.3"), "/api/join/signal"));
         // The host's side of Play Together stays on this computer.
         for p in [
             "/api/join",
@@ -13008,6 +13552,7 @@ mod loopback_guard_tests {
             "/api/join/relay",
             "/api/join/ws/x",
             "/api/join/wsx",
+            "/api/join/signal/x",
             "/join/../api/join/open",
             "/joinx",
             "/join/x",
@@ -13457,6 +14002,7 @@ mod helpers_tests {
             excludes: vec![],
             bandwidth_cap_mbps: None,
             skip_existing: None,
+            unescape_names: false,
         };
 
         let resp = transfer_dir_handler(State(state), Json(req))
@@ -13523,6 +14069,7 @@ mod helpers_tests {
             excludes: vec![],
             bandwidth_cap_mbps: None,
             skip_existing: None,
+            unescape_names: false,
         };
         let _ = transfer_dir_handler(State(state), Json(req))
             .await
@@ -13566,6 +14113,7 @@ mod helpers_tests {
             excludes: vec![],
             bandwidth_cap_mbps: None,
             skip_existing: Some("sometimes".to_string()),
+            unescape_names: false,
         };
         let resp = transfer_dir_handler(State(state), Json(req))
             .await

@@ -285,7 +285,7 @@ mod tests {
         std::fs::create_dir_all(root.join("out")).unwrap();
         let built = folder_build::build(
             &mut sub,
-            Some(&reopen),
+            &reopen,
             &target,
             VerifyMode::Full,
             &AtomicBool::new(false),

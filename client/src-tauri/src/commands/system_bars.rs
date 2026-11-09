@@ -46,12 +46,16 @@ pub fn android_system_ui(
     }
 }
 
-/// The iOS app: make the web view the first responder. WKWebView hands controllers (Backbone,
-/// Kishi, any MFi or Bluetooth pad) to the page's Gamepad API only while it is the first
-/// responder (WebKit bug 269292), which it may not be after a load or another view took the
-/// focus. Every other platform: a no-op.
+/// The iOS and Mac apps: make the web view the first responder. WKWebView hands controllers
+/// (Backbone, Kishi, any MFi or Bluetooth pad, a DualSense) to the page's Gamepad API only while
+/// it is the first responder (WebKit bug 269292; on the Mac, WebKit gives controller input to the
+/// key window's first responder only), which it may not be after a load, another view took the
+/// focus, or the window left full screen (#720: a Mac lost the controller after full screen and
+/// had it back only in full screen). Answers what had the focus before ("webview" when the web
+/// view already had it, "none", or the class of the view that had it), for the log. Every other
+/// platform: a no-op ("").
 #[tauri::command]
-pub fn focus_webview(window: tauri::WebviewWindow) -> Result<(), String> {
+pub async fn focus_webview(window: tauri::WebviewWindow) -> Result<String, String> {
     #[cfg(target_os = "ios")]
     {
         window
@@ -63,12 +67,182 @@ pub fn focus_webview(window: tauri::WebviewWindow) -> Result<(), String> {
                     let _: bool = unsafe { objc2::msg_send![view, becomeFirstResponder] };
                 }
             })
+            .map_err(|e| e.to_string())?;
+        Ok(String::new())
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // Async, and the answer awaited on a blocking thread: never on the main thread, where
+        // with_webview runs the closure, nor on a runtime worker.
+        let (tx, rx) = std::sync::mpsc::channel();
+        window
+            .with_webview(move |wv| {
+                let _ = tx.send(mac_focus::focus(wv.ns_window(), wv.inner()));
+            })
+            .map_err(|e| e.to_string())?;
+        tauri::async_runtime::spawn_blocking(move || {
+            rx.recv_timeout(std::time::Duration::from_secs(1))
+                .map_err(|_| "the window did not answer".to_string())
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "macos")))]
+    {
+        let _ = window;
+        Ok(String::new())
+    }
+}
+
+/// The Mac app's web view made the window's first responder.
+#[cfg(target_os = "macos")]
+mod mac_focus {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyObject, Bool};
+    use std::ffi::c_void;
+
+    /// Runs on the main thread (`with_webview`). What had the focus before, see `focus_webview`.
+    pub fn focus(window: *mut c_void, webview: *mut c_void) -> String {
+        let (win, view) = (window as *mut AnyObject, webview as *mut AnyObject);
+        if win.is_null() || view.is_null() {
+            return "none".into();
+        }
+        // SAFETY: ns_window() and inner() are the live NSWindow and WKWebView, on the main
+        // thread (AppKit's); firstResponder may be nil and is checked before its class is read.
+        unsafe {
+            let before: *mut AnyObject = msg_send![win, firstResponder];
+            if before == view {
+                return "webview".into();
+            }
+            let was = if before.is_null() {
+                "none".to_string()
+            } else {
+                (*before).class().name().to_string_lossy().into_owned()
+            };
+            let ok: Bool = msg_send![win, makeFirstResponder: view];
+            if ok.as_bool() {
+                was
+            } else {
+                format!("{was} (refused)")
+            }
+        }
+    }
+}
+
+/// The iOS app: hide the status bar (the clock, battery and signal) while Remote Play fills the
+/// screen, and show it again on leaving (#722). The window's root view controller is tao's, whose
+/// `prefersStatusBarHidden` is a property it keeps; its `setPrefersStatusBarHidden:` setter also
+/// calls `setNeedsStatusBarAppearanceUpdate`. Every other platform: a no-op.
+#[tauri::command]
+pub fn set_status_bar_hidden(window: tauri::WebviewWindow, hidden: bool) -> Result<(), String> {
+    #[cfg(target_os = "ios")]
+    {
+        window
+            .with_webview(move |wv| {
+                use objc2::runtime::{AnyObject, Bool, Sel};
+                let vc = wv.view_controller() as *mut AnyObject;
+                if vc.is_null() {
+                    return;
+                }
+                let setter = Sel::register(c"setPrefersStatusBarHidden:");
+                // SAFETY: view_controller() is the window's live root UIViewController, and
+                // with_webview runs on the main thread, the only one allowed to touch UIKit. The
+                // setter is checked for before it is sent (tao's controller has it).
+                unsafe {
+                    let has: bool = objc2::msg_send![vc, respondsToSelector: setter];
+                    if has {
+                        let _: () =
+                            objc2::msg_send![vc, setPrefersStatusBarHidden: Bool::new(hidden)];
+                    } else {
+                        eprintln!("[system-ui] the root view controller has no status bar setter");
+                    }
+                }
+            })
             .map_err(|e| e.to_string())
     }
     #[cfg(not(target_os = "ios"))]
     {
-        let _ = window;
+        let _ = (window, hidden);
         Ok(())
+    }
+}
+
+/// The iOS and macOS apps: whether the controllers' Home button (the PS button) is the app's or the
+/// system's. By default iOS opens its Games overlay and macOS its Games overlay or Launchpad, and the
+/// page never sees the press (#675; on the Mac the PS button stopped reaching the PS5 while every
+/// other button worked). iOS only honours this when the user's in-app Home button setting defers to
+/// the app. Every other platform: a no-op.
+#[tauri::command]
+pub fn hold_controller_home(window: tauri::WebviewWindow, on: bool) -> Result<(), String> {
+    #[cfg(any(target_os = "ios", target_os = "macos"))]
+    {
+        window
+            .with_webview(move |_| ios_home::set(on))
+            .map_err(|e| e.to_string())
+    }
+    #[cfg(not(any(target_os = "ios", target_os = "macos")))]
+    {
+        let _ = (window, on);
+        Ok(())
+    }
+}
+
+/// GameController's Home button switch, the same API on iOS and macOS (11 and later).
+#[cfg(any(target_os = "ios", target_os = "macos"))]
+mod ios_home {
+    use objc2::msg_send;
+    use objc2::runtime::{AnyClass, AnyObject};
+    use std::os::raw::c_char;
+
+    // Loaded for GCController: WebKit only pulls the framework in once a page asks for gamepads.
+    #[link(name = "GameController", kind = "framework")]
+    extern "C" {}
+
+    /// `GCSystemGestureStateEnabled`.
+    const GESTURE_ENABLED: isize = 0;
+    /// `GCSystemGestureStateDisabled`: "input is passed directly to the app".
+    const GESTURE_DISABLED: isize = 2;
+
+    /// Runs on the main thread (`with_webview`). Objects come back autoreleased.
+    pub fn set(on: bool) {
+        let (Some(controllers), Some(strings)) =
+            (AnyClass::get(c"GCController"), AnyClass::get(c"NSString"))
+        else {
+            return;
+        };
+        let state = if on {
+            GESTURE_DISABLED
+        } else {
+            GESTURE_ENABLED
+        };
+        // SAFETY: documented GameController and Foundation selectors, on the main thread, each
+        // result checked for nil before use. `GCInputButtonHome` is the string "Button Home".
+        unsafe {
+            let name: *mut AnyObject = msg_send![
+                strings,
+                stringWithUTF8String: c"Button Home".as_ptr() as *const c_char
+            ];
+            let list: *mut AnyObject = msg_send![controllers, controllers];
+            if list.is_null() || name.is_null() {
+                return;
+            }
+            let count: usize = msg_send![list, count];
+            for i in 0..count {
+                let controller: *mut AnyObject = msg_send![list, objectAtIndex: i];
+                let profile: *mut AnyObject = msg_send![controller, physicalInputProfile];
+                if profile.is_null() {
+                    continue;
+                }
+                let buttons: *mut AnyObject = msg_send![profile, buttons];
+                if buttons.is_null() {
+                    continue;
+                }
+                let home: *mut AnyObject = msg_send![buttons, objectForKey: name];
+                if !home.is_null() {
+                    let _: () = msg_send![home, setPreferredSystemGestureState: state];
+                }
+            }
+        }
     }
 }
 

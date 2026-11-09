@@ -104,6 +104,7 @@ methods! {
     (INDEX_STATUS, 68, "INDEX_STATUS"),
     (INDEX_SEARCH, 69, "SEARCH_INDEX"),
     (INDEX_CANCEL, 70, "INDEX_CANCEL"),
+    (HW_FPS, 71, "HW_FPS"),
     (HW_INFO, 72, "HW_INFO"),
     (HW_TEMPS, 73, "HW_TEMPS"),
     (HW_POWER, 74, "HW_POWER"),
@@ -201,6 +202,8 @@ methods! {
     (VPAD_STATUS, 194, "VPAD_STATUS"),
     (CONSOLE_TASKS, 195, "CONSOLE_TASKS"),
     (CONSOLE_TASK_CANCEL, 196, "CONSOLE_TASK_CANCEL"),
+    (LOG_LEVEL, 197, "LOG_LEVEL"),
+    (TAILNET, 198, "TAILNET"),
 }
 
 /// A management call the payload refused.

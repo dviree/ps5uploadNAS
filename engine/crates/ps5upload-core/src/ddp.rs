@@ -99,7 +99,13 @@ fn resolve(host: &str, port: u16) -> Result<SocketAddr> {
 /// matching `ps5-wake`. The asymmetry looks like an oversight but the console
 /// may depend on it, so it is preserved rather than tidied.
 pub fn probe(host: &str, timeout: Duration) -> Result<DdpStatus> {
-    let addr = resolve(host, DDP_PORT)?;
+    // Home first; a console away on Tailscale answers discovery there too (UDP 9302 is on its
+    // tailnet allow-list), which Remote Play's readiness check needs (`route`).
+    let bare = host.split(':').next().unwrap_or(host);
+    let addr = match crate::route::dial(bare, DDP_PORT, true) {
+        Some(a) => a,
+        None => resolve(host, DDP_PORT)?,
+    };
     let pkt = format!("SRCH * HTTP/1.1\ndevice-discovery-protocol-version:{DDP_VERSION}\n\0");
     let sockets = send_every_way(pkt.as_bytes(), addr, true);
     if sockets.is_empty() {
@@ -329,7 +335,20 @@ pub const STANDBY_PROBE_SENDS: u32 = 2;
 /// all, or a host that does not resolve. Never an error: callers use it only to explain a
 /// failure they already have. Blocking.
 pub fn standby_probe(host: &str, budget: Duration, sends: u32) -> Option<u16> {
+    let r = standby_probe_inner(host, budget, sends);
+    crate::clog!(
+        Trace,
+        "wake",
+        "ddp: {host}: standby probe ({sends} send(s), {} ms): {}",
+        budget.as_millis(),
+        r.map_or("no answer".to_string(), |c| format!("DDP {c}"))
+    );
+    r
+}
+
+fn standby_probe_inner(host: &str, budget: Duration, sends: u32) -> Option<u16> {
     let addr = resolve(host, DDP_PORT).ok()?;
+
     let pkt = format!("SRCH * HTTP/1.1\ndevice-discovery-protocol-version:{DDP_VERSION}\n\0");
     let sends = sends.max(1);
     let slice = (budget / sends).max(Duration::from_millis(1));
@@ -375,11 +394,24 @@ pub fn wake(host: &str, credential: &str) -> Result<()> {
     // Every way the console can be reached, like a SRCH (see `send_every_way`). The
     // credential goes to the subnet's broadcast only from an interface whose unicast send
     // failed: it stays off the rest of the LAN whenever it can.
-    if send_every_way(pkt.as_bytes(), addr, false).is_empty() {
+    let sent = send_every_way(pkt.as_bytes(), addr, false);
+    if sent.is_empty() {
+        crate::clog!(
+            Info,
+            "wake",
+            "ddp: {addr}: WAKEUP not sent: no network here reaches it"
+        );
         return Err(anyhow!(
             "could not send WAKEUP to {addr}: no network on this computer reaches it"
         ));
     }
+    // Never the credential: only that it went, and how many ways.
+    crate::clog!(
+        Debug,
+        "wake",
+        "ddp: {addr}: WAKEUP sent ({} way(s)); the console never acknowledges it",
+        sent.len()
+    );
     Ok(())
 }
 

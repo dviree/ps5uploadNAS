@@ -1,7 +1,9 @@
 // One guest's Play Together session (#641): the link to the host's engine (lib/joinClient), the
 // picture (pad/watchPlayer, in the player's low-latency mode) and the pad this device sends.
 // Shared by the /join page a friend opens in any browser and the app's own Join a friend view;
-// React reads it through useJoinSession (useSyncExternalStore).
+// React reads it through useJoinSession (useSyncExternalStore). The link runs over a WebSocket on
+// the LAN, or over a WebRTC data channel for an internet invite (rtcTransport.ts): the same
+// messages either way, so the picture, the sound, the pad and the stages are the same.
 
 import { useSyncExternalStore } from "react";
 
@@ -11,6 +13,7 @@ import { gamepadsOf } from "../lib/nativePad";
 import { profileFor } from "../lib/padProfiles";
 import {
   DEFAULT_KEYMAP,
+  IDLE_PAD,
   mergePads,
   padFromGamepads,
   padFromKeys,
@@ -18,10 +21,13 @@ import {
   type KeyAction,
   type PadState,
 } from "../lib/remotePlayStream";
-import { makeWatchPlayer, type MsePlayer, type WatchPlayer, type WatchProblem } from "../pad/watchPlayer";
-import { rpInput } from "../state/remotePlay";
+import { makeWatchPlayer, type MsePlayer, type SoundReport, type WatchPlayer, type WatchProblem } from "../pad/watchPlayer";
+import { rpInput } from "../state/rpInput";
 import { setScreenWakeReason } from "../lib/androidScreenWake";
 import { setPadForwardReason } from "../lib/androidPadBridge";
+import type { NetPath } from "./netPath";
+import type { JoinTransport } from "./rtcTransport";
+import { TrackPlayer } from "./trackPlayer";
 
 export interface JoinSnapshot {
   stage: JoinStage;
@@ -37,6 +43,8 @@ export interface JoinSnapshot {
   host: string | null;
   /** The guest muted the game's sound (remembered on this device). */
   muted: boolean;
+  /** Which way the connection goes while joined (join/netPath), when it is known. */
+  path: NetPath | null;
 }
 
 const MUTED_KEY = "ps5upload.join.muted";
@@ -46,11 +54,23 @@ export interface JoinSessionOptions {
   keysLive?: () => boolean;
   /** The guest socket (direct, or through this app's engine). */
   url: string;
+  /** What carries the session: the WebSocket to `url` (the LAN, the default), or an internet
+   *  invite's WebRTC data channel (`rtcTransport`, which ignores `url`). */
+  transport?: JoinTransport;
   invite: string | null;
   code?: string | null;
   name: string;
   host: string | null;
+  /** The way a plain socket goes (the host's page on their Wi-Fi: join/netPath hostPath). An
+   *  internet invite's transport says it itself once joined. */
+  path?: NetPath | null;
+  /** An internet invite (its words for a dropped connection are the internet's); absent: it is
+   *  one when it has a transport. A Wi-Fi link's WebRTC join is not. */
+  internet?: boolean;
 }
+
+/** How often the way is read again while joined (ICE may move to another pair). */
+export const PATH_EVERY_MS = 5000;
 
 /** A guest's keyboard (#654): Remote Play's default keys, except Escape, which stays the
  *  browser's (it leaves full screen). */
@@ -82,9 +102,34 @@ function isControl(t: HTMLElement | null): boolean {
   return role === "button" || role === "link" || role === "menuitem" || role === "tab" || role === "switch";
 }
 
-/** The pad this device is: connected controllers (standard mapping), the keyboard and the
+let padChecking = false;
+
+/** While the guest checks their controller, the game gets an idle pad. */
+export function setPadChecking(on: boolean): void {
+  padChecking = on;
+}
+
+/** What the page tells the host about its picture: none before the first picture, unless the
+ *  picture fails, which the host then hears about with the decoder and codec (#720: an iPhone
+ *  that never drew a picture sent nothing, so the host could not say which decoder failed). The
+ *  sound's path and counters go with it once the sound started (#720: an iPhone guest's sound
+ *  stuttered and the host's log said nothing about it). */
+export function pageStats(
+  stats: { frames: number; snapshot(): Record<string, number | string> | null } | null,
+  problem: WatchProblem | null,
+  sound: SoundReport | null = null,
+): Record<string, number | string> | null {
+  if (!stats || (stats.frames === 0 && !problem)) return null;
+  const s = stats.snapshot();
+  if (!s) return s;
+  return { ...s, ...(problem ? { problem } : {}), ...(sound ?? {}) };
+}
+
+/** The pad this device is: connected controllers (each through its profile), the keyboard and the
  *  on-screen one, merged. */
 export function devicePad(): PadState {
+  // Checking the controller (PadCheck): its presses are not the game's.
+  if (padChecking) return { ...IDLE_PAD };
   const pads = padFromGamepads(gamepadsOf(typeof navigator === "undefined" ? undefined : navigator), profileFor);
   const touch = rpInput.touchPad;
   const merged = mergePads(mergePads(pads, padFromKeys(guestHeld, GUEST_KEYMAP)), touch);
@@ -93,7 +138,7 @@ export function devicePad(): PadState {
 
 export class JoinSession {
   readonly client: JoinClient;
-  private player: WatchPlayer | MsePlayer | null = null;
+  private player: WatchPlayer | MsePlayer | TrackPlayer | null = null;
   private snap: JoinSnapshot;
   private listeners = new Set<() => void>();
   private cleanups: Array<() => void> = [];
@@ -109,21 +154,35 @@ export class JoinSession {
       noSound: false,
       host: opts.host,
       muted: readMuted(),
+      path: null,
     };
     this.client = new JoinClient({
       url: opts.url,
       invite: opts.invite,
       code: opts.code ?? null,
       name: opts.name,
+      WebSocketImpl: opts.transport,
       readPad: devicePad,
       onStage: (stage) => {
         this.set({ stage });
+        if (stage.kind === "joined") void this.readPath();
         if (stage.kind === "refused" || stage.kind === "ended") this.teardown();
       },
       onStatus: (status) => this.set({ status, host: status.host ?? this.snap.host }),
       onRtt: (rttMs) => this.set({ rttMs }),
       onFrame: (d) => this.picture().onMessage(d),
-      onCodec: (h) => this.picture().setHevc(h),
+      // How the picture looks here, for the host's panel and log: none before the first picture,
+      // unless the picture fails, which the host then hears about (#720).
+      readStats: () => pageStats(this.player?.stats ?? null, this.snap.problem, this.player?.soundReport() ?? null),
+      onCodec: (h, track, audio) => {
+        const p = this.picture();
+        p.setHevc(h);
+        if (p instanceof TrackPlayer) {
+          p.setTrack(track, !!audio);
+          // The pictures come on the track now: a problem the channel's decoder had is not on show.
+          if (track && this.snap.problem) this.set({ problem: null });
+        }
+      },
       onRumble: (strong, weak) => {
         const pads = gamepadsOf(typeof navigator === "undefined" ? undefined : navigator);
         playRumble(pads, strong, weak);
@@ -134,18 +193,35 @@ export class JoinSession {
     });
   }
 
-  /** The picture's player, made on first use (needs a document). */
-  picture(): WatchPlayer | MsePlayer {
+  /** The picture's player, made on first use (needs a document). An internet invite's may take
+   *  the pictures as a video track (trackPlayer.ts). */
+  picture(): WatchPlayer | MsePlayer | TrackPlayer {
     if (!this.player) {
-      this.player = makeWatchPlayer(
+      const p = makeWatchPlayer(
         (problem) => this.set({ problem }),
         "player",
         () => this.client.askKeyframe(),
       );
+      this.player = this.opts.transport ? new TrackPlayer(p) : p;
       this.player.onSoundFail = () => this.set({ noSound: true });
       this.player.setMuted(this.snap.muted);
     }
     return this.player;
+  }
+
+  /** Which way the connection goes now: the transport's own word (an internet invite's selected
+   *  pair), else what the plain socket's address says. */
+  async readPath(): Promise<void> {
+    const s = this.client.socket as { netPath?: () => Promise<NetPath | null> } | null;
+    let path: NetPath | null = this.opts.path ?? null;
+    if (s?.netPath) {
+      try {
+        path = (await s.netPath()) ?? this.opts.path ?? null;
+      } catch {
+        path = null;
+      }
+    }
+    if (path !== this.snap.path) this.set({ path });
   }
 
   /** The element the picture is drawn in (moved into whichever view shows it). */
@@ -187,7 +263,11 @@ export class JoinSession {
     document.addEventListener("visibilitychange", vis);
     window.addEventListener("blur", blur);
     window.addEventListener("focus", focus);
+    const pathTimer = setInterval(() => {
+      if (this.client.current.kind === "joined") void this.readPath();
+    }, PATH_EVERY_MS);
     this.cleanups.push(() => {
+      clearInterval(pathTimer);
       document.removeEventListener("visibilitychange", vis);
       window.removeEventListener("blur", blur);
       window.removeEventListener("focus", focus);

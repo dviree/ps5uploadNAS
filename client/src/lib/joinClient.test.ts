@@ -188,6 +188,30 @@ describe("join client", () => {
     expect(rtts).toEqual([35]);
   });
 
+  it("reports the picture every 2 s once joined, and nothing while it has none", () => {
+    let stats: Record<string, unknown> | null = null;
+    const c = client({ readStats: () => stats });
+    c.start();
+    last().open();
+    advance(4000);
+    expect(last().texts.some((t) => "stats" in t)).toBe(false);
+    last().say({ stage: "joined", player: 2, token: "TOK", hevc: false });
+    // The engine is heard every second (its pongs), as on a live link.
+    const seconds = (n: number) => {
+      for (let i = 0; i < n; i++) {
+        advance(1000);
+        last().say({ pong: now });
+      }
+    };
+    seconds(4);
+    expect(last().texts.some((t) => "stats" in t)).toBe(false);
+    stats = { frames: 120, stalls: 1, stall_ms: 140 };
+    seconds(4);
+    const sent = last().texts.filter((t) => "stats" in t);
+    expect(sent).toHaveLength(2);
+    expect(sent[0].stats).toEqual({ frames: 120, stalls: 1, stall_ms: 140 });
+  });
+
   it("reconnects with backoff and resumes with the token, without asking", () => {
     const c = client();
     joinNow(c, 2);
@@ -298,6 +322,35 @@ describe("join client", () => {
       advance(5000);
       expect(FakeSocket.all.length).toBe(n);
     }
+  });
+
+  it("moves to the player the engine says, off the host's stream's controller (#720)", () => {
+    const c = client();
+    joinNow(c, 1);
+    expect(stages[stages.length - 1]).toEqual({ kind: "joined", player: 1, hevc: false });
+    last().say({ status: { player: 1, state: "playing", stream_seat: true } });
+    expect(stages[stages.length - 1]).toMatchObject({ kind: "joined", player: 1 });
+    last().say({ status: { player: 2, state: "picking_user" } });
+    expect(stages[stages.length - 1]).toEqual({ kind: "joined", player: 2, hevc: false });
+    // a reconnect keeps the new place
+    last().drop();
+    expect(stages[stages.length - 1]).toMatchObject({ kind: "reconnecting", player: 2 });
+  });
+
+  it("explains a seat the host needed back, also after waiting for the host", () => {
+    const c = client();
+    joinNow(c, 1);
+    last().say({ bye: "seat_taken" });
+    expect(stages[stages.length - 1]).toEqual({ kind: "ended", why: "seat_taken" });
+    // Coming back after the host restarted Play, with no controller free.
+    stages = [];
+    const d = client();
+    joinNow(d, 1);
+    last().say({ bye: "host_stopped" });
+    advance(250);
+    last().open();
+    last().say({ stage: "refused", why: "seat_taken" });
+    expect(stages[stages.length - 1]).toEqual({ kind: "refused", why: "seat_taken" });
   });
 
   it("waits for a host who stopped playing, keeps the place, and plays on when they start again", () => {

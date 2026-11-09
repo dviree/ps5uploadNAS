@@ -17,7 +17,17 @@ pub(crate) fn register() {
 }
 
 fn open(url: &str) -> ps5upload_fpkg::Result<(Arc<dyn RemoteFiles>, String)> {
+    let r = open_inner(url);
+    match &r {
+        Ok((_, path)) => crate::log_at!(Debug, "convert", "convert source {url}: opened at {path}"),
+        Err(e) => crate::log_at!(Debug, "convert", "convert source {url}: {e}"),
+    }
+    r
+}
+
+fn open_inner(url: &str) -> ps5upload_fpkg::Result<(Arc<dyn RemoteFiles>, String)> {
     let fail = |m: String| ps5upload_fpkg::Error::Format(m);
+
     // Converter work runs on blocking threads, which can wait on the runtime.
     let handle = tokio::runtime::Handle::try_current()
         .map_err(|_| fail(format!("{url}: no runtime to reach the server from")))?;
@@ -82,6 +92,11 @@ fn open_console(
 struct ServerFiles {
     fs: Arc<RemoteSourceFs>,
     label: String,
+}
+
+/// A saved server's files as the converter reads them, through `fs`.
+pub(crate) fn server_files(fs: Arc<RemoteSourceFs>, label: String) -> Arc<dyn RemoteFiles> {
+    Arc::new(ServerFiles { fs, label })
 }
 
 impl RemoteFiles for ServerFiles {

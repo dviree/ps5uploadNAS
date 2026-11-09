@@ -468,6 +468,11 @@ pub(crate) fn refusal(status: u16, message: String) -> UploadFailure {
     // be fixed by trying again, so it is told apart by the console's words.
     let reason = if status == gen::ERR_IO && message.contains("File too large") {
         "ava1_file_too_large".into()
+    } else if status == gen::ERR_PATH
+        && (message.contains("is a symbolic link") || message.contains("is not a folder"))
+    {
+        // AVA1 1.0.7: a link (or a file) where a folder of the job goes, inside the destination.
+        "ava1_path_link".into()
     } else {
         refusal_reason(status)
     };
@@ -656,9 +661,13 @@ fn source_for(cfg: &TransferConfig, root: &Path) -> Arc<dyn Source> {
     }
 }
 
-/// [`source_for`] a folder upload, with the config's renames applied.
+/// [`source_for`] a folder upload, with the config's renames applied, and its kept names read
+/// back as the console's (`unescape_names`).
 fn dir_source_for(cfg: &TransferConfig, root: &Path) -> Arc<dyn Source> {
-    let source = source_for(cfg, root);
+    let mut source = source_for(cfg, root);
+    if cfg.unescape_names {
+        source = Arc::new(crate::source::KeptNamesSource::new(source));
+    }
     if cfg.renames.is_empty() {
         return source;
     }
@@ -714,6 +723,18 @@ pub fn upload_with_seq_in(
         .iter()
         .filter(|e| e.kind == gen::ENTRY_FILE)
         .count() as u64;
+    ps5upload_core::clog!(
+        Debug,
+        "transfer",
+        "ava1 send {} to {console}:{}: {} entries, {manifest_files} files, {} bytes, {} reader(s), sequential source {}",
+        hex(&job_id),
+        opts.root,
+        manifest.entries.len(),
+        manifest.entries.iter().map(|e| e.size).sum::<u64>(),
+        opts.readers,
+        seq.is_some() || opts.seq.is_some()
+    );
+    let job_started = Instant::now();
     let manifest = Arc::new(manifest);
     let progress = Arc::new(Progress::default());
     let cancel = cfg
@@ -734,7 +755,7 @@ pub fn upload_with_seq_in(
         progress.clone(),
         resumed.clone(),
     );
-    crate::block_on(async {
+    let outcome = crate::block_on(async {
         SessionGate::identity(pool)?;
         let _bridge = Bridge::start_resumed(progress.clone(), cfg, resumed.clone());
         let mut backoff = Duration::from_millis(250);
@@ -766,6 +787,13 @@ pub fn upload_with_seq_in(
                 }
             };
             gate.connected();
+            ps5upload_core::clog!(
+                Debug,
+                "transfer",
+                "ava1 send {}: session up, {} bytes durable so far",
+                hex(&job_id),
+                progress.bytes_durable.load(Ordering::Relaxed)
+            );
             progress.telemetry.lock().unwrap().peer_key = Some(session.peer_key());
             let mut link = session.job(job_id);
             let o = SendOptions {
@@ -907,7 +935,25 @@ pub fn upload_with_seq_in(
                 Err(e) => return Err(anyhow!(e)),
             }
         }
-    })
+    });
+    match &outcome {
+        Ok(r) => ps5upload_core::clog!(
+            Debug,
+            "transfer",
+            "ava1 send {}: done in {} ms: {}",
+            hex(&job_id),
+            job_started.elapsed().as_millis(),
+            r.commit_ack_body
+        ),
+        Err(e) => ps5upload_core::clog!(
+            Debug,
+            "transfer",
+            "ava1 send {}: ended after {} ms: {e:#}",
+            hex(&job_id),
+            job_started.elapsed().as_millis()
+        ),
+    }
+    outcome
 }
 
 /// The first wait after a connection that was doing real work.
@@ -1649,6 +1695,14 @@ mod failure_reason_tests {
     fn refusals_keep_their_machine_reason() {
         assert_eq!(refusal_reason(gen::ERR_NO_SPACE), "ava1_no_space");
         assert_eq!(refusal_reason(gen::ERR_PATH), "ava1_not_allowed");
+        assert_eq!(
+            refusal(gen::ERR_PATH, "Game/sce_sys is a symbolic link".into()).reason,
+            "ava1_path_link"
+        );
+        assert_eq!(
+            refusal(gen::ERR_PATH, "outside the allowed roots".into()).reason,
+            "ava1_not_allowed"
+        );
         assert_eq!(refusal_reason(gen::ERR_EXISTS), "ava1_exists");
         assert_eq!(refusal_reason(gen::ERR_CROSS_DEVICE), "ava1_cross_device");
         assert_eq!(refusal_reason(gen::ERR_STALLED), "ava1_stalled");

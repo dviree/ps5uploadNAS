@@ -243,38 +243,30 @@ pub(crate) fn release_runtime() -> Result<Vec<u8>, String> {
     )
 }
 
+/// The emulator a game gets: ampr-emu-ng when asked for by name, else drakmor's ampr_emu.
+pub(crate) fn emulator(build: Option<&str>) -> Result<Vec<u8>, String> {
+    match build {
+        Some("ampr-emu-ng") => ng_runtime(),
+        _ => release_runtime(),
+    }
+}
+
+/// ampr-emu-ng's release, which reads zstd packs.
+pub(crate) fn ng_runtime() -> Result<Vec<u8>, String> {
+    use crate::zstd_packs::{NG_SHA256, NG_URL, NG_VERSION};
+    fetch_pinned(
+        NG_URL,
+        NG_SHA256,
+        &format!("ampr-emu-ng-{NG_VERSION}-libSceAmpr.sprx"),
+        "ampr-emu-ng",
+    )
+}
+
 /// A file from the data dir's cache, fetched once and only kept or used when its SHA-256
 /// matches `sha`: what goes onto a console or into an image is exactly what was reviewed.
 fn fetch_pinned(url: &str, sha: &str, cache_name: &str, what: &str) -> Result<Vec<u8>, String> {
-    let cache = data_dir()?.join("cache");
-    let path = cache.join(cache_name);
-    let check = |bytes: &[u8]| -> bool {
-        use sha2::Digest;
-        let d = sha2::Sha256::digest(bytes);
-        let hex: String = d.iter().map(|b| format!("{b:02x}")).collect();
-        hex == sha
-    };
-    if let Ok(bytes) = std::fs::read(&path) {
-        if check(&bytes) {
-            return Ok(bytes);
-        }
-    }
-    let bytes = ureq::get(url)
-        .call()
-        .map_err(|e| format!("fetching {what}: {e}"))?
-        .body_mut()
-        .with_config()
-        .limit(16 << 20)
-        .read_to_vec()
-        .map_err(|e| format!("reading {what}: {e}"))?;
-    if !check(&bytes) {
-        return Err(format!(
-            "{what} downloaded does not match the digest this app expects; not used"
-        ));
-    }
-    std::fs::create_dir_all(&cache).map_err(|e| e.to_string())?;
-    std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
-    Ok(bytes)
+    let path = data_dir()?.join("cache").join(cache_name);
+    crate::zstd_runtime::fetch_checked(&crate::zstd_runtime::http_get, url, sha, &path, what)
 }
 
 fn join(dir: &str, name: &str) -> String {

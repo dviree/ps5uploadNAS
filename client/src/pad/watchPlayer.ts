@@ -5,7 +5,8 @@
 
 import { avcDescription, lengthPrefixed, opusInit, opusSamples, opusSegment, videoInit, videoSegment } from "../lib/fmp4";
 import { avcCodecString, isKeyframe, supportedHevc } from "../lib/rpCodec";
-import { OpusPipe } from "../lib/rpAudioPipe";
+import { type AudioCodecs, OpusPipe } from "../lib/rpAudioPipe";
+import { wasmOpusCodecs } from "../lib/rpOpusWasm";
 import { hevcCodecString, spsVisibleRect } from "../lib/rpSps";
 
 export type WatchProblem = "no_hevc" | "decode";
@@ -30,6 +31,14 @@ export const MSE_EDGE: Record<Latency, Edge> = {
   watch: { seek: 0.5, speed: Infinity, target: 0.05 },
   player: { seek: 0.15, speed: 0.06, target: 0.02 },
 };
+
+/** The app's own player on the system's media player (Settings › Video decoding, old Macs: #720).
+ *  A seek makes the media player decode again from the last keyframe, and a Remote Play stream
+ *  has one only every several seconds: each seek is a visible hitch. In the app the page is busy
+ *  (the whole UI, and the sound decoded in WebAssembly), so pictures come in bursts and the
+ *  player's 150 ms edge seeked often. It catches up by playing faster and seeks only after a real
+ *  stall. */
+export const HOST_MSE_EDGE: Edge = { seek: 0.6, speed: 0.08, target: 0.04 };
 
 /** The sound's edge (#657). A seek restarts a browser's audio output, which takes longer to
  *  start than an Opus frame lasts (iPhone Safari most of all): chasing the sound as tightly
@@ -128,6 +137,19 @@ function pipeHeader(h: Uint8Array): Uint8Array {
  *  smaller than that still leaves the sound behind the picture, so while the least lead over
  *  TRIM_WINDOW stays more than TRIM_OVER past the cushion, one piece a window is left out until
  *  it is back (measured live: a watcher's first burst kept the sound 210 ms late for good). */
+/** How a guest's sound went, for its report to the host (#720: an iPhone guest's sound stuttered
+ *  and the host's log had nothing about it): the path, and its counters. Short keys: the guest
+ *  page has a size budget. */
+export type SoundReport = Record<string, number | string>;
+
+/** The report of sound decoded on the page (WebCodecs or WebAssembly) and scheduled by a clock. */
+export function scheduledSound(
+  path: "webcodecs" | "wasm",
+  s: { decoded: number; concealed: number; underruns: number; dropped: number },
+): SoundReport {
+  return { snd: path, snd_decoded: s.decoded, snd_concealed: s.concealed, snd_underruns: s.underruns, snd_dropped: s.dropped };
+}
+
 export class SoundClock {
   private next = 0;
   private calmSince = 0;
@@ -200,14 +222,125 @@ async function decodesOpus(rate: number, channels: number): Promise<boolean> {
   }
 }
 
+/** A picture this long after the one before arrived late (ms). */
+export const LATE_MS = 50;
+/** No new picture for longer than this is a stall (ms). */
+export const STALL_MS = 100;
+
+/** What a player's picture did, cheaply: counters, and the time of the last picture. Read on
+ *  demand (`snapshot`, every 2 s for a Play Together guest's report to the host). The counters
+ *  carry the report's own names (the guest page has a size budget). */
+export class PictureStats {
+  /** Pictures drawn, dropped (waiting for a keyframe, or behind), arriving over LATE_MS after
+   *  the one before; stalls over STALL_MS (how many, in all, the longest, ms); keyframe waits. */
+  readonly n = { frames: 0, dropped: 0, late: 0, stalls: 0, stall_ms: 0, worst_stall_ms: 0, key_waits: 0 };
+  /** The last arrival, the last picture drawn, whether a keyframe is awaited. */
+  private a = 0;
+  private d = 0;
+  private w = false;
+  /** Decode start times, in order (WebCodecs outputs in order), and the decode time summed. */
+  private q: number[] = [];
+  private sum = 0;
+  private cnt = 0;
+  /** The codec the decoder was set up with (e.g. "avc1.640028"), for the host's log. */
+  codec = "";
+
+  constructor(
+    private readonly decoder: "webcodecs" | "mse",
+    private readonly now: () => number = () => performance.now(),
+  ) {}
+
+  get frames(): number {
+    return this.n.frames;
+  }
+
+  /** A picture arrived whole. */
+  arrived(): void {
+    const t = this.now();
+    if (this.a && t - this.a > LATE_MS) this.n.late++;
+    this.a = t;
+  }
+
+  /** A picture was not used (waiting for a keyframe, or behind). */
+  drop(): void {
+    this.n.dropped++;
+    if (!this.w) this.n.key_waits++;
+    this.w = true;
+  }
+
+  /** A picture went to the decoder. */
+  decoding(): void {
+    this.w = false;
+    if (this.q.push(this.now()) > 64) this.q.shift();
+  }
+
+  /** A picture was drawn (WebCodecs' output, with `decoded`; or MSE took it). */
+  drawn(decoded = false): void {
+    const t = this.now();
+    const s = decoded ? this.q.shift() : undefined;
+    if (s !== undefined) {
+      this.sum += t - s;
+      this.cnt++;
+    }
+    const gap = this.d ? t - this.d : 0;
+    if (gap > STALL_MS) this.stall(gap);
+    this.d = t;
+    this.n.frames++;
+  }
+
+  private stall(gap: number): void {
+    this.n.stalls++;
+    this.n.stall_ms += gap;
+    this.n.worst_stall_ms = Math.max(this.n.worst_stall_ms, gap);
+  }
+
+  /** The totals so far (a stall still going counts up to now); the decode time is the average
+   *  since the last snapshot. */
+  snapshot(): Record<string, number | string> {
+    const on = this.d ? this.now() - this.d : 0;
+    const v: Record<string, number | string> = { ...this.n, decoder: this.decoder };
+    if (this.codec) v.codec = this.codec;
+    if (on > STALL_MS) {
+      v.stalls = this.n.stalls + 1;
+      v.stall_ms = this.n.stall_ms + on;
+      v.worst_stall_ms = Math.max(this.n.worst_stall_ms, on);
+    }
+    for (const k of ["stall_ms", "worst_stall_ms"]) v[k] = Math.round(v[k] as number);
+    v.decode_ms = this.cnt ? Math.round((this.sum / this.cnt) * 10) / 10 : 0;
+    this.sum = this.cnt = 0;
+    return v;
+  }
+}
+
 /** The events a browser lets start sound (a touch's pointerdown is not one). */
 const GESTURES = ["pointerup", "touchend", "click", "keydown"] as const;
 
+/** WebCodecs failures with no picture ever drawn before a page plays the picture through the
+ *  system's media player (MSE) instead. An iPhone XR on iOS 18 joining over the LAN had WebCodecs
+ *  take the stream and fail every decode (0 pictures drawn, #720), as macOS 13's WebKit does;
+ *  its media player is what plays there. */
+export const WEBCODECS_FAILS_BEFORE_MSE = 3;
+
 export class WatchPlayer {
   readonly canvas = document.createElement("canvas");
+  /** What the page shows: the canvas, and the media player's element once it takes over. Made on
+   *  first use, so the picture can move to MSE in the same place. */
+  private wrap: HTMLElement | null = null;
   get element(): HTMLElement {
-    return this.canvas;
+    if (!this.wrap) {
+      const w = document.createElement("div");
+      w.className = "h-full w-full";
+      w.append(this.canvas);
+      if (this.mse) w.append(this.mse.element);
+      this.wrap = w;
+    }
+    return this.wrap;
   }
+  /** The system's media player, once WebCodecs failed WEBCODECS_FAILS_BEFORE_MSE times without a
+   *  picture: the video goes there from then on (the sound stays here). */
+  private mse: MsePlayer | null = null;
+  /** WebCodecs failures since the start, while no picture was ever drawn. */
+  private failsNoPicture = 0;
   private ctx = this.canvas.getContext("2d", { alpha: false });
   private hevc = false;
   private header: Uint8Array | null = null;
@@ -215,6 +348,12 @@ export class WatchPlayer {
   private opening = false;
   private sawKey = false;
   private keyAsk: KeyAsker;
+  private readonly ownStats = new PictureStats("webcodecs");
+  /** What the picture did (a Play Together guest reports it to the host): the media player's once
+   *  it took over, so the host's log says which one played. */
+  get stats(): PictureStats {
+    return this.mse?.stats ?? this.ownStats;
+  }
   /** A problem is on show until the next picture. */
   private problemShown = false;
   private ts = 0;
@@ -230,18 +369,32 @@ export class WatchPlayer {
   /** The sound through MSE where this page has VideoDecoder but no AudioDecoder (Safari before
    *  26 on a secure page, the iPhone app among them). */
   private mseSound: MseSound | null = null;
+  /** The last audio header (the WebAssembly decoder starts from it when MSE fails later). */
+  private audioHeader: Uint8Array | null = null;
+  /** Whether the sound on the page is decoded by WebAssembly (else WebCodecs), for the report. */
+  private soundWasm = false;
   /** The sound cannot play on this device. */
   onSoundFail: (() => void) | null = null;
+
+  /** How the sound went, for the host (null before it started). */
+  soundReport(): SoundReport | null {
+    if (!this.soundOn) return null;
+    if (this.mseSound) return this.mseSound.report();
+    return scheduledSound(this.soundWasm ? "wasm" : "webcodecs", this.soundStats);
+  }
 
   constructor(
     private onProblem: (p: WatchProblem | null) => void,
     private latency: Latency = "watch",
-    onNeedKey?: () => void,
+    private onNeedKey?: () => void,
   ) {
     this.keyAsk = new KeyAsker(onNeedKey);
     this.clock = new SoundClock(latency === "player" ? 0.05 : 0.08);
-    // Made now, so the tap that starts the sound also starts this element (iPhone).
-    if (typeof AudioDecoder === "undefined") this.mseSound = new MseSound(latency, () => this.onSoundFail?.());
+    // Made now, so the tap that starts the sound also starts this element (iPhone). Where MSE
+    // takes no Opus either (Safari 16, #720) the WebAssembly decoder plays it through Web Audio.
+    if (typeof AudioDecoder === "undefined" && mseOpusSupported()) {
+      this.mseSound = new MseSound(latency, () => this.mseSoundFailed());
+    }
     this.canvas.className = "block h-full w-full object-contain";
     this.canvas.dataset.testid = "watch-canvas";
   }
@@ -249,6 +402,37 @@ export class WatchPlayer {
   /** The engine said which codec the session uses. */
   setHevc(hevc: boolean): void {
     this.hevc = hevc;
+    this.mse?.setHevc(hevc);
+  }
+
+  /** Whether the picture went to the system's media player (WebCodecs gave none here). */
+  get onMse(): boolean {
+    return !!this.mse;
+  }
+
+  /** WebCodecs failed (a decode error, or a configure that threw). True when that was one too many
+   *  with no picture ever drawn and the picture went to the media player: nothing to rebuild. */
+  private decodeFailed(): boolean {
+    if (this.mse || this.ownStats.frames > 0) return false;
+    if (++this.failsNoPicture < WEBCODECS_FAILS_BEFORE_MSE || !mediaSourceCtor()) return false;
+    const mse = new MsePlayer(this.onProblem, this.latency, this.onNeedKey);
+    mse.setHevc(this.hevc);
+    // The problem WebCodecs put on show goes once the media player plays a picture.
+    mse.markProblemShown();
+    this.mse = mse;
+    const v = this.video;
+    this.video = null;
+    try {
+      v?.close();
+    } catch {
+      // Already closed.
+    }
+    if (this.canvas.style) this.canvas.style.display = "none";
+    this.wrap?.append(mse.element);
+    // The same codec header, then a keyframe to start from.
+    if (this.header) mse.onMessage(new Uint8Array([0, ...this.header]).buffer);
+    this.onNeedKey?.();
+    return true;
   }
 
   /** Sound needs a tap first (browsers keep a page quiet until then). */
@@ -259,6 +443,11 @@ export class WatchPlayer {
       this.mseSound.start();
       return;
     }
+    this.openContext();
+  }
+
+  /** The Web Audio output (made in the tap where it can be: a browser starts it then). */
+  private openContext(): void {
     try {
       if (!this.actx) {
         const ctx = new AudioContext({ latencyHint: "interactive" });
@@ -334,6 +523,11 @@ export class WatchPlayer {
     if (b.length < 1) return;
     const kind = b[0];
     const payload = b.subarray(1);
+    // The media player took the picture over: the video is its, the sound stays here.
+    if (this.mse && (kind === 0 || kind === 1)) {
+      if (kind === 0) this.header = payload.slice();
+      return this.mse.onMessage(buf);
+    }
     if (kind === 0) void this.openVideo(payload.slice());
     else if (kind === 1) this.onVideo(payload);
     else if (kind === 3) this.openAudio(payload.slice());
@@ -346,10 +540,14 @@ export class WatchPlayer {
     this.opening = true;
     try {
       const codec = this.hevc ? await hevcFor(header) : avcCodecString(header);
+      // The media player took over while this was looked up.
+      if (this.mse) return;
       if (!codec) {
+        this.problemShown = true;
         this.onProblem("no_hevc");
         return;
       }
+      this.ownStats.codec = codec;
       // H.264 in AVC form, its parameter sets as the description (WebKitGTK decodes no Annex B).
       const description = this.hevc ? undefined : (avcDescription(header) ?? undefined);
       try {
@@ -365,6 +563,7 @@ export class WatchPlayer {
             c.height = frame.displayHeight;
           }
           this.ctx?.drawImage(frame, 0, 0, c.width, c.height);
+          this.ownStats.drawn(true);
           frame.close();
           if (this.problemShown) {
             this.problemShown = false;
@@ -375,14 +574,17 @@ export class WatchPlayer {
           if (this.video !== v) return;
           this.problemShown = true;
           this.onProblem("decode");
-          this.rebuild();
+          if (!this.decodeFailed()) this.rebuild();
         },
       });
       v.configure(description ? { codec, description, optimizeForLatency: true } : { codec, optimizeForLatency: true });
       this.video = v;
       this.sawKey = false;
     } catch {
+      // Said until a picture is drawn (unflagged, a picture later left it on show for good).
+      this.problemShown = true;
       this.onProblem("decode");
+      this.decodeFailed();
     } finally {
       this.opening = false;
     }
@@ -391,6 +593,7 @@ export class WatchPlayer {
   /** The decoder failed, or the browser took it back (a hidden page's hardware decoder): a new one
    *  from the header, and the next keyframe. Without this the picture stays frozen for good. */
   private rebuild(): void {
+    if (this.mse) return;
     this.video = null;
     this.sawKey = false;
     if (!this.header) return;
@@ -405,10 +608,15 @@ export class WatchPlayer {
     }
     if (!v || v.state !== "configured") return;
     const key = isKeyframe(au, this.hevc);
-    if (!this.sawKey && !key) return this.keyAsk.waiting();
+    this.ownStats.arrived();
+    if (!this.sawKey && !key) {
+      this.ownStats.drop();
+      return this.keyAsk.waiting();
+    }
     // Behind: a watcher wants now, not the backlog. Wait for the next keyframe.
     if (!key && v.decodeQueueSize > BACKLOG_LIMIT[this.latency]) {
       this.sawKey = false;
+      this.ownStats.drop();
       return this.keyAsk.waiting();
     }
     this.sawKey = true;
@@ -420,6 +628,7 @@ export class WatchPlayer {
       data.set(au, this.header.length);
     }
     this.ts += 16_667;
+    this.ownStats.decoding();
     v.decode(new EncodedVideoChunk({ type: key ? "key" : "delta", timestamp: this.ts, data }));
   }
 
@@ -429,13 +638,14 @@ export class WatchPlayer {
     this.pipe?.reset();
     this.pipe = null;
     this.clock.reset();
+    this.audioHeader = header;
     if (this.mseSound) return this.mseSound.setHeader(header);
     const channels = header[0];
     const rate = new DataView(header.buffer, header.byteOffset, header.byteLength).getUint32(2);
     void decodesOpus(rate, channels).then((ok) => {
       if (gen !== this.audioGen) return;
-      // No Opus in this decoder: MSE plays it, if it can.
-      if (!ok) return this.soundThroughMse(header);
+      // No Opus in this decoder: MSE plays it, if it can, else the WebAssembly decoder.
+      if (!ok) return mseOpusSupported() ? this.soundThroughMse(header) : this.soundThroughWasm(header);
       const pipe = new OpusPipe((planes, scale) => this.play(planes, scale, pipe.sampleRate));
       try {
         pipe.header(pipeHeader(header));
@@ -449,10 +659,41 @@ export class WatchPlayer {
   private soundThroughMse(header: Uint8Array): void {
     this.pipe = null;
     if (!this.mseSound) {
-      this.mseSound = new MseSound(this.latency, () => this.onSoundFail?.());
+      this.mseSound = new MseSound(this.latency, () => this.mseSoundFailed());
       if (this.soundOn) this.mseSound.start();
     }
     this.mseSound.setHeader(header);
+  }
+
+  /** The sound decoded by the WebAssembly Opus decoder (lib/rpOpusWasm), played as WebCodecs'
+   *  would be: no AudioDecoder Opus here and no Opus in MSE (Safari 16, #720). */
+  private soundThroughWasm(header: Uint8Array): void {
+    this.pipe?.reset();
+    this.soundWasm = true;
+    const pipe = new OpusPipe(
+      (planes, scale) => this.play(planes, scale, pipe.sampleRate),
+      wasmOpusCodecs,
+      () => {
+        if (this.pipe === pipe) this.pipe = null;
+        this.onSoundFail?.();
+      },
+    );
+    this.pipe = pipe;
+    pipe.header(pipeHeader(header));
+  }
+
+  /** MSE could not play the sound after all: the WebAssembly decoder plays it instead. */
+  private mseSoundFailed(): void {
+    const ms = this.mseSound;
+    if (!ms) return;
+    this.mseSound = null;
+    ms.stop();
+    if (this.soundOn) {
+      this.openContext();
+      // Made outside a tap when MSE failed mid-stream: the next tap starts it.
+      if (this.actx && this.actx.state !== "running") this.armResume();
+    }
+    if (this.audioHeader) this.soundThroughWasm(this.audioHeader);
   }
 
   private onAudio(frame: Uint8Array): void {
@@ -483,6 +724,7 @@ export class WatchPlayer {
     } catch {
       // Already closed.
     }
+    this.mse?.stop();
     this.audioGen++;
     this.pipe?.reset();
     this.pipe = null;
@@ -521,6 +763,12 @@ export const OPUS_MP4 = 'audio/mp4; codecs="Opus"';
 /** The spelling 11.0.2 asked for, tried next (a browser that knows only it). */
 export const OPUS_MP4_LOWER = 'audio/mp4; codecs="opus"';
 
+/** Whether this page's media player (MSE) takes Opus in MP4. Safari 16 does not (#720). */
+export function mseOpusSupported(): boolean {
+  const MS = typeof window === "undefined" ? null : mediaSourceCtor();
+  return !!MS && (mseSupports(MS, OPUS_MP4) || mseSupports(MS, OPUS_MP4_LOWER));
+}
+
 /**
  * The sound through Media Source Extensions: an <audio> element fed Opus in fragmented MP4.
  * Browsers keep a page quiet until a tap, so nothing opens before start() (call it from the
@@ -548,6 +796,11 @@ export class MseSound {
 
   get playing(): boolean {
     return this.on && !this.failed;
+  }
+
+  /** For the guest's report: the media player's jumps to the live edge (each one a gap). */
+  report(): SoundReport {
+    return { snd: "mse", snd_jumps: this.track.seeks };
   }
 
   /** The codec header (channels, rate) arrived. */
@@ -618,6 +871,162 @@ export class MseSound {
   }
 }
 
+/**
+ * The sound decoded by the WebAssembly Opus decoder (lib/rpOpusWasm) and played with Web Audio,
+ * for a page with neither an Opus AudioDecoder nor Opus in MSE (Safari 16 on an http:// guest
+ * page, #720). Frames go through OpusPipe (order, FEC copies, a lost one covered) and are
+ * scheduled on a SoundClock, as WatchPlayer schedules WebCodecs' output. start() is the tap: the
+ * AudioContext is made there, so the browser lets it play. `onFail` says no sound can play here.
+ */
+export class WasmSound {
+  private actx: AudioContext | null = null;
+  private pipe: OpusPipe | null = null;
+  private header: Uint8Array | null = null;
+  private clock: SoundClock;
+  private on = false;
+  private failed = false;
+  private muted = false;
+  private unarm: (() => void) | null = null;
+  /** Some decoded sound was scheduled to play. */
+  played = false;
+
+  constructor(
+    latency: Latency,
+    private readonly onFail: () => void,
+    private readonly codecs: AudioCodecs = wasmOpusCodecs,
+  ) {
+    this.clock = new SoundClock(latency === "player" ? 0.05 : 0.08);
+  }
+
+  get playing(): boolean {
+    return this.on && !this.failed;
+  }
+
+  /** What the sound has done (a session's health, tests). */
+  get stats(): { decoded: number; concealed: number; underruns: number; dropped: number } {
+    return {
+      decoded: this.pipe?.decoded ?? 0,
+      concealed: this.pipe?.concealed ?? 0,
+      underruns: this.clock.underruns,
+      dropped: this.clock.dropped,
+    };
+  }
+
+  /** The tap: the output is made and started inside it. */
+  start(): void {
+    if (this.failed) return;
+    this.on = true;
+    playThroughSilentSwitch();
+    try {
+      if (!this.actx) {
+        const ctx = new AudioContext({ latencyHint: "interactive" });
+        this.actx = ctx;
+        ctx.onstatechange = () => {
+          if (this.actx === ctx && ctx.state !== "running" && ctx.state !== "closed") this.armResume();
+        };
+      }
+      void this.actx.resume().catch(() => {});
+      // Started outside a tap (the media player's sound failing mid-stream): the context stays
+      // suspended with no state change to arm on, so the next tap or key starts it.
+      if (this.actx.state !== "running") this.armResume();
+    } catch {
+      return this.fail();
+    }
+    if (this.header && !this.pipe) this.open();
+  }
+
+  /** The codec header (channels, rate) arrived. */
+  setHeader(header: Uint8Array): void {
+    if (header.length < 6) return;
+    this.header = header;
+    this.pipe?.reset();
+    this.pipe = null;
+    this.clock.reset();
+    if (this.on) this.open();
+  }
+
+  /** One sound frame as the engine sends it ([u16 index][Opus packet]). */
+  frame(payload: Uint8Array): void {
+    if (!this.on || this.failed) return;
+    this.pipe?.packet(payload);
+  }
+
+  setMuted(m: boolean): void {
+    this.muted = m;
+  }
+
+  /** The page is back: an output suspended meanwhile starts again. */
+  resume(): void {
+    const ctx = this.actx;
+    if (!this.playing || !ctx || ctx.state === "running" || ctx.state === "closed") return;
+    this.clock.reset();
+    void ctx.resume().catch(() => {});
+    this.armResume();
+  }
+
+  stop(): void {
+    this.on = false;
+    this.pipe?.reset();
+    this.pipe = null;
+    this.unarm?.();
+    void this.actx?.close().catch(() => {});
+    this.actx = null;
+  }
+
+  private open(): void {
+    const h = this.header;
+    if (!h || this.failed) return;
+    const pipe = new OpusPipe((planes, scale) => this.play(planes, scale, pipe.sampleRate), this.codecs, () => {
+      if (this.pipe === pipe) this.fail();
+    });
+    this.pipe = pipe;
+    pipe.header(pipeHeader(h));
+  }
+
+  private play(planes: Float32Array[], scale: number, rate: number): void {
+    const ctx = this.actx;
+    if (!ctx || ctx.state !== "running" || !planes.length) return;
+    const n = planes[0].length;
+    const at = this.clock.at(ctx.currentTime, n / rate);
+    if (at === null) return;
+    const buf = ctx.createBuffer(planes.length, n, rate);
+    const k = this.muted ? 0 : scale;
+    planes.forEach((p, c) => buf.copyToChannel((k === 1 ? p : p.map((v) => v * k)) as Float32Array<ArrayBuffer>, c));
+    const src = ctx.createBufferSource();
+    src.buffer = buf;
+    src.connect(ctx.destination);
+    src.start(at);
+    this.played = true;
+  }
+
+  private armResume(): void {
+    if (this.unarm || typeof window === "undefined" || !window.addEventListener) return;
+    const go = () => {
+      const ctx = this.actx;
+      if (!ctx || ctx.state === "closed") return this.unarm?.();
+      this.clock.reset();
+      void ctx
+        .resume()
+        .then(() => {
+          if (ctx.state === "running") this.unarm?.();
+        })
+        .catch(() => {});
+    };
+    for (const e of GESTURES) window.addEventListener(e, go, true);
+    this.unarm = () => {
+      for (const e of GESTURES) window.removeEventListener(e, go, true);
+      this.unarm = null;
+    };
+  }
+
+  private fail(): void {
+    if (this.failed) return;
+    this.failed = true;
+    this.stop();
+    this.onFail();
+  }
+}
+
 /** The MediaSource this browser has: ManagedMediaSource on iPhones, MediaSource elsewhere. */
 function mediaSourceCtor(): MseCtor | null {
   const w = window as unknown as { ManagedMediaSource?: MseCtor; MediaSource?: MseCtor };
@@ -636,6 +1045,40 @@ export function trimPoint(keys: readonly number[], start: number, now: number, k
   let cut: number | null = null;
   for (const k of keys) if (k > start && k <= now - keep) cut = k;
   return cut;
+}
+
+/** A jump to the live edge, for the log (MseTrack.lastJump). */
+export interface JumpNote {
+  at: number;
+  start: number;
+  end: number;
+  ranges: number;
+  readyState: number;
+  paused: boolean;
+  seeking: boolean;
+  sinceTrimMs: number;
+  trimFrom: number;
+  sinceKeyMs: number;
+}
+
+/** The host's latency line about the media player's jumps to the live edge (each one a hitch). */
+export function mseJumpsText(v: {
+  seeks: number;
+  maxLagMs: number;
+  fromZero: number;
+  trims: number;
+  lastJump: JumpNote | null;
+}): string {
+  const s = (x: number) => x.toFixed(2);
+  const ms = (x: number) => (x < 0 ? "none yet" : `${x} ms`);
+  const j = v.lastJump;
+  const last = j
+    ? `, the last from ${s(j.at)} s with ${s(j.start)}-${s(j.end)} s buffered in ${j.ranges} range(s), ` +
+      `readyState ${j.readyState}${j.paused ? ", paused" : ""}${j.seeking ? ", seeking" : ""}; ` +
+      `since the last trim ${ms(j.sinceTrimMs)}${j.trimFrom >= 0 ? ` (made at ${s(j.trimFrom)} s)` : ""}, ` +
+      `since the last keyframe ${ms(j.sinceKeyMs)}`
+    : "";
+  return `; media player: ${v.seeks} jumps to the live edge (${v.fromZero} from 0.00 s, ${v.trims} trims; most behind ${v.maxLagMs} ms${last})`;
 }
 
 /** One <video>/<audio> element fed fragmented MP4 through a MediaSource. */
@@ -658,13 +1101,37 @@ export class MseTrack {
     private latency: Latency | Edge = "watch",
     /** Video: there's no keyframe to cut at yet, so ask for one. */
     private onNeedKey?: () => void,
+    private readonly now: () => number = () => performance.now(),
   ) {
     if (onNeedKey) this.keys = [];
+  }
+
+  /** Jumps to the live edge so far, and the most the picture was behind before one, s. */
+  seeks = 0;
+  maxLagS = 0;
+  /** Jumps made from a playhead back at 0 with the buffer well past it. A macOS 13 report (12.3.0)
+   *  had every jump from 0.00 s with the last ~10 s buffered, about one each trim (#720): these
+   *  say whether a trim or a keyframe comes right before. */
+  fromZero = 0;
+  /** Old video removed (trims) so far. */
+  trims = 0;
+  /** The last jump: where the playhead was, what was buffered (s), the element's state, and how
+   *  long after the last trim (and where its playhead was) and the last keyframe it came (ms, -1
+   *  for none yet). */
+  lastJump: JumpNote | null = null;
+  private trimAt = -1;
+  private trimFrom = -1;
+  private keyAt = -1;
+
+  /** How far behind the buffered end it may fall before it catches up or jumps. */
+  setEdge(e: Latency | Edge): void {
+    this.latency = e;
   }
 
   /** A keyframe was pushed that plays at `t` seconds. */
   markKey(t: number): void {
     this.keys?.push(t);
+    this.keyAt = this.now();
   }
 
   /** (Re)starts the element on a new init segment. */
@@ -696,12 +1163,13 @@ export class MseTrack {
     if ("ManagedMediaSource" in window && MS === (window as unknown as { ManagedMediaSource: MseCtor }).ManagedMediaSource) {
       // iPhone: a managed source needs remote playback off and srcObject.
       this.el.disableRemotePlayback = true;
-      (this.el as HTMLMediaElement & { srcObject: unknown }).srcObject = ms;
-    } else {
-      this.el.src = URL.createObjectURL(ms);
     }
+    this.attached = attachSource(this.el, ms);
     return true;
   }
+
+  /** How the open source was put on the element. */
+  private attached: "object" | "url" | null = null;
 
   nextSeq(): number {
     return this.seq++;
@@ -725,8 +1193,28 @@ export class MseTrack {
     if (sb.buffered.length) {
       const end = sb.buffered.end(sb.buffered.length - 1);
       const start = sb.buffered.start(0);
-      const act = edgeAction(end - el.currentTime, end, this.latency);
-      if (act.seekTo !== null) el.currentTime = Math.max(start, act.seekTo);
+      const lag = end - el.currentTime;
+      const act = edgeAction(lag, end, this.latency);
+      if (act.seekTo !== null) {
+        this.seeks++;
+        this.maxLagS = Math.max(this.maxLagS, lag);
+        const t = this.now();
+        const since = (at: number) => (at < 0 ? -1 : Math.round(t - at));
+        if (el.currentTime < 0.05 && start > 1) this.fromZero++;
+        this.lastJump = {
+          at: el.currentTime,
+          start,
+          end,
+          ranges: sb.buffered.length,
+          readyState: el.readyState,
+          paused: el.paused,
+          seeking: el.seeking,
+          sinceTrimMs: since(this.trimAt),
+          trimFrom: this.trimFrom,
+          sinceKeyMs: since(this.keyAt),
+        };
+        el.currentTime = Math.max(start, act.seekTo);
+      }
       if (el.playbackRate !== act.rate) el.playbackRate = act.rate;
       if (el.currentTime - start > TRIM_AFTER_S && this.trim(sb, start)) return;
     }
@@ -760,6 +1248,9 @@ export class MseTrack {
     }
     try {
       sb.remove(start, cut);
+      this.trims++;
+      this.trimAt = this.now();
+      this.trimFrom = now;
       return true;
     } catch {
       return false; // Try again on the next segment.
@@ -779,8 +1270,60 @@ export class MseTrack {
         // Already ending.
       }
     }
-    if (this.el.src.startsWith("blob:")) URL.revokeObjectURL(this.el.src);
+    if (this.attached === "object") {
+      try {
+        (this.el as HTMLMediaElement & { srcObject: unknown }).srcObject = null;
+      } catch {
+        // Gone with the element.
+      }
+    }
+    this.attached = null;
+    if (this.el.src?.startsWith("blob:")) URL.revokeObjectURL(this.el.src);
     this.el.removeAttribute("src");
+  }
+}
+
+/** Puts a MediaSource on an element: as its srcObject where the element takes one (Safari 17+,
+ *  and what an iPhone's ManagedMediaSource needs), else as a blob: URL. WebKit before 17 throws a
+ *  TypeError for a srcObject that is not a MediaStream. A blob: media URL under the app's own
+ *  custom-scheme origin is the likely reason the macOS app's media player showed nothing on
+ *  WebKit 18615 while Safari on the same Mac played it (#720), so srcObject goes first. */
+export function attachSource(el: HTMLMediaElement, ms: MediaSource): "object" | "url" {
+  if ("srcObject" in el) {
+    try {
+      (el as HTMLMediaElement & { srcObject: unknown }).srcObject = ms;
+      return "object";
+    } catch {
+      // Not a MediaSource here: the URL below.
+    }
+  }
+  el.src = URL.createObjectURL(ms);
+  return "url";
+}
+
+/** Failed opens of the media player within MSE_FAIL_WINDOW_MS before it gives up (#720: an
+ *  element that fails on every open used to be opened again at once, thousands of times). */
+export const MSE_MAX_FAILS = 3;
+export const MSE_FAIL_WINDOW_MS = 10_000;
+
+/** Counts failures in a sliding window: true once `max` have come within `windowMs`. */
+export class FailWindow {
+  private at: number[] = [];
+  constructor(
+    private readonly max = MSE_MAX_FAILS,
+    private readonly windowMs = MSE_FAIL_WINDOW_MS,
+    private readonly now: () => number = () => performance.now(),
+  ) {}
+  /** One more failure: whether that makes too many. */
+  fail(): boolean {
+    const t = this.now();
+    this.at = this.at.filter((x) => t - x < this.windowMs);
+    this.at.push(t);
+    return this.at.length >= this.max;
+  }
+  /** It worked (a picture played): the count starts over. */
+  clear(): void {
+    this.at = [];
   }
 }
 
@@ -788,57 +1331,145 @@ export class MseTrack {
 export class MsePlayer {
   private video: MseTrack;
   private audio: MseSound;
+  /** The sound through the WebAssembly decoder where MSE takes no Opus (Safari 16, #720). */
+  private wasm: WasmSound | null = null;
+  private audioHeader: Uint8Array | null = null;
+  private muted = false;
+  private fails: FailWindow;
+  /** Too many failed opens: the media player gave up on this stream (a new one tries again). */
+  private gaveUp = false;
+  /** An open is under way: an error it raises is counted, not answered with another open. */
+  private reopening = false;
+  private failedWhileOpening = false;
   private wrap = document.createElement("div");
   private hevc = false;
   private header: Uint8Array | null = null;
   private sawKey = false;
   private keyAsk: KeyAsker;
+  /** What the picture did (a Play Together guest reports it to the host). */
+  readonly stats = new PictureStats("mse");
   private problemShown = false;
   private vTime = 0;
   private vLast = 0;
   private soundOn = false;
   /** The sound cannot play on this device. */
   onSoundFail: (() => void) | null = null;
+  /** The picture failed MSE_MAX_FAILS times within MSE_FAIL_WINDOW_MS and the player stopped
+   *  trying; said once (the "decode" problem stays on show). */
+  onGiveUp: (() => void) | null = null;
 
   constructor(
     private onProblem: (p: WatchProblem | null) => void,
     private latency: Latency = "watch",
     onNeedKey?: () => void,
+    now?: () => number,
   ) {
     this.keyAsk = new KeyAsker(onNeedKey);
+    this.fails = new FailWindow(MSE_MAX_FAILS, MSE_FAIL_WINDOW_MS, now);
     const v = document.createElement("video");
     v.muted = true;
     v.autoplay = true;
     v.playsInline = true;
     v.className = "block h-full w-full object-contain";
     v.dataset.testid = "watch-video";
-    this.audio = new MseSound(latency, () => this.onSoundFail?.());
+    this.audio = new MseSound(latency, () => this.soundThroughWasm());
     this.wrap.className = "h-full w-full";
     this.wrap.append(v, this.audio.el);
-    this.video = new MseTrack(v, () => this.onProblem("decode"), latency, () => this.keyAsk.waiting());
+    this.video = new MseTrack(v, () => this.showProblem(), latency, () => this.keyAsk.waiting());
     // A decode error closes the source, and every segment after it would be dropped in silence.
     v.addEventListener("error", () => this.restartVideo());
     v.addEventListener("playing", () => {
+      this.fails.clear();
       if (!this.problemShown) return;
       this.problemShown = false;
       this.onProblem(null);
     });
   }
 
-  /** The element failed: open it again from the init segment and wait for the next keyframe. */
-  private restartVideo(): void {
+  /** A problem another player put on show (WebCodecs, before this took over): cleared once a
+   *  picture plays here. */
+  markProblemShown(): void {
+    this.problemShown = true;
+  }
+
+  /** The "decode" problem, said once until the picture is back. */
+  private showProblem(): void {
+    if (this.problemShown) return;
     this.problemShown = true;
     this.onProblem("decode");
+  }
+
+  /** The element failed: open it again from the init segment and wait for the next keyframe, unless
+   *  it keeps failing (then the player gives up, and says so once). */
+  private restartVideo(): void {
+    if (this.gaveUp) return;
+    // An error raised by the open below: never another open from inside this one. It is taken
+    // up once that open is done.
+    if (this.reopening) {
+      this.failedWhileOpening = true;
+      return;
+    }
+    this.showProblem();
+    if (this.fails.fail()) {
+      this.gaveUp = true;
+      this.video.close();
+      this.onGiveUp?.();
+      return;
+    }
     const h = this.header;
     if (!h) return;
     this.header = null;
-    this.openVideo(h);
+    this.reopening = true;
+    this.failedWhileOpening = false;
+    try {
+      this.openVideo(h);
+    } finally {
+      this.reopening = false;
+    }
     this.sawKey = false;
     this.keyAsk.waiting();
+    // The new open failed as it was made: counted as one more (at most MSE_MAX_FAILS deep).
+    if (this.failedWhileOpening) {
+      this.failedWhileOpening = false;
+      this.restartVideo();
+    }
+  }
+
+  /** Whether the media player stopped trying (MSE_MAX_FAILS failed opens). */
+  get failed(): boolean {
+    return this.gaveUp;
+  }
+
+  /** The picture's edge (see HOST_MSE_EDGE): the sound keeps its own. */
+  setVideoEdge(e: Latency | Edge): void {
+    this.video.setEdge(e);
+  }
+
+  /** Jumps to the live edge so far and the most the picture was behind before one, for the log. */
+  get videoSeeks(): {
+    seeks: number;
+    maxLagMs: number;
+    fromZero: number;
+    trims: number;
+    lastJump: MseTrack["lastJump"];
+  } {
+    return {
+      seeks: this.video.seeks,
+      maxLagMs: Math.round(this.video.maxLagS * 1000),
+      fromZero: this.video.fromZero,
+      trims: this.video.trims,
+      lastJump: this.video.lastJump,
+    };
   }
 
   get element(): HTMLElement {
     return this.wrap;
+  }
+
+  /** The element was moved in the page (taking it out pauses it): plays on. */
+  resume(): void {
+    const v = this.video.el;
+    if (v.paused) void v.play()?.catch?.(() => {});
   }
 
   setHevc(hevc: boolean): void {
@@ -847,17 +1478,46 @@ export class MsePlayer {
 
   startSound(): void {
     this.soundOn = true;
+    if (this.wasm) return this.wasm.start();
+    // No Opus in this MSE: the WebAssembly decoder, its output made in this tap.
+    if (!mseOpusSupported()) return this.soundThroughWasm();
     this.audio.start();
+  }
+
+  /** MSE can't play the sound: the WebAssembly decoder plays it through Web Audio. */
+  private soundThroughWasm(): void {
+    if (this.wasm) return;
+    this.audio.stop();
+    const w = new WasmSound(this.latency, () => this.onSoundFail?.());
+    this.wasm = w;
+    w.setMuted(this.muted);
+    if (this.audioHeader) w.setHeader(this.audioHeader);
+    if (this.soundOn) w.start();
   }
 
   /** The page is back (visible, focused): sound the browser paused meanwhile plays again. */
   resumeSound(): void {
-    if (this.soundOn) this.audio.resume();
+    if (!this.soundOn) return;
+    if (this.wasm) this.wasm.resume();
+    else this.audio.resume();
   }
 
   /** Sound muted by the guest. */
   setMuted(m: boolean): void {
+    this.muted = m;
     this.audio.setMuted(m);
+    this.wasm?.setMuted(m);
+  }
+
+  /** How the sound went, for the host (null before it started). */
+  soundReport(): SoundReport | null {
+    if (!this.soundOn) return null;
+    return this.wasm ? scheduledSound("wasm", this.wasm.stats) : this.audio.report();
+  }
+
+  /** Whether the sound plays: MSE's element, or sound the WebAssembly decoder scheduled. */
+  get soundPlaying(): boolean {
+    return this.wasm ? this.wasm.played : this.audio.playing;
   }
 
   get sound(): boolean {
@@ -871,18 +1531,28 @@ export class MsePlayer {
     const payload = b.subarray(1);
     if (kind === 0) this.openVideo(payload.slice());
     else if (kind === 1) this.onVideo(payload);
-    else if (kind === 3) this.audio.setHeader(payload.slice());
-    else if (kind === 4) this.audio.frame(payload);
+    else if (kind === 3) {
+      this.audioHeader = payload.slice();
+      (this.wasm ?? this.audio).setHeader(this.audioHeader);
+    } else if (kind === 4) (this.wasm ?? this.audio).frame(payload);
   }
 
   private openVideo(header: Uint8Array): void {
-    const same = this.header && this.header.length === header.length && this.header.every((x, i) => x === header[i]);
+    const same = !!this.header && this.header.length === header.length && this.header.every((x, i) => x === header[i]);
     if (same && this.video.ready) return;
+    if (this.gaveUp) {
+      // Given up on this stream; a new one (another header) gets a fresh try.
+      if (same) return;
+      this.gaveUp = false;
+      this.fails.clear();
+    }
     this.header = header;
     const rect = spsVisibleRect(header, this.hevc) ?? { w: 1920, h: 1080 };
     const v = videoInit(header, this.hevc, rect);
     if (!v) return;
+    this.stats.codec = /codecs="([^"]+)"/.exec(v.mime)?.[1] ?? "";
     if (!this.video.open(v.mime, v.init)) {
+      this.problemShown = true;
       this.onProblem(this.hevc ? "no_hevc" : "decode");
       return;
     }
@@ -898,13 +1568,19 @@ export class MsePlayer {
       this.video.dropped = false;
       this.sawKey = false;
     }
-    if (!this.sawKey && !key) return this.keyAsk.waiting();
+    this.stats.arrived();
+    if (!this.sawKey && !key) {
+      this.stats.drop();
+      return this.keyAsk.waiting();
+    }
     // Behind: skip to the next keyframe rather than play the backlog.
     if (!key && this.video.backlog > BACKLOG_LIMIT[this.latency]) {
       this.sawKey = false;
+      this.stats.drop();
       return this.keyAsk.waiting();
     }
     this.sawKey = true;
+    this.stats.drawn();
     // Times from arrival, so a 30 or 60 fps stream both play at their pace.
     const now = performance.now();
     const dur = this.vLast ? Math.min(9000, Math.max(750, Math.round((now - this.vLast) * 90))) : 1500;
@@ -917,6 +1593,7 @@ export class MsePlayer {
   stop(): void {
     this.video.close();
     this.audio.stop();
+    this.wasm?.stop();
   }
 }
 

@@ -57,7 +57,7 @@ void import("./lib/appJournal").then(({ recordAppEvent }) =>
 // packaged users would see nothing when something goes wrong.
 installEngineLogBridge();
 // "Detailed logs" (Logs tab): tell the engine, and turn it off when its time is up.
-void import("./lib/detailedLogs").then((m) => m.installDetailedLogs());
+void import("./lib/logLevels").then((m) => m.installLogLevels());
 
 // Start mirroring stores to ~/.ps5upload/settings.json on every change,
 // and then hydrate from that file (asynchronously) if the user has a
@@ -95,7 +95,9 @@ if (typeof window !== "undefined" && window.visualViewport) {
       active &&
       (active.tagName === "INPUT" ||
         active.tagName === "TEXTAREA" ||
-        (active as HTMLElement).isContentEditable)
+        (active as HTMLElement).isContentEditable) &&
+      // The stream's hidden typing field: the page holds still under the picture.
+      !active.hasAttribute("data-rp-typing")
     ) {
       const el = active as HTMLElement;
       const vv = window.visualViewport!;

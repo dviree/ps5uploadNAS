@@ -45,8 +45,10 @@
   drives. Replaces PS Game Library.
 - **Convert games (Workshop).** Build an installable package from a decrypted game folder or an
   image, or write a game folder as a game image (`.exfat`, `.ffpkg`, `.ffpfs`, or the smaller
-  `.ffpfsc`) that ShadowMount+ mounts. A queue makes games one after another and hands each to
-  Upload & Install to install or upload.
+  `.ffpfsc`) that ShadowMount+ mounts. A PS4 game (or a PS4 game merged with its update) can
+  also become a PS4 fake package. An image or folder can be written straight to a server (SMB,
+  NFS, FTP, SFTP or WebDAV) with nothing stored on your computer. A queue makes games one after
+  another and hands each to Upload & Install to install or upload.
 - **Browse and manage.** Files, games, disk images (mount, edit in place), screenshots and
   video clips; register, launch, stop and uninstall games; copy, move (Move to…), delete, set
   permissions.
@@ -60,6 +62,12 @@
     you use other screens, and a dropped connection rejoins by itself.
   - Play with a controller connected to this device, the keyboard (keys you can remap) or an
     on-screen controller on phones and tablets; the controller vibrates with the game.
+    Third-party controllers (8BitDo, Switch Pro, Logitech and more) are mapped for you, and
+    **Check your controller** sets up the buttons of any other.
+  - **Away from home:** Tailscale is built in. Put the PS5 on your tailnet from its card in
+    **Connection** and sign in on each device under **Settings › Tailscale**, with no Tailscale
+    app needed. A phone that was never at home finds the PS5 on Tailscale by itself; only
+    Remote Play and PS5Upload are reachable through it.
   - Or give the PS5 your computer's keyboard and mouse as its own (any firmware), and use a
     phone as its touchpad and keyboard.
   - If the user has a PS5 passcode, the app asks for it (never saved).
@@ -74,16 +82,18 @@
     controller on the PS5, from any browser or the app. Share a QR code, a link or a short
     code, allow each friend, and they pick Quick Play on the TV. They play with a controller,
     the keyboard or the on-screen controls on a phone, and hear the game (with Mute). A short
-    drop keeps their place; when you stop Play, they're told at once. Friends away from home
-    join over Tailscale, WireGuard or another VPN, and a link opens in the PS5Upload app when
-    they have it.
+    drop keeps their place; when you stop Play, they're told at once. Friends anywhere join from
+    an **internet invite** (no Tailscale or VPN needed), and a link opens in the PS5Upload app
+    when they have it. Guests play as the PS5 profile you choose, or the TV asks them. Phone
+    controllers and watch links work over the internet too.
   - **Go live** to YouTube, Twitch, Kick, Facebook or any RTMP/SRT server, several at once,
     straight from Play (desktop apps and the web UI), or add the stream to **OBS** for your own
     scenes and overlays.
   - A script or AI agent on the engine's computer can watch and play a running session
     ([AUTOMATION.md](AUTOMATION.md)), and drive everything else too ([API and AI agents](#api-and-ai-agents)).
 - **Cheats, fan curve, hardware view,** payload sender with a catalogue and playlists, and
-  backport tools.
+  backport tools. **Payload updates** update one payload or all, roll back, or keep them up to
+  date by themselves, and keep Payload Manager's copies and boot list in step.
 - **Bug reports in one place.** Bug Report (always in the sidebar) gathers the app's, the
   engine's and the PS5 helper's logs for the time you pick into one `.zip`, with addresses,
   serials and keys removed, ready to post on GitHub or Discord. **Detailed logs** (Logs tab)
@@ -94,6 +104,14 @@
   screen, port 9180), made for the controller: installed games and the games on your network
   shares and drives, save backups, files (SMB shares, archive extraction, package install,
   payload loading), cheats, fan, processes, clean-up and settings, with no PC nearby.
+- **Your PS5s on one page.** **Connection** shows each PS5 as a card: online or not, how this
+  device reaches it, its helper and firmware. **Add a PS5** scans your home network and your
+  Tailscale network, opens an invite, or takes an address. **Invite a device** gives a new phone
+  or computer a code and link (nothing in it lets anyone in), and with approval on, a new device
+  waits for your **Allow** on any device that uses the PS5 or on the PS5's own page.
+- **Share with a friend.** Send a game's saves, screenshots and clips, cheats, controls and
+  homebrew apps straight to a friend's PS5Upload, after you allow them. Retail games are never
+  shared.
 - **Several devices, one PS5.** Computers, phones and Docker connect at once with no pairing
   code, see what the others are doing (Devices), share your consoles and settings, and stay out
   of each other's way. Settings are backed up daily, to the engine and to each console.
@@ -301,12 +319,14 @@ For per-platform bundles only (no full dev env): `make dist-mac`,
 ## Quick start
 
 1. Jailbreak the PS5 and keep an ELF loader running on port **9021**.
-2. Launch ps5upload and open **Connection**. Enter the PS5's IP address.
-3. Click **Check**, then **Send helper**. The app launches the helper and connects to it. (Other
-   payloads, such as kstuff or etaHEN, are sent from **Payloads → Send payload**.)
+2. Launch ps5upload, open **Connection** and press **Add a PS5**: **Scan** finds it on your
+   network, or type its IP address.
+3. On its card, click **Check**, then **Send helper**. The app launches the helper and connects
+   to it. (Other payloads, such as kstuff or etaHEN, are sent from **Payloads → Send payload**.)
 4. Other computers, phones and Docker setups connect to the same helper with no code; the console
-   remembers each one (**Devices**). To make new devices type a code shown on the TV first, turn
-   on **Ask before a new device can connect** there.
+   remembers each one (**Devices allowed to use it** on its card). **Invite a device** adds the
+   PS5 on a new phone or computer. To approve each new device yourself, turn on **Ask before a
+   new device can connect**: new devices then wait for your **Allow**.
 
 The helper stays until the PS5 reboots, and usually keeps running through rest mode; if the dot
 stays red after a wake, send it again. The app connects to ports **9120**
@@ -412,7 +432,8 @@ to install. The engine, in the desktop app or the Docker image, serves all of th
 
 There is no password, by design: it answers only the engine's own computer unless you open it with
 `PS5UPLOAD_ALLOW_IP`. An agent can do whatever you can on your console, including delete files, so
-`PS5UPLOAD_MCP_READ_ONLY=1` is there if you only want it to look.
+"Agents can change things" under MCP & API (or `PS5UPLOAD_MCP_READ_ONLY=1`) is there if you only want
+it to look.
 
 ## FAQ
 
@@ -509,7 +530,7 @@ adapted file by file), **library** (a dependency the build pulls in), **fetched 
 **Included code:**
 * [PS5 Payload SDK](https://github.com/ps5-payload-dev/sdk) (John Törnblom) — builds every payload; its startup code is in [`payload/third_party/sdk-crt`](payload/third_party/sdk-crt) with one fix so payloads start on firmware where two kernel lookups fail (FW 5.50)
 * [elfldr](https://github.com/ps5-payload-dev/elfldr) (John Törnblom) — the ELF loader, in [`third_party/elfldr`](third_party/elfldr) with a fix for a loader that hangs on a silent client; the app sends this build to the console
-* [PS5 Dump Forge](https://github.com/quer3q/ps5-dump-forge) (quer3q) — the UFS2 (`.ffpkg`) and PFS (`.ffpfs`) image writers and the streaming `.ffpfsc` container, in `engine/crates/ps5-dump-forge-ufs2` and `-pfs`; quer3q also contributed reader and safety fixes to the package crates, and the ideas behind hash-checked images and spare space for read-write mounts
+* [PS5 Dump Forge](https://github.com/quer3q/ps5-dump-forge) (quer3q) — the zstd asset pack writer and reader (`engine/crates/ps5-dump-forge-zstd`), the UFS2 (`.ffpkg`) and PFS (`.ffpfs`) image writers and the streaming `.ffpfsc` container, in `engine/crates/ps5-dump-forge-ufs2` and `-pfs`; quer3q also contributed reader and safety fixes to the package crates, the fake-signing of unsigned executables and the reading of more package layouts (ported from Forge), and the ideas behind hash-checked images and spare space for read-write mounts
 * [Monocypher](https://github.com/LoupVaillant/Monocypher) (Loup Vaillant et al.) and [BLAKE3](https://github.com/BLAKE3-team/BLAKE3) — AVA1's cryptography and file verification on the console, in [`third_party/ava1/c/third_party`](third_party/ava1/c/third_party)
 * [SQLite](https://sqlite.org/) — reading the console's app database, in [`payload/third_party/sqlite3`](payload/third_party/sqlite3)
 * [tiny-AES-c](https://github.com/kokke/tiny-AES-c) (kokke) — MC4 cheat decryption, in [`payload/third_party/tiny_aes`](payload/third_party/tiny_aes)
@@ -526,6 +547,8 @@ adapted file by file), **library** (a dependency the build pulls in), **fetched 
 * [ps5-app-dumper](https://github.com/EchoStretch/ps5-app-dumper) (EchoStretch, slopmaster33) — the on-console game dump: its dumper, package, PFS, decrypt and elf2fself code, adapted into `payload/src/app_dump_*.c`
 * [ps5-self-pager](https://github.com/idlesauce/ps5-self-pager) (idlesauce) — the self-pager SELF decryption and its firmware table, in `payload/src/app_dump_self.c`
 * [elf-arsenal](https://git.etawen.dev/soniciso/elf-arsenal) (soniciso and contributors) — the cheat engine (`payload/src/cheats.c`), the drive sensors (`drive_sensors.c`) and the Remote Play account-id lookup (`remoteplay.c`); the wake watchdog adapts its algorithm, and its launch and jailbreak code was a reference for ours
+* [Alembic](https://github.com/fthdgn-gh/Alembic) (fthdgn-gh) and [PS4pkg_to_ffpfsc](https://github.com/SadykovIV/PS4pkg_to_ffpfsc) (SadykovIV) — the `param.json` a PS4 game's image needs, how a PS4 fake package is read (`engine/crates/ps5upload-fpkg/src/ps4_pkg.rs`, also following [LibOrbisPkg](https://github.com/maxton/LibOrbisPkg)), and Alembic's console findings on the AMPR emulator and ShadowMount+'s rescan
+* [ampr-emu-ng](https://github.com/quer3q/ampr-emu-ng) (quer3q) — the emulator that reads zstd packs, fetched from its release and checked by SHA-256, never bundled
 * [ampr_emu](https://github.com/drakmor/ampr_emu) (drakmor) — the LZ4 asset packer is a Rust port of its `ampr_pack.py`, and "Measure how it plays" of `ampr_pack_profile.py`; the index writer follows the format `build_ampr_index.py` writes
 * [playactor](https://github.com/dhleong/playactor) (Daniel Leong) — Remote Play registration (with its key tables) and the control session that wakes a console and signs its user in, ported to Rust in `engine/crates/ps5upload-core/src/rp_regist*.rs` and `rp_session.rs`
 * [ProsperoSunshine](https://github.com/Darkatek7/ProsperoSunshine) (Darkatek7, from ps5-mcp's RemoteEye) — the `/dev/hid` requests that make Play Together's virtual controllers (add, insert, delete, output, and the state block layout), written anew in `payload/src/vpad.c` (GPL-3.0-only, as its source)
@@ -534,6 +557,7 @@ adapted file by file), **library** (a dependency the build pulls in), **fetched 
 **Libraries:**
 * Desktop client: [Tauri](https://tauri.app/), [React](https://react.dev/), [react-router](https://reactrouter.com/), [Zustand](https://github.com/pmndrs/zustand), [lucide-react](https://lucide.dev/) icons, built with [Vite](https://vitejs.dev/) and [Tailwind CSS](https://tailwindcss.com/)
 * Remote Play instant replay: [Mediabunny](https://mediabunny.dev/) (MPL-2.0, used unmodified from npm) writes the saved clip as MP4
+* Remote Play sound on devices with no Opus decoder (older Safari and WebKit): [opus-decoder](https://github.com/eshaz/wasm-audio-decoders/tree/main/src/opus-decoder) (MIT, used unmodified from npm), [libopus](https://opus-codec.org/) (BSD-3-Clause) compiled to WebAssembly, loaded only where it is needed
 * Remote Play upscaling: [AMD FidelityFX Super Resolution 1](https://github.com/GPUOpen-Effects/FidelityFX-FSR) (MIT) — **ported**: its EASU and RCAS shaders rewritten as WebGL 2 GLSL in `client/src/lib/rpPicture.ts`
 * Engine: [tokio](https://tokio.rs/), [axum](https://github.com/tokio-rs/axum), [serde](https://serde.rs/), [anyhow](https://github.com/dtolnay/anyhow), [uuid](https://github.com/uuid-rs/uuid), [zip](https://github.com/zip-rs/zip2), and the other crates in the `Cargo.lock` files
 * [UnRAR](https://www.rarlab.com/) (Alexander Roshal) — `.rar` extraction on **desktop and Docker**, compiled from the source the `unrar_sys` crate bundles into its own program, `ps5upload-unrar`, which holds only ps5upload's own code and UnRAR and which the engine runs over pipes (UnRAR is never linked into the engine); used to *extract only*, never to compress.
@@ -627,8 +651,8 @@ Thank you to everyone who has supported PS5Upload. Every coffee keeps it going. 
 the website list you too, under Thanks & Support.)
 
 <!-- supporters:start (scripts/supporters.mjs) -->
-BigPapii420 · clincher · Ice · Marv530e · San · Dennis · gabuscus · Slappula · b1ackcoffee · drsam · f0d · John Malpas · kheops · LEO · Lucky · MagneTo · Peejay571 · Ronnie K. · B3aver08 · Beetle · David Rabilero · Florian · hernanr1993 · JB · Joe Szymkowicz · Joey Lam · kuttenkop de kutjelikker · Mehmet · Niko · StrijderNL · Ferko · GerardoPTC · Griffdaddy · here · Mayankk! · Rubén · Turcan Vadim · Zeiko
+BigPapii420 · clincher · Ice · Marv530e · mikekay1 · San · Dennis · gabuscus · Slappula · b1ackcoffee · drsam · f0d · GorFMan · Joe Szymkowicz · John Malpas · kheops · LEO · Lucky · MagneTo · Peejay571 · Ronnie K. · Mohd Rahimi Samsuddin · B3aver08 · Beetle · David Rabilero · Florian · hernanr1993 · JB · Joey Lam · kuttenkop de kutjelikker · Mehmet · Niko · StrijderNL · TOPMUSICMAN8 · Ferko · GerardoPTC · Griffdaddy · here · Mayankk! · Pedro Madureira · Rubén · Turcan Vadim · Zeiko
 
-…and 8 anonymous supporters. Thank you all! 💛
+…and 9 anonymous supporters. Thank you all! 💛
 
 <!-- supporters:end -->

@@ -233,7 +233,13 @@ export function TouchModeToggle({
   blocked,
   style,
   touchpadLabel,
+  tight = false,
+  hidden = false,
 }: {
+  /** Faded out and out of the way (full screen, with the stream's controls hidden). */
+  hidden?: boolean;
+  /** Between the shoulder buttons on an upright phone: only the chosen one has its name. */
+  tight?: boolean;
   mode: "controller" | "touchpad";
   /** The touchpad's name (the phone link page says "Touchpad & keyboard"). */
   touchpadLabel?: string;
@@ -251,6 +257,7 @@ export function TouchModeToggle({
         role="radio"
         aria-checked={mode === m}
         aria-disabled={off || undefined}
+        aria-label={tight && mode !== m ? label : undefined}
         title={off ? blocked! : label}
         onClick={(e) => {
           e.stopPropagation();
@@ -262,7 +269,7 @@ export function TouchModeToggle({
         data-testid={`rp-touch-mode-${m}`}
       >
         {icon}
-        <span>{label}</span>
+        {(!tight || mode === m) && <span>{label}</span>}
       </button>
     );
   };
@@ -270,7 +277,10 @@ export function TouchModeToggle({
     <div
       role="radiogroup"
       aria-label={tr("rp_tp_mode", undefined, "Touch controls")}
-      className="pointer-events-auto absolute left-1/2 z-30 flex -translate-x-1/2 gap-0.5 rounded-full border border-white/20 bg-black/50 p-0.5 backdrop-blur-sm"
+      aria-hidden={hidden || undefined}
+      className={`absolute left-1/2 z-30 flex -translate-x-1/2 gap-0.5 rounded-full border border-white/20 bg-black/50 p-0.5 backdrop-blur-sm transition-opacity duration-200 ${
+        hidden ? "pointer-events-none opacity-0" : "pointer-events-auto opacity-100"
+      }`}
       style={style}
       data-testid="rp-touch-mode"
     >

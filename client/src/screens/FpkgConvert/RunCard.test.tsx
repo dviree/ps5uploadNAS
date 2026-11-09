@@ -11,7 +11,7 @@ vi.mock("../../state/lang", () => ({
 }));
 
 import type { Pipeline } from "../../state/fpkgConversion";
-import { ImageChoice } from "./ImageOptions";
+import { ImageChoice, ZstdOption, folderPackOptions, folderPacks, packOptions } from "./ImageOptions";
 import {
   RunCard,
   deleteLabel,
@@ -191,6 +191,116 @@ describe("RunCard", () => {
       expect(out).not.toContain("A package (.pkg)");
       expect(options(out, "After converting")).toEqual(["Keep the package", "Stream & install", "Upload & install"]);
       expect(button(out, "Add this game to the queue")?.disabled).toBe(false);
+    });
+
+    it("saves an image to this computer or straight to the PS5", () => {
+      const img = { make: "image" as const, onSaveTo: noop };
+      expect(options(idle(img, { canImage: true }), "Save to")).toEqual([
+        "This computer",
+        "The PS5, straight (nothing stored here)",
+      ]);
+      // A package has no such choice.
+      expect(idle({ onSaveTo: noop })).not.toContain("Save to");
+      const toPs5 = idle({ ...img, saveTo: "ps5" }, { canImage: true });
+      expect(toPs5).not.toContain("After converting");
+      expect(toPs5).toContain("goes on where it stopped");
+      expect(button(toPs5, "Make game image")?.disabled).toBe(false);
+      // An image that can't stream there says why and runs nothing.
+      const refused = idle({ ...img, saveTo: "ps5", ps5Refusal: "Save this one to this computer." }, { canImage: true });
+      expect(refused).toContain("Save this one to this computer.");
+      expect(button(refused, "Make game image")?.disabled).toBe(true);
+      // Nor with no console to send to.
+      const noPs5 = idle({ ...img, saveTo: "ps5", canInstall: false }, { canImage: true });
+      expect(button(noPs5, "Make game image")?.disabled).toBe(true);
+    });
+
+    it("saves an image or a game folder straight to a server folder", () => {
+      const img = { make: "image" as const, onSaveTo: noop, onServerFolder: noop };
+      expect(options(idle(img, { canImage: true }), "Save to")).toEqual([
+        "This computer",
+        "The PS5, straight (nothing stored here)",
+        "A server, straight (nothing stored here)",
+      ]);
+      // A folder goes to this computer or a server, never straight to the PS5.
+      const folder = { make: "folder" as const, onSaveTo: noop, onServerFolder: noop };
+      expect(options(idle(folder, { canFolder: true }), "Save to")).toEqual([
+        "This computer",
+        "A server, straight (nothing stored here)",
+      ]);
+      // With no folder on a server chosen yet, nothing runs.
+      const noFolder = idle({ ...img, saveTo: "server" }, { canImage: true });
+      expect(noFolder).toContain('data-testid="server-dest"');
+      expect(noFolder).not.toContain("After converting");
+      expect(button(noFolder, "Make game image")?.disabled).toBe(true);
+      const chosen = idle({ ...img, saveTo: "server", serverFolder: "remote://nas1/games" }, { canImage: true });
+      expect(chosen).toContain("read back there before it gets its name");
+      expect(button(chosen, "Make game image")?.disabled).toBe(false);
+      // An image that can't stream there says why and runs nothing.
+      const refused = idle(
+        { ...img, saveTo: "server", serverFolder: "remote://nas1/games", serverRefusal: "Not this one." },
+        { canImage: true },
+      );
+      expect(refused).toContain("Not this one.");
+      expect(button(refused, "Make game image")?.disabled).toBe(true);
+      // A folder build has no image refusal.
+      const folderTo = idle(
+        { ...folder, saveTo: "server", serverFolder: "remote://nas1/games", serverRefusal: "Not this one." },
+        { canFolder: true },
+      );
+      expect(button(folderTo, "Make game folder")?.disabled).toBe(false);
+      // The queue offers no server.
+      expect(options(idle({ make: "image", onSaveTo: noop }, { canImage: true }), "Save to")).not.toContain(
+        "A server, straight (nothing stored here)",
+      );
+    });
+
+    it("says a finished image is on a server, with nothing to upload, show or delete", () => {
+      const out = html(
+        {
+          phase: "done",
+          mode: "image",
+          source: "/g",
+          host: "10.0.0.2",
+          packagePath: "remote://nas1/games/G.exfat",
+          packageBytes: 9,
+          convertMs: 1,
+          installMs: 0,
+          stageMs: {},
+          deleted: false,
+          titleId: null,
+        },
+        { canInstall: true },
+        { onUploadImage: noop },
+      );
+      expect(out).toContain("written straight to the server");
+      expect(out).toContain("nas1 › games/G.exfat");
+      expect(button(out, "Upload to PS5")).toBeNull();
+      expect(button(out, "Show in folder")).toBeNull();
+    });
+
+    it("says a finished image is on the PS5, with nothing to upload", () => {
+      const out = html(
+        {
+          phase: "done",
+          mode: "image",
+          source: "/g",
+          host: "10.0.0.2",
+          packagePath: "/data/homebrew/G.exfat",
+          packageBytes: 9,
+          convertMs: 1,
+          installMs: 0,
+          stageMs: {},
+          deleted: false,
+          titleId: null,
+          onConsole: true,
+        },
+        { canInstall: true },
+        { onUploadImage: noop },
+      );
+      expect(out).toContain("written straight to the PS5");
+      expect(out).toContain("/data/homebrew/G.exfat");
+      expect(button(out, "Upload to PS5")).toBeNull();
+      expect(button(out, "Show in folder")).toBeNull();
     });
 
     it("names the action after the choice", () => {
@@ -472,6 +582,10 @@ describe("RunCard", () => {
       onProfile: noop,
       installRuntime: false,
       onInstallRuntime: noop,
+      kind: "lz4",
+      onKind: noop,
+      zstdLevel: 5,
+      onZstdLevel: noop,
       ...over,
     });
     // The image's options live under ③ (ImageChoice); the run card only runs.
@@ -506,6 +620,42 @@ describe("RunCard", () => {
       expect(button(named, "Use the built-in profile")).not.toBeNull();
       expect(lz4Active("exfat", lz4({ on: true }))).toBe(true);
       expect(lz4Active("ffpkg", lz4({ on: true }))).toBe(false);
+    });
+
+    it("offers zstd on any plain image, needing no emulator of the game's own", () => {
+      const noEmulator = { runtime_version: null, refusal: "no emulator", kind: "runtime" as const };
+      const zstd = lz4({ on: true, kind: "zstd", readiness: noEmulator });
+      expect(lz4Active("ffpkg", zstd)).toBe(true);
+      expect(lz4Active("ffpkg", lz4({ on: true }))).toBe(false);
+      expect(checkbox(idle("ffpkg", zstd), "zstd asset packs")).not.toBeNull();
+      expect(idle("ffpkg", zstd)).not.toContain("AMPR LZ4 asset packs");
+      expect(checkbox(idle("exfat", zstd), "AMPR LZ4 asset packs")?.checked).toBe(false);
+      expect(checkbox(idle("exfat", zstd), "zstd asset packs")?.checked).toBe(true);
+      const notAmpr = lz4({ kind: "zstd", on: true, readiness: { refusal: "no", kind: "no_ampr" } });
+      expect(lz4Active("ffpkg", notAmpr)).toBe(false);
+      // The resume note also names zstd asset packs, so look for the option itself.
+      expect(checkbox(idle("ffpkg", notAmpr), "zstd asset packs")).toBeNull();
+      // The runtime choice goes with it: the newest release unless the tested one is chosen.
+      expect(packOptions("ffpkg", zstd)).toEqual({ zstdLevel: 5, zstdRuntime: "latest" });
+      expect(packOptions("ffpkg", lz4({ on: true }))).toBeUndefined();
+      expect(packOptions("exfat", lz4({ on: true }), "t")).toEqual({ profileToml: "t", installRuntime: false });
+      expect(idle("ffpkg", zstd)).toContain("Newest release (default)");
+      expect(idle("ffpkg", zstd)).toContain("Tested 0.3.2");
+    });
+
+    it("packs a folder in zstd only, with the runtime chosen", () => {
+      const zstd = lz4({ on: true, kind: "zstd" });
+      expect(folderPacks(zstd)).toBe(true);
+      expect(folderPackOptions(zstd)).toEqual({ level: 5, runtime: "latest" });
+      // LZ4 packs are for .exfat images: a folder gets none.
+      expect(folderPacks(lz4({ on: true }))).toBe(false);
+      expect(folderPackOptions(lz4({ on: true }))).toBeUndefined();
+      expect(folderPackOptions(undefined)).toBeUndefined();
+      const notAmpr = lz4({ kind: "zstd", on: true, readiness: { refusal: "no", kind: "no_ampr" } });
+      expect(folderPacks(notAmpr)).toBe(false);
+      const html = renderToStaticMarkup(<ZstdOption lz4={zstd} folder />);
+      expect(html).toContain("LZ4 packs are not offered here");
+      expect(html).toContain('data-testid="zstd-runtime"');
     });
 
     it("says why, and cannot be turned on, when the game's ampr_emu cannot serve packs", () => {

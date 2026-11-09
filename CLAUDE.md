@@ -4,12 +4,26 @@ ps5upload (phantomptr/ps5upload) with LZ4: Convert Games has My games (which PS5
 library can be LZ4), the converter, and Compatibility (LZ4 reports and the .ffpfsc list). It
 runs as the Docker web UI on a NAS.
 
+## Memory files: read first, update when a task is done
+
+- `SNAPSHOT.md`: a blueprint of the current architecture (upstream, the fork's additions, CI
+  and Docker, local build quirks). Read it at the start of a session.
+- `BACKLOG.md`: found bugs, stubs and ideas, with a `>RESUME HERE` block naming the last thing
+  done and the next step. Read it at the start and pick up from `>RESUME HERE`.
+- `CLAUDE.md` (this file): the rules every turn. Tune it when the user sets a new rule.
+- When a task is complete, update all three in the same commit as the change: the snapshot if
+  the shape changed, the backlog's `>RESUME HERE` always, and this file for new rules. Keep the
+  user's network addresses, paths and ids out of them.
+- Reply in Swedish when the user writes Swedish. End every reply with a "🌱 Trail: …" line
+  saying which trail commands ran, and say plainly when something was read without Trail
+  (workflow YAML, scripts and upstream's version via git are not in Trail's map).
+
 ## GitHub Actions: Docker only
 
 Only the Docker images build by themselves. `docker-engine.yml` publishes
 `ghcr.io/dviree/ps5upload-engine-webui` (tags `lz4`, `latest`, `lz4-<commit>`) on every push to
 `main`. Every other workflow (`engine-ci.yml`, `publish.yml`, `pages.yml`, `ava1-soak.yml`,
-`codeql.yml`, `ios.yml`, `release-tag.yml`, `release-cache.yml`, `ci-runner-retry.yml`, `publish-retry.yml`) runs only by hand (`workflow_dispatch`): no desktop, Android or release builds on push, tag,
+`codeql.yml`, `ios.yml`, `release-tag.yml`, `release-cache.yml`, `ci-runner-retry.yml`, `publish-retry.yml`, `flake-hunter.yml`) runs only by hand (`workflow_dispatch`): no desktop, Android or release builds on push, tag,
 pull request or schedule.
 
 Keep it that way:

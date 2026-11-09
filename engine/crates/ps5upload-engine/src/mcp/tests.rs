@@ -19,6 +19,7 @@ use serde_json::{json, Value};
 use tokio::sync::{broadcast, Notify};
 use tower::ServiceExt as _;
 
+use super::access::AgentAccess;
 use super::jsonrpc::{
     HEADER_MISMATCH, INVALID_PARAMS, INVALID_REQUEST, META_CLIENT_CAPABILITIES,
     META_PROTOCOL_VERSION, META_SERVER_INFO, METHOD_NOT_FOUND, MODERN_VERSION, PARSE_ERROR,
@@ -201,8 +202,12 @@ struct Server {
 }
 
 fn server_with(api: Router, read_only: bool) -> Server {
+    server_with_access(api, AgentAccess::in_memory(false, read_only))
+}
+
+fn server_with_access(api: Router, access: AgentAccess) -> Server {
     let (events, _) = broadcast::channel(64);
-    let state = McpState::build(api, events.clone(), "10.0.0.1".to_string(), read_only);
+    let state = McpState::build(api, events.clone(), "10.0.0.1".to_string(), access);
     Server {
         router: router(state.clone()),
         state,
@@ -334,7 +339,7 @@ async fn modern_discover_says_what_this_server_is() {
     let result = &answer.body["result"];
     assert_eq!(result["resultType"], "complete");
     assert_eq!(result["supportedVersions"][0], MODERN_VERSION);
-    assert_eq!(result["capabilities"]["tools"]["listChanged"], false);
+    assert_eq!(result["capabilities"]["tools"]["listChanged"], true);
     assert_eq!(result["capabilities"]["resources"]["subscribe"], false);
     assert_eq!(result["capabilities"]["prompts"]["listChanged"], false);
     assert_eq!(result["_meta"][META_SERVER_INFO]["name"], "ps5upload");
@@ -343,6 +348,9 @@ async fn modern_discover_says_what_this_server_is() {
         env!("CARGO_PKG_VERSION")
     );
     assert!(result["instructions"].as_str().unwrap().contains("console"));
+    // #772: 2026-07-28 caching hints, or a modern client refuses the handshake.
+    assert_eq!(result["ttlMs"], 0);
+    assert_eq!(result["cacheScope"], "private");
     // A modern answer carries no session.
     assert!(answer.headers.get("mcp-session-id").is_none());
 }
@@ -352,6 +360,8 @@ async fn modern_ping_is_complete() {
     let answer = server().modern("ping", json!({})).await;
     assert_eq!(answer.status, StatusCode::OK);
     assert_eq!(answer.body["result"]["resultType"], "complete");
+    // Not one of the cacheable results.
+    assert!(answer.body["result"].get("ttlMs").is_none());
 }
 
 #[tokio::test]
@@ -360,6 +370,8 @@ async fn modern_tools_list_describes_every_tool() {
     assert_eq!(answer.status, StatusCode::OK);
     let result = &answer.body["result"];
     assert_eq!(result["resultType"], "complete");
+    assert_eq!(result["ttlMs"], 0);
+    assert_eq!(result["cacheScope"], "private");
     let tools = result["tools"].as_array().unwrap();
     assert!(tools.len() >= 30);
     for tool in tools {
@@ -683,6 +695,7 @@ async fn the_legacy_flow_works_start_to_finish() {
     assert!(result["instructions"].is_string());
     assert!(result.get("resultType").is_none());
     assert!(result.get("_meta").is_none());
+    assert!(result.get("ttlMs").is_none());
     // A session id is minted, a real one.
     let session = answer.headers["mcp-session-id"]
         .to_str()
@@ -1067,6 +1080,9 @@ async fn the_routes_for_this_computer_alone_accept_a_local_caller_and_no_one_els
 
 #[tokio::test]
 async fn nothing_streaming_is_reported_not_guessed() {
+    // Other tests put a session in place while they hold this lock: "nothing streaming" is only
+    // true outside them.
+    let _live = crate::rp_stream_api::LIVE_TEST_LOCK.lock().await;
     let result = server().tool("rp_session", json!({})).await;
     assert_eq!(result["structuredContent"]["host"], Value::Null);
     assert!(text_of(&result).contains("Nothing is streaming"));
@@ -1317,7 +1333,7 @@ async fn read_only_refuses_what_can_change_something() {
         )
         .await;
     assert_eq!(result["isError"], true);
-    assert!(text_of(&result).contains("read-only"));
+    assert!(text_of(&result).contains("agents can only look"));
 
     for (name, arguments) in [
         (
@@ -1340,7 +1356,7 @@ async fn read_only_refuses_what_can_change_something() {
     ] {
         let result = server.tool(name, arguments).await;
         assert_eq!(result["isError"], true, "{name}");
-        assert!(text_of(&result).contains("read-only"), "{name}");
+        assert!(text_of(&result).contains("agents can only look"), "{name}");
     }
 
     // And says so up front.
@@ -1365,6 +1381,281 @@ async fn read_only_keeps_every_read_even_those_that_are_post_routes() {
     assert!(result.get("isError").is_none(), "{result}");
     let result = server.tool("files_read", json!({"path": "/x"})).await;
     assert!(result.get("isError").is_none(), "{result}");
+}
+
+// ── The owner's switch (access.rs) ──────────────────────────────────────────────────────────────
+
+impl Server {
+    /// `/api/mcp/access`, as the app calls it.
+    async fn access(&self, method: Method, body: Option<Value>) -> (StatusCode, Value) {
+        let mut request = Request::builder().method(method).uri("/api/mcp/access");
+        let body = match body {
+            Some(json) => {
+                request = request.header(header::CONTENT_TYPE, "application/json");
+                Body::from(json.to_string())
+            }
+            None => Body::empty(),
+        };
+        let response = self
+            .router
+            .clone()
+            .oneshot(request.body(body).unwrap())
+            .await
+            .unwrap();
+        let status = response.status();
+        let raw = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        (status, serde_json::from_slice(&raw).unwrap_or(Value::Null))
+    }
+
+    async fn tool_names(&self) -> Vec<String> {
+        let answer = self.legacy("tools/list", json!({})).await;
+        answer.body["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|tool| tool["name"].as_str().unwrap().to_string())
+            .collect()
+    }
+}
+
+#[tokio::test]
+async fn the_owners_switch_changes_the_tool_list_and_the_calls_live() {
+    let server = server();
+    let (status, state) = server.access(Method::GET, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        state,
+        json!({"read_only": false, "setting": false, "locked": false})
+    );
+    let names = server.tool_names().await;
+    for name in ["files_delete", "files_mkdir", "settings_set", "api_request"] {
+        assert!(names.iter().any(|n| n == name), "{name}");
+    }
+    let mkdir = json!({"console": "1.2.3.4", "path": "/data/x"});
+    let result = server.tool("files_mkdir", mkdir.clone()).await;
+    assert!(result.get("isError").is_none(), "{result}");
+
+    // Look only: no restart, the next list and call already know.
+    let (status, state) = server
+        .access(Method::PUT, Some(json!({"read_only": true})))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        state,
+        json!({"read_only": true, "setting": true, "locked": false})
+    );
+    let names = server.tool_names().await;
+    for gone in [
+        "files_delete",
+        "files_mkdir",
+        "settings_set",
+        "power_control",
+    ] {
+        assert!(!names.iter().any(|n| n == gone), "{gone}");
+    }
+    for kept in ["files_list", "files_stat", "engine_status", "api_request"] {
+        assert!(names.iter().any(|n| n == kept), "{kept}");
+    }
+    // A client holding the old list is still refused, and told where to change it.
+    let result = server.tool("files_mkdir", mkdir.clone()).await;
+    assert_eq!(result["isError"], true);
+    let text = text_of(&result);
+    assert!(
+        text.contains("this PS5Upload is set so agents can only look"),
+        "{text}"
+    );
+    assert!(text.contains("MCP & API"), "{text}");
+    assert!(!text.contains("PS5UPLOAD_MCP_READ_ONLY"), "{text}");
+    let result = server
+        .tool(
+            "api_request",
+            json!({"method": "POST", "path": "/api/echo", "body": {}}),
+        )
+        .await;
+    assert_eq!(result["isError"], true);
+    assert!(text_of(&result).contains("agents can only look"));
+    // Reads go on.
+    let result = server
+        .tool("api_request", json!({"path": "/api/echo"}))
+        .await;
+    assert!(result.get("isError").is_none(), "{result}");
+    let result = server.tool("files_stat", json!({"path": "/data"})).await;
+    assert!(result.get("isError").is_none(), "{result}");
+    let result = server.tool("engine_status", json!({})).await;
+    assert_eq!(result["structuredContent"]["read_only"], true);
+    let answer = server.modern("server/discover", json!({})).await;
+    assert!(answer.body["result"]["instructions"]
+        .as_str()
+        .unwrap()
+        .contains("read-only"));
+
+    // And back.
+    let (_, state) = server
+        .access(Method::PUT, Some(json!({"read_only": false})))
+        .await;
+    assert_eq!(state["read_only"], false);
+    assert!(server.tool_names().await.iter().any(|n| n == "files_mkdir"));
+    let result = server.tool("files_mkdir", mkdir).await;
+    assert!(result.get("isError").is_none(), "{result}");
+
+    // A body that is not the switch changes nothing.
+    let (status, _) = server
+        .access(Method::PUT, Some(json!({"read_only": "no"})))
+        .await;
+    assert!(status.is_client_error(), "{status}");
+    assert_eq!(server.access(Method::GET, None).await.1["read_only"], false);
+}
+
+#[tokio::test]
+async fn the_environment_wins_and_the_app_is_told_it_is_locked() {
+    let server = server_with_access(fake_api(), AgentAccess::in_memory(true, false));
+    let (_, state) = server.access(Method::GET, None).await;
+    assert_eq!(
+        state,
+        json!({"read_only": true, "setting": false, "locked": true})
+    );
+    // The switch is kept, but agents still only look.
+    let (status, state) = server
+        .access(Method::PUT, Some(json!({"read_only": false})))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(state["read_only"], true);
+    assert_eq!(state["locked"], true);
+    assert!(!server
+        .tool_names()
+        .await
+        .iter()
+        .any(|n| n == "files_delete"));
+    let result = server
+        .tool(
+            "files_delete",
+            json!({"console": "1.2.3.4", "path": "/data/x"}),
+        )
+        .await;
+    assert_eq!(result["isError"], true);
+    let text = text_of(&result);
+    assert!(text.contains("agents can only look"), "{text}");
+    assert!(text.contains("PS5UPLOAD_MCP_READ_ONLY"), "{text}");
+    let result = server.tool("engine_version", json!({})).await;
+    assert!(result.get("isError").is_none(), "{result}");
+}
+
+#[tokio::test]
+async fn an_agent_cannot_flip_the_switch_however_it_asks() {
+    // Everything in the API behind the tools answers: only the guard can say no.
+    let server = server_with(Router::new().fallback(echo_any), false);
+    for method in ["GET", "POST", "PUT", "PATCH", "DELETE"] {
+        for path in [
+            "/api/mcp/access",
+            "/api/mcp/access/",
+            "/api//mcp/access",
+            "/api/mcp//access//",
+            "/API/MCP/Access",
+            "/Api/Mcp/ACCESS/",
+            "/api/mcp/%61ccess",
+            "/api/%6D%63%70/access",
+            "/api/mcp%2Faccess",
+            "/api/mcp/access/x",
+            "/api/mcp/./access",
+            "/api/x/../mcp/access",
+            " /api/mcp/access ",
+        ] {
+            let result = server
+                .tool(
+                    "api_request",
+                    json!({"method": method, "path": path, "body": {"read_only": false}}),
+                )
+                .await;
+            assert_eq!(result["isError"], true, "{method} {path}");
+            assert!(
+                text_of(&result).contains("owner's to decide"),
+                "{method} {path}: {}",
+                text_of(&result)
+            );
+        }
+    }
+    for name in [
+        "mcp_read_only",
+        "MCP_READ_ONLY",
+        "mcp-read-only",
+        "mcpReadOnly",
+    ] {
+        let result = server
+            .tool("settings_set", json!({"settings": {name: false}}))
+            .await;
+        assert_eq!(result["isError"], true, "{name}");
+        assert!(text_of(&result).contains("owner's to decide"), "{name}");
+    }
+    // One refused name refuses the lot: nothing reached the route.
+    let result = server
+        .tool(
+            "settings_set",
+            json!({"settings": {"auto_resume": true, "mcp_read_only": false}}),
+        )
+        .await;
+    assert_eq!(result["isError"], true);
+    // Other settings still change.
+    let asked = route_of(
+        &server,
+        "settings_set",
+        json!({"settings": {"auto_resume": true}}),
+    )
+    .await;
+    assert_eq!(asked["method"], "PATCH");
+    assert_eq!(asked["path"], "/api/settings");
+    assert_eq!(asked["body"]["settings"]["auto_resume"], true);
+    // Even past the guard, the switch is not in the API the tools call: it is mounted beside it.
+    let caller = super::Caller::local();
+    let refused = server
+        .state
+        .api_call(&caller, Method::PUT, "/api/mcp/access", &[], None)
+        .await
+        .unwrap_err();
+    assert!(refused.contains("owner's to decide"), "{refused}");
+}
+
+#[tokio::test]
+async fn a_listening_client_hears_the_tool_list_change() {
+    let server = server();
+    let body = json!({
+        "jsonrpc": "2.0",
+        "id": 8,
+        "method": "subscriptions/listen",
+        "params": modern_params(json!({"notifications": {"toolsListChanged": true}})),
+    });
+    let request = Request::builder()
+        .method(Method::POST)
+        .uri("/mcp")
+        .header("MCP-Protocol-Version", MODERN_VERSION)
+        .header("Mcp-Method", "subscriptions/listen")
+        .body(Body::from(body.to_string()))
+        .unwrap();
+    let response = server.router.clone().oneshot(request).await.unwrap();
+    let mut stream = response.into_body().into_data_stream();
+    let acknowledged = next_message(&mut stream).await;
+    assert_eq!(
+        acknowledged["params"]["notifications"]["toolsListChanged"],
+        true
+    );
+
+    server
+        .access(Method::PUT, Some(json!({"read_only": true})))
+        .await;
+    let changed = next_message(&mut stream).await;
+    assert_eq!(changed["method"], "notifications/tools/list_changed");
+    assert_eq!(
+        changed["params"]["_meta"]["io.modelcontextprotocol/subscriptionId"],
+        8
+    );
+    server
+        .access(Method::PUT, Some(json!({"read_only": false})))
+        .await;
+    let changed = next_message(&mut stream).await;
+    assert_eq!(changed["method"], "notifications/tools/list_changed");
+
+    server.state.begin_shutdown();
+    let last = next_message(&mut stream).await;
+    assert_eq!(last["id"], 8);
 }
 
 // ── Curated tools ───────────────────────────────────────────────────────────────────────────────
@@ -2351,6 +2642,21 @@ async fn each_post_tool_sends_what_its_route_reads() {
     assert_eq!(asked["path"], "/api/ps5/hw/fan-threshold");
     reads_as::<crate::FanThresholdReq>(&asked["body"]);
 
+    for (action, path) in [
+        ("start", "/api/ps5/hw/fps/capture/start"),
+        ("stop", "/api/ps5/hw/fps/capture/stop"),
+    ] {
+        let asked = route_of(
+            &server,
+            "hw_fps_capture",
+            json!({"console": c, "action": action}),
+        )
+        .await;
+        assert_eq!(asked["path"], path);
+        assert_eq!(asked["body"]["addr"], c);
+        reads_as::<crate::game_fps_api::AddrBody>(&asked["body"]);
+    }
+
     let asked = route_of(
         &server,
         "saves_backup_now",
@@ -2438,6 +2744,46 @@ async fn the_routes_that_say_host_get_the_console_as_host() {
 }
 
 #[tokio::test]
+async fn the_payload_update_tools_reach_their_routes() {
+    let server = echo_server();
+    let asked = route_of(&server, "payloads_updates", json!({})).await;
+    assert_eq!(asked["path"], "/api/payloads/updates");
+    let asked = route_of(&server, "payloads_updates_check", json!({"force": true})).await;
+    assert_eq!(asked["path"], "/api/payloads/updates/check");
+    assert_eq!(asked["body"]["force"], true);
+    let asked = route_of(
+        &server,
+        "payloads_update",
+        json!({"ids": ["kstuff-echostretch"], "sync_console": "1.2.3.4"}),
+    )
+    .await;
+    assert_eq!(asked["path"], "/api/payloads/updates/apply");
+    assert_eq!(asked["body"]["sync_console"], "1.2.3.4");
+    assert_eq!(asked["body"]["ids"], json!(["kstuff-echostretch"]));
+    let asked = route_of(&server, "payloads_rollback", json!({"id": "hush"})).await;
+    assert_eq!(asked["path"], "/api/payloads/hush/rollback");
+    let asked = route_of(
+        &server,
+        "payloads_update_settings",
+        json!({"auto_update": true}),
+    )
+    .await;
+    assert_eq!(asked["path"], "/api/payloads/updates/settings");
+    assert_eq!(asked["body"]["auto_update"], true);
+    let asked = route_of(
+        &server,
+        "payloads_pm_choice",
+        json!({"console": "1.2.3.4", "ids": ["hush"], "autoload_ids": []}),
+    )
+    .await;
+    assert_eq!(asked["path"], "/api/payloads/pm-sync");
+    assert_eq!(asked["body"]["host"], "1.2.3.4");
+    let asked = route_of(&server, "payloads_pm_sync", json!({"console": "1.2.3.4"})).await;
+    assert_eq!(asked["path"], "/api/payloads/pm-sync/run");
+    assert_eq!(asked["body"]["host"], "1.2.3.4");
+}
+
+#[tokio::test]
 async fn each_read_tool_asks_its_route_with_the_console_as_addr() {
     let server = echo_server();
     for (tool, path, extra) in [
@@ -2451,6 +2797,7 @@ async fn each_read_tool_asks_its_route_with_the_console_as_addr() {
             json!({"title_id": "PPSA00001"}),
         ),
         ("hw_power", "/api/ps5/hw/power", json!({})),
+        ("hw_fps", "/api/ps5/hw/fps", json!({})),
         ("power_telemetry", "/api/ps5/power/telemetry", json!({})),
         ("devices_list", "/api/mesh/state", json!({})),
         ("drive_list", "/api/drive", json!({})),
@@ -2690,7 +3037,7 @@ async fn read_only_refuses_the_new_tools_that_change_something() {
     ] {
         let result = server.tool(tool, arguments).await;
         assert_eq!(result["isError"], true, "{tool}");
-        assert!(text_of(&result).contains("read-only"), "{tool}");
+        assert!(text_of(&result).contains("agents can only look"), "{tool}");
     }
     // A scan only looks, even though its route is a POST.
     let asked = route_of(&server, "cleanup_scan", json!({"console": "c"})).await;
@@ -2712,6 +3059,41 @@ async fn the_recent_events_are_the_newest_within_the_limit() {
     assert_eq!(answer["events"], json!([2, 3]));
     let since: u64 = answer["since"].as_str().unwrap().parse().unwrap();
     assert!(crate::now_ms() - since >= 5 * 60_000);
+}
+
+#[tokio::test]
+async fn the_log_tools_reach_their_routes() {
+    let set = route_of(
+        &echo_server(),
+        "logs_level_set",
+        json!({"categories": {"rp": "trace"}, "minutes": 30, "merge": true}),
+    )
+    .await;
+    assert_eq!(set["method"], "PUT");
+    assert_eq!(set["path"], "/api/logs/level");
+    let read = route_of(&echo_server(), "logs_level_get", json!({})).await;
+    assert_eq!(read["path"], "/api/logs/level");
+
+    let api = Router::new().route(
+        "/api/logs/recent",
+        get(|Query(q): Query<HashMap<String, String>>| async move {
+            Json(json!({"lines": [], "count": 0, "next_seq": 0, "asked": q}))
+        }),
+    );
+    let result = server_with(api, false)
+        .tool(
+            "logs_recent",
+            json!({"level": "debug", "category": "rp", "minutes": 10}),
+        )
+        .await;
+    let asked = &result["structuredContent"]["asked"];
+    assert_eq!(asked["level"], "debug");
+    assert_eq!(asked["category"], "rp");
+    let since: u64 = asked["since_ms"].as_str().unwrap().parse().unwrap();
+    assert!(crate::now_ms() - since >= 10 * 60_000);
+    // A level outside the five is refused before any call.
+    let bad = server().tool("logs_recent", json!({"level": "loud"})).await;
+    assert_eq!(bad["isError"], true);
 }
 
 #[tokio::test]
@@ -2802,6 +3184,15 @@ async fn the_payload_and_console_tools_reach_their_routes() {
     let asked = route_of(&server, "consoles_discover", json!({"timeout_ms": 500})).await;
     assert_eq!(asked["path"], "/api/discover");
     assert_eq!(asked["method"], "POST");
+    let asked = route_of(
+        &server,
+        "tailnet_consoles",
+        json!({"addr": "den-ps5u", "refresh": true}),
+    )
+    .await;
+    assert_eq!(asked["path"], "/api/tailnet/consoles");
+    assert_eq!(asked["method"], "GET");
+    assert_eq!(asked["query"]["addr"], "den-ps5u");
     let asked = route_of(&server, "payloads_catalog", json!({})).await;
     assert_eq!(asked["path"], "/api/payloads");
     let asked = route_of(&server, "payloads_download", json!({"id": "kstuff"})).await;
@@ -3019,7 +3410,7 @@ async fn read_only_refuses_the_friends_and_viewers_tools() {
         assert!(result["content"][0]["text"]
             .as_str()
             .unwrap()
-            .contains("read-only"));
+            .contains("agents can only look"));
     }
 }
 

@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { RemotePlayStream, type StreamOptions } from "./remotePlayStream";
+import { OPUS_SINE_PACKETS } from "./testdata/opusSine";
 
 // What a stream lets go of when it ends: a page that played many sessions in one run kept each
 // one's WebGL context, worklet and stream alive (an AudioWorkletNode outlives its closed context
@@ -516,7 +517,7 @@ describe("RemotePlayStream with a decoder that never shows a picture (#683)", ()
     p.openVideo();
   };
 
-  it("on H.264: hardware a few times, software a few times, then one error and the end", async () => {
+  it("on H.264: hardware a few times, then as Annex B, software a few times, then one error and the end", async () => {
     const made = failingDecoders();
     const errors: string[] = [];
     const o = { ...options(), onError: (e: { code: string }) => errors.push(e.code) };
@@ -524,16 +525,165 @@ describe("RemotePlayStream with a decoder that never shows a picture (#683)", ()
     await s.start();
     open(s, false);
     await settle();
-    expect(made.map((c) => c.hardwareAcceleration)).toEqual([
-      "prefer-hardware",
-      "prefer-hardware",
-      "prefer-hardware",
-      "prefer-software",
-      "prefer-software",
-      "prefer-software",
+    expect(made.map((c) => [c.hardwareAcceleration, !!c.description])).toEqual([
+      ["prefer-hardware", true],
+      ["prefer-hardware", true],
+      ["prefer-hardware", true],
+      // Annex B: no description.
+      ["prefer-hardware", false],
+      ["prefer-hardware", false],
+      ["prefer-hardware", false],
+      // Software in AVC form again (WebKitGTK's software decoder takes only that).
+      ["prefer-software", true],
+      ["prefer-software", true],
+      ["prefer-software", true],
     ]);
     expect(errors).toEqual(["decode"]);
     expect(o.phases[o.phases.length - 1]).toBe("ended");
+  });
+
+  /** An element for the media player (MsePlayer) and the canvas it covers, under a parent. */
+  function mediaPage() {
+    const el = (tag: string) => {
+      // The canvas's fields, but a real addEventListener: the test fires "error" at the <video>.
+      const { addEventListener: _, ...canvas } = fakeCanvas();
+      return Object.assign(new EventTarget(), {
+        ...canvas,
+        tag,
+        src: "",
+        muted: false,
+        paused: true,
+        currentTime: 0,
+        playbackRate: 1,
+        classList: { add() {} },
+        parentElement: { append() {} },
+        play: () => Promise.resolve(),
+        removeAttribute() {},
+        append() {},
+        remove() {},
+      });
+    };
+    (document as unknown as { createElement: unknown }).createElement = el;
+    const sources: EventTarget[] = [];
+    class FakeMs extends EventTarget {
+      static isTypeSupported = (t: string) => t.startsWith("video/");
+      readyState = "closed";
+      constructor() {
+        super();
+        sources.push(this);
+      }
+      endOfStream() {}
+    }
+    vi.stubGlobal("MediaSource", FakeMs);
+    Object.assign(window, { MediaSource: FakeMs });
+    vi.spyOn(URL, "createObjectURL").mockReturnValue("blob:fake");
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => {});
+    return { sources };
+  }
+
+  it("#720: the media player failing every open ends with one decode error, not a loop", async () => {
+    failingDecoders();
+    const { sources } = mediaPage();
+    const errors: string[] = [];
+    const o = { ...options(), onError: (e: { code: string }) => errors.push(e.code) };
+    const s = new RemotePlayStream(o);
+    await s.start();
+    open(s, false);
+    await settle();
+    const mse = (s as unknown as { mse: unknown }).mse;
+    // WebCodecs gave up and the media player took over; its <video> fails every open.
+    expect(mse).not.toBeNull();
+    const video = (mse as unknown as { video: { el: EventTarget } }).video.el;
+    for (let i = 0; i < 1000; i++) video.dispatchEvent(new Event("error"));
+    await settle();
+    expect(sources.length).toBe(3);
+    expect(errors).toEqual(["decode"]);
+    expect(o.phases[o.phases.length - 1]).toBe("ended");
+    vi.restoreAllMocks();
+  });
+
+  it("Settings › Video decoding › System media player: MSE from the start, no VideoDecoder made", async () => {
+    const made = failingDecoders();
+    const { sources } = mediaPage();
+    const s = new RemotePlayStream({ ...options(), decoding: "mse" });
+    await s.start();
+    open(s, false);
+    await settle();
+    expect(made).toEqual([]);
+    expect((s as unknown as { mse: unknown }).mse).not.toBeNull();
+    expect(sources.length).toBe(1);
+    s.stop();
+    vi.restoreAllMocks();
+  });
+
+  it("#720: full screen moves the picture's host: the media player's picture goes along and plays on", async () => {
+    failingDecoders();
+    mediaPage();
+    const s = new RemotePlayStream({ ...options(), decoding: "mse" });
+    await s.start();
+    open(s, false);
+    await settle();
+    const mse = (s as unknown as { mse: { element: object; video: { el: { paused: boolean; play(): Promise<void> } } } })
+      .mse;
+    const plays = vi.spyOn(mse.video.el, "play");
+    const host = () => {
+      const kids: object[] = [];
+      const h = {
+        kids,
+        appendChild(c: { parentElement: unknown }) {
+          kids.push(c);
+          c.parentElement = h;
+        },
+        removeChild(c: { parentElement: unknown }) {
+          kids.splice(kids.indexOf(c), 1);
+          c.parentElement = null;
+        },
+      };
+      return h;
+    };
+    const windowed = host();
+    const unmount = s.mount(windowed as unknown as HTMLElement);
+    expect(windowed.kids).toEqual([s.canvas, mse.element]);
+    // Into full screen: the old host is let go and a new one takes both.
+    unmount();
+    expect(windowed.kids).toEqual([]);
+    const full = host();
+    s.mount(full as unknown as HTMLElement);
+    expect(full.kids).toEqual([s.canvas, mse.element]);
+    // A <video> taken out of the page pauses: it is played again.
+    expect(plays).toHaveBeenCalled();
+    s.stop();
+    vi.restoreAllMocks();
+  });
+
+  it("#720: no Opus in WebCodecs or MSE: the WebAssembly decoder feeds the same worklet", async () => {
+    mediaPage();
+    vi.stubGlobal("AudioDecoder", undefined);
+    vi.stubGlobal("Worker", undefined);
+    const s = new RemotePlayStream(options());
+    await s.start();
+    await settle();
+    const p = s as unknown as {
+      onAudio(kind: number, payload: Uint8Array, whole: ArrayBuffer): void;
+      wasmAudio: boolean;
+      soundUnavailable: boolean;
+    };
+    const header = new Uint8Array(14);
+    header[0] = 2;
+    new DataView(header.buffer).setUint32(2, 48000);
+    new DataView(header.buffer).setUint32(6, 480);
+    p.onAudio(3, header, new ArrayBuffer(0));
+    expect(p.wasmAudio).toBe(true);
+    for (const [i, pk] of OPUS_SINE_PACKETS.entries()) {
+      p.onAudio(4, new Uint8Array([0, i, ...pk]), new ArrayBuffer(0));
+      if (i === 2) await settle(); // the module loads meanwhile
+    }
+    const played = nodes[0].port.sent.filter((m) => !!m && typeof m === "object" && "planes" in m) as Array<{ planes: Float32Array[] }>;
+    expect(played.length).toBeGreaterThanOrEqual(18);
+    expect(played.every((m) => m.planes.length === 2 && m.planes[0].length === 480)).toBe(true);
+    expect(p.soundUnavailable).toBe(false);
+    s.stop();
+    vi.restoreAllMocks();
   });
 
   it("on HEVC: ends the stream with no error and asks for H.264 next time", async () => {

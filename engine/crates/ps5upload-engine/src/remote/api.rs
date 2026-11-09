@@ -74,6 +74,15 @@ fn parse_body(body: ConnectionBody) -> Result<(Connection, Option<Secret>), Box<
             c.share.clone()
         };
         (host, share)
+    } else if c.protocol == Protocol::Nfs {
+        // `nas:/volume1/games`, as a mount command spells it: the export goes in its place.
+        match c.host.trim().split_once(":/") {
+            Some((host, export)) if c.share.trim().is_empty() => {
+                (host.to_string(), export.to_string())
+            }
+            Some((host, _)) => (host.to_string(), c.share.clone()),
+            None => (c.host.trim().to_string(), c.share.clone()),
+        }
     } else {
         (c.host.trim().to_string(), c.share.clone())
     };
@@ -107,7 +116,8 @@ fn parse_body(body: ConnectionBody) -> Result<(Connection, Option<Secret>), Box<
         .or(c.port.filter(|p| *p != 0))
         .unwrap_or_else(|| default_port(&protocol));
     let user = c.user.trim().to_string();
-    let secret = if user.is_empty() {
+    // NFS has no passwords: its user field is a user and group ID.
+    let secret = if user.is_empty() || c.protocol == Protocol::Nfs {
         Some(Secret::None)
     } else if let Some(pem) = body.key_pem.filter(|k| !k.trim().is_empty()) {
         Some(Secret::Key {
@@ -694,6 +704,20 @@ mod tests {
         );
         let (c, _) = parse_body(smb_form("nas", "/XXX/YYY/", "")).ok().unwrap();
         assert_eq!((c.share.as_str(), c.start_path.as_str()), ("XXX", "/YYY"));
+        // Discord: `share/sub/folder` (either slash) failed with BAD_NETWORK_NAME in other tools'
+        // style; the first name is the share and the rest goes in front of Start folder.
+        for typed in [
+            "share/sub/folder",
+            "share\\sub\\folder",
+            "share\\sub/folder\\",
+        ] {
+            let (c, _) = parse_body(smb_form("nas", typed, "/inner")).ok().unwrap();
+            assert_eq!(
+                (c.share.as_str(), c.start_path.as_str()),
+                ("share", "/sub/folder/inner"),
+                "{typed}"
+            );
+        }
         assert!(parse_body(smb_form("nas", "", "")).is_err());
         assert!(parse_body(smb_form("smb://nas/", " / ", "")).is_err());
     }

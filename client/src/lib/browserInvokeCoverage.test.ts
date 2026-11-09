@@ -46,7 +46,9 @@ const SHIM_SOURCE = Object.values(
  */
 const NATIVE_ONLY: Record<string, string> = {
   android_system_ui: "Android app only: hides the system bars and locks landscape for Remote Play full screen",
-  focus_webview: "iOS app only: makes the WKWebView the first responder so controllers reach the page",
+  focus_webview: "iOS and Mac apps only: makes the WKWebView the first responder so controllers reach the page",
+  hold_controller_home: "iOS and Mac apps only: asks for the controller's PS button during a stream, instead of the system's Games overlay",
+  set_status_bar_hidden: "iOS app only: hides the status bar while Remote Play fills the screen",
   game_mode_set: "the app asks its OS for game mode while Remote Play plays; a browser tab cannot (lib/gameMode.ts skips it)",
   pad_touchpad_set: "the app reads a DualSense's touchpad over HID while Remote Play plays; a browser uses WebHID instead (lib/padTouchpad.ts)",
   pad_dualsense_info: "the app looks for a DualSense over HID to start Remote Play in DualSense mode; a browser never does (lib/dualSense.ts)",
@@ -120,6 +122,7 @@ const NATIVE_ONLY: Record<string, string> = {
   app_events_append: "native: the app event journal file; the browser keeps it in IndexedDB",
   app_events_read: "native: the app event journal file; the browser keeps it in IndexedDB",
   host_platform: "native: the OS and CPU the desktop app was built for; the browser reports the web UI",
+  host_system_info: "native: the OS version, model, CPU, memory and web view version of the computer the app runs on; the browser report takes the engine's host instead",
   diag_log_open_dir: "native: opens a host file manager",
 
   // Desktop-side persistence (browser uses localStorage)

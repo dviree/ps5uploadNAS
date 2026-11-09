@@ -102,6 +102,24 @@ pub fn aes128_cbc_encrypt(key: &[u8; 16], iv: [u8; 16], data: &mut [u8]) {
     }
 }
 
+/// AES-128-CBC decryption in place; `data` must be whole 16-byte blocks.
+pub fn aes128_cbc_decrypt(key: &[u8; 16], iv: [u8; 16], data: &mut [u8]) {
+    use aes::cipher::{BlockCipherDecrypt, KeyInit as _};
+    debug_assert!(data.len().is_multiple_of(16));
+    let cipher = aes::Aes128::new(&(*key).into());
+    let mut prev = iv;
+    for chunk in data.as_chunks_mut::<16>().0 {
+        let stored = *chunk;
+        let mut blk = aes::Block::from(*chunk);
+        cipher.decrypt_block(&mut blk);
+        chunk.copy_from_slice(&blk);
+        for (b, p) in chunk.iter_mut().zip(prev) {
+            *b ^= p;
+        }
+        prev = stored;
+    }
+}
+
 /// The PFS image key for a debug package, from its content id and passcode.
 pub fn derive_ekpfs(content_id: &str, passcode: &str) -> [u8; 32] {
     derive_pfs_key(content_id, passcode, 1)
@@ -143,10 +161,43 @@ const CRC32C_TABLE: [u32; 256] = {
     t
 };
 
-/// CRC-32C (Castagnoli), as stored in `playgo-chunk.crc`.
+/// [`CRC32C_TABLE`] for slicing by 8: entry `k` of table `n` is the CRC of byte `k` followed by
+/// `n` zero bytes.
+const CRC32C_SLICES: [[u32; 256]; 8] = {
+    let mut t = [CRC32C_TABLE; 8];
+    let mut n = 1;
+    while n < 8 {
+        let mut k = 0;
+        while k < 256 {
+            let prev = t[n - 1][k];
+            t[n][k] = (prev >> 8) ^ CRC32C_TABLE[(prev & 0xFF) as usize];
+            k += 1;
+        }
+        n += 1;
+    }
+    t
+};
+
+/// CRC-32C (Castagnoli), as stored in `playgo-chunk.crc`. Eight bytes per step: a package's CRC
+/// table covers every one of its bytes, in the write stage and again in a full verification.
+/// (From PS5 Dump Forge, which measured ~435 to ~2,250 MB/s.)
 pub fn crc32c(data: &[u8]) -> u32 {
+    let t = &CRC32C_SLICES;
     let mut c = 0xFFFF_FFFFu32;
-    for &b in data {
+    let (words, rest) = data.as_chunks::<8>();
+    for w in words {
+        let lo = c ^ u32::from_le_bytes([w[0], w[1], w[2], w[3]]);
+        let hi = u32::from_le_bytes([w[4], w[5], w[6], w[7]]);
+        c = t[7][(lo & 0xFF) as usize]
+            ^ t[6][(lo >> 8 & 0xFF) as usize]
+            ^ t[5][(lo >> 16 & 0xFF) as usize]
+            ^ t[4][(lo >> 24) as usize]
+            ^ t[3][(hi & 0xFF) as usize]
+            ^ t[2][(hi >> 8 & 0xFF) as usize]
+            ^ t[1][(hi >> 16 & 0xFF) as usize]
+            ^ t[0][(hi >> 24) as usize];
+    }
+    for &b in rest {
         c = CRC32C_TABLE[((c ^ b as u32) & 0xFF) as usize] ^ (c >> 8);
     }
     c ^ 0xFFFF_FFFF
@@ -194,6 +245,26 @@ mod tests {
     #[test]
     fn crc32c_check_value() {
         assert_eq!(crc32c(b"123456789"), 0xE306_9283);
+    }
+
+    /// Eight bytes at a time gives what one at a time gives, at every length and alignment.
+    #[test]
+    fn crc32c_matches_a_byte_at_a_time() {
+        let bytewise = |data: &[u8]| {
+            let mut c = 0xFFFF_FFFFu32;
+            for &b in data {
+                c = CRC32C_TABLE[((c ^ b as u32) & 0xFF) as usize] ^ (c >> 8);
+            }
+            c ^ 0xFFFF_FFFF
+        };
+        let data: Vec<u8> = (0..300u32)
+            .map(|i| (i.wrapping_mul(2654435761) >> 24) as u8)
+            .collect();
+        for start in 0..9 {
+            for end in start..data.len() {
+                assert_eq!(crc32c(&data[start..end]), bytewise(&data[start..end]));
+            }
+        }
     }
 
     /// The ZIP member checksum, against the universal check value for the classic CRC-32.

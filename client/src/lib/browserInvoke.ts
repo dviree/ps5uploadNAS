@@ -21,6 +21,9 @@ import { getEngineUrl } from "../state/engine";
 import { consoleAddr } from "./addr";
 import { WORDED_ERROR_CODES } from "./payloadErrors";
 
+/** The status probe's HTTP timeout (probes.rs `STATUS_HTTP_TIMEOUT` says the same). */
+const STATUS_HTTP_TIMEOUT_MS = 8_000;
+
 // ── Error types ──────────────────────────────────────────────────────────────
 
 /** Thrown by `browserInvoke` for commands that require the Tauri desktop
@@ -840,10 +843,11 @@ export async function browserInvoke<T>(
       return { base64: btoa(bin) } as T;
     }
     case "fpkg_inspect": {
-      // TS caller: { source, outputDir }
+      // TS caller: { source, outputDir, update }
       return postJson<T>("/api/fpkg/inspect", {
         source: args["source"],
         output_dir: args["outputDir"],
+        update: args["update"],
       }, true);
     }
     case "lz4_status": {
@@ -874,6 +878,7 @@ export async function browserInvoke<T>(
         language: args["language"],
         full_verify: args["fullVerify"] ?? false,
         keep_both: args["keepBoth"] ?? false,
+        update: args["update"],
       }, true);
     }
     case "ps5_elfldr_health": {
@@ -893,6 +898,9 @@ export async function browserInvoke<T>(
     }
     case "fpkg_delete": {
       return postJson<T>("/api/fpkg/delete", { path: args["path"] });
+    }
+    case "fpkg_ampr_emu": {
+      return postJson<T>("/api/fpkg/ampr-emu", { source: args["source"], build: args["build"] });
     }
     case "fpkg_ampr_index": {
       return postJson<T>("/api/fpkg/ampr-index", { source: args["source"] });
@@ -928,6 +936,11 @@ export async function browserInvoke<T>(
         edits: args["edits"] ?? [],
         keep_both: args["keepBoth"] ?? false,
         rebuild_ampr_index: args["rebuildAmprIndex"] ?? false,
+        add_ampr_emu: args["addAmprEmu"] ?? true,
+        ampr_zstd: args["amprZstd"],
+        ampr_emu_build: args["amprEmuBuild"],
+        destination: args["destination"],
+        update: args["update"],
       }, true);
     }
     case "folder_build": {
@@ -939,6 +952,9 @@ export async function browserInvoke<T>(
         entry: args["entry"],
         ampr_lz4: args["amprLz4"],
         keep_both: args["keepBoth"] ?? false,
+        ampr_zstd: args["amprZstd"],
+        update: args["update"],
+        destination: args["destination"],
       }, true);
     }
     case "image_browse": {
@@ -1114,7 +1130,9 @@ export async function browserInvoke<T>(
       const addr = uenc(consoleAddr(ip));
       const url = `${getEngineUrl()}/api/ps5/status?addr=${addr}`;
       try {
-        const r = await fetch(url, { signal: AbortSignal.timeout(5_000) });
+        // Longer than the engine's own worst case (a new session, then the status call: about
+        // 5 s), so a slow console is answered by the engine, never mistaken for no engine.
+        const r = await fetch(url, { signal: AbortSignal.timeout(STATUS_HTTP_TIMEOUT_MS) });
         if (r.ok) {
           const status = (await r.json()) as unknown;
           return { ok: true, reachable: true, engine: true, status } as unknown as T;
@@ -1226,6 +1244,9 @@ export async function browserInvoke<T>(
 
     case "smp_status":
       return getJson<T>(addrUrl("/api/ps5/smp/status", args["addr"]));
+
+    case "smp_rescan":
+      return postJson<T>(addrUrl("/api/ps5/smp/rescan", args["addr"]), {});
 
     // Small-file write. The desktop app has this as a Tauri command; without
     // the browser counterpart anything that writes a config file to the

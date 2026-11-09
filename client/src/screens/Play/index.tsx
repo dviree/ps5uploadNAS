@@ -1,5 +1,5 @@
-import { ListChecks, MonitorPlay, Users } from "lucide-react";
-import { useEffect, useState } from "react";
+import { ListChecks, LogIn, MonitorPlay, Users } from "lucide-react";
+import { useCallback, useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router";
 
 import { Button, PageHeader, SegmentedControl } from "../../components";
@@ -14,6 +14,10 @@ import { COMPACT_QUERY, useMedia } from "./immersive";
 import { StreamPanel } from "./StreamPanel";
 import { JoinAFriend } from "./JoinAFriend";
 import { useJoinStore } from "../../state/joinSession";
+
+/** Play my PS5 (Remote Play), Play together (host friends on it), Join a friend's game, or
+ *  Receive what a friend shared (a Share link). */
+export type PlayMode = "mine" | "together" | "friend";
 
 /**
  * Play (was "Remote Play" before 10.0.0): a console's screen streamed into the app, played with a
@@ -36,7 +40,18 @@ export default function PlayScreen() {
   const launchName = params.get("name")?.trim() ?? "";
   // /play?join=<a friend's Play Together link>: Join a friend, with that link.
   const joinParam = params.get("join")?.trim() || null;
-  const [mode, setMode] = useState<"mine" | "friend">(() => (joined || joinParam ? "friend" : "mine"));
+  // /play?receive=<a friend's Share link> (before 12.3): Share has it now.
+  const receiveParam = params.get("receive")?.trim() || null;
+  useEffect(() => {
+    if (receiveParam) navigate(`/share?receive=${encodeURIComponent(receiveParam)}`, { replace: true });
+  }, [receiveParam, navigate]);
+  const [mode, setMode] = useState<PlayMode>(() =>
+    joined || joinParam ? "friend" : "mine",
+  );
+  // Play together is the same stream as Play my PS5 with its invite panel (StreamPanel stays
+  // mounted between the two, so switching never touches the stream). The stream bar's button
+  // and the menu switch here and back.
+  const onTogether = useCallback((open: boolean) => setMode(open ? "together" : "mine"), []);
   const [pendingJoin, setPendingJoin] = useState<string | null>(joinParam);
   useEffect(() => {
     if (!joinParam) return;
@@ -59,6 +74,8 @@ export default function PlayScreen() {
       navigate("/play/setup");
       return;
     }
+    // The launch plays on the stream (StreamPanel), not on Join a friend.
+    setMode((m) => (m === "friend" ? "mine" : m));
     useStreamLaunch.getState().request(host, { titleId: launch, titleName: launchName || launch });
   }, [launch, launchName, host, paired, navigate, setParams]);
   // On a phone the picture and its controller need the height: while playing, the header is
@@ -98,17 +115,19 @@ export default function PlayScreen() {
         <SegmentedControl
           ariaLabel={tr("play_mode_label", undefined, "What to play")}
           value={mode}
-          onChange={(v) => setMode(v as "mine" | "friend")}
+          onChange={(v) => setMode(v as PlayMode)}
           segments={[
             { value: "mine", label: tr("play_mode_mine", undefined, "Play my PS5"), icon: MonitorPlay },
-            { value: "friend", label: tr("play_mode_friend", undefined, "Join a friend"), icon: Users },
+            // The stream bar's Play Together button has the same icon.
+            { value: "together", label: tr("pt_title", undefined, "Play Together"), icon: Users },
+            { value: "friend", label: tr("play_mode_friend", undefined, "Join a friend"), icon: LogIn },
           ]}
         />
       )}
       {mode === "friend" ? (
         <JoinAFriend pending={pendingJoin} onPendingDone={() => setPendingJoin(null)} />
       ) : (
-        <StreamPanel />
+        <StreamPanel together={mode === "together"} onTogether={onTogether} />
       )}
     </div>
   );

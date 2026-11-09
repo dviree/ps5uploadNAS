@@ -131,6 +131,8 @@ pub fn screenshot_decoder_child() -> bool {
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    // The app's uptime in a bug report counts from here.
+    commands::host_platform::mark_started();
     // Before anything that can fail, so that it leaves a word behind (#672). Phones have theirs
     // in mobile_log.
     #[cfg(desktop)]
@@ -456,6 +458,7 @@ pub fn run() {
             commands::game_inspect_files,
             commands::fpkg_build,
             commands::fpkg_delete,
+            commands::fpkg_ampr_emu,
             commands::fpkg_ampr_index,
             commands::fpkg_estimate,
             commands::ps5_elfldr_health,
@@ -531,6 +534,7 @@ pub fn run() {
             // into the console. We never write SMP's files. See
             // commands/smp.rs.
             commands::smp_status,
+            commands::smp_rescan,
             // Edit sessions: check an image out of ShadowMount+ so its
             // contents can be changed, then put it back. See
             // `ps5upload_core::smp_checkout` for why an image has to be moved
@@ -604,6 +608,7 @@ pub fn run() {
             commands::app_events::app_events_append,
             commands::app_events::app_events_read,
             commands::host_platform::host_platform,
+            commands::host_platform::host_system_info,
             commands::diag_log::diag_log_append,
             commands::diag_log::diag_log_open_dir,
             // ── Bug-report bundle (zip: logs + ps5 snapshot + images) ─
@@ -671,6 +676,8 @@ pub fn run() {
             // Remote Play full screen on Android: hide the system bars, hold landscape.
             commands::android_system_ui,
             commands::focus_webview,
+            commands::hold_controller_home,
+            commands::set_status_bar_hidden,
             // Remote Play playing: the OS's game mode where an app can ask for one.
             commands::game_mode_set,
             // Remote Play playing: a DualSense's touchpad, which the Gamepad API never gives.

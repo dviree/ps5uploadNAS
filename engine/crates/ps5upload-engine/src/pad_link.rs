@@ -14,9 +14,25 @@
 //!   through its own engine (`/api/ps5/rp/pad-relay`): an app page may not open a plain
 //!   `ws://` to another machine (Android blocks cleartext, iOS ATS), its own loopback it may.
 //!
+//! * **Internet** (`POST /api/ps5/rp/pad-link/internet`): a phone anywhere, over WebRTC through the
+//!   signalling hub, as an internet Play Together guest connects (crate::join_net). The link is
+//!   `https://ps5upload.phantomptr.com/pad/#room=…&k=…&fp=…&hub=…` (`&w=1` to watch): a room of
+//!   its own on the hub and a key of its own, both new with each New link (the old link then stops
+//!   working). The website's copy of `/pad` opens a `"pad"` data channel to this engine, checks its
+//!   certificate against `fp`, and sends this socket's messages on it after a first `{"hello":
+//!   {"t", "name", "d", "w"}}` (the query below). The key only lets it ask: the computer allows
+//!   it (`decide`) before it gets the pad or the picture, as with an internet Play Together guest,
+//!   and one it allowed comes back after a drop without asking: on the yes the engine sends it a
+//!   reconnect token of its own (`{"rt": …}`, random), which the page keeps for that link's room
+//!   and sends back as `rt` in its hello. A device id is never enough over the internet (the phone
+//!   makes it up). New link voids every token and refuses the phones still waiting. A
+//!   watcher there gets the picture as an internet Play Together guest does (a short queue that
+//!   skips to the next keyframe), and only watches: it cannot be handed the controller. Internet
+//!   invites off (Settings › Play Together) closes the room; phones already in keep playing.
+//!
 //! `/pad` and `/api/pad/` are the only routes a LAN peer reaches besides `/pkg-host/`
 //! (`loopback_allows` in lib.rs), and the socket checks the key or the computer's yes itself.
-//! A phone also names its device (`d=`, random, kept on the phone): a device the computer allowed
+//! A phone also names its device (`d=`, random, kept on the phone): on the LAN, a device the computer allowed
 //! comes back after a dropped socket without asking again, and one it disconnected stays out until
 //! the link is closed.
 //!
@@ -65,6 +81,11 @@ const PAD_SILENT_AFTER: Duration = Duration::from_millis(if cfg!(test) { 300 } e
 const PHONE_MSG_MAX: usize = crate::join::GUEST_MSG_MAX;
 /// Asks waiting from one address.
 const MAX_PENDING_PER_IP: usize = 2;
+/// An internet watcher's pictures queued before it skips to the next keyframe (Play Together's
+/// internet guests have the same, join.rs): never far behind, whatever its connection.
+const NET_WATCH_QUEUE: usize = 6;
+/// An internet phone must say hello this soon after its channel opens.
+const NET_HELLO_WAIT: Duration = Duration::from_secs(10);
 
 /// Merge controller states into the one pad the console gets: buttons from all, the deeper
 /// trigger, and for each stick axis the one pushed furthest (a resting controller never cancels
@@ -107,6 +128,14 @@ impl PadSources {
         self.0.lock().map(|g| g.is_empty()).unwrap_or(true)
     }
 
+    /// Whether `source` has a state recorded.
+    pub fn contains(&self, source: u64) -> bool {
+        self.0
+            .lock()
+            .map(|g| g.contains_key(&source))
+            .unwrap_or(false)
+    }
+
     /// Record `source`'s state (None: it left) and return the merged pad.
     pub fn set(&self, source: u64, state: Option<ControllerState>) -> ControllerState {
         let Ok(mut g) = self.0.lock() else {
@@ -135,13 +164,40 @@ struct Pad {
     watch: bool,
     /// The computer handed this watcher the controller.
     control: bool,
+    /// Its connection when it came over the internet (None on the LAN).
+    net: Option<std::sync::Arc<crate::join_net::PeerInfo>>,
+    /// An internet phone's reconnect token (see [`NetLink::tokens`]).
+    rt: Option<String>,
+}
+
+/// The internet link: a room on the signalling hub, and the key its link carries.
+struct NetLink {
+    room: crate::join_net::hub::Room,
+    key: String,
+    /// Reconnect tokens this engine gave the internet phones it allowed (random, made here: never
+    /// what a phone says about itself). Only one of these lets a phone back in without asking
+    /// again; they go with the room, so a New link (or closing the link) voids them all.
+    tokens: std::collections::HashSet<String>,
 }
 
 struct Pending {
     id: u64,
     name: String,
     ip: std::net::IpAddr,
-    answer: oneshot::Sender<bool>,
+    /// It asks over the internet (an internet link's phone).
+    net: bool,
+    /// It asks to watch.
+    watch: bool,
+    answer: oneshot::Sender<Answer>,
+}
+
+/// The computer's answer to a phone that asked.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Answer {
+    Allow,
+    Deny,
+    /// Its internet link was replaced by a New link before anyone answered: told `key`.
+    Revoked,
 }
 
 #[derive(Default)]
@@ -154,6 +210,8 @@ struct Link {
     allowed: std::collections::HashSet<String>,
     /// Devices the computer disconnected: out until the link closes.
     denied: std::collections::HashSet<String>,
+    /// The internet link, once asked for (until the link closes or a New link replaces it).
+    net: Option<NetLink>,
 }
 
 static LINK: Mutex<Option<Link>> = Mutex::new(None);
@@ -462,9 +520,18 @@ fn status(headers: &HeaderMap, console: Option<&str>) -> serde_json::Value {
         ip_bases,
         crate::pkg_install::bridged_container_without_pkg_host_ip(),
     );
+    let internet_invites = crate::join::settings().internet_invites;
+    // The home network's page, the internet link's hint for a phone that cannot reach the hub
+    // ("Open on this Wi-Fi"). It carries no key: the phone asks there, and the computer allows it.
+    let lan_page = bases.first().map(|b| format!("{b}{prefix}/pad"));
     with_link(|l| {
         serde_json::json!({
             "open": l.key.is_some(),
+            // Internet links may be made (Settings › Play Together › Allow internet invites).
+            "internet_invites": internet_invites,
+            // The internet link once asked for: `url` (the link), `room`, `hub`, `fp`, `state`
+            // (the hub connection), `error`, `router`, `peers` (as Play Together's invite has).
+            "internet": l.net.as_ref().map(|n| n.room.json(&n.key, lan_page.as_deref(), None)),
             "url": match (bases.first(), &l.key) {
                 (Some(b), Some(k)) => serde_json::Value::String(format!("{b}{prefix}/pad#t={k}")),
                 _ => serde_json::Value::Null,
@@ -481,8 +548,17 @@ fn status(headers: &HeaderMap, console: Option<&str>) -> serde_json::Value {
             },
             // What the phone app connects to (it asks; the computer allows).
             "pad_ws": pad_ws,
-            "pads": l.pads.iter().map(|p| serde_json::json!({"id": p.id, "name": p.name, "since_ms": p.since_ms, "watch": p.watch, "control": p.control})).collect::<Vec<_>>(),
-            "pending": l.pending.iter().map(|p| serde_json::json!({"id": p.id, "name": p.name})).collect::<Vec<_>>(),
+            // `via`: "lan" or "internet" (with the connection's round trip, `rtt_ms`).
+            "pads": l.pads.iter().map(|p| serde_json::json!({
+                "id": p.id, "name": p.name, "since_ms": p.since_ms, "watch": p.watch, "control": p.control,
+                "via": if p.net.is_some() { "internet" } else { "lan" },
+                "rtt_ms": p.net.as_ref().and_then(|n| n.rtt_ms()),
+                // An internet phone's way: "lan", "tailscale", "internet" (ICE's selected pair).
+                "path": p.net.as_ref().and_then(|n| n.net_path()),
+            })).collect::<Vec<_>>(),
+            "pending": l.pending.iter().map(|p| serde_json::json!({
+                "id": p.id, "name": p.name, "via": if p.net { "internet" } else { "lan" }, "watch": p.watch,
+            })).collect::<Vec<_>>(),
         })
     })
 }
@@ -501,6 +577,8 @@ fn diag_of(l: &Link, tailscale: bool) -> serde_json::Value {
         "watchers": l.pads.iter().filter(|p| p.watch).count(),
         "watchers_in_control": l.pads.iter().filter(|p| p.watch && p.control).count(),
         "asking": l.pending.len(),
+        "internet_link": l.net.is_some(),
+        "internet_phones": l.pads.iter().filter(|p| p.net.is_some()).count(),
         "tailscale_ip_present": tailscale,
     })
 }
@@ -556,10 +634,12 @@ pub async fn set_open(headers: HeaderMap, Json(r): Json<OpenReq>) -> Json<serde_
             return Vec::new();
         }
         l.key = None;
+        // Its room on the hub closes with it.
+        l.net = None;
         l.allowed.clear();
         l.denied.clear();
         for p in l.pending.drain(..) {
-            let _ = p.answer.send(false);
+            let _ = p.answer.send(Answer::Deny);
         }
         l.pads
             .drain(..)
@@ -576,6 +656,96 @@ pub async fn set_open(headers: HeaderMap, Json(r): Json<OpenReq>) -> Json<serde_
 }
 
 #[derive(serde::Deserialize)]
+pub struct InternetReq {
+    /// A new room and key: the old internet link stops working.
+    #[serde(default)]
+    new: bool,
+    #[serde(default)]
+    #[serde(alias = "addr", alias = "host")]
+    console: Option<String>,
+}
+
+fn net_refused(code: StatusCode, err: &str) -> Response {
+    (code, Json(serde_json::json!({ "error": err }))).into_response()
+}
+
+/// `POST /api/ps5/rp/pad-link/internet {new?, console?}`: the link for a phone anywhere
+/// (`internet.url` in the answer, the status as `GET` has it; the link opens too). A room on the
+/// signalling hub in Play Together's settings, with a key of its own; the same one again unless
+/// `new`, which closes the old room (its link stops working; internet phones still waiting to be
+/// allowed are told so, phones already in keep playing). An internet phone asks like the phone
+/// app does: the computer allows it (`pending`, `decide`) before it gets the pad or the picture.
+/// 409 `internet_off` when the settings turned internet invites off, 409 `hub_url` when the hub
+/// address is not a `wss://` one.
+pub async fn set_internet(headers: HeaderMap, Json(r): Json<InternetReq>) -> Response {
+    let s = crate::join::settings();
+    if !s.internet_invites {
+        return net_refused(StatusCode::CONFLICT, "internet_off");
+    }
+    if !crate::join_net::hub_url_ok(&s.hub_url) {
+        return net_refused(StatusCode::CONFLICT, "hub_url");
+    }
+    if crate::join_net::fingerprint().is_none() {
+        return net_refused(StatusCode::INTERNAL_SERVER_ERROR, "no_certificate");
+    }
+    let made = with_link(|l| {
+        if l.key.is_none() {
+            l.key = random_key();
+        }
+        if r.new || l.net.as_ref().is_none_or(|n| n.room.url() != s.hub_url) {
+            // The old room goes first: its link stops working, and the internet phones still
+            // waiting for an answer go with it (those allowed keep playing).
+            l.net = None;
+            let (revoked, kept) = std::mem::take(&mut l.pending)
+                .into_iter()
+                .partition::<Vec<_>, _>(|p| p.net);
+            l.pending = kept;
+            for p in revoked {
+                let _ = p.answer.send(Answer::Revoked);
+            }
+            let key = random_key()?;
+            let room = crate::join_net::hub::Room::start(
+                crate::join_net::Kind::Pad,
+                Box::new(|| crate::join::settings().internet_invites),
+                s.hub_url.clone(),
+            )?;
+            l.net = Some(NetLink {
+                room,
+                key,
+                tokens: Default::default(),
+            });
+        }
+        Some(())
+    });
+    if made.is_none() {
+        return net_refused(StatusCode::INTERNAL_SERVER_ERROR, "no_random");
+    }
+    crate::log_at!(
+        Info,
+        "together",
+        "pad_link: internet link open (new: {})",
+        r.new
+    );
+    Json(status(&headers, r.console.as_deref())).into_response()
+}
+
+/// Internet invites were turned off: the internet link's room closes, and the internet phones
+/// still waiting for an answer go with it (phones in keep playing).
+pub(crate) fn internet_off() {
+    let revoked = with_link(|l| {
+        l.net = None;
+        let (revoked, kept) = std::mem::take(&mut l.pending)
+            .into_iter()
+            .partition::<Vec<_>, _>(|p| p.net);
+        l.pending = kept;
+        revoked
+    });
+    for p in revoked {
+        let _ = p.answer.send(Answer::Revoked);
+    }
+}
+
+#[derive(serde::Deserialize)]
 pub struct DecideReq {
     id: u64,
     allow: bool,
@@ -589,7 +759,9 @@ pub async fn decide(Json(r): Json<DecideReq>) -> Json<serde_json::Value> {
     });
     let ok = found.is_some();
     if let Some(p) = found {
-        let _ = p.answer.send(r.allow);
+        let _ = p
+            .answer
+            .send(if r.allow { Answer::Allow } else { Answer::Deny });
     }
     Json(serde_json::json!({ "ok": ok }))
 }
@@ -610,6 +782,10 @@ pub async fn kick(Json(r): Json<KickReq>) -> Json<serde_json::Value> {
             l.allowed.remove(d);
             l.denied.insert(d.clone());
         }
+        // Its way back in over the internet goes too.
+        if let (Some(rt), Some(n)) = (&p.rt, l.net.as_mut()) {
+            n.tokens.remove(rt);
+        }
         Some((p.id, p.watch))
     });
     let ok = gone.is_some();
@@ -626,9 +802,14 @@ pub struct ControlReq {
 }
 
 /// `POST /api/ps5/rp/pad-link/control {id, on}`: hand a watcher the controller, or take it back.
+/// Not one watching over the internet (`ok: false`): those only watch.
 pub async fn control(Json(r): Json<ControlReq>) -> Json<serde_json::Value> {
     let ok = with_link(|l| {
-        let Some(p) = l.pads.iter_mut().find(|p| p.id == r.id && p.watch) else {
+        let Some(p) = l
+            .pads
+            .iter_mut()
+            .find(|p| p.id == r.id && p.watch && p.net.is_none())
+        else {
             return false;
         };
         p.control = r.on;
@@ -672,6 +853,9 @@ pub struct PadQuery {
     /// This device's own id (random, kept on the device).
     #[serde(default)]
     d: Option<String>,
+    /// An internet phone's reconnect token, as this engine gave it when it was allowed.
+    #[serde(default)]
+    rt: Option<String>,
 }
 
 /// A phone's name as it gave it: printable, short. Empty when it gave none, and the /pad page sends
@@ -732,8 +916,91 @@ pub async fn ws(
         .on_upgrade(move |s| pad_session(s, q, ip))
 }
 
+#[derive(serde::Deserialize)]
+struct NetHello {
+    hello: PadQuery,
+}
+
+/// An internet phone's data channel (crate::join_net, a room of the phone link): its first message
+/// is `{"hello": {"t", "name", "d", "w"}}`, the LAN socket's query. In only with the internet link's
+/// key, and only from that link's room (a New link's old room lets nobody in); then the LAN socket's
+/// session.
+pub(crate) async fn rtc_session(
+    mut socket: crate::join_net::RtcSocket,
+    ip: std::net::IpAddr,
+    room: String,
+) {
+    use crate::join::GuestSocket;
+    use crate::rp_stream_api::send_limited;
+    let refuse = |why: &str| say(serde_json::json!({"stage": "refused", "why": why}));
+    let hello = tokio::time::timeout(NET_HELLO_WAIT, async {
+        loop {
+            match socket.recv().await {
+                Some(Ok(Message::Text(t))) => {
+                    return serde_json::from_str::<NetHello>(t.as_str())
+                        .ok()
+                        .map(|h| h.hello);
+                }
+                Some(Ok(Message::Pong(_) | Message::Ping(_))) => {}
+                _ => return None,
+            }
+        }
+    })
+    .await
+    .ok()
+    .flatten();
+    let Some(q) = hello else {
+        send_limited(&mut socket, refuse("hello")).await;
+        return;
+    };
+    let ok = with_link(|l| {
+        l.net.as_ref().is_some_and(|n| {
+            n.room.id() == room && q.t.as_deref().is_some_and(|t| same_key(&n.key, t))
+        })
+    });
+    if !ok {
+        crate::log_at!(
+            Debug,
+            "together",
+            "pad_link: an internet phone with an old or wrong link"
+        );
+        send_limited(&mut socket, refuse("key")).await;
+        return;
+    }
+    pad_session(socket, q, ip).await
+}
+
+/// `t` when it is a reconnect token the current internet link gave (compared whole).
+fn net_token_known(t: &str) -> Option<String> {
+    with_link(|l| {
+        l.net
+            .as_ref()
+            .and_then(|n| n.tokens.iter().find(|k| same_key(k, t)).cloned())
+    })
+}
+
+/// A new reconnect token for an internet phone just allowed, kept with the current internet link.
+/// None when the link went meanwhile (the phone then has to ask again after a drop).
+fn new_net_token() -> Option<String> {
+    let t = random_key()?;
+    with_link(|l| {
+        let n = l.net.as_mut()?;
+        n.tokens.insert(t.clone());
+        Some(t)
+    })
+}
+
 fn say(v: serde_json::Value) -> Message {
     Message::Text(v.to_string().into())
+}
+
+/// A ping's payload: the time, eight bytes (what an internet phone's channel carries as a ping).
+fn ping_bytes() -> [u8; 8] {
+    std::time::UNIX_EPOCH
+        .elapsed()
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+        .to_le_bytes()
 }
 
 /// A phone's `{"kbm": ..}` for the page.
@@ -780,13 +1047,37 @@ fn ask_kbm_caps(host: String, tx: mpsc::WeakSender<Message>) {
     });
 }
 
-/// A watcher plays only while it holds the controller.
-fn plays(id: u64) -> bool {
-    with_link(|l| l.pads.iter().any(|x| x.id == id && (!x.watch || x.control)))
+impl Pad {
+    /// A watcher plays only while it holds the controller.
+    fn plays(&self) -> bool {
+        !self.watch || self.control
+    }
 }
 
-async fn pad_session(mut socket: WebSocket, q: PadQuery, ip: std::net::IpAddr) {
+/// A watcher plays only while it holds the controller.
+fn plays(id: u64) -> bool {
+    with_link(|l| l.pads.iter().any(|x| x.id == id && x.plays()))
+}
+
+/// A linked phone plays on the stream's controller (a controller, or a watcher handed it), quiet
+/// or not: a Play Together guest never gets that controller from under it (join.rs, #720).
+pub(crate) fn phones_playing() -> bool {
+    with_link(|l| any_playing(&l.pads))
+}
+
+fn any_playing(pads: &[Pad]) -> bool {
+    pads.iter().any(Pad::plays)
+}
+
+/// A phone's session, on the LAN socket or an internet phone's data channel (whose key
+/// `rtc_session` checked already).
+async fn pad_session<S: crate::join::GuestSocket>(
+    mut socket: S,
+    q: PadQuery,
+    ip: std::net::IpAddr,
+) {
     use crate::rp_stream_api::send_limited;
+    let net = socket.net();
     let name = clean_name(q.name.as_deref());
     let device = clean_device(q.d.as_deref());
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
@@ -798,9 +1089,20 @@ async fn pad_session(mut socket: WebSocket, q: PadQuery, ip: std::net::IpAddr) {
         send_limited(&mut socket, refuse("kicked")).await;
         return;
     }
-    let keyed = is_expected(&q);
+    // The QR code's key lets a phone on the LAN in at once. Over the internet the link's key only
+    // lets a phone ask (`rtc_session` checked it): the computer allows it, as it allows an
+    // internet Play Together guest, and one it allowed comes back after a drop with the reconnect
+    // token this engine gave it then. Never by its device id: the phone makes that up itself.
+    let mut rt = match &net {
+        Some(_) => q.rt.as_deref().and_then(net_token_known),
+        None => None,
+    };
+    let keyed = match &net {
+        Some(_) => rt.is_some(),
+        None => is_expected(&q),
+    };
     if !keyed {
-        if q.t.is_some() {
+        if net.is_none() && q.t.is_some() {
             // A QR code from a link closed since (or a guess).
             send_limited(&mut socket, refuse("key")).await;
             return;
@@ -817,6 +1119,8 @@ async fn pad_session(mut socket: WebSocket, q: PadQuery, ip: std::net::IpAddr) {
                 id,
                 name: name.clone(),
                 ip,
+                net: net.is_some(),
+                watch: q.w == Some(1),
                 answer: tx,
             });
             true
@@ -825,12 +1129,19 @@ async fn pad_session(mut socket: WebSocket, q: PadQuery, ip: std::net::IpAddr) {
             send_limited(&mut socket, refuse("busy")).await;
             return;
         }
+        crate::log_at!(
+            Info,
+            "together",
+            "pad_link: phone {id} asks to {} ({})",
+            if q.w == Some(1) { "watch" } else { "play" },
+            if net.is_some() { "internet" } else { "LAN" }
+        );
         send_limited(&mut socket, say(serde_json::json!({"stage": "asking"}))).await;
         let answer = tokio::select! {
             a = rx => a.ok(),
             _ = tokio::time::sleep(ASK_WAIT) => None,
             // The phone gave up.
-            _ = async { loop { match socket.recv().await { Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break, _ => {} } } } => Some(false),
+            _ = async { loop { match socket.recv().await { Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break, _ => {} } } } => Some(Answer::Deny),
         };
         with_link(|l| l.pending.retain(|p| p.id != id));
         match answer {
@@ -838,29 +1149,56 @@ async fn pad_session(mut socket: WebSocket, q: PadQuery, ip: std::net::IpAddr) {
                 send_limited(&mut socket, refuse("no_answer")).await;
                 return;
             }
-            Some(false) => {
+            Some(Answer::Deny) => {
                 send_limited(&mut socket, refuse("denied")).await;
                 return;
             }
-            Some(true) => {
-                if let Some(d) = &device {
+            Some(Answer::Revoked) => {
+                send_limited(&mut socket, refuse("key")).await;
+                return;
+            }
+            Some(Answer::Allow) => {
+                if net.is_some() {
+                    // Its way back after a drop: a token of ours, kept by the phone for this link.
+                    rt = new_net_token();
+                    if let Some(t) = &rt {
+                        send_limited(&mut socket, say(serde_json::json!({ "rt": t }))).await;
+                    }
+                } else if let Some(d) = &device {
                     with_link(|l| l.allowed.insert(d.clone()));
                 }
             }
         }
     }
     let watch = q.w == Some(1);
-    // A watcher gets the stream itself (rp_stream_api's copy for it); none without a session.
-    let mut frames = if watch {
-        match crate::rp_stream_api::add_spectator(id) {
-            Some(r) => Some(r),
+    // A watcher gets the stream itself (rp_stream_api's copy for it); none without a session. Over
+    // the internet as a Play Together guest gets it: pictures through a short queue of their own
+    // (`video`) that skips to the next keyframe when the connection can't keep up.
+    let (mut frames, mut video) = if watch {
+        let feed = if net.is_some() {
+            crate::rp_stream_api::live_host()
+                .and_then(|host| {
+                    crate::rp_stream_api::add_player(
+                        id,
+                        &host,
+                        NET_WATCH_QUEUE,
+                        std::sync::Arc::new(AtomicU64::new(0)),
+                        true,
+                    )
+                })
+                .map(|f| (Some(f.other), Some(f.video)))
+        } else {
+            crate::rp_stream_api::add_spectator(id).map(|r| (Some(r), None))
+        };
+        match feed {
+            Some(f) => f,
             None => {
                 send_limited(&mut socket, refuse("no_stream")).await;
                 return;
             }
         }
     } else {
-        None
+        (None, None)
     };
     let (tx, mut rx) = mpsc::channel::<Message>(64);
     // Weak: the session still ends when the link drops the phone's sender.
@@ -888,6 +1226,8 @@ async fn pad_session(mut socket: WebSocket, q: PadQuery, ip: std::net::IpAddr) {
             tx,
             watch,
             control: false,
+            net: net.clone(),
+            rt: rt.clone(),
         });
         true
     });
@@ -899,11 +1239,14 @@ async fn pad_session(mut socket: WebSocket, q: PadQuery, ip: std::net::IpAddr) {
         return;
     }
     // By number at this level: a bug report is posted in public (names under Detailed logs).
-    crate::log_info!(
-        "pad_link: phone {id} joined as {}",
-        if watch { "watcher" } else { "controller" }
+    crate::log_at!(
+        Info,
+        "together",
+        "pad_link: phone {id} joined as {} ({})",
+        if watch { "watcher" } else { "controller" },
+        if net.is_some() { "internet" } else { "LAN" }
     );
-    crate::log_detail!("pad_link: phone {id} is {name}");
+    crate::log_at!(Debug, "together", "pad_link: phone {id} is {name}");
     let mut tick = tokio::time::interval(STATE_EVERY);
     tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     // Rounds since anything came from the phone (counted, not timed: see rp_stream_api's page).
@@ -927,10 +1270,20 @@ async fn pad_session(mut socket: WebSocket, q: PadQuery, ip: std::net::IpAddr) {
                 Some(m) => if !send_limited(&mut socket, m).await { break },
                 None => frames = None,
             },
+            // An internet watcher's pictures (their own short queue).
+            f = async {
+                match video.as_mut() {
+                    Some(r) => r.recv().await,
+                    None => std::future::pending().await,
+                }
+            } => match f {
+                Some(m) => if !send_limited(&mut socket, m).await { break },
+                None => video = None,
+            },
             _ = tick.tick() => {
                 quiet += 1;
                 if quiet > crate::rp_stream_api::PEER_QUIET_PINGS {
-                    crate::log_info!("pad_link: phone {id} went silent; letting it go");
+                    crate::log_at!(Info, "together", "pad_link: phone {id} went silent; letting it go");
                     break;
                 }
                 let s = crate::rp_stream_api::live_state();
@@ -940,7 +1293,8 @@ async fn pad_session(mut socket: WebSocket, q: PadQuery, ip: std::net::IpAddr) {
                     ask_kbm_caps(host.unwrap_or_default(), caps_tx.clone());
                 }
                 if !send_limited(&mut socket, say(serde_json::json!({"stage": "joined", "session": s}))).await
-                    || !send_limited(&mut socket, Message::Ping(Vec::new().into())).await
+                    // Eight bytes: an internet phone's channel carries only those (join_net/chunk.rs).
+                    || !send_limited(&mut socket, Message::Ping(ping_bytes().to_vec().into())).await
                 {
                     break;
                 }
@@ -997,7 +1351,7 @@ async fn pad_session(mut socket: WebSocket, q: PadQuery, ip: std::net::IpAddr) {
     }
     release(id, watch);
     with_link(|l| l.pads.retain(|p| p.id != id));
-    crate::log_info!("pad_link: phone {id} left");
+    crate::log_at!(Info, "together", "pad_link: phone {id} left");
 }
 
 #[derive(serde::Deserialize)]
@@ -1149,7 +1503,7 @@ pub(crate) fn lan_ws_target(url: &str, want: &str) -> Option<String> {
 
 /// A relay's connection refused by its address, or not reached at all.
 #[derive(Debug, PartialEq, Eq, Clone, Copy)]
-enum RelayRefusal {
+pub(crate) enum RelayRefusal {
     Address,
     Unreachable,
 }
@@ -1177,7 +1531,10 @@ fn only_lan(addrs: Vec<std::net::SocketAddr>) -> Result<Vec<std::net::SocketAddr
 }
 
 /// A TCP connection to the address `host` was checked to have.
-async fn connect_lan(host: &str, port: u16) -> Result<tokio::net::TcpStream, RelayRefusal> {
+pub(crate) async fn connect_lan(
+    host: &str,
+    port: u16,
+) -> Result<tokio::net::TcpStream, RelayRefusal> {
     let host = host.trim_start_matches('[').trim_end_matches(']');
     let addrs = match host.parse::<std::net::IpAddr>() {
         Ok(ip) => vec![std::net::SocketAddr::new(ip, port)],
@@ -1197,7 +1554,7 @@ async fn connect_lan(host: &str, port: u16) -> Result<tokio::net::TcpStream, Rel
 
 /// TLS for a `wss://` engine behind a proxy, checked against the public roots as any browser's
 /// visit would be. A private CA's certificate is refused here; the host's LAN address still works.
-fn relay_tls() -> Option<tokio_rustls::TlsConnector> {
+pub(crate) fn relay_tls() -> Option<tokio_rustls::TlsConnector> {
     let mut roots = rustls::RootCertStore::empty();
     roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
     let config = rustls::ClientConfig::builder_with_provider(std::sync::Arc::new(
@@ -1323,9 +1680,28 @@ where
     let _ = far_tx.send(TMsg::Close(None)).await;
 }
 
+/// The phone link's host routes (lib.rs registers the same ones), for tests that serve them.
+#[cfg(test)]
+pub(crate) fn router<S: Clone + Send + Sync + 'static>() -> axum::Router<S> {
+    use axum::routing::{get, post};
+    axum::Router::new()
+        .route("/api/ps5/rp/pad-link", get(get_status).post(set_open))
+        .route("/api/ps5/rp/pad-link/decide", post(decide))
+        .route("/api/ps5/rp/pad-link/kick", post(kick))
+        .route("/api/ps5/rp/pad-link/control", post(control))
+        .route("/api/ps5/rp/pad-link/internet", post(set_internet))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_ping_carries_eight_bytes() {
+        // An internet phone's channel passes a ping of eight bytes only (join_net/chunk.rs).
+        assert_eq!(ping_bytes().len(), 8);
+        assert!(u64::from_le_bytes(ping_bytes()) > 0);
+    }
 
     #[test]
     fn vpn_addresses_are_private_and_not_virtual_adapters() {
@@ -1385,6 +1761,8 @@ mod tests {
                     tx: tx.clone(),
                     watch: false,
                     control: false,
+                    net: None,
+                    rt: None,
                 },
                 Pad {
                     id: 2,
@@ -1394,6 +1772,8 @@ mod tests {
                     tx,
                     watch: true,
                     control: true,
+                    net: None,
+                    rt: None,
                 },
             ],
             ..Default::default()
@@ -1765,6 +2145,28 @@ mod tests {
             serde_json::json!({"id": 2, "on": true, "mouse": true, "keyboard": false})
         );
         assert_eq!(kbm_left(2), serde_json::json!({"id": 2, "left": true}));
+    }
+
+    #[test]
+    fn a_linked_phone_plays_quiet_or_not_and_a_watcher_only_with_the_controller() {
+        let pad = |watch: bool, control: bool| Pad {
+            id: 1,
+            name: String::new(),
+            device: None,
+            since_ms: 0,
+            tx: mpsc::channel(1).0,
+            watch,
+            control,
+            net: None,
+            rt: None,
+        };
+        assert!(!any_playing(&[]));
+        assert!(
+            any_playing(&[pad(false, false)]),
+            "a controller, whatever it sent lately"
+        );
+        assert!(!any_playing(&[pad(true, false)]), "a watcher only watches");
+        assert!(any_playing(&[pad(true, false), pad(true, true)]));
     }
 
     #[test]

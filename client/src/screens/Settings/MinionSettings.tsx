@@ -11,14 +11,56 @@ import { hostOf } from "../../lib/addr";
 import { openExternalUrl } from "../../lib/openExternalUrl";
 import { useConnectionStore } from "../../state/connection";
 import { useTr } from "../../state/lang";
-import { rememberMinion } from "../../state/minionMemory";
+import {
+  markMinionHandled,
+  minionOffForNew,
+  rememberMinion,
+  setMinionOffForNew,
+} from "../../state/minionMemory";
+import { useRosterStore } from "../../state/roster";
+import { consoleOnTailnet, useTailnet } from "../../state/useTailnet";
 
 type Tr = ReturnType<typeof useTr>;
 
-export function MinionSettings() {
-  const host = useConnectionStore((s) => s.host);
-  const up = useConnectionStore((s) => s.payloadStatus === "up");
+/** Settings › This PS5: Minion on one console (on/off, home-screen tile, LAN page). */
+export function MinionConsoleSettings({ host }: { host: string }) {
+  const up = useConnectionStore((s) => s.runtimeByHost[hostOf(host.trim())]?.payloadStatus === "up");
   return <MinionTileControl key={`${host}:${up}`} host={host} up={up} />;
+}
+
+/** Settings › App: this computer's choices for every console: Minion off on consoles added from
+ *  now on (#715). */
+export function MinionDefaults() {
+  const tr = useTr();
+  const [offForNew, setOffForNew] = useState(minionOffForNew);
+  return (
+    <div className="space-y-2 text-sm">
+      <Toggle
+        checked={offForNew}
+        onChange={(on) => {
+          const known = useRosterStore
+            .getState()
+            .profiles.map((p) => (p.host ?? "").trim())
+            .filter(Boolean);
+          setMinionOffForNew(on, known);
+          setOffForNew(on);
+        }}
+        label={tr("minion_off_for_new_label", undefined, "Keep Minion off on consoles I add")}
+        hint={tr(
+          "minion_off_for_new_hint",
+          undefined,
+          "When a console connects to this app for the first time, Minion is turned off on it once. Consoles you already have stay as they are, and turning Minion back on for one console keeps it on.",
+        )}
+      />
+      <p className="text-xs text-[var(--color-muted)]">
+        {tr(
+          "minion_boot_helper_note",
+          undefined,
+          "Minion needs the helper running. To start it with the PS5, turn on Payloads → Payload Manager → Load the PS5Upload helper at boot.",
+        )}
+      </p>
+    </div>
+  );
 }
 
 /** The line under the controls: what the helper last did, in words. */
@@ -47,6 +89,13 @@ export function minionStatus(
       "Minion is off: its home-screen tile is removed and the page on the console is stopped.",
     );
   }
+  // Also after a failed add at helper start, before anyone pressed a button: says why.
+  if (state.tile_failed && state.tile && state.tile_error)
+    return tr(
+      "cw_settings_tile_failed_reason",
+      { reason: state.tile_error },
+      "Could not add PS5Upload Minion to the home screen ({reason}). Try again.",
+    );
   if (state.tile_failed)
     return tr(
       state.tile ? "cw_settings_err_tile_add" : "cw_settings_err_tile_remove",
@@ -90,6 +139,23 @@ export interface MinionViewProps {
 }
 
 /** Settings → Minion without state (tests render it directly). */
+/** Reached through Tailscale now: the console's page is not carried there (only Remote Play and
+ *  PS5Upload's own connection are), so its link says so instead of a page that never loads. */
+function MinionTailnetNote({ host }: { host: string }) {
+  const tr = useTr();
+  const { status } = useTailnet(!!host);
+  if ((consoleOnTailnet(status, host)?.via ?? "lan") === "lan") return null;
+  return (
+    <p className="w-full text-xs text-[var(--color-muted)]" data-testid="minion-tailnet-note">
+      {tr(
+        "minion_tailnet_note",
+        undefined,
+        "This PS5 is reached through Tailscale right now, which doesn't carry this page. It opens on the PS5's home network.",
+      )}
+    </p>
+  );
+}
+
 export function MinionView({
   up,
   state,
@@ -221,6 +287,7 @@ export function MinionView({
                   >
                     {tr("minion_open_here", undefined, "Open here")}
                   </Button>
+                  <MinionTailnetNote host={host} />
                 </div>
               )}
             </div>
@@ -297,6 +364,9 @@ function MinionTileControl({ host, up }: { host: string; up: boolean }) {
       if (next.supported && change.remove) rememberMinion(host, true);
       else if (next.supported && change.enabled !== undefined)
         rememberMinion(host, !change.enabled);
+      // Chosen by hand: "Keep Minion off on consoles I add" never changes it again.
+      if (next.supported && (change.remove || change.enabled !== undefined))
+        markMinionHandled(host);
     } catch (e) {
       setError(String(e));
     } finally {

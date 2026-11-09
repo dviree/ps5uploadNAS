@@ -37,11 +37,10 @@ test("Files uploads device files into the open PS5 folder", async ({ page }) => 
     await route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
   });
   await page.goto("/files?path=%2Fdata%2Fhomebrew", { waitUntil: "domcontentloaded" });
-  const picker = page.getByRole("button", { name: "From this device…", exact: true });
-  await expect(picker).toBeEnabled({ timeout: 20_000 });
-  const chooser = page.waitForEvent("filechooser");
-  await picker.click();
-  await (await chooser).setFiles([
+  // Add files › This device… opens this input (upstream's device pick).
+  const input = page.getByTestId("fs-device-files");
+  await expect(input).toBeAttached({ timeout: 20_000 });
+  await input.setInputFiles([
     { name: "notes.txt", mimeType: "text/plain", buffer: Buffer.from("hello") },
     { name: "archive.zip", mimeType: "application/zip", buffer: Buffer.from("bytes") },
   ]);
@@ -99,11 +98,10 @@ test("the engine's copies of the phone's files are deleted once they are on the 
     await route.fulfill({ contentType: "application/json", body: JSON.stringify(body) });
   });
   await page.goto("/files?path=%2Fdata%2Fhomebrew", { waitUntil: "domcontentloaded" });
-  const picker = page.getByRole("button", { name: "From this device…", exact: true });
-  await expect(picker).toBeEnabled({ timeout: 20_000 });
-  const chooser = page.waitForEvent("filechooser");
-  await picker.click();
-  await (await chooser).setFiles([
+  // Add files › This device… opens this input (upstream's device pick).
+  const input = page.getByTestId("fs-device-files");
+  await expect(input).toBeAttached({ timeout: 20_000 });
+  await input.setInputFiles([
     { name: "photo-1.jpg", mimeType: "image/jpeg", buffer: Buffer.from("hello") },
     { name: "photo-2.jpg", mimeType: "image/jpeg", buffer: Buffer.from("world") },
   ]);

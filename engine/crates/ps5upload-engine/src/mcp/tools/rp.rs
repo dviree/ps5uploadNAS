@@ -1,5 +1,5 @@
 //! Remote Play: `rp_session`, `rp_start`, `rp_stop`, `rp_settings`, `rp_passcode`, `rp_keyboard`,
-//! `rp_frame`, `rp_input`, `rp_input_release`. The routes and what they promise are in
+//! `rp_frame`, `rp_input`, `rp_input_release`, `rp_controller`, `rp_pair_attempts`. The routes and what they promise are in
 //! `AUTOMATION.md`.
 //!
 //! A session id guards every route: the routes refuse a session that is not the one running, so
@@ -41,8 +41,13 @@ pub(super) fn tools() -> Vec<ToolDef> {
             name: "rp_session",
             title: "Remote Play session",
             description: "What Remote Play is streaming now: `host` and `session` (null when \
-                          nothing streams), `playing`, and `attached`, whether an app page shows \
-                          it. rp_start starts a stream.",
+                          nothing streams), `playing`, `attached`, whether an app page shows \
+                          it, `user`, the paired PS5 user it signed in (by name), and `stats`, \
+                          the last second of the stream: frames, loss, round trip, and sound \
+                          (`audio_frames_total` 0 with frames flowing means no sound came; \
+                          `audio_other_codec` and `audio_header` say why). rp_start starts a \
+                          stream. `last_session` is how the last one started and ended: its \
+                          stages with times, and at the end frames, `audio_frames` and loss.",
             kind: Kind::Read,
             schema: object(json!({}), &[]),
             run: |ctx, args| Box::pin(session(ctx, args)),
@@ -53,7 +58,10 @@ pub(super) fn tools() -> Vec<ToolDef> {
             description: "Starts a Remote Play stream from a paired console, or joins the one \
                           running there. A console has one Remote Play slot, so only when the user \
                           asked for it. With no app page showing it, it ends after `keep_alive_s` \
-                          without a call. `no_credentials` means the console is not paired yet.",
+                          without a call. `no_credentials` means the console is not paired yet. \
+                          A console can have several PS5 users paired (consoles_list shows their \
+                          names as `rp_users`): `user` picks one, and the console signs that user \
+                          in; left out, the user chosen in the app.",
             kind: Kind::Write { idempotent: true },
             schema: object(
                 json!({
@@ -61,6 +69,12 @@ pub(super) fn tools() -> Vec<ToolDef> {
                         "type": "string",
                         "description": "The console: its address, id or name.",
                     },
+                    "user": text(
+                        "The PS5 user to play as: a name from the console's `rp_users` in \
+                         consoles_list, or its number there (1, 2, …). Left out, the user chosen \
+                         in the app. A stream already running as another user answers \
+                         `busy_user`: rp_stop it first, if the user asked for that.",
+                    ),
                     "width": whole("Picture width. Left out, the engine's default."),
                     "height": whole("Picture height. Left out, the engine's default."),
                     "fps": whole("Frames a second. Left out, the engine's default."),
@@ -252,7 +266,76 @@ pub(super) fn tools() -> Vec<ToolDef> {
             ),
             run: |ctx, args| Box::pin(release(ctx, args)),
         },
+        ToolDef {
+            name: "rp_controller",
+            title: "What the controller sends",
+            description: "What Remote Play sends the PS5's controller, for the running session \
+                          (or the last one, `running` false): each controller's last state \
+                          (`page` is the app's, with `from` saying which controllers it reads, \
+                          their mapping and reader, and the inputs in use; `phone N`, `guest`, \
+                          `automation`), buttons by name, `l2`/`r2` 0-255 and sticks, the \
+                          trigger peaks since the session started, and `triggers_analog` (false: \
+                          only 0 or 255 ever came, the triggers act as buttons). `sent` is all \
+                          of them merged, as the console gets it. Ask the user to half-press L2 \
+                          and read whether about 128 arrived.",
+            kind: Kind::Read,
+            schema: object(json!({}), &[]),
+            run: |ctx, args| Box::pin(controller(ctx, args)),
+        },
+        ToolDef {
+            name: "rp_pair_attempts",
+            title: "Recent pairing tries",
+            description: "The last few Remote Play pairing tries (newest last): when, the \
+                          console, `with` (`helper`: one press in Play › Set up; `pin`: the PIN \
+                          the PS5 shows), whether it paired, the PS5's refusal `code` (80108b03 \
+                          and the like) and `reason`, and `console`, what the PS5 last said about \
+                          its Remote Play switch and signed-in user before the try (null when not \
+                          checked). Never a PIN or a key.",
+            kind: Kind::Read,
+            schema: object(json!({}), &[]),
+            run: |ctx, args| Box::pin(pair_attempts(ctx, args)),
+        },
     ]
+}
+
+async fn controller(ctx: ToolCtx, _args: Args) -> ToolResult {
+    let answer = ctx.get("/api/ps5/rp/controller", &[]).await?;
+    let summary = if answer.get("session").is_none_or(Value::is_null) {
+        "No Remote Play session has sent controller input since the engine started.".to_string()
+    } else {
+        let n = |k: &str| answer["sent"][k].as_u64().unwrap_or(0);
+        format!(
+            "{} session {}: the console was last sent L2 {} R2 {}; peaks L2 {} R2 {}.",
+            if answer["running"] == true {
+                "Running"
+            } else {
+                "Last"
+            },
+            answer["session"],
+            answer["sent"]["state"]["l2"],
+            answer["sent"]["state"]["r2"],
+            n("peak_l2"),
+            n("peak_r2"),
+        )
+    };
+    Ok(ToolOutput::ok(summary, answer))
+}
+
+async fn pair_attempts(ctx: ToolCtx, _args: Args) -> ToolResult {
+    let answer = ctx.get("/api/ps5/rp/pair/attempts", &[]).await?;
+    let tries = answer["attempts"].as_array().map_or(0, Vec::len);
+    let summary = match answer["attempts"].as_array().and_then(|a| a.last()) {
+        None => "No pairing tried since the engine started.".to_string(),
+        Some(last) if last["ok"] == true => format!("{tries} kept; the last one paired."),
+        Some(last) => format!(
+            "{tries} kept; the last one was refused{}.",
+            last["code"]
+                .as_str()
+                .map(|c| format!(" with {c}"))
+                .unwrap_or_default()
+        ),
+    };
+    Ok(ToolOutput::ok(summary, answer))
 }
 
 fn stick(which: &'static str) -> Value {
@@ -283,8 +366,13 @@ async fn session(ctx: ToolCtx, _args: Args) -> ToolResult {
         Some(host) => {
             let session = answer.get("session").cloned().unwrap_or(Value::Null);
             let attached = answer.get("attached").and_then(Value::as_bool) == Some(true);
+            let user = answer
+                .get("user")
+                .and_then(Value::as_str)
+                .map(|u| format!(" as {u}"))
+                .unwrap_or_default();
             format!(
-                "Streaming from {host}, session {session}. {}",
+                "Streaming from {host}{user}, session {session}. {}",
                 if attached {
                     "An app page shows it."
                 } else {

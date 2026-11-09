@@ -10,7 +10,7 @@ import type { MakeKind } from "../../state/convertPrefs";
 import type { OutputPlace } from "../../lib/outputPlace";
 import { useTr } from "../../state/lang";
 import { CompressionTiles } from "./CompressionTiles";
-import { FullVerifyOption, ImageChoice, type Lz4Choice } from "./ImageOptions";
+import { FullVerifyOption, ImageChoice, ZstdOption, type Lz4Choice } from "./ImageOptions";
 import { NextGameNote } from "./MakeCard";
 import { prettyBytes } from "./RunCard";
 
@@ -53,6 +53,8 @@ export interface OptionsCardProps {
   onLanguage?: (code: string) => void;
   /** A game is being made: this card sets what the next game added uses (#669). */
   forNext?: boolean;
+  /** The checked game is a PS4 game: a package of it is a PS4 package. */
+  ps4?: boolean;
   /** More choices, after the rest. */
   children?: ReactNode;
 }
@@ -60,6 +62,9 @@ export interface OptionsCardProps {
 export function OptionsCard(props: OptionsCardProps) {
   const tr = useTr();
   const beside = props.outputPlace === "beside";
+  // A PS4 package has neither the PS5 package's compression nor its language; it is always
+  // read back whole.
+  const ps4Package = props.ps4 === true && props.make !== "image" && props.make !== "folder";
   return (
     <Card padded={false} className="p-3.5 sm:p-4">
       <div className="flex flex-col gap-2.5 text-sm">
@@ -159,11 +164,26 @@ export function OptionsCard(props: OptionsCardProps) {
             )}
           </div>
         ) : props.make === "folder" ? (
-          <div className="text-xs text-[var(--color-muted)]" data-testid="options-folder">
+          <div className="flex flex-col gap-2" data-testid="options-folder">
+            <div className="text-xs text-[var(--color-muted)]">
+              {tr(
+                "fpkg.folder.what",
+                undefined,
+                "The folder is named after the image or package, in the output folder. Nothing is compressed, and nothing reaches the PS5.",
+              )}
+            </div>
+            {/* A game that reads through AMPR can have its folder in zstd packs (LZ4 packs are
+                for .exfat images only). */}
+            {props.image?.lz4 && props.image.lz4.readiness.kind !== "no_ampr" && (
+              <ZstdOption lz4={props.image.lz4} folder />
+            )}
+          </div>
+        ) : ps4Package ? (
+          <div className="text-xs text-[var(--color-muted)]" data-testid="options-ps4-pkg">
             {tr(
-              "fpkg.folder.what",
+              "fpkg.ps4_pkg.options",
               undefined,
-              "The folder is named after the image or package, in the output folder. Nothing is compressed, and nothing reaches the PS5.",
+              "A PS4 package keeps the game's files as they are: nothing is compressed, the game keeps all its languages, and every file is read back and compared before the package is kept.",
             )}
           </div>
         ) : (
@@ -179,7 +199,7 @@ export function OptionsCard(props: OptionsCardProps) {
             />
           </div>
         )}
-        {props.onLanguage && props.make !== "image" && props.make !== "folder" && (
+        {props.onLanguage && props.make !== "image" && props.make !== "folder" && !ps4Package && (
           <div className="flex flex-col gap-1">
             <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
             <label htmlFor="fpkg-language" className="text-[var(--color-muted)]">
@@ -209,7 +229,7 @@ export function OptionsCard(props: OptionsCardProps) {
             </div>
           </div>
         )}
-        <FullVerifyOption disabled={props.locked} />
+        {!ps4Package && <FullVerifyOption disabled={props.locked} />}
         {props.children}
       </div>
     </Card>

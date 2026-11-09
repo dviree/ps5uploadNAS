@@ -9,8 +9,9 @@ import { KbmSender } from "../lib/kbmInput";
 import { useTr } from "../state/lang";
 import { setScreenWakeReason } from "../lib/androidScreenWake";
 import { setPadForwardReason } from "../lib/androidPadBridge";
-import { rpInput } from "../state/remotePlay";
+import { rpInput } from "../state/rpInput";
 import { makeWatchPlayer, type MsePlayer, type WatchPlayer, type WatchProblem } from "./watchPlayer";
+import { OpenOnWifi, useHubDown } from "../join/OpenOnWifi";
 
 type Tr = ReturnType<typeof useTr>;
 
@@ -36,10 +37,37 @@ function stageText(tr: Tr, s: PadLinkStage, computer: string): string {
       if (s.why === "key") return tr("pad_old_code", undefined, "This code has expired. Scan the new one on the computer.");
       if (s.why === "full") return tr("pad_full", undefined, "Four phones are playing already.");
       if (s.why === "no_stream") return tr("pad_watch_no_stream", undefined, "Nothing is streaming on the computer right now.");
+      if (s.why.startsWith("net:")) return netText(tr, s.why.slice(4));
       return tr("pad_refused", undefined, "The computer did not let this phone in.");
     case "reconnecting":
       return tr("pad_reconnecting", undefined, "Connection lost. Reconnecting…");
     case "lost":
+      return tr("pad_lost", undefined, "Lost the connection to the computer.");
+  }
+}
+
+/** Why an internet link could not connect (join/rtcTransport's `net:<why>`), in words. */
+export function netText(tr: Tr, why: string): string {
+  switch (why) {
+    case "mismatch":
+      return tr("join_net_mismatch", undefined, "This link doesn't match the host; ask them for a new one.");
+    case "no_direct":
+      return tr(
+        "join_net_no_direct",
+        undefined,
+        "A direct connection isn't possible from this network (both sides' routers are strict). Try Wi-Fi instead of mobile data, or ask the host to turn on UPnP.",
+      );
+    case "no_room":
+      return tr("pad_old_code", undefined, "This code has expired. Scan the new one on the computer.");
+    case "net_full":
+      return tr("pad_full", undefined, "Four phones are playing already.");
+    case "no_hub":
+      return tr("join_net_no_hub", undefined, "Couldn't reach the PS5Upload invite service. Check your internet connection, then try again.");
+    // The engine could not take this browser's offer: another browser may do.
+    case "offer":
+    case "no_webrtc":
+      return tr("join_net_no_webrtc", undefined, "This browser can't make direct connections. Try a recent Chrome, Safari or Firefox.");
+    default:
       return tr("pad_lost", undefined, "Lost the connection to the computer.");
   }
 }
@@ -111,17 +139,33 @@ function PadTouchpad({ client, caps }: { client: PadClient; caps: KbmCapsMsg }) 
  */
 export function PadApp({
   url,
-  computer,
+  computer: computerName,
   onLeave,
   watch = false,
+  transport,
+  hello,
+  onReconnectToken,
+  lanUrl = null,
 }: {
+  /** An internet link's page on the computer's Wi-Fi ("Open on this Wi-Fi", join/lanHint),
+   *  offered when the invite service can't be reached; null: none. */
+  lanUrl?: string | null;
   url: string;
-  computer: string;
+  /** The computer's name for the page's words; null (an internet link): "the computer". */
+  computer: string | null;
   onLeave?: () => void;
   /** Watch party: watch the stream; play only once the computer hands over the controller. */
   watch?: boolean;
+  /** An internet link: the WebRTC transport (join/rtcTransport, a "pad" channel) instead of the
+   *  LAN WebSocket, and the hello it opens with (padClient). */
+  transport?: typeof WebSocket;
+  hello?: Record<string, string | number>;
+  /** An internet link: the engine's reconnect token, to keep for this link. */
+  onReconnectToken?: (rt: string) => void;
 }) {
   const tr = useTr();
+  const hubDown = useHubDown(transport ? url : null, lanUrl);
+  const computer = computerName ?? tr("pad_net_computer", undefined, "the computer");
   const [stage, setStage] = useState<PadLinkStage>({ kind: "connecting" });
   const [attempt, setAttempt] = useState(0);
   const [portrait, setPortrait] = useState(() => typeof window !== "undefined" && window.innerHeight > window.innerWidth);
@@ -168,6 +212,9 @@ export function PadApp({
     setSound(false);
     const c = new PadClient({
       url,
+      WebSocketImpl: transport,
+      hello,
+      onReconnectToken,
       onStage: setStage,
       touchPad: () => rpInput.touchPad,
       onLight: setLight,
@@ -198,6 +245,8 @@ export function PadApp({
       p?.stop();
       p?.element.remove();
     };
+    // transport and hello are made once per page (main.tsx).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [url, attempt, watch]);
 
   useEffect(() => {
@@ -209,6 +258,10 @@ export function PadApp({
   const ended = stage.kind === "refused" || stage.kind === "lost";
   // Through a short drop the controller stays where the thumbs are.
   const live = stage.kind === "joined" || stage.kind === "reconnecting";
+  // The invite service can't be reached (this page's check, or the connection said so): on the
+  // computer's Wi-Fi, its own page still works.
+  const showLan =
+    !!lanUrl && !live && (hubDown || (stage.kind === "refused" && stage.why === "net:no_hub"));
   return (
     <div
       className="fixed inset-0 select-none overflow-hidden bg-black text-white [-webkit-touch-callout:none]"
@@ -319,9 +372,15 @@ export function PadApp({
         </div>
       )}
 
+      {showLan && !ended && lanUrl && (
+        <div className="absolute inset-x-0 bottom-8 z-10 flex justify-center px-6">
+          <OpenOnWifi href={lanUrl} />
+        </div>
+      )}
       {ended && (
         <div className="absolute inset-0 z-10 flex flex-col items-center justify-center gap-3 px-6 text-center text-sm">
           <p className="max-w-sm text-white/85">{stageText(tr, stage, computer)}</p>
+          {showLan && lanUrl && <OpenOnWifi href={lanUrl} />}
           {canRetry(stage) && (
             <button
               type="button"

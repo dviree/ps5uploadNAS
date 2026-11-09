@@ -123,6 +123,14 @@ pub fn request_failure_text(err: &str) -> String {
     let err = err.trim();
     if err.is_empty() {
         "the PS5 could not make a pairing PIN (it gave no reason)".into()
+    } else if err.to_ascii_lowercase().contains("0x80fc0101") {
+        // The console's Remote Play is busy: a session is running or still being let go (it
+        // holds on 12-30 s after one ends, and longer after one ended badly).
+        format!(
+            "the PS5 could not make a pairing PIN because Remote Play is in use on it: a stream is \
+             running or still closing. Stop any stream, wait 30 seconds and try again; if it keeps \
+             saying this, restart the PS5 ({err})"
+        )
     } else {
         format!("the PS5 could not make a pairing PIN: {err}")
     }
@@ -342,7 +350,7 @@ mod status_tests {
     fn a_live_pin_is_waiting_with_its_countdown() {
         // Shape of the payload's answer three seconds after a request (Phat, FW 13.60).
         let s = parse(
-            r#"{"state":"waiting","pin":"36876659","account_id":"XCDiqZluNXo=",
+            r#"{"state":"waiting","pin":"43218765","account_id":"iHdmVUQzIhE=",
                 "seconds_left":297,"err":"","probes":1,"confirm_rc":0,
                 "confirm_status":0,"confirm_err":0}"#,
         );
@@ -392,7 +400,7 @@ mod status_tests {
     #[test]
     fn an_older_payload_without_the_diagnostics_still_parses() {
         let s = parse(
-            r#"{"state":"idle","pin":"","account_id":"XCDiqZluNXo=","seconds_left":0,"err":""}"#,
+            r#"{"state":"idle","pin":"","account_id":"iHdmVUQzIhE=","seconds_left":0,"err":""}"#,
         );
         assert_eq!(s.phase(), PairingPhase::Idle);
         assert_eq!((s.probes, s.confirm_rc, s.confirm_status), (0, 0, 0));

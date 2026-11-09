@@ -71,7 +71,8 @@ pub use self::proto::Resolution;
 pub use self::video::{FrameAssembler, VideoStats};
 
 const STREAM_PORT: u16 = 9296;
-const MTU: u32 = 1454;
+#[cfg(test)]
+const MTU: u32 = takion::MTU_LAN;
 const RTT_MS: u32 = 1;
 /// Takion protocol version a PS5 speaks.
 const TAKION_VERSION_PS5: u32 = 12;
@@ -176,6 +177,14 @@ pub struct LiveStats {
     /// see `Takion::rtt`). Absent until measured.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub console_rtt_ms: Option<f64>,
+    /// Sound since the start: Opus frames passed on, packets in a format we don't play (and the
+    /// last such codec), and whether the stream's info carried a sound header. With video
+    /// flowing, these say whether the PS5 sends no sound or sound this app can't play.
+    pub audio_frames_total: u64,
+    pub audio_other_codec: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub audio_last_other_codec: Option<u8>,
+    pub audio_header: bool,
     /// The console's last connection-quality report, raw (see `proto::ConnectionQuality`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub quality: Option<proto::ConnectionQuality>,
@@ -234,6 +243,10 @@ impl Drop for Ctrl {
 }
 
 fn resolve(host: &str, port: u16) -> Result<SocketAddr> {
+    // Away from home, through the engine's tailnet node (route.rs); the stream is UDP.
+    if let Some(a) = crate::route::dial(host, port, port == STREAM_PORT) {
+        return Ok(a);
+    }
     (host, port)
         .to_socket_addrs()
         .with_context(|| format!("resolving {host}"))?
@@ -618,7 +631,7 @@ fn ctrl_msg(kind: u16) -> [u8; 8] {
     h
 }
 
-fn launch_spec(cfg: &StreamConfig, handshake_key: &[u8; HANDSHAKE_KEY_SIZE]) -> String {
+fn launch_spec(cfg: &StreamConfig, handshake_key: &[u8; HANDSHAKE_KEY_SIZE], mtu: u32) -> String {
     let codec = if cfg.codec.is_hevc() { "hevc" } else { "avc" };
     let range = if cfg.codec == Codec::H265Hdr {
         "HDR"
@@ -640,7 +653,7 @@ fn launch_spec(cfg: &StreamConfig, handshake_key: &[u8; HANDSHAKE_KEY_SIZE]) -> 
         h = cfg.height,
         fps = cfg.fps,
         bw = cfg.bitrate_kbps,
-        mtu = MTU,
+        mtu = mtu,
         rtt = RTT_MS,
         hk = b64(handshake_key),
     )
@@ -711,24 +724,38 @@ pub trait StreamSink {
     }
 }
 
-/// Records the console's hold-off when a session ends, however it ends.
+/// Records how a session ended (and the console's hold-off after it), however it ends.
 struct ReleaseHold {
     host: String,
-    clean: std::cell::Cell<bool>,
+    /// Dropped until the session says otherwise.
+    end: std::cell::RefCell<guard::SessionEnd>,
+}
+
+impl ReleaseHold {
+    fn ended(&self, end: guard::SessionEnd) {
+        *self.end.borrow_mut() = end;
+    }
 }
 
 impl Drop for ReleaseHold {
     fn drop(&mut self) {
-        guard::hold_off(
-            &self.host,
-            if self.clean.get() {
-                guard::RELEASE_AFTER_CLEAN_STOP
-            } else {
-                guard::RELEASE_AFTER_DROP
-            },
-        );
+        guard::session_ended(&self.host, self.end.get_mut().clone());
     }
 }
+
+/// How a stream we closed with a goodbye ended: the PS5's own DISCONNECT (its reason), or ctrl
+/// the PS5 closed, or else us (a stop, or an error on our side).
+fn clean_end(console_reason: Option<&str>, result: &Result<()>) -> guard::SessionEnd {
+    match (console_reason, result) {
+        (Some(r), _) => guard::SessionEnd::ByConsole(r.to_string()),
+        (None, Err(e)) if format!("{e:#}").contains(CTRL_CLOSED_BY_CONSOLE) => {
+            guard::SessionEnd::ByConsole(CTRL_CLOSED_BY_CONSOLE.to_string())
+        }
+        (None, _) => guard::SessionEnd::Stopped,
+    }
+}
+
+const CTRL_CLOSED_BY_CONSOLE: &str = "the console closed the Remote Play control connection";
 
 /// Puts video packets back in order (chiaki-ng's video reorder queue): a
 /// missing packet is waited for up to 16 ms (about a frame), then skipped.
@@ -793,6 +820,9 @@ pub struct StreamReport {
     pub av_packets: u64,
     pub av_bad_mac: u64,
     pub audio_frames: u64,
+    /// Audio packets in a format other than Opus, and whether the stream info had a header.
+    pub audio_other_codec: u64,
+    pub audio_header: bool,
     pub av_dropped_on_purpose: u64,
     /// Units the congestion reports covered, lost as seen, and lost as reported.
     pub units_seen: u64,
@@ -800,6 +830,9 @@ pub struct StreamReport {
     pub loss_reported: u64,
     pub bytes_received: u64,
     pub disconnect_reason: Option<String>,
+    /// After our stop: how long the console took to acknowledge our DISCONNECT, or None when
+    /// it never did (or the stream ended another way).
+    pub disconnect_acked_ms: Option<u64>,
     /// Our DATA chunks sent again because the console had not acknowledged them, and given up on.
     pub data_resent: u64,
     pub data_given_up: u64,
@@ -813,6 +846,8 @@ pub struct StreamReport {
 const SILENCE_LIMIT: Duration = Duration::from_secs(15);
 /// After ctrl closes, this long for the console's DISCONNECT (and its reason) to arrive.
 const CTRL_GONE_GRACE: Duration = Duration::from_secs(3);
+/// After our DISCONNECT, this long for the console to acknowledge it (resent meanwhile).
+const DISCONNECT_WAIT: Duration = Duration::from_secs(1);
 
 /// Open a stream and run it into `sink` (video, audio, status; pad input back)
 /// until the sink stops, `max` time passes, or the console disconnects.
@@ -851,13 +886,19 @@ pub fn run_stream(
             guard::hold_off(host, guard::IN_USE_BACKOFF);
             return Err(guard::NotReady::InUse(guard::IN_USE_BACKOFF).into());
         }
+        // Closed with no answer: the slot is still held. Asked again only after a wait that
+        // grows with each closed answer in a row (a knock may itself keep the slot taken).
+        Err(e) if format!("{e:#}").contains(crate::rp_session::SESSION_INIT_CLOSED) => {
+            return Err(guard::closed_answer(host).into());
+        }
         Err(e) => return Err(e),
     };
+    guard::slot_answered(host);
     // From here the console holds a slot for us: whatever happens next, do
     // not ask again until it has had time to let go.
     let _release = ReleaseHold {
         host: host.to_string(),
-        clean: std::cell::Cell::new(false),
+        end: std::cell::RefCell::new(guard::SessionEnd::Dropped),
     };
     sink.progress(Progress::Nonce);
     // Take the nonce once, then retry only the ctrl connection while the console
@@ -920,6 +961,17 @@ pub fn run_stream(
     }
 
     let mut takion = Takion::connect(resolve(host, STREAM_PORT)?)?;
+    // Through the tailnet the address is a 127.0.0.1 mapping, which looks like one network to
+    // path_mtu; the tunnel underneath carries 1280-byte packets, so the routed size.
+    if crate::route::via(host) != crate::route::Via::Lan && takion.mtu > takion::MTU_ROUTED {
+        takion.mtu = takion::MTU_ROUTED;
+        crate::clog!(
+            Info,
+            "rp",
+            "rp_stream: packet size {} (through the tailnet)",
+            takion.mtu
+        );
+    }
     crate::core_debug!("rp stream: {host}: takion connected (ctrl took {attempt} attempt(s))");
     sink.progress(Progress::TakionConnected);
 
@@ -930,7 +982,7 @@ pub fn run_stream(
 
     // The launch spec is XORed with the ctrl cipher's keystream at counter 0
     // (chiaki encrypts zeros, then XORs), NUL terminator included.
-    let mut spec = launch_spec(&cfg, &handshake_key).into_bytes();
+    let mut spec = launch_spec(&cfg, &handshake_key, takion.mtu).into_bytes();
     spec.push(0);
     let ks = auth_encrypt(&brt, &amb, 0, &vec![0u8; spec.len()]);
     for (b, k) in spec.iter_mut().zip(ks) {
@@ -954,9 +1006,11 @@ pub fn run_stream(
     while stream_info.is_none() {
         if sink.stopped() {
             // As a stop during the stream: DISCONNECT over Takion, then ctrl closes.
-            takion.close();
+            report.disconnect_acked_ms = takion
+                .close_and_wait(DISCONNECT_WAIT)
+                .map(|d| d.as_millis() as u64);
             drop(ctrl);
-            _release.clean.set(true);
+            _release.ended(guard::SessionEnd::Stopped);
             return Ok(report);
         }
         if Instant::now() > deadline {
@@ -1020,7 +1074,11 @@ pub fn run_stream(
     }
     let mut mic_sender = mic::AudioSender::new();
     let (mut mic_connected, mut mic_live) = (false, false);
-    if !si.audio_header.is_empty() {
+    // Without a header the player never sets up its decoder, and every frame after is dropped
+    // with no word: if Opus frames come anyway, the standard header is sent before the first.
+    let mut audio_header_sent = AudioHeader::parse(&si.audio_header).is_some();
+    let audio_header_from_console = audio_header_sent;
+    if audio_header_sent {
         sink.audio(&si.audio_header, true);
     }
     let mut audio = AudioAssembler::default();
@@ -1058,9 +1116,7 @@ pub fn run_stream(
         if ctrl.ended() {
             let since = *ctrl_gone.get_or_insert_with(Instant::now);
             if since.elapsed() > CTRL_GONE_GRACE {
-                break Err(anyhow!(
-                    "the console closed the Remote Play control connection"
-                ));
+                break Err(anyhow!(CTRL_CLOSED_BY_CONSOLE));
             }
         }
         if last_heartbeat.elapsed() >= Duration::from_secs(1) {
@@ -1152,6 +1208,10 @@ pub fn run_stream(
                 units: std::mem::take(&mut second_units),
                 units_lost: std::mem::take(&mut second_units_lost),
                 console_rtt_ms: takion.rtt().map(|d| d.as_secs_f64() * 1000.0),
+                audio_frames_total: audio.frames,
+                audio_other_codec: audio.other_codec,
+                audio_last_other_codec: audio.last_other_codec,
+                audio_header: audio_header_from_console,
                 quality,
             }));
             stats_prev = now;
@@ -1176,8 +1236,11 @@ pub fn run_stream(
                 lost.min(u16::MAX as u64) as u16,
             )?;
         }
-        if sink.wants_keyframe()
-            && last_idr.is_none_or(|t: Instant| t.elapsed() > Duration::from_millis(500))
+        // The gate first: asked inside it, the ask waits for it. Taken first (the sink forgets an
+        // ask it has given), an ask within 500 ms of the last IDR was lost, and a Play Together
+        // guest that had just skipped to a keyframe waited seconds for its next ask.
+        if last_idr.is_none_or(|t: Instant| t.elapsed() > Duration::from_millis(500))
+            && sink.wants_keyframe()
         {
             last_idr = Some(Instant::now());
             takion.send_message(2, &proto::bare(proto::kind::IDRREQUEST))?;
@@ -1274,7 +1337,12 @@ pub fn run_stream(
                 }
             }
             Event::Av(p) => {
-                for (idx, frame) in audio.push(&p) {
+                let frames = audio.push(&p);
+                if !audio_header_sent && !frames.is_empty() {
+                    audio_header_sent = true;
+                    sink.audio(&AudioHeader::default_bytes(), true);
+                }
+                for (idx, frame) in frames {
                     let mut f = Vec::with_capacity(2 + frame.len());
                     f.extend_from_slice(&idx.to_be_bytes());
                     f.extend_from_slice(&frame);
@@ -1285,14 +1353,29 @@ pub fn run_stream(
             }
         }
     };
-    // Clean stop, in chiaki's order: DISCONNECT over Takion, then close ctrl.
-    takion.close();
+    // Clean stop, in chiaki's order: DISCONNECT over Takion, then close ctrl. Ctrl stays open
+    // until the console has the DISCONNECT (or a second passes): closing both at once left the
+    // goodbye unsent again if lost and unconfirmed either way. A PS5 on FW 13.00 held its one
+    // slot for minutes after such a stop (#720); `bye_acked_ms` in the log now says whether the
+    // console had the goodbye.
+    report.disconnect_acked_ms = takion
+        .close_and_wait(DISCONNECT_WAIT)
+        .map(|d| d.as_millis() as u64);
+    crate::core_debug!(
+        "rp stream: {host}: the console {} our DISCONNECT",
+        match report.disconnect_acked_ms {
+            Some(ms) => format!("took ({ms} ms)"),
+            None => "never confirmed".to_string(),
+        }
+    );
     drop(ctrl);
-    _release.clean.set(true);
+    _release.ended(clean_end(report.disconnect_reason.as_deref(), &result));
     report.video = assembler.stats;
     report.av_packets = takion.av_received;
     report.av_bad_mac = takion.av_bad_mac;
     report.audio_frames = audio.frames;
+    report.audio_other_codec = audio.other_codec;
+    report.audio_header = audio_header_from_console;
     report.av_dropped_on_purpose = takion.av_dropped_on_purpose;
     report.bytes_received = takion.bytes_received;
     report.data_resent = takion.data_resent;
@@ -1344,8 +1427,27 @@ mod tests {
     }
 
     #[test]
+    fn a_session_the_ps5_ended_is_told_from_our_stop() {
+        // #769: a controller at the console took over, and the PS5 said "Server shutting down".
+        assert_eq!(
+            clean_end(Some("Server shutting down"), &Ok(())),
+            guard::SessionEnd::ByConsole("Server shutting down".into())
+        );
+        assert_eq!(
+            clean_end(None, &Err(anyhow!(CTRL_CLOSED_BY_CONSOLE))),
+            guard::SessionEnd::ByConsole(CTRL_CLOSED_BY_CONSOLE.into())
+        );
+        assert_eq!(clean_end(None, &Ok(())), guard::SessionEnd::Stopped);
+        // An error on our side still went out with a goodbye.
+        assert_eq!(
+            clean_end(None, &Err(anyhow!("the console stopped sending"))),
+            guard::SessionEnd::Stopped
+        );
+    }
+
+    #[test]
     fn launch_spec_is_valid_json() {
-        let s = launch_spec(&StreamConfig::default(), &[0u8; 16]);
+        let s = launch_spec(&StreamConfig::default(), &[0u8; 16], MTU);
         let v: serde_json::Value = serde_json::from_str(&s).unwrap();
         assert_eq!(v["videoCodec"], "avc");
         assert_eq!(v["network"]["mtu"], 1454);
@@ -1361,7 +1463,7 @@ mod tests {
                 codec,
                 ..Default::default()
             };
-            serde_json::from_str::<serde_json::Value>(&launch_spec(&cfg, &[0u8; 16])).unwrap()
+            serde_json::from_str::<serde_json::Value>(&launch_spec(&cfg, &[0u8; 16], MTU)).unwrap()
         };
         let hdr = spec(Codec::H265Hdr);
         assert_eq!(hdr["videoCodec"], "hevc");
@@ -1402,8 +1504,8 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            launch_spec(&on, &[0u8; 16]),
-            launch_spec(&StreamConfig::default(), &[0u8; 16])
+            launch_spec(&on, &[0u8; 16], MTU),
+            launch_spec(&StreamConfig::default(), &[0u8; 16], MTU)
         );
         assert!(!StreamConfig::default().mic);
         assert!(!StreamConfig::default().dualsense);
@@ -1426,8 +1528,8 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(
-            launch_spec(&on, &[0u8; 16]),
-            launch_spec(&StreamConfig::default(), &[0u8; 16])
+            launch_spec(&on, &[0u8; 16], MTU),
+            launch_spec(&StreamConfig::default(), &[0u8; 16], MTU)
         );
     }
 

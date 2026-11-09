@@ -4,6 +4,13 @@
 # dependency and secret scan that does gate PRs is the `security scan` job in engine-ci.yml.
 #
 # The payload's C is not analysed here: it builds only with the PS5 Payload SDK.
+#
+# Off the critical path: neither `PR gate` (engine-ci.yml) nor release-tag.yml waits for this
+# workflow, and it must not be made a required check (a PR that touches none of the paths below
+# never gets one, and a merge-queue entry never runs it). It runs on every push to main, weekly,
+# and on a pull request only when it changes code in one of the four languages analysed here; a
+# PR of docs, templates or the website has nothing for it to read. Results still upload to the
+# Security tab, and open alerts still stop scripts/release.sh.
 name: codeql
 
 # This fork: by hand only (see CLAUDE.md).
@@ -33,13 +40,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           submodules: true
-      - uses: github/codeql-action/init@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4
+      - uses: github/codeql-action/init@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4
         with:
           languages: ${{ matrix.language }}
           build-mode: none
           queries: security-extended
           config-file: ./.github/codeql/codeql-config.yml
-      - uses: github/codeql-action/analyze@9b3254085494b55a0f7c4c2b3d2d52cc712ce370 # v4
+      - uses: github/codeql-action/analyze@1fc58d04a4d4374f921bdac573c3811c240f9c26 # v4
         with:
           category: /language:${{ matrix.language }}
 

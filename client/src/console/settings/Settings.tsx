@@ -18,6 +18,8 @@ import {
 } from "../theme";
 import { ConfirmDialog } from "../ui/ConfirmDialog";
 import { forgetPhoneUrl } from "../ui/PhoneHandoff";
+import { TailscaleSection } from "./Tailscale";
+import { DevicesSection } from "./Devices";
 
 /** /api/settings (payload/src/webui_api.c send_settings). */
 export interface WebSettings {
@@ -30,6 +32,9 @@ export interface WebSettings {
   /** What the helper last did to the tile: "added", "removed", "hidden" (the PS5 kept its record,
    *  so the icon was hidden instead), "failed" or "" (#480; older helpers send none). */
   tile_result?: string;
+  /** Why the last add/remove failed, a short code ("not_listed", "register_install_api_error", …);
+   *  "" when it did not. Helpers from 11.6.1. */
+  tile_error?: string;
   /** PS5Upload Minion as a whole (#480); older helpers send none and cannot turn it off. */
   enabled?: boolean;
   /** The page opens on Cheats instead of Home (#584); older helpers send none (Home). */
@@ -48,8 +53,21 @@ export function canTurnOff(s: WebSettings | null): boolean {
   return typeof s?.enabled === "boolean";
 }
 
-/** The note under the tile switch: says when removing the tile could only hide its icon. */
+/** The helper's short code for a failed add or remove of the tile (webui_tile.c, register.c), in
+ *  words: a code like "not_listed" means nothing to whoever reads the note. */
+export function tileWhy(code: string): string {
+  if (code === "not_listed") return t("cw_tile_why_not_listed");
+  if (code === "write_failed") return t("cw_tile_why_write_failed");
+  if (code === "removal_incomplete") return t("cw_tile_why_removal");
+  if (code.startsWith("register_")) return t("cw_tile_why_register");
+  return t("cw_tile_why_other");
+}
+
+/** The note under the tile switch: says why the tile is missing when adding it failed (also at
+ *  helper start, before anyone touched the switch), or when removing it could only hide its icon. */
 export function tileNote(s: WebSettings): string | undefined {
+  if (s.tile && !s.tile_busy && s.tile_failed && s.tile_error)
+    return t("cw_settings_tile_failed_reason", { reason: tileWhy(s.tile_error) });
   if (s.tile || s.tile_busy || s.tile_failed || s.tile_result !== "hidden") return undefined;
   return t("cw_settings_tile_hidden");
 }
@@ -95,6 +113,8 @@ export function settingsErrorText(err: unknown): string | null {
 }
 
 export interface SettingsViewProps {
+  /** Tests: leave out the Tailscale section (it reads the helper itself). */
+  noTailscale?: boolean;
   /** null until the first answer. */
   settings: WebSettings | null;
   loadFailed: boolean;
@@ -197,7 +217,7 @@ function ActionRow({ setting, label, note, onClick }: { setting: string; label: 
 /**
  * Settings without state: everything comes in through props (tests render it directly).
  * Order: Theme · Language · Full screen · Controls · Show tips again · Allow other devices ·
- * Show PS5Upload Minion on the home screen · Turn off PS5Upload Minion · About (each row carries
+ * Show PS5Upload Minion on the home screen · Turn off PS5Upload Minion · Tailscale · About (each row carries
  * data-setting).
  */
 export function SettingsView(p: SettingsViewProps) {
@@ -371,6 +391,10 @@ export function SettingsView(p: SettingsViewProps) {
           <p className="cw-dim">{t("cw_home_loading")}</p>
         )}
       </section>
+
+      {p.turnedOff || p.noTailscale ? null : <TailscaleSection />}
+
+      {p.turnedOff ? null : <DevicesSection />}
 
       <section className="cw-home-section" data-setting="about">
         <h2 className="cw-h2">{t("cw_settings_about")}</h2>

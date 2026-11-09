@@ -15,7 +15,7 @@
 
 const REPO = "phantomptr/ps5upload";
 const API = `https://api.github.com/repos/${REPO}/releases?per_page=12`;
-const NEWS_COUNT = 4;
+const NEWS_COUNT = 2;
 
 // ── Language ───────────────────────────────────────────────────────────────
 
@@ -123,6 +123,10 @@ function applyTheme(theme) {
   document.querySelectorAll("img[data-theme-img]").forEach((img) => {
     img.src = `${dir}${img.dataset.themeImg}-${dark ? "dark" : "light"}.webp`;
   });
+  // A screen that looks the same in light and dark (a friend's dark join page): one picture.
+  document.querySelectorAll("img[data-lang-img]").forEach((img) => {
+    img.src = `${dir}${img.dataset.langImg}.webp`;
+  });
 }
 applyTheme(store.get("ps5upload.site.theme"));
 document.getElementById("theme").addEventListener("click", () => {
@@ -131,6 +135,25 @@ document.getElementById("theme").addEventListener("click", () => {
   store.set("ps5upload.site.theme", next);
   applyTheme(next);
 });
+
+// ── Everything it does ─────────────────────────────────────────────────────
+
+// Closed (a list of groups to pick from, keeping the page short); "Open all" opens every one.
+const allGroups = [...document.querySelectorAll(".all-group")];
+for (const d of allGroups) d.open = false;
+document.getElementById("all-open")?.addEventListener("click", () => allGroups.forEach((d) => (d.open = true)));
+document.getElementById("all-close")?.addEventListener("click", () => allGroups.forEach((d) => (d.open = false)));
+// A link to something folded away (#all-saves, #keyboard-mouse) opens what holds it.
+const openGroup = () => {
+  // No hash: "" is not an element (`"" && …` stays "", and "".classList is undefined).
+  const el = location.hash ? document.getElementById(location.hash.slice(1)) : null;
+  if (!el) return;
+  if (el.classList.contains("all-group")) el.open = true;
+  for (let d = el.parentElement?.closest("details"); d; d = d.parentElement?.closest("details")) d.open = true;
+  if (el.closest(".fold")) el.scrollIntoView();
+};
+window.addEventListener("hashchange", openGroup);
+openGroup();
 
 // ── Copy buttons ───────────────────────────────────────────────────────────
 

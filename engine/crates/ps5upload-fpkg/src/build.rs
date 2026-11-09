@@ -288,7 +288,11 @@ fn build_mode(
     mode: Mode,
 ) -> Result<BuildReport> {
     enter(control, Stage::Check);
-    let mut tree = source::open(&request.source)?;
+    // An unsigned executable would install and then never start: it goes in fake-signed.
+    let (mut tree, signing) = crate::fself::wrap(source::open(&request.source)?);
+    if let Some(line) = signing.describe() {
+        progress(&line);
+    }
     let mut files: Vec<SourceFile> = tree.files().to_vec();
     if files.is_empty() {
         return format_err(format!("{} has no files", tree.describe()));
@@ -489,13 +493,33 @@ fn build_mode(
     // A libSceAmpr title looks its files up through `ampr_emu.index` at the image root (see
     // `ampr_index`), and `ampr_emu` trusts its sizes. It is always generated from exactly the
     // files packaged: a dump's own copy lists the folder as it was, before the param.json
-    // rewrite, executable repairs, left-out files and the icons the container carries.
+    // rewrite, executable repairs, left-out files and the icons the container carries. An
+    // LZ4-packed source's is the exception (`source::lz4_packed`): it goes in byte for byte.
     let mut generated: std::collections::HashMap<String, Vec<u8>> =
         std::collections::HashMap::new();
     let dump_index = files
         .iter()
         .any(|f| f.path.eq_ignore_ascii_case(AMPR_INDEX));
-    if dump_index || source::imports_ampr(tree.as_mut(), "eboot.bin") {
+    if source::lz4_packed(tree.as_mut())? {
+        let at = files
+            .iter()
+            .find(|f| f.path.eq_ignore_ascii_case(AMPR_INDEX))
+            .map(|f| f.path.clone());
+        let readable = match at {
+            Some(path) => crate::ampr_index::parse(&tree.read(&path)?).is_some(),
+            None => false,
+        };
+        if !readable {
+            return format_err(format!(
+                "{} holds LZ4 packs but no readable {AMPR_INDEX}, the one list of the files \
+                 inside them, so a package can't be made from it",
+                tree.describe()
+            ));
+        }
+        progress(&format!(
+            "keeping the LZ4-packed game's {AMPR_INDEX}: it has to match the packs"
+        ));
+    } else if dump_index || source::imports_ampr(tree.as_mut(), "eboot.bin") {
         files.retain(|f| !f.path.eq_ignore_ascii_case(AMPR_INDEX));
         let mut listed: Vec<(String, u64)> =
             files.iter().map(|f| (f.path.clone(), f.size)).collect();
@@ -996,6 +1020,59 @@ pub fn package_digest(path: &Path) -> Result<[u8; 32]> {
 #[cfg(test)]
 mod tests {
 
+    /// Inspect says what a PS4 package is: a game, an update with the game it goes in, an
+    /// add-on with or without files; and with an update given, the merged game.
+    #[test]
+    fn inspect_tells_ps4_kinds_apart() {
+        use crate::ps4_pkg::Ps4Kind;
+        let dir = std::env::temp_dir().join(format!("fpkg-ps4-kinds-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let put = |name: &str| {
+            let path = dir.join(format!("{name}.pkg"));
+            std::fs::write(&path, crate::ps4_pkg::tests::fixture(name)).unwrap();
+            path
+        };
+        let (game, update, addon, licence) = (
+            put("synthetic"),
+            put("update"),
+            put("addon"),
+            put("licence"),
+        );
+
+        let g = super::inspect(&game, &dir).unwrap();
+        assert_eq!(g.ps4_kind, Some(Ps4Kind::Game));
+        assert!(g.ps4_game && g.ps4_merge.is_none());
+
+        let u = super::inspect(&update, &dir).unwrap();
+        assert_eq!(u.ps4_kind, Some(Ps4Kind::Patch));
+        assert_eq!(u.ps4_title_id.as_deref(), Some("CUSA99990"));
+        assert_eq!(u.content_version.as_deref(), Some("01.05"));
+
+        let a = super::inspect(&addon, &dir).unwrap();
+        assert_eq!(a.ps4_kind, Some(Ps4Kind::Addon));
+        assert_eq!(a.ps4_addon_data, Some(true));
+        assert_eq!(a.files, 2);
+        assert!(a.ok(), "no game's checks for an add-on: {:?}", a.checks);
+        assert_eq!(
+            a.content_id.as_deref(),
+            Some("UP0000-CUSA99990_00-DLCDATA000000001")
+        );
+        assert_eq!(a.title.as_deref(), Some("Test Add-on"));
+
+        let l = super::inspect(&licence, &dir).unwrap();
+        assert_eq!(l.ps4_addon_data, Some(false));
+        assert_eq!(l.files, 0);
+        assert!(!l.ok());
+
+        let m = super::inspect_with_update(&game, Some(&update), &dir).unwrap();
+        assert_eq!(m.ps4_kind, Some(Ps4Kind::Game));
+        assert_eq!(m.content_version.as_deref(), Some("01.05"));
+        let merge = m.ps4_merge.expect("merged");
+        assert_eq!(merge.game_version, "01.00");
+        assert!(super::inspect_with_update(&update, Some(&game), &dir).is_err());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// A build's `.partial` goes on every way out but success, a panic included; kept, it stays.
     #[test]
     fn a_leftover_is_removed_unless_kept() {
@@ -1183,6 +1260,21 @@ pub struct Inspection {
     /// For a libSceAmpr title, whether an image can carry LZ4 asset packs (see
     /// [`crate::ampr_pack::image::readiness`]); `None` for any other title.
     pub ampr_packs: Option<crate::ampr_pack::image::Readiness>,
+    /// How many of its executables are plain ELF files, which a build fake-signs.
+    pub unsigned_executables: usize,
+    /// A PS4 game, update or add-on: it becomes an image or a folder, not a PS5 package.
+    pub ps4_game: bool,
+    /// The version it says it is: `contentVersion`, or a PS4 game's `APP_VER`.
+    pub content_version: Option<String>,
+    /// What a PS4 source is: `game`, `patch` (an update, which goes into its game: see
+    /// [`crate::ps4_merge`]) or `addon`. Absent for a PS5 one.
+    pub ps4_kind: Option<crate::ps4_pkg::Ps4Kind>,
+    /// The PS4 title it is or belongs to (`CUSA…`): an update's or add-on's game.
+    pub ps4_title_id: Option<String>,
+    /// An add-on: whether it holds files (`false`: a licence, nothing to convert).
+    pub ps4_addon_data: Option<bool>,
+    /// Inspected with an update merged in: what the merge is.
+    pub ps4_merge: Option<crate::ps4_merge::MergeInfo>,
 }
 
 impl Inspection {
@@ -1393,9 +1485,101 @@ pub fn estimate(source_path: &Path, output_dir: Option<&Path>) -> Result<Estimat
 
 /// Look at a source without building it: readiness, geometry, cost and room.
 pub fn inspect(source_path: &Path, output_dir: &Path) -> Result<Inspection> {
-    let mut tree = source::open(source_path)?;
+    inspect_with_update(source_path, None, output_dir)
+}
+
+/// What an add-on that is only a licence is: nothing to convert, said as a failed check.
+fn licence_only(source_path: &Path, info: &crate::ps4_pkg::Ps4Info) -> Inspection {
+    Inspection {
+        source: format!("PS4 add-on package (a licence) {}", source_path.display()),
+        files: 0,
+        bytes: 0,
+        content_id: Some(info.content_id.clone()),
+        title: info.text("TITLE"),
+        required_firmware: None,
+        planned_size: 0,
+        output_free: None,
+        checks: vec![source::Check {
+            name: "add-on data".into(),
+            ok: false,
+            detail: crate::ps4_pkg::LICENCE_ONLY.into(),
+        }],
+        ampr_packs: None,
+        unsigned_executables: 0,
+        ps4_game: true,
+        content_version: info.text("APP_VER"),
+        ps4_kind: Some(crate::ps4_pkg::Ps4Kind::Addon),
+        ps4_title_id: Some(info.title_id()),
+        ps4_addon_data: Some(false),
+        ps4_merge: None,
+    }
+}
+
+/// [`inspect`], with the PS4 update at `update` merged into the game at `source_path`
+/// ([`crate::ps4_merge`]): the merged game as an image or folder of it would hold it.
+pub fn inspect_with_update(
+    source_path: &Path,
+    update: Option<&Path>,
+    output_dir: &Path,
+) -> Result<Inspection> {
+    use crate::ps4_pkg::Ps4Kind;
+    // A PS4 package says what it is in its container, even an add-on with no files.
+    let peeked = crate::ps4_pkg::peek_path(source_path).ok().flatten();
+    if let Some(info) = &peeked {
+        if update.is_none() && info.kind == Ps4Kind::Addon && !info.has_image {
+            return Ok(licence_only(source_path, info));
+        }
+    }
+    let (mut tree, merge): (Box<dyn source::SourceTree>, _) = match update {
+        Some(update) => {
+            let merged = crate::ps4_merge::open(source_path, update)?;
+            let info = merged.info().clone();
+            (Box::new(merged), Some(info))
+        }
+        None => (source::open(source_path)?, None),
+    };
     let files: Vec<SourceFile> = tree.files().to_vec();
-    let checks = source::readiness(tree.as_mut()).checks;
+    let mut checks = source::readiness(tree.as_mut()).checks;
+    // A PS4 game: param.sfo, no param.json. What a PS5 package needs is no warning for it.
+    let has = |name: &str| files.iter().any(|f| f.path.eq_ignore_ascii_case(name));
+    let ps4_game = has("sce_sys/param.sfo") && !has("sce_sys/param.json");
+    let sfo = if ps4_game {
+        tree.read("sce_sys/param.sfo")
+            .ok()
+            .and_then(|b| ps5upload_pkg::sfo_params(&b).ok())
+            .unwrap_or_default()
+    } else {
+        // An add-on's param.sfo is in its container, not among its files.
+        peeked
+            .as_ref()
+            .map(|p| p.params.clone())
+            .unwrap_or_default()
+    };
+    let sfo_text = |key: &str| crate::ps4_pkg::sfo_text(&sfo, key);
+    let ps4_kind = match (&merge, &peeked) {
+        (Some(_), _) => Some(Ps4Kind::Game),
+        (None, Some(p)) => Some(p.kind),
+        (None, None) if ps4_game => Some(
+            Ps4Kind::of_category(&sfo_text("CATEGORY").unwrap_or_default())
+                .unwrap_or(Ps4Kind::Game),
+        ),
+        (None, None) => None,
+    };
+    let ps4_game = ps4_game || ps4_kind.is_some();
+    if ps4_kind == Some(Ps4Kind::Addon) {
+        // Its files are what the game reads at its mount point: no game's checks apply.
+        checks.retain(|c| c.name == "source");
+    }
+    if ps4_game {
+        const PS5_ONLY: [&str; 5] = [
+            "param.json present",
+            "no param.sfo",
+            "content id",
+            "icon0.png and icon0.dds present",
+            "sce_sys/about/right.sprx present",
+        ];
+        checks.retain(|c| !PS5_ONLY.contains(&c.name.as_str()));
+    }
     let param = tree.read("sce_sys/param.json").unwrap_or_default();
     let json: Option<serde_json::Value> = serde_json::from_slice(
         std::str::from_utf8(&param)
@@ -1404,23 +1588,45 @@ pub fn inspect(source_path: &Path, output_dir: &Path) -> Result<Inspection> {
             .as_bytes(),
     )
     .ok();
-    let title = json.as_ref().and_then(title_of);
+    let title = json
+        .as_ref()
+        .and_then(title_of)
+        .or_else(|| sfo_text("TITLE"));
     let required_firmware = json.as_ref().and_then(firmware_version);
+    let content_version = json
+        .as_ref()
+        .and_then(|j| j.get("contentVersion"))
+        .and_then(|v| v.as_str())
+        .map(str::to_string)
+        .or_else(|| sfo_text("APP_VER"));
     let planned_size = if files.is_empty() {
         0
     } else {
         estimate_size(&plan::build(&files)?)?
     };
+    let ps4_title_id = ps4_kind.map(|_| match &peeked {
+        Some(p) if merge.is_none() => p.title_id(),
+        _ => sfo_text("TITLE_ID").unwrap_or_default(),
+    });
     Ok(Inspection {
         source: tree.describe(),
         files: files.len(),
         bytes: files.iter().map(|f| f.size).sum(),
-        content_id: source::content_id(&param),
+        content_id: source::content_id(&param)
+            .or_else(|| sfo_text("CONTENT_ID"))
+            .or_else(|| peeked.as_ref().map(|p| p.content_id.clone())),
         title,
         required_firmware,
         planned_size,
         output_free: free_bytes(output_dir),
         checks,
         ampr_packs: crate::ampr_pack::image::readiness(tree.as_mut()),
+        unsigned_executables: crate::fself::unsigned(tree.as_mut()).len(),
+        ps4_game,
+        content_version,
+        ps4_kind,
+        ps4_title_id,
+        ps4_addon_data: (ps4_kind == Some(Ps4Kind::Addon)).then_some(true),
+        ps4_merge: merge,
     })
 }

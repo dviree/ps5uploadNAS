@@ -994,6 +994,12 @@ test-payload: payload
 	@cc -O2 -Wall -Wextra -Werror -o $(SELFTEST_DIR)/ps5upload-app-info-selftest \
 		$(PAYLOAD_DIR)/tests/app_info_selftest.c
 	@$(RUN_LIMITED) $(SELFTEST_DIR)/ps5upload-app-info-selftest
+	@echo "Running file compare self-test (host build)..."
+	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
+		-o $(SELFTEST_DIR)/ps5upload-file-compare-selftest \
+		$(PAYLOAD_DIR)/tests/file_compare_selftest.c $(PAYLOAD_DIR)/src/file_compare.c
+	@$(RUN_LIMITED) $(SELFTEST_DIR)/ps5upload-file-compare-selftest
+	@echo "✓ the save write-back sees an edit that left the copy's size and mtime as they were"
 	@echo "Running uninstall outcome self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
 		-o $(SELFTEST_DIR)/ps5upload-unregister-outcome-selftest \
@@ -1040,9 +1046,9 @@ test-payload: payload
 	@echo "Running webui offline copy lookup self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
 		-o $(SELFTEST_DIR)/ps5upload-webui-offline-selftest \
-		$(PAYLOAD_DIR)/tests/webui_offline_selftest.c $(PAYLOAD_DIR)/src/webui_offline.c
+		$(PAYLOAD_DIR)/tests/webui_offline_selftest.c $(PAYLOAD_DIR)/src/webui_offline.c $(PAYLOAD_DIR)/src/webui_http.c
 	@$(RUN_LIMITED) $(SELFTEST_DIR)/ps5upload-webui-offline-selftest
-	@echo "✓ GET /sw.js and /cache.appcache answer with their own types; nothing else matches"
+	@echo "✓ GET /sw.js and /minion.appcache answer with their own types; the old /cache.appcache is 410 Gone; an old stored page is nudged to reload once"
 	@echo "Running webui auth self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
 		-o $(SELFTEST_DIR)/ps5upload-webui-auth-selftest \
@@ -1119,7 +1125,19 @@ test-payload: payload
 		$(PAYLOAD_DIR)/tests/mesh_selftest.c $(PAYLOAD_DIR)/src/mesh.c $(PAYLOAD_DIR)/src/webui_codec.c \
 		$(AVA1_C)/gen/ava1_gen.c $(PAYLOAD_DIR)/gen/ava1_app_gen.c $(AVA1_C)/ava1_wire.c
 	@$(RUN_LIMITED) $(SELFTEST_DIR)/ps5upload-mesh-selftest
-	@echo "✓ devices connect, are listed, renamed, blocked and pruned; locks lapse; shared documents keep their revision"
+	@echo "✓ devices connect (or ask, and are allowed or declined), are listed, renamed, blocked and pruned; locks lapse; shared documents keep their revision"
+	@echo "Running the tailnet core's unit tests (host build, ASan + UBSan)..."
+	@$(MAKE) -s -C tailnet test
+	@$(MAKE) -s -C tailnet SAN=1 lib
+	@echo "Running the tailnet node self-test (host build, ASan + UBSan)..."
+	@cc -O1 -g -fsanitize=address,undefined -fno-sanitize-recover=undefined -Wall -Wextra -Werror -pthread \
+		-I$(PAYLOAD_DIR)/include -I$(AVA1_C) -I$(AVA1_C)/gen -I$(PAYLOAD_DIR)/gen -Itailnet/include \
+		-o $(SELFTEST_DIR)/ps5upload-tailnet-node-selftest \
+		$(PAYLOAD_DIR)/tests/tailnet_node_selftest.c $(PAYLOAD_DIR)/src/tailnet_node.c $(PAYLOAD_DIR)/src/webui_codec.c \
+		$(AVA1_C)/gen/ava1_gen.c $(PAYLOAD_DIR)/gen/ava1_app_gen.c $(AVA1_C)/ava1_wire.c \
+		tailnet/build/asan/libtailnet.a tailnet/build/asan/liblwip.a tailnet/build/asan/libbearssl.a
+	@$(RUN_LIMITED) $(SELFTEST_DIR)/ps5upload-tailnet-node-selftest
+	@echo "✓ tailnet: on/off/sign-out, rename, renew, the allow-list, rest/wake cycles in every state, settings on disk (no auth key stored), status JSON; core crypto, WireGuard, disco, STUN, IP"
 	@echo "Running console page tasks self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -pthread -I$(PAYLOAD_DIR)/include -I$(AVA1_C) -I$(AVA1_C)/gen -I$(PAYLOAD_DIR)/gen \
 		-o /tmp/ps5upload-console-tasks-selftest \
@@ -1127,6 +1145,12 @@ test-payload: payload
 		$(AVA1_C)/gen/ava1_gen.c $(PAYLOAD_DIR)/gen/ava1_app_gen.c $(AVA1_C)/ava1_wire.c
 	@$(RUN_LIMITED) /tmp/ps5upload-console-tasks-selftest
 	@echo "✓ the apps see what the page started, how it ended and that it was cancelled, and nothing a PC started"
+	@echo "Running helper log levels self-test (host build)..."
+	@cc -O2 -Wall -Wextra -Werror -pthread -I$(PAYLOAD_DIR)/include \
+		-o $(SELFTEST_DIR)/ps5upload-plog-selftest \
+		$(PAYLOAD_DIR)/tests/plog_selftest.c $(PAYLOAD_DIR)/src/plog.c
+	@$(RUN_LIMITED) $(SELFTEST_DIR)/ps5upload-plog-selftest
+	@echo "✓ per-category levels gate lines, a raise ends on time, bad settings change nothing"
 	@echo "Running Show on TV / Show on PC handoff self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -pthread -I$(PAYLOAD_DIR)/include -I$(AVA1_C) -I$(AVA1_C)/gen -I$(PAYLOAD_DIR)/gen \
 		-o $(SELFTEST_DIR)/ps5upload-files-handoff-selftest \
@@ -1276,6 +1300,12 @@ test-payload: payload
 		$(PAYLOAD_DIR)/tests/cleanup_rules_selftest.c
 	@$(RUN_LIMITED) $(SELFTEST_DIR)/ps5upload-cleanup-rules-selftest
 	@echo "✓ clean-up removes only its categories' paths: never the package library, saves, installed games or another drive's system folders"
+	@echo "Running attached-image mount self-test (host build)..."
+	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
+		-o $(SELFTEST_DIR)/ps5upload-image-mount-selftest \
+		$(PAYLOAD_DIR)/tests/image_mount_selftest.c
+	@$(RUN_LIMITED) $(SELFTEST_DIR)/ps5upload-image-mount-selftest
+	@echo "✓ a title's nullfs link to a disk image keeps no drive margin, so edits to the game fit its spare room"
 	@echo "Checking per-console isolation..."
 	@./scripts/check-per-console-isolation.sh
 	@echo "✓ one console's data cannot be shown under another's name"
@@ -1291,6 +1321,12 @@ test-payload: payload
 		$(PAYLOAD_DIR)/tests/mp1_clock_selftest.c
 	@$(RUN_LIMITED) $(SELFTEST_DIR)/ps5upload-mp1-clock-selftest
 	@echo "✓ clock reads are bounded, cached for 2 s, stop for good after one refusal (not a busy moment), and never change a clock"
+	@echo "Running game frame count (/dev/dce) self-test (host build)..."
+	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
+		-o $(SELFTEST_DIR)/ps5upload-game-fps-selftest \
+		$(PAYLOAD_DIR)/tests/game_fps_selftest.c
+	@$(RUN_LIMITED) $(SELFTEST_DIR)/ps5upload-game-fps-selftest
+	@echo "✓ the frame count is read from what the kernel wrote, \"no game\" is an answer, a failure reopens the device, and the reply keys are the engine's"
 	@echo "Running measured CPU clock self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
 		-o $(SELFTEST_DIR)/ps5upload-cpu-measure-selftest \
@@ -1326,6 +1362,16 @@ test-payload: payload
 		$(PAYLOAD_DIR)/tests/wake_watchdog_selftest.c
 	@$(RUN_LIMITED) $(SELFTEST_DIR)/ps5upload-wake-watchdog-selftest
 	@echo "✓ only a ucred that really changed is written again: a clock jump or a throttled thread never is"
+	@echo "Running power-phase self-test (host build)..."
+	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
+		-o $(SELFTEST_DIR)/ps5upload-power-phase-selftest \
+		$(PAYLOAD_DIR)/tests/power_phase_selftest.c
+	@$(RUN_LIMITED) $(SELFTEST_DIR)/ps5upload-power-phase-selftest
+	@cc -O2 -Wall -Wextra -Werror -pthread -I$(PAYLOAD_DIR)/include \
+		-o $(SELFTEST_DIR)/ps5upload-power-phase-live-selftest \
+		$(PAYLOAD_DIR)/tests/power_phase_live_selftest.c $(PAYLOAD_DIR)/src/power_phase.c
+	@$(RUN_LIMITED) $(SELFTEST_DIR)/ps5upload-power-phase-live-selftest
+	@echo "✓ going to rest and the minute after a wake: no fan or kernel work, tailnet without sockets until the network is back"
 	@echo "Running process-identity self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
 		-o $(SELFTEST_DIR)/ps5upload-proc-identity-selftest \

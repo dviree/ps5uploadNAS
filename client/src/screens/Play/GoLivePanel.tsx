@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Check, Copy, Download, ExternalLink, Plus, Radio, Trash2, X } from "lucide-react";
 
 import { Button, Callout, Input, ProgressBar, Toggle } from "../../components";
@@ -37,10 +37,21 @@ type Tr = ReturnType<typeof useTr>;
 
 export { presetName, problemText };
 
-/** The Stream button and panel are for computers: the desktop app and the web UI (where Go
- *  live runs on the engine's computer). The phone apps have no streaming pipeline in 11.0.0. */
-export function goLiveAvailable(p: { mobile: boolean }): boolean {
-  return !p.mobile;
+/** Go live runs in the engine: with ffmpeg on a computer (the desktop app, and the web UI on any
+ *  device, a phone's Safari included, #731), and in the phone apps by the app's own engine with
+ *  the phone's sound converter, no ffmpeg (#763). The status says when a phone can't. */
+export function goLiveAvailable(_p: { tauri: boolean; mobile: boolean }): boolean {
+  return true;
+}
+
+/** The engine needs ffmpeg for this status (not when it streams by itself). */
+export function needsFfmpeg(status: Pick<StreamStatus, "pipeline">): boolean {
+  return (status.pipeline ?? "ffmpeg") === "ffmpeg";
+}
+
+/** The phone app (Tauri on Android/iOS): its engine always runs inside it, on the phone. */
+export function inAppPhoneEngine(p: { tauri: boolean; mobile: boolean }): boolean {
+  return p.tauri && p.mobile;
 }
 
 /** The OBS feed answers only on the engine's own computer, so it is offered where OBS can be
@@ -326,6 +337,7 @@ function DestinationRow({ d, disabled }: { d: LiveDestination; disabled: boolean
       <div className="flex items-center gap-2">
         <input
           type="checkbox"
+          className="h-5 w-5 shrink-0 sm:h-auto sm:w-auto"
           checked={d.enabled}
           disabled={disabled}
           onChange={(e) => void setEnabled(d.id, e.target.checked)}
@@ -347,7 +359,7 @@ function DestinationRow({ d, disabled }: { d: LiveDestination; disabled: boolean
           disabled={disabled}
           onClick={() => void remove(d.id)}
           aria-label={tr("golive_remove", { name: d.label }, `Remove ${d.label}`)}
-          className="rounded p-1 hover:bg-[var(--color-surface-3)] disabled:opacity-40"
+          className="flex h-10 w-10 shrink-0 items-center justify-center rounded hover:bg-[var(--color-surface-3)] disabled:opacity-40 sm:h-7 sm:w-7"
           data-testid="golive-dest-remove"
         >
           <Trash2 size={14} />
@@ -359,9 +371,10 @@ function DestinationRow({ d, disabled }: { d: LiveDestination; disabled: boolean
         </p>
       )}
       {d.preset === "twitch" && (
-        <label className="flex items-center gap-2 ps-6 text-xs">
+        <label className="flex min-h-10 items-center gap-2 ps-6 text-xs sm:min-h-0">
           <input
             type="checkbox"
+            className="h-5 w-5 shrink-0 sm:h-auto sm:w-auto"
             checked={d.bandwidth_test}
             disabled={disabled}
             onChange={(e) => void setTest(d.id, e.target.checked)}
@@ -517,6 +530,7 @@ function GoLiveTab({ status }: { status: StreamStatus }) {
   const chosen = status.destinations.filter((d) => d.enabled);
   const fix = useMemo(() => playFix(status.session, chosen), [status.session, chosen]);
   const blocked = chosen.some((d) => (d.checks ?? []).some((c) => c.blocking));
+  const ready = status.pipeline === "native" || (needsFfmpeg(status) && status.ffmpeg.installed);
   const needMbps = (uploadNeededKbps(status.session, chosen.length) / 1000).toFixed(1);
 
   if (isLive(run) && run) return <LiveView run={run} />;
@@ -533,7 +547,24 @@ function GoLiveTab({ status }: { status: StreamStatus }) {
           </Callout>
         </div>
       )}
-      {!status.ffmpeg.installed && <FfmpegPrompt status={status} />}
+      {status.pipeline === "none" && (
+        <div data-testid="golive-native-unavailable">
+          <Callout
+            tone="warn"
+            title={tr("golive_native_unavailable", undefined, "This device can't convert the sound for streaming sites, so going live isn't available here.")}
+          />
+        </div>
+      )}
+      {status.pipeline === "native" && isMobile() && (
+        <p className="text-xs text-[var(--color-muted)]" data-testid="golive-phone-note">
+          {tr(
+            "golive_phone_keep_open",
+            undefined,
+            "The phone sends the stream itself. Keep PS5Upload open on screen while you're live: the stream stops if the app goes to the background or the phone locks.",
+          )}
+        </p>
+      )}
+      {needsFfmpeg(status) && !status.ffmpeg.installed && <FfmpegPrompt status={status} />}
       {lastFailed?.error && (
         <div data-testid="golive-failed">
           <Callout tone="error" title={tr("golive_stopped", undefined, "The stream stopped")}>
@@ -569,7 +600,7 @@ function GoLiveTab({ status }: { status: StreamStatus }) {
             <button
               key={p}
               type="button"
-              className="chip inline-flex min-h-8 items-center gap-1.5 px-3 text-xs"
+              className="chip inline-flex min-h-10 items-center gap-1.5 px-3 text-xs sm:min-h-8"
               onClick={() => {
                 clearError();
                 setAdding(p);
@@ -633,7 +664,7 @@ function GoLiveTab({ status }: { status: StreamStatus }) {
             variant="danger"
             size="md"
             leftIcon={<Radio size={15} />}
-            disabled={busy || !chosen.length || !status.ffmpeg.installed || blocked || !status.session}
+            disabled={busy || !chosen.length || !ready || blocked || !status.session}
             onClick={() => void start()}
             data-testid="golive-start"
           >
@@ -766,9 +797,16 @@ export function GoLivePanel({ onClose }: { onClose: () => void }) {
   const obs = obsFeedAvailable({ mobile: isMobile(), engineUrl: getEngineUrl() });
   const hasStream = useRemotePlayStore((s) => !!s.stream);
   const [tab, setTab] = useState<"live" | "obs">("live");
+  // On a phone the panel opens from the menu under the picture, out of sight: bring it in.
+  const box = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (typeof window !== "undefined" && window.matchMedia?.("(max-width: 639px)").matches)
+      box.current?.scrollIntoView?.({ block: "start", behavior: "smooth" });
+  }, []);
   return (
     <div
-      className="space-y-3 rounded-[var(--radius-card)] border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-4"
+      ref={box}
+      className="min-w-0 max-w-full space-y-3 break-words rounded-[var(--radius-card)] border border-[var(--color-border)] bg-[var(--color-surface-raised)] p-3 sm:p-4"
       data-testid="golive-panel"
     >
       <div className="flex items-center gap-2">
@@ -778,7 +816,7 @@ export function GoLivePanel({ onClose }: { onClose: () => void }) {
           type="button"
           onClick={onClose}
           aria-label={tr("golive_close", undefined, "Close")}
-          className="rounded p-1 hover:bg-[var(--color-surface-3)]"
+          className="flex h-10 w-10 shrink-0 items-center justify-center rounded hover:bg-[var(--color-surface-3)] sm:h-7 sm:w-7"
         >
           <X size={16} />
         </button>
@@ -800,7 +838,7 @@ export function GoLivePanel({ onClose }: { onClose: () => void }) {
               type="button"
               aria-pressed={tab === t}
               onClick={() => setTab(t)}
-              className="chip min-h-8 px-3 text-xs"
+              className="chip min-h-10 px-3 text-xs sm:min-h-8"
               data-testid={`golive-tab-${t}`}
             >
               {t === "live" ? tr("golive_tab_live", undefined, "Go live") : "OBS"}

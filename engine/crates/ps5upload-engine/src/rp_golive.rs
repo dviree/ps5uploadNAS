@@ -27,6 +27,11 @@
 //!   `key` keeps it), `DELETE /api/stream/destinations/{id}`. Keys are never returned
 //!   (golive_dest.rs).
 //! * `POST /api/stream/tools/ffmpeg/install`: download ffmpeg (progress in the status).
+//!
+//! Without ffmpeg (#763, golive_native/): the phone apps can't run ffmpeg, so their engine
+//! publishes itself, the video as it came and the sound through the device's own AAC encoder.
+//! The status says which (`pipeline`: "ffmpeg", "native", or "none" on a phone without the
+//! codecs); a computer uses ffmpeg unless `PS5UPLOAD_GOLIVE=native`.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -45,6 +50,9 @@ use crate::ffmpeg_tool::{self, FfmpegCmd};
 use crate::golive_dest::{self, Preset};
 use crate::golive_ffmpeg::{self as gf, Backoff, Failure, Next, Output, Progress};
 use crate::rp_stream_api::live_feed::{self, SessionInfo};
+
+#[path = "golive_native/mod.rs"]
+mod native;
 
 /// How long Go live waits for Remote Play to start again after it ended.
 const WAIT_FOR_PLAY: Duration = Duration::from_secs(120);
@@ -151,13 +159,43 @@ struct RunState {
     ended_at: Option<Instant>,
 }
 
+/// What a run streams with.
+#[derive(Clone)]
+pub(crate) enum Pipeline {
+    Ffmpeg(FfmpegCmd),
+    /// The engine itself, with the device's sound converters (golive_native/).
+    Native(Arc<dyn native::audio::AudioCodecs>),
+}
+
+impl From<FfmpegCmd> for Pipeline {
+    fn from(f: FfmpegCmd) -> Self {
+        Pipeline::Ffmpeg(f)
+    }
+}
+
+/// What this engine streams with: "ffmpeg", "native", or "none" (a phone without the codecs).
+fn pipeline_mode() -> (&'static str, Option<Arc<dyn native::audio::AudioCodecs>>) {
+    #[cfg(test)]
+    if let Some(c) = tests::native_override() {
+        return ("native", Some(c));
+    }
+    if !native::wanted() {
+        return ("ffmpeg", None);
+    }
+    match native::audio::available() {
+        Some(c) => ("native", Some(c)),
+        None if cfg!(any(target_os = "android", target_os = "ios")) => ("none", None),
+        None => ("ffmpeg", None),
+    }
+}
+
 pub(crate) struct Run {
     started: Instant,
     stop: AtomicBool,
     wake: tokio::sync::Notify,
     audio_kbps: u32,
     dests: Vec<Dest>,
-    ffmpeg: FfmpegCmd,
+    pipeline: Pipeline,
     timing: Timing,
     st: Mutex<RunState>,
     sent: AtomicU64,
@@ -239,7 +277,13 @@ impl Run {
     }
 
     fn fail(&self, p: Problem) {
-        crate::log_warn!("golive: stopped: {} ({})", p.message, p.code);
+        crate::log_at!(
+            Warn,
+            "golive",
+            "golive: stopped: {} ({})",
+            p.message,
+            p.code
+        );
         self.set(|s| {
             s.phase = "failed";
             s.error = Some(p);
@@ -330,6 +374,7 @@ pub(crate) fn diag_summary() -> serde_json::Value {
     });
     serde_json::json!({
         "ffmpeg": ffmpeg_tool::status_json().get("installed").cloned(),
+        "pipeline": pipeline_mode().0,
         "destinations": destinations,
         "store_error": store_error,
         "run": run,
@@ -345,21 +390,28 @@ struct Exit {
     session_ended: bool,
     rejoin: bool,
     spawn_error: Option<String>,
+    /// Ends the run with this (the native pipeline's sound converter failing).
+    fatal: Option<Problem>,
 }
 
 /// Starts a run, unless one is still going (None). The check and the start are one step under
 /// the lock: two starts at once would otherwise both pass, and the first run would go on with
 /// nothing able to stop it.
-pub(crate) fn start_run(dests: Vec<Dest>, audio_kbps: u32, ffmpeg: FfmpegCmd) -> Option<Arc<Run>> {
-    start_run_with(dests, audio_kbps, ffmpeg, Timing::default())
+pub(crate) fn start_run(
+    dests: Vec<Dest>,
+    audio_kbps: u32,
+    pipeline: impl Into<Pipeline>,
+) -> Option<Arc<Run>> {
+    start_run_with(dests, audio_kbps, pipeline, Timing::default())
 }
 
 fn start_run_with(
     dests: Vec<Dest>,
     audio_kbps: u32,
-    ffmpeg: FfmpegCmd,
+    pipeline: impl Into<Pipeline>,
     timing: Timing,
 ) -> Option<Arc<Run>> {
+    let pipeline = pipeline.into();
     let mut slot = RUN.lock().unwrap_or_else(|e| e.into_inner());
     if slot.as_ref().is_some_and(|old| !old.finished()) {
         return None;
@@ -389,18 +441,24 @@ fn start_run_with(
             ..Default::default()
         }),
         dests,
-        ffmpeg,
+        pipeline,
         sent: AtomicU64::new(0),
     });
     *slot = Some(r.clone());
     drop(slot);
-    crate::log_info!(
-        "golive: going live to {}",
+    crate::log_at!(
+        Info,
+        "golive",
+        "golive: going live to {} ({})",
         r.dests
             .iter()
             .map(|d| format!("{} ({})", d.preset.name, d.out.format))
             .collect::<Vec<_>>()
-            .join(", ")
+            .join(", "),
+        match &r.pipeline {
+            Pipeline::Ffmpeg(_) => "ffmpeg".to_string(),
+            Pipeline::Native(c) => format!("native, sound by {}", c.name()),
+        }
     );
     tokio::spawn(run(r.clone()));
     Some(r)
@@ -473,8 +531,15 @@ async fn run(r: Arc<Run>) {
             r.fail(p);
             break;
         }
-        let exit = run_ffmpeg(&r, reader, &active).await;
+        let exit = match &r.pipeline {
+            Pipeline::Ffmpeg(ff) => run_ffmpeg(&r, reader, &active, ff).await,
+            Pipeline::Native(c) => native::run(&r, reader, &active, c.clone()).await,
+        };
         if r.stopped() {
+            break;
+        }
+        if let Some(p) = exit.fatal {
+            r.fail(p);
             break;
         }
         if let Some(e) = exit.spawn_error {
@@ -485,7 +550,11 @@ async fn run(r: Arc<Run>) {
             break;
         }
         if exit.session_ended {
-            crate::log_info!("golive: the Remote Play session ended; waiting for a new one");
+            crate::log_at!(
+                Info,
+                "golive",
+                "golive: the Remote Play session ended; waiting for a new one"
+            );
             continue;
         }
         if exit.rejoin {
@@ -498,7 +567,9 @@ async fn run(r: Arc<Run>) {
         );
         match backoff.after(f, exit.ran, Instant::now()) {
             Next::Retry(d) => {
-                crate::log_info!(
+                crate::log_at!(
+                    Info,
+                    "golive",
                     "golive: ffmpeg stopped ({f:?} after {:.0} s); again in {} s",
                     exit.ran.as_secs_f64(),
                     d.as_secs()
@@ -551,7 +622,9 @@ async fn run(r: Arc<Run>) {
         }
         s.live_since = None;
     });
-    crate::log_info!(
+    crate::log_at!(
+        Info,
+        "golive",
         "golive: ended after {:.0} s, {} MB sent",
         r.started.elapsed().as_secs_f64(),
         r.sent.load(Ordering::Relaxed) / 1_000_000
@@ -594,10 +667,15 @@ fn rank(f: Failure) -> u8 {
 }
 
 /// One ffmpeg process for the outputs `idx`, fed from `reader`, until it stops.
-async fn run_ffmpeg(r: &Arc<Run>, mut reader: live_feed::FeedReader, idx: &[usize]) -> Exit {
+async fn run_ffmpeg(
+    r: &Arc<Run>,
+    mut reader: live_feed::FeedReader,
+    idx: &[usize],
+    ff: &FfmpegCmd,
+) -> Exit {
     let outs: Vec<Output> = idx.iter().map(|&i| r.dests[i].out.clone()).collect();
     let hevc = reader.session.codec != "h264";
-    let mut cmd = r.ffmpeg.command();
+    let mut cmd = ff.command();
     cmd.args(gf::args(&outs, r.audio_kbps, hevc))
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
@@ -678,7 +756,7 @@ async fn run_ffmpeg(r: &Arc<Run>, mut reader: live_feed::FeedReader, idx: &[usiz
                 }
                 if logged < 40 {
                     logged += 1;
-                    crate::log_info!("golive: ffmpeg: {clean}");
+                    crate::log_at!(Info, "golive", "golive: ffmpeg: {clean}");
                 }
                 let kind = gf::classify(&line);
                 // Which output a tee line is about (by its number, or its URL).
@@ -798,7 +876,7 @@ async fn run_ffmpeg(r: &Arc<Run>, mut reader: live_feed::FeedReader, idx: &[usiz
                 if session_ended.load(Ordering::Relaxed) {
                     let since = *session_over.get_or_insert(now);
                     if now.saturating_duration_since(since) >= grace {
-                        crate::log_info!("golive: ffmpeg did not finish after the session ended; stopping it");
+                        crate::log_at!(Info, "golive", "golive: ffmpeg did not finish after the session ended; stopping it");
                         let _ = child.kill().await;
                         break child.wait().await.ok();
                     }
@@ -807,7 +885,7 @@ async fn run_ffmpeg(r: &Arc<Run>, mut reader: live_feed::FeedReader, idx: &[usiz
                 if now.saturating_duration_since(moved.1) >= limit
                     && !session_ended.load(Ordering::Relaxed)
                 {
-                    crate::log_info!(
+                    crate::log_at!(Info, "golive",
                         "golive: no progress for {} s: the connection is gone, starting again",
                         limit.as_secs()
                     );
@@ -822,7 +900,7 @@ async fn run_ffmpeg(r: &Arc<Run>, mut reader: live_feed::FeedReader, idx: &[usiz
                 }
                 let due = rejoin_at.lock().ok().and_then(|g| *g).is_some_and(|t| now >= t);
                 if due {
-                    crate::log_info!("golive: letting a dropped destination back in (short restart)");
+                    crate::log_at!(Info, "golive", "golive: letting a dropped destination back in (short restart)");
                     rejoin = true;
                     break finish(&mut child, &writer, grace).await;
                 }
@@ -841,7 +919,9 @@ async fn run_ffmpeg(r: &Arc<Run>, mut reader: live_feed::FeedReader, idx: &[usiz
     let ran = started.elapsed();
     let ok = status.is_some_and(|s| s.success());
     let failure = failure.lock().ok().and_then(|g| *g);
-    crate::log_info!(
+    crate::log_at!(
+        Info,
+        "golive",
         "golive: ffmpeg exited ({}) after {:.0} s",
         status.map_or("killed".to_string(), |s| s.to_string()),
         ran.as_secs_f64()
@@ -857,6 +937,7 @@ async fn run_ffmpeg(r: &Arc<Run>, mut reader: live_feed::FeedReader, idx: &[usiz
         session_ended: session_ended.load(Ordering::Relaxed),
         rejoin,
         spawn_error: None,
+        fatal: None,
     }
 }
 
@@ -1000,16 +1081,42 @@ pub async fn start(
         Ok(d) => d,
         Err((code, e, msg)) => return err(code, e, msg),
     };
-    let Some(ff) = ffmpeg_tool::find() else {
-        return (
-            StatusCode::PRECONDITION_FAILED,
-            Json(serde_json::json!({
-                "error": "ffmpeg_missing",
-                "message": "Streaming needs ffmpeg: download it first.",
-                "ffmpeg": ffmpeg_tool::status_json(),
-            })),
-        )
-            .into_response();
+    let pipeline: Pipeline = match pipeline_mode() {
+        (_, Some(c)) => {
+            // SRT is ffmpeg's: the engine itself publishes RTMP(S) only.
+            if let Some(d) = dests.iter().find(|d| d.out.format != "flv") {
+                return err(
+                    StatusCode::CONFLICT,
+                    "srt_unsupported",
+                    format!(
+                        "{} uses SRT, which needs a computer: use an rtmp:// or rtmps:// address to go live from here.",
+                        d.label
+                    ),
+                );
+            }
+            Pipeline::Native(c)
+        }
+        ("none", None) => {
+            return err(
+                StatusCode::PRECONDITION_FAILED,
+                "audio_unavailable",
+                "This device can't convert the sound for streaming sites, so going live isn't available here.",
+            )
+        }
+        _ => match ffmpeg_tool::find() {
+            Some(ff) => Pipeline::Ffmpeg(ff),
+            None => {
+                return (
+                    StatusCode::PRECONDITION_FAILED,
+                    Json(serde_json::json!({
+                        "error": "ffmpeg_missing",
+                        "message": "Streaming needs ffmpeg: download it first.",
+                        "ffmpeg": ffmpeg_tool::status_json(),
+                    })),
+                )
+                    .into_response();
+            }
+        },
     };
     let Some(session) = live_feed::session_info() else {
         return err(
@@ -1051,7 +1158,7 @@ pub async fn start(
         old.wait_finished(STOP_WAIT).await;
     }
     let audio = req.audio_kbps.unwrap_or(160).clamp(64, 320);
-    let Some(r) = start_run(dests, audio, ff) else {
+    let Some(r) = start_run(dests, audio, pipeline) else {
         return err(
             StatusCode::CONFLICT,
             "already_live",
@@ -1072,7 +1179,7 @@ pub async fn stop(
     match current() {
         Some(r) => {
             r.request_stop();
-            crate::log_info!("golive: stop asked");
+            crate::log_at!(Info, "golive", "golive: stop asked");
             Json(serde_json::json!({ "ok": true })).into_response()
         }
         None => Json(serde_json::json!({ "ok": true, "live": null })).into_response(),
@@ -1128,6 +1235,7 @@ pub async fn status(
     });
     Json(serde_json::json!({
         "ffmpeg": ffmpeg_tool::status_json(),
+        "pipeline": pipeline_mode().0,
         "session": session,
         "presets": presets,
         "destinations": destinations,
@@ -1166,7 +1274,13 @@ pub async fn add_destination(
     };
     match store.add(&inp) {
         Ok(v) => {
-            crate::log_info!("golive: destination {} ({}) added", v.dest.id, v.name);
+            crate::log_at!(
+                Info,
+                "golive",
+                "golive: destination {} ({}) added",
+                v.dest.id,
+                v.name
+            );
             Json(v).into_response()
         }
         Err(e) => invalid(e),
@@ -1207,7 +1321,7 @@ pub async fn remove_destination(
         Err(e) => return err(StatusCode::INTERNAL_SERVER_ERROR, "store", e),
     };
     if store.remove(&id) {
-        crate::log_info!("golive: destination {id} removed");
+        crate::log_at!(Info, "golive", "golive: destination {id} removed");
         Json(serde_json::json!({"ok": true})).into_response()
     } else {
         err(StatusCode::NOT_FOUND, "not_found", "No such destination.")

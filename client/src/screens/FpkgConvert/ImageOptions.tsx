@@ -1,6 +1,13 @@
 import { Button, Toggle } from "../../components";
-import type { AmprPacksReadiness, FfpfscLevel, ImageFormat } from "../../api/fpkg";
-import { DEFAULT_VERIFY_CHUNK_KIB, VERIFY_CHUNK_KIB, useConvertPrefs } from "../../state/convertPrefs";
+import type { AmprLz4Options, AmprPacksReadiness, FfpfscLevel, ImageFormat, ZstdPacks } from "../../api/fpkg";
+import {
+  DEFAULT_VERIFY_CHUNK_KIB,
+  VERIFY_CHUNK_KIB,
+  parseAmprEmuBuild,
+  parseZstdRuntime,
+  useConvertPrefs,
+  type AmprEmuBuild,
+} from "../../state/convertPrefs";
 import { useTr } from "../../state/lang";
 
 // The options of a game image (③ Options when "A game image" is what Convert makes): its
@@ -19,33 +26,166 @@ export interface Lz4Choice {
   /** Install ampr_emu 0.4.2.1 into the image (offered when `readiness.kind` is `runtime`). */
   installRuntime: boolean;
   onInstallRuntime: (on: boolean) => void;
+  /** Which packs: LZ4 (plain exFAT only, the game's own emulator) or zstd (any plain image,
+   *  with ampr-emu-ng). */
+  kind: "lz4" | "zstd";
+  onKind: (kind: "lz4" | "zstd") => void;
+  zstdLevel: number;
+  onZstdLevel: (level: number) => void;
 }
+
+/** The zstd levels offered, as ps5-dump-forge offers them. */
+const ZSTD_LEVELS = [1, 5, 19];
 
 /** Packs are refused for this game unless the engine installs the runtime, which is on. */
 export function lz4Refused(lz4: Lz4Choice): string | null {
   if (!lz4.readiness.refusal) return null;
+  // zstd packs bring their own emulator: only a game that doesn't read through AMPR is out.
+  if (lz4.kind === "zstd" && lz4.readiness.kind !== "no_ampr") return null;
   if (lz4.readiness.kind === "runtime" && lz4.installRuntime) return null;
   return lz4.readiness.refusal;
 }
 
-/** Packing replaces .ffpfsc compression: the packs are already compressed, and the engine
- *  writes them into a plain exFAT image only. */
+/** What the build is told when packs are on, or nothing. Packing replaces .ffpfsc compression:
+ *  the packs are already compressed, so the image holding them is a plain one. */
+export function packOptions(
+  format: ImageFormat,
+  lz4: Lz4Choice | undefined,
+  profileToml?: string,
+): AmprLz4Options | undefined {
+  if (!lz4 || !lz4Active(format, lz4)) return undefined;
+  return lz4.kind === "zstd"
+    ? { zstdLevel: lz4.zstdLevel, zstdRuntime: useConvertPrefs.getState().zstdRuntime }
+    : { profileToml, installRuntime: lz4.installRuntime };
+}
+
+/** Whether a pack format is on for this image. */
 export function lz4Active(format: ImageFormat, lz4: Lz4Choice | undefined): boolean {
-  return format === "exfat" && !!lz4?.on && !lz4Refused(lz4);
+  return !!lz4?.on && (format === "exfat" || lz4.kind === "zstd") && !lz4Refused(lz4);
+}
+
+/** Whether a folder build packs: zstd only (LZ4 packs go into an .exfat image). */
+export function folderPacks(lz4: Lz4Choice | undefined): boolean {
+  return !!lz4?.on && lz4.kind === "zstd" && !lz4Refused(lz4);
+}
+
+/** What a folder build is told when zstd packs are on, or nothing. */
+export function folderPackOptions(lz4: Lz4Choice | undefined): ZstdPacks | undefined {
+  return lz4 && folderPacks(lz4)
+    ? { level: lz4.zstdLevel, runtime: useConvertPrefs.getState().zstdRuntime }
+    : undefined;
+}
+
+/** The tested ampr-emu-ng release, as the engine pins it (zstd_packs.rs). */
+const NG_TESTED = "0.3.2";
+
+/** Which ampr-emu-ng goes in with zstd packs: the newest release or the tested one. */
+function ZstdRuntimeChoice() {
+  const tr = useTr();
+  const runtime = useConvertPrefs((s) => s.zstdRuntime);
+  const set = useConvertPrefs((s) => s.setZstdRuntime);
+  return (
+    <div className="ms-6 space-y-0.5 text-xs">
+      <label className="flex items-center gap-2">
+        <span>{tr("fpkg.image.zstd_runtime", undefined, "Pack runtime")}</span>
+        <select
+          value={runtime}
+          onChange={(e) => set(parseZstdRuntime(e.target.value))}
+          className="select w-auto!"
+          data-testid="zstd-runtime"
+        >
+          <option value="latest">
+            {tr("fpkg.image.zstd_runtime_latest", undefined, "Newest release (default)")}
+          </option>
+          <option value="pinned">
+            {tr("fpkg.image.zstd_runtime_pinned", { version: NG_TESTED }, "Tested {version}")}
+          </option>
+        </select>
+      </label>
+      <div className="leading-relaxed text-[var(--color-muted)]">
+        {tr(
+          "fpkg.image.zstd_runtime_body",
+          { version: NG_TESTED },
+          "Newest uses the latest ampr-emu-ng release on GitHub only when it matches the SHA-256 GitHub publishes for it; otherwise, or offline, the tested {version} goes in. Tested always uses {version}.",
+        )}
+      </div>
+    </div>
+  );
+}
+
+/** zstd packs, for any plain image of a game that reads through AMPR, or for a plain folder
+ *  (`folder`), the only packs a folder gets. */
+export function ZstdOption({ lz4, folder }: { lz4: Lz4Choice; folder?: boolean }) {
+  const tr = useTr();
+  const on = lz4.on && lz4.kind === "zstd";
+  return (
+    <div className="space-y-1" data-testid="zstd-option">
+      <label className="flex cursor-pointer items-start gap-2.5 text-xs">
+        <input
+          type="checkbox"
+          checked={on}
+          onChange={(e) => {
+            lz4.onKind("zstd");
+            lz4.onToggle(e.target.checked);
+          }}
+          className="checkbox mt-px h-4 w-4 shrink-0"
+        />
+        <span className="min-w-0">
+          <span className="block font-medium text-[var(--color-text)]">
+            {tr("fpkg.image.zstd", undefined, "zstd asset packs (smallest, for ShadowMount+)")}
+          </span>
+          <span className="mt-0.5 block leading-relaxed text-[var(--color-muted)]">
+            {folder
+              ? tr(
+                  "fpkg.folder.zstd_body",
+                  undefined,
+                  "Writes the game as a plain folder with all but its system files in zstd packs, and quer3q's ampr-emu-ng as fakelib/libSceAmpr.sprx. A game folder can be the source too. LZ4 packs are not offered here: they go into an .exfat image only. Turn off update_emulators in ShadowMount+, or it can swap the emulator for one that can't read them.",
+                )
+              : tr(
+                  "fpkg.image.zstd_body",
+                  undefined,
+                  "Packs all but the game's system files into zstd packs, written straight into the image with no temporary copy. The image gets quer3q's ampr-emu-ng as its emulator, checked against a published digest before it is used. A game already in LZ4 packs is switched over. Turn off update_emulators in ShadowMount+, or it can swap the emulator for one that can't read them.",
+                )}
+          </span>
+        </span>
+      </label>
+      {on && <ZstdRuntimeChoice />}
+      {on && (
+        <label className="ms-6 flex items-center gap-2 text-xs">
+          <span>{tr("fpkg.image.zstd_level", undefined, "Compression level")}</span>
+          <select
+            value={lz4.zstdLevel}
+            onChange={(e) => lz4.onZstdLevel(Number(e.target.value))}
+            className="select w-auto!"
+            data-testid="zstd-level"
+          >
+            {ZSTD_LEVELS.map((l) => (
+              <option key={l} value={l}>
+                {l}
+              </option>
+            ))}
+          </select>
+        </label>
+      )}
+    </div>
+  );
 }
 
 function Lz4Option({ lz4 }: { lz4: Lz4Choice }) {
   const tr = useTr();
-  const refusal = lz4Refused(lz4);
+  const refusal = lz4Refused({ ...lz4, kind: "lz4" });
   const kind = lz4.readiness.kind ?? (lz4.readiness.refusal ? "runtime" : "ok");
   return (
     <div className="space-y-1" data-testid="lz4-option">
       <label className="flex cursor-pointer items-start gap-2.5 text-xs">
         <input
           type="checkbox"
-          checked={lz4.on && !refusal}
+          checked={lz4.on && lz4.kind === "lz4" && !refusal}
           disabled={!!refusal}
-          onChange={(e) => lz4.onToggle(e.target.checked)}
+          onChange={(e) => {
+            lz4.onKind("lz4");
+            lz4.onToggle(e.target.checked);
+          }}
           className="checkbox mt-px h-4 w-4 shrink-0"
         />
         <span className="min-w-0">
@@ -115,7 +255,16 @@ function Lz4Option({ lz4 }: { lz4: Lz4Choice }) {
           </div>
         )
       )}
-      {lz4.on && !refusal && (
+      {lz4.on && lz4.kind === "lz4" && !refusal && (
+        <div className="text-xs text-[var(--color-muted)]" data-testid="lz4-placement-note">
+          {tr(
+            "fpkg.image.lz4_placement_note",
+            undefined,
+            "Keep a packed image on the console's internal storage: one has been reported to hang on a black screen from USB. Turn off update_emulators in ShadowMount+, or it can swap the emulator for one that can't read packs.",
+          )}
+        </div>
+      )}
+      {lz4.on && lz4.kind === "lz4" && !refusal && (
         <div className="flex flex-wrap items-center gap-2 text-xs">
           {lz4.profileName ? (
             <>
@@ -144,6 +293,61 @@ function Lz4Option({ lz4 }: { lz4: Lz4Choice }) {
         </div>
       )}
     </div>
+  );
+}
+
+/** Some libSceAmpr games with no emulator fail to start from an image (Alembic's two on a console),
+ *  others run (LEGO Horizon Adventures reaches its menu with or without one, on the Pro), and
+ *  ShadowMount+ doesn't add one. On by default; packs have their own choice. */
+function AmprEmuOption() {
+  const tr = useTr();
+  const on = useConvertPrefs((s) => s.addAmprEmu);
+  const set = useConvertPrefs((s) => s.setAddAmprEmu);
+  const build = useConvertPrefs((s) => s.amprEmuBuild);
+  const setBuild = useConvertPrefs((s) => s.setAmprEmuBuild);
+  return (
+    <div className="space-y-1" data-testid="ampr-emu-option">
+      <Toggle
+        checked={on}
+        onChange={set}
+        label={tr("fpkg.image.ampr_emu", undefined, "Add the AMPR emulator")}
+        hint={tr(
+          "fpkg.image.ampr_emu_body",
+          undefined,
+          "This game reads its files through AMPR and has no emulator. Some such games won't start from an image without one, and others run fine. Adds drakmor's ampr_emu 0.4.2.1 as fakelib/libSceAmpr.sprx, fetched once from its GitHub release and checked against a known digest.",
+        )}
+      />
+      {on && <AmprEmuBuildChoice build={build} onBuild={setBuild} />}
+    </div>
+  );
+}
+
+/** Product names, the same in every language. */
+const AMPR_EMU = "ampr_emu 0.4.2.1";
+const AMPR_EMU_NG = "ampr-emu-ng 0.3.2";
+
+/** Which emulator a game gets: drakmor's, or quer3q's, which also reads zstd packs. */
+export function AmprEmuBuildChoice({
+  build,
+  onBuild,
+}: {
+  build: AmprEmuBuild;
+  onBuild: (build: AmprEmuBuild) => void;
+}) {
+  const tr = useTr();
+  return (
+    <label className="flex items-center gap-2 text-xs">
+      <span>{tr("fpkg.image.ampr_emu_build", undefined, "Emulator")}</span>
+      <select
+        value={build}
+        onChange={(e) => onBuild(parseAmprEmuBuild(e.target.value))}
+        className="select w-auto!"
+        data-testid="ampr-emu-build"
+      >
+        <option value="ampr_emu">{AMPR_EMU}</option>
+        <option value="ampr-emu-ng">{AMPR_EMU_NG}</option>
+      </select>
+    </label>
   );
 }
 
@@ -238,8 +442,17 @@ export function ImageChoice({
         </span>
       </label>
       {compress && !packing && <FfpfscLevelOption own={level} />}
+      {lz4?.readiness.emulator_missing && !packing && <AmprEmuOption />}
       {lz4 && format === "exfat" && <Lz4Option lz4={lz4} />}
+      {lz4 && lz4.readiness.kind !== "no_ampr" && <ZstdOption lz4={lz4} />}
       <VerifyChunkOption />
+      <p className="text-xs leading-relaxed text-[var(--color-muted)]">
+        {tr(
+          "fpkg.image.resume_note",
+          undefined,
+          "If the app or the engine stops while an image is being made, making it again goes on from where it stopped and then reads every byte back. An image with LZ4 or zstd asset packs starts over.",
+        )}
+      </p>
     </div>
   );
 }

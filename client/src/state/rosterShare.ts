@@ -58,7 +58,7 @@ function canonical(v: unknown): unknown {
 const same = (a: unknown, b: unknown) => JSON.stringify(canonical(a)) === JSON.stringify(canonical(b));
 
 /** What wakes a console and signs in to it. A save that leaves one out keeps the engine's. */
-const KEY_FIELDS = ["wake_credential", "wake_regist_key", "wake_rp_key"] as const;
+const KEY_FIELDS = ["wake_credential", "wake_regist_key", "wake_rp_key", "rp_users"] as const;
 
 const withoutKeys = (list: readonly SharedProfile[]) =>
   list.map((p) => {
@@ -386,6 +386,13 @@ export async function seedDefaultConsole(
   roster.setActive(roster.add({ name: `PS5 (${host})`, host }));
 }
 
+/** Asks the running share for the engine's list now (a console the engine added, say). Its own
+ *  event, so the focus listeners elsewhere (the status checks) are not woken by it. */
+const ROSTER_PULL_EVENT = "ps5upload:roster-pull";
+export function requestRosterPull(): void {
+  if (typeof window !== "undefined") window.dispatchEvent(new Event(ROSTER_PULL_EVENT));
+}
+
 /** Starts sharing the console list with the engine; returns a stop. */
 export function startRosterShare(api: ShareApi = engineShareApi): () => void {
   const share = new RosterShare(api, useRosterStore, isTauriEnv() ? "union" : "replace");
@@ -444,11 +451,13 @@ export function startRosterShare(api: ShareApi = engineShareApi): () => void {
   };
   const timer = window.setInterval(pull, PULL_MS);
   window.addEventListener("focus", pull);
+  window.addEventListener(ROSTER_PULL_EVENT, pull);
   document.addEventListener("visibilitychange", pull);
   return () => {
     unsub();
     window.clearInterval(timer);
     window.removeEventListener("focus", pull);
+    window.removeEventListener(ROSTER_PULL_EVENT, pull);
     document.removeEventListener("visibilitychange", pull);
   };
 }

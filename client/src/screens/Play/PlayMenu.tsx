@@ -1,5 +1,6 @@
 import {
   BarChart3,
+  CircleDot,
   Gamepad2,
   Minimize,
   Monitor,
@@ -19,6 +20,7 @@ import { MicTile } from "./MicControl";
 import { useTr } from "../../state/lang";
 import { useRemotePlayStore } from "../../state/remotePlay";
 import { CaptureRow } from "./CaptureControls";
+import { GoLiveBarIcon } from "./GoLivePanel";
 
 /** Volume, on the picture's bar and in the player menu (Settings has it too). Keys and presses
  *  on it never reach the pad. */
@@ -111,7 +113,10 @@ export function PlayMenu({
   onSettings,
   onStop,
   onGame,
+  onPsButton,
   onTogether,
+  onGoLive,
+  goLiveHint,
 }: {
   inFull: boolean;
   pipKind: unknown;
@@ -122,8 +127,13 @@ export function PlayMenu({
   onStop: () => void;
   /** The Game panel (the running game, its cheats, the console). */
   onGame: () => void;
+  onPsButton?: () => void;
   /** Play Together (#641): friends as Player 2–4. */
   onTogether?: () => void;
+  /** Stream (Go live): where the engine can, the web UI on a phone included (#731). */
+  onGoLive?: () => void;
+  /** The phone app, where Go live can't run: say where it does. */
+  goLiveHint?: boolean;
 }) {
   const tr = useTr();
   const prefs = useRemotePlayStore((s) => s.prefs);
@@ -154,7 +164,8 @@ export function PlayMenu({
           </button>
         </div>
       )}
-      <div className="grid grid-cols-3 gap-2">
+      {/* Four across when sideways: a phone has no height for a third row. */}
+      <div className={`grid gap-2 ${inFull ? "grid-cols-3 landscape:grid-cols-4" : "grid-cols-3"}`}>
         {inFull && (
           <Tile
             label={tr("rp_exit_fullscreen", undefined, "Leave full screen")}
@@ -202,6 +213,14 @@ export function PlayMenu({
             active={!!pip}
           />
         )}
+        {inFull && onPsButton && (
+          <Tile
+            label={tr("rp_action_ps", undefined, "PS button")}
+            icon={<CircleDot size={18} />}
+            onClick={onPsButton}
+            testId="rp-menu-ps"
+          />
+        )}
         <Tile
           label={tr("rp_game_button", undefined, "Game")}
           icon={<Gamepad2 size={18} />}
@@ -214,6 +233,14 @@ export function PlayMenu({
             icon={<Users size={18} />}
             onClick={onTogether}
             testId="rp-menu-together"
+          />
+        )}
+        {onGoLive && !inFull && (
+          <Tile
+            label={tr("golive_title", undefined, "Stream")}
+            icon={<GoLiveBarIcon />}
+            onClick={onGoLive}
+            testId="rp-menu-golive"
           />
         )}
         <Tile
@@ -232,6 +259,15 @@ export function PlayMenu({
           />
         )}
       </div>
+      {!inFull && goLiveHint && !onGoLive && (
+        <p className="px-1 text-[11px] leading-snug text-white/60" data-testid="rp-menu-golive-hint">
+          {tr(
+            "golive_phone_app_hint",
+            undefined,
+            "To go live from here, run the engine on a computer and open its web UI in Safari",
+          )}
+        </p>
+      )}
       {!inFull && pictureHere && <CaptureRow onDone={onClose} />}
       {inFull && pictureHere && (
         // Picture size where it shows: in full screen.

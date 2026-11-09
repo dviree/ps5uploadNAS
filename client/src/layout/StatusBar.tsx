@@ -1,5 +1,7 @@
-import { useState } from "react";
-import { Camera, Check, AlertTriangle, Images, MonitorSmartphone, Zap } from "lucide-react";
+import { useEffect, useState } from "react";
+import { Camera, Check, AlertTriangle, Globe, Images, MonitorSmartphone, Zap } from "lucide-react";
+import { pathSwitch, tailnetVia, type TailnetVia } from "../api/tailnet";
+import { profileNameForHost } from "../state/roster";
 import { useNavigate } from "react-router";
 
 import { useConnectionStore, EMPTY_HOST_RUNTIME } from "../state/connection";
@@ -17,6 +19,8 @@ import {
 } from "../state/roster";
 import { ActivityStatusSlot } from "./ActivityBar";
 import { useUploadSettingsStore } from "../state/uploadSettings";
+import { useShallow } from "zustand/react/shallow";
+import { defaultConsoleSettings, profileForHost, settingsOfProfile } from "../state/consoleSettings";
 import { getEngineUrl } from "../state/engine";
 import { Spinner } from "../components/Spinner";
 import { hostOf } from "../lib/addr";
@@ -97,8 +101,10 @@ export default function StatusBar() {
   // Rest mode reads as its own calm state, not as a dropped connection.
   const ps5Light = consoleLight({ payloadStatus, power, session });
   const ps5Tooltip = [
-    ps5Light === "unknown"
-      ? tr("status_ps5_disconnected", undefined, "Not connected")
+    // "Checking…" while unknown, with the helper version and kernel it was last seen with; with
+    // no console on the list there is nothing to check.
+    ps5Light === "unknown" && !activeProfile
+      ? tr("status_ps5_none", undefined, "No PS5 added yet")
       : consoleLightLabel(ps5Light, tr),
     ps5Kernel || null,
     payloadVersion
@@ -187,6 +193,7 @@ export default function StatusBar() {
       {/* Right cluster — live activity + power/capture controls. */}
       <div className="ms-auto flex items-center gap-3">
         <ActivityStatusSlot />
+        <TailnetChip />
         <OtherDevicesChip />
         <KeepAwakeIndicator />
         {/* Saving a capture is native; the web build's Bug Report attaches files instead. */}
@@ -194,6 +201,68 @@ export default function StatusBar() {
         {isTauriEnv() && <ViewCapturesButton />}
       </div>
     </div>
+  );
+}
+
+/** "via Tailscale (direct, 3.2 ms)" / "via Tailscale (relayed)" while the engine reaches the
+ *  selected console through its tailnet node because the home address does not answer.
+ *  Nothing on the LAN. */
+function TailnetChip() {
+  const tr = useTr();
+  const host = useConnectionStore((s) => s.host);
+  const [via, setVia] = useState<TailnetVia>({ via: "lan", latency_ms: -1 });
+  useEffect(() => {
+    if (!host) return;
+    let live = true;
+    let prev: string | null = null;
+    const read = () => {
+      // Foreground only: a phone in the background asks nothing.
+      if (typeof document !== "undefined" && document.hidden) return;
+      void tailnetVia(host).then((v) => {
+        if (!live) return;
+        setVia(v);
+        // "Living room PS5: now through Tailscale" / "back on your home network".
+        const sw = pathSwitch(prev, v.via);
+        prev = v.via;
+        if (sw) {
+          const name = profileNameForHost(host, useRosterStore.getState().profiles);
+          useToastStore.getState().push({
+            message:
+              sw === "tailnet"
+                ? tr("tn_switch_tailnet", { name }, "{name}: now through Tailscale")
+                : tr("tn_switch_home", { name }, "{name}: back on your home network"),
+            tone: "info",
+          });
+        }
+      });
+    };
+    read();
+    const t = window.setInterval(read, 5000);
+    return () => {
+      live = false;
+      window.clearInterval(t);
+    };
+  }, [host, tr]);
+  if (!host || (via.via !== "direct" && via.via !== "relayed" && via.via !== "system")) return null;
+  const label =
+    via.via === "direct"
+      ? tr(
+          "tn_via_direct",
+          { ms: via.latency_ms >= 0 ? via.latency_ms.toFixed(1) : "?" },
+          "via Tailscale (direct, {ms} ms)",
+        )
+      : via.via === "system"
+        ? tr("tn_via_system", undefined, "via Tailscale (the Tailscale app)")
+        : tr("tn_via_relayed", undefined, "via Tailscale (relayed)");
+  return (
+    <span
+      className="flex items-center gap-1 rounded-full px-1.5 py-0.5 text-[var(--color-accent-bright)]"
+      title={label}
+      data-testid="tailnet-chip"
+    >
+      <Globe size={12} aria-hidden />
+      <span>{label}</span>
+    </span>
   );
 }
 
@@ -239,20 +308,23 @@ function OtherDevicesChip() {
  */
 function KeepAwakeIndicator() {
   const tr = useTr();
-  const mode = useUploadSettingsStore((s) => s.keepPs5AwakeMode);
-  const anyUp = useConnectionStore((s) => {
-    for (const h in s.runtimeByHost) {
-      if (s.runtimeByHost[h].payloadStatus === "up") return true;
-    }
-    return false;
-  });
-  if (mode !== "always" || !anyUp) return null;
+  // Each console has its own mode (Settings › This PS5): shown while one set to "Always" answers.
+  const profiles = useRosterStore((s) => s.profiles);
+  const defaultMode = useUploadSettingsStore((s) => s.keepPs5AwakeMode);
+  const upHosts = useConnectionStore(
+    useShallow((s) => Object.keys(s.runtimeByHost).filter((h) => s.runtimeByHost[h].payloadStatus === "up")),
+  );
+  const defaults = { ...defaultConsoleSettings(), keep_awake_mode: defaultMode };
+  const keeping = upHosts.some(
+    (h) => settingsOfProfile(profileForHost(h, profiles), defaults).keep_awake_mode === "always",
+  );
+  if (!keeping) return null;
   return (
     <span
       className="flex items-center gap-1 text-[var(--color-warn)]"
       title={tr(
-        "status_keep_awake_tooltip_v2",
-        "Keep-awake is set to “Always while connected” — connected consoles won't auto-enter rest mode while the app is open. Change in Settings → Console.",
+        "status_keep_awake_tooltip_v3",
+        "A connected PS5 is set to keep awake “Always while connected”: it won't go into rest mode by itself while the app is open. Change it in Settings › This PS5.",
       )}
     >
       <Zap size={11} aria-hidden />

@@ -348,8 +348,8 @@ fn unreadable_reply(len: usize) -> String {
         format!("The PS5 sent a reply the app can't read ({len} bytes)")
     };
     format!(
-        "{what}. Its Remote Play may be stuck on an earlier session: close Remote Play on any other \
-         device, restart the PS5 and try again"
+        "{what}, before saying anything about the PIN. Close Remote Play on any other device and \
+         try again"
     )
 }
 
@@ -394,11 +394,12 @@ fn reason_text(code: &str) -> &'static str {
         // screen, where trying and unpairing change nothing: the step that is
         // left is on the console.
         "80108b03" => {
-            "Remote Play isn't ready on the PS5. Open Settings › System › Remote Play on the \
-             console and turn on Enable Remote Play. If it's greyed out, this PS5 user's account \
-             usually isn't activated: activate it in Accounts › Users. If it still won't turn on \
-             or stay on, run the offline sign-in in Play › Set up and restart the PS5. Then press \
-             Pair again"
+            "Remote Play isn't ready on the PS5. On the console, the user you play as must show as \
+             signed in (Settings › Users and Accounts) and Enable Remote Play must be on \
+             (Settings › System › Remote Play). If either is off or greyed out, run the offline \
+             sign-in in Play › Set up, restart the PS5 and press Pair again. Still refused? Pair \
+             with the PIN the PS5 shows in Settings › System › Remote Play › Link Device \
+             (Play › Set up › Pair with the PIN shown on the PS5)"
         }
         "80108b02" => "the console rejected the PSN account",
         "80108b10" => "Remote Play is already in use",
@@ -406,6 +407,44 @@ fn reason_text(code: &str) -> &'static str {
         "80108b11" => "the console wants a different Remote Play version",
         _ => "the console refused the registration",
     }
+}
+
+/// Sends the request on a new connection and reads what comes back until the console hangs up (a
+/// reply followed by a console that doesn't hang up is still a reply). `half_close`: end our
+/// sending side once it's sent.
+fn exchange(
+    addr: std::net::SocketAddr,
+    req: &[u8],
+    half_close: bool,
+    wait: Duration,
+) -> Result<Vec<u8>> {
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(10)).map_err(|e| {
+        // Refused: nothing takes pairings on 9295 now, and trying again will not change
+        // that. Anything else (a timeout, a reset) may pass on the next try.
+        if e.kind() == std::io::ErrorKind::ConnectionRefused {
+            anyhow::Error::new(NotAnswering {
+                detail: format!("{addr} refused the connection: {e}"),
+            })
+        } else {
+            anyhow!("connecting to {addr}: {e}")
+        }
+    })?;
+    stream.set_read_timeout(Some(wait))?;
+    stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+    stream
+        .write_all(req)
+        .map_err(|e| anyhow!("sending the registration request: {e}"))?;
+    stream.flush().ok();
+    if half_close {
+        let _ = stream.shutdown(Shutdown::Write);
+    }
+    let mut raw = Vec::new();
+    if let Err(e) = stream.read_to_end(&mut raw) {
+        if raw.is_empty() {
+            return Err(anyhow!("reading the console's reply: {e}"));
+        }
+    }
+    Ok(raw)
 }
 
 /// Register with a console and come back with its regist key.
@@ -426,27 +465,23 @@ pub fn register(host: &str, account_id_b64: &str, pin: u32) -> Result<Registrati
         bail!("account id should decode to 8 bytes, got {}", decoded.len());
     }
 
+    crate::clog!(
+        Debug,
+        "pairing",
+        "rp_regist: {host}: searching for the console (SRC3)"
+    );
     regist_search(host, Duration::from_secs(5))?;
+    crate::clog!(
+        Debug,
+        "pairing",
+        "rp_regist: {host}: it answered; sending the registration"
+    );
 
     let mut nonce = [0u8; NONCE_LEN];
     getrandom_bytes(&mut nonce)?;
     let req_built = build_request_body(account_id_b64.trim(), pin, &nonce);
 
     let addr = resolve(host, REGIST_PORT)?;
-    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(10)).map_err(|e| {
-        // Refused: nothing takes pairings on 9295 now, and trying again will not change
-        // that. Anything else (a timeout, a reset) may pass on the next try.
-        if e.kind() == std::io::ErrorKind::ConnectionRefused {
-            anyhow::Error::new(NotAnswering {
-                detail: format!("{addr} refused the connection: {e}"),
-            })
-        } else {
-            anyhow!("connecting to {addr}: {e}")
-        }
-    })?;
-    stream.set_read_timeout(Some(Duration::from_secs(30)))?;
-    stream.set_write_timeout(Some(Duration::from_secs(10)))?;
-
     let mut req = format!(
         "POST {REGIST_PATH} HTTP/1.1\r\n\
          HOST: 10.0.2.15\r\n\
@@ -458,18 +493,24 @@ pub fn register(host: &str, account_id_b64: &str, pin: u32) -> Result<Registrati
     )
     .into_bytes();
     req.extend_from_slice(&req_built.body);
-    stream
-        .write_all(&req)
-        .map_err(|e| anyhow!("sending the registration request: {e}"))?;
-    stream.flush().ok();
-    let _ = stream.shutdown(Shutdown::Write);
 
-    let mut raw = Vec::new();
-    stream
-        .read_to_end(&mut raw)
-        .map_err(|e| anyhow!("reading the console's reply: {e}"))?;
+    // Keeping our side open until the console answers, as real clients do. Consoles have paired
+    // for years with us hanging up our sending side right after the request, though, so one that
+    // gives nothing back this way gets that too, on a new connection with the same PIN (#704).
+    let raw = match exchange(addr, &req, false, Duration::from_secs(10)) {
+        Ok(raw) if !raw.is_empty() => raw,
+        Err(e) if e.downcast_ref::<NotAnswering>().is_some() => return Err(e),
+        _ => exchange(addr, &req, true, Duration::from_secs(30))?,
+    };
 
     let reply = split_http(&raw)?;
+    crate::clog!(
+        Debug,
+        "pairing",
+        "rp_regist: {host}: the console answered HTTP {} ({} bytes)",
+        reply.code,
+        reply.body.len()
+    );
     if reply.code >= 300 {
         // Sony's reason code says what actually went wrong; without it the
         // status alone is nearly useless for diagnosis, so fall back to
@@ -490,6 +531,12 @@ pub fn register(host: &str, account_id_b64: &str, pin: u32) -> Result<Registrati
                     .join("; ")
             ),
         };
+        crate::clog!(
+            Info,
+            "pairing",
+            "rp_regist: {host}: registration refused (HTTP {}): {reason}",
+            reply.code
+        );
         bail!("registration failed (HTTP {}): {reason}", reply.code);
     }
     if reply.body.is_empty() {
@@ -665,10 +712,19 @@ mod tests {
         assert_ne!(&padding[0x191..0x191 + 8], b"AAAAAAAA");
     }
 
+    /// Random bytes, made without a fixed starting value (CodeQL takes any array literal that
+    /// reaches the nonce for a hard-coded one).
+    fn fresh_nonce() -> [u8; NONCE_LEN] {
+        let a = getrandom::u64().unwrap().to_le_bytes();
+        let b = getrandom::u64().unwrap().to_le_bytes();
+        std::array::from_fn(|i| if i < 8 { a[i % 8] } else { b[i % 8] })
+    }
+
     #[test]
     fn the_body_is_padding_then_ciphertext() {
-        let nonce = [3u8; NONCE_LEN];
-        let body = build_request_body("XCDiqZluNXo=", 12345678, &nonce).body;
+        // A fresh nonce, as a real request has (nothing here depends on its value).
+        let nonce = fresh_nonce();
+        let body = build_request_body("iHdmVUQzIhE=", 12345678, &nonce).body;
         assert!(body.len() > PADDING_BYTES);
         assert_eq!(&body[..8], b"AAAAAAAA");
         // The record must not be recognisable in the clear.
@@ -680,12 +736,13 @@ mod tests {
     fn a_record_decrypts_back_to_itself() {
         // The console uses the same key and IV in both directions, so a
         // round trip here is the same operation the reply goes through.
-        let nonce = [9u8; NONCE_LEN];
-        let built = build_request_body("XCDiqZluNXo=", 99887766, &nonce);
+        // A fresh nonce, as a real request has (nothing here depends on its value).
+        let nonce = fresh_nonce();
+        let built = build_request_body("iHdmVUQzIhE=", 99887766, &nonce);
         let mut plain = built.body[PADDING_BYTES..].to_vec();
         Aes128CfbDec::new(&built.seed.into(), &built.iv.into()).decrypt(&mut plain);
         let text = String::from_utf8_lossy(&plain);
-        assert!(text.contains("Np-AccountId: XCDiqZluNXo="));
+        assert!(text.contains("Np-AccountId: iHdmVUQzIhE="));
         assert!(text.contains(CLIENT_TYPE));
     }
 
@@ -749,7 +806,8 @@ mod tests {
         let t = reason_text("80108b03");
         assert!(t.contains("Enable Remote Play"), "{t}");
         assert!(t.contains("Pair again"), "{t}");
-        assert!(t.contains("Accounts › Users"), "{t}");
+        assert!(t.contains("Users and Accounts"), "{t}");
+        assert!(t.contains("Pair with the PIN shown on the PS5"), "{t}");
         assert_eq!(reason_text("80108B03"), reason_text("80108b03"));
     }
 
@@ -815,6 +873,27 @@ pub struct PairResult {
     /// passed through from readiness so the UI can name it.
     pub account_id_b64: String,
     pub account_via: String,
+    /// The paired user's name on the console, when it could be read (the helper's user list), for
+    /// telling a console's paired users apart. Empty when not known.
+    #[serde(default)]
+    pub user_name: String,
+}
+
+/// The name of the console user `uid`, from the helper's user list. Empty when it can't be read:
+/// a name is only for showing, so its absence never fails a pairing.
+fn user_name_of(mgmt_addr: &str, uid: i64) -> String {
+    if uid <= 0 {
+        return String::new();
+    }
+    crate::profile::profile_info(mgmt_addr)
+        .ok()
+        .and_then(|info| {
+            info.users
+                .into_iter()
+                .find(|u| i64::from(u.uid) == uid)
+                .map(|u| u.username.trim().to_string())
+        })
+        .unwrap_or_default()
 }
 
 /// Pair with a console end to end, with nothing asked of the user.
@@ -831,6 +910,18 @@ pub struct PairResult {
 pub fn pair_with_console(mgmt_addr: &str, host: &str) -> Result<PairResult> {
     let mut readiness = crate::remoteplay::remoteplay_readiness(mgmt_addr)
         .context("asking the console whether it can pair")?;
+    crate::clog!(
+        Debug,
+        "pairing",
+        "rp_regist: {host}: readiness: registry_err {}, symbols {}, user {}, activated {}, service on {}, per-user {} (on {})",
+        readiness.registry_err,
+        readiness.symbols_ok,
+        readiness.account_uid > 0,
+        readiness.activated(),
+        readiness.service_on(),
+        readiness.needs_per_user(),
+        readiness.user_on()
+    );
 
     // Check preconditions here rather than let registration fail with a
     // generic refusal — each of these has a different fix.
@@ -857,10 +948,20 @@ pub fn pair_with_console(mgmt_addr: &str, host: &str) -> Result<PairResult> {
     // while the account in use is not permitted, which pairs fine and then
     // refuses every session.
     if !readiness.service_on() {
+        crate::clog!(
+            Debug,
+            "pairing",
+            "rp_regist: {host}: turning Remote Play on"
+        );
         readiness = crate::remoteplay::remoteplay_enable(mgmt_addr, "service")
             .context("turning Remote Play on")?;
     }
     if readiness.needs_per_user() && !readiness.user_on() {
+        crate::clog!(
+            Debug,
+            "pairing",
+            "rp_regist: {host}: allowing this user Remote Play"
+        );
         readiness = crate::remoteplay::remoteplay_enable(mgmt_addr, "user")
             .context("allowing this user to use Remote Play")?;
     }
@@ -877,7 +978,7 @@ pub fn pair_with_console(mgmt_addr: &str, host: &str) -> Result<PairResult> {
     // finished attempt's state). Cancel makes no Sony call that can block.
     // Done in the attempt below.
 
-    let reg = with_pending_retries(PENDING_TRIES, PENDING_WAIT, || {
+    let attempt = with_pending_retries(PENDING_TRIES, PENDING_WAIT, || {
         // A retry's old PIN goes first, as above.
         let _ = crate::remoteplay::remoteplay_cancel(mgmt_addr);
         // The PIN comes back in the ack. It must NOT be fetched by polling
@@ -886,22 +987,42 @@ pub fn pair_with_console(mgmt_addr: &str, host: &str) -> Result<PairResult> {
         // then refused (measured: HTTP 403, reason 80108b03).
         // Its error already says what failed (the payload's Sony call and code).
         let snap = crate::remoteplay::remoteplay_request(mgmt_addr, None)?;
+        // Never the PIN itself: only that one came.
+        crate::clog!(
+            Debug,
+            "pairing",
+            "rp_regist: {host}: the helper made a pairing PIN ({} digits)",
+            snap.pin.trim().len()
+        );
 
         let pin = snap.pin.trim().to_string();
         if pin.is_empty() {
             bail!("the console did not return a pairing PIN");
         }
-        let pin_num: u32 = pin
-            .parse()
-            .map_err(|_| anyhow!("the console produced a PIN we cannot read: {pin:?}"))?;
+        let pin_num: u32 = pin.parse().map_err(|_| {
+            anyhow!(
+                "the console produced a PIN we cannot read ({} characters)",
+                pin.len()
+            )
+        })?;
 
         register(host, &account_id, pin_num)
-    })?;
-    let credential = credential_from_regist_key(&reg.regist_key)?;
-
-    // Best effort: the PIN has been consumed, so clear the waiting state
-    // rather than leave the console counting down.
+    });
+    // Best effort, and whichever way it went: the PIN is used or no use, so clear the waiting
+    // state. A failed try that left it behind looks like the cause of the console then saying
+    // another user is using Remote Play (#704; not measured).
     let _ = crate::remoteplay::remoteplay_cancel(mgmt_addr);
+    if let Err(e) = &attempt {
+        crate::clog!(Info, "pairing", "rp_regist: {host}: pairing failed: {e:#}");
+    }
+    let reg = attempt?;
+    let credential = credential_from_regist_key(&reg.regist_key)?;
+    crate::clog!(
+        Info,
+        "pairing",
+        "rp_regist: {host}: paired (via {})",
+        readiness.account_via
+    );
 
     Ok(PairResult {
         credential: credential.to_string(),
@@ -911,6 +1032,7 @@ pub fn pair_with_console(mgmt_addr: &str, host: &str) -> Result<PairResult> {
         mac: reg.mac,
         account_id_b64: account_id,
         account_via: readiness.account_via,
+        user_name: user_name_of(mgmt_addr, readiness.account_uid),
     })
 }
 
@@ -930,7 +1052,11 @@ fn with_pending_retries<T>(
         n += 1;
         match attempt() {
             Err(e) if n < tries && e.to_string().to_ascii_lowercase().contains("80108b03") => {
-                crate::core_log!("rp_regist: pairing try {n}: a registration is pending; again");
+                crate::clog!(
+                    Info,
+                    "pairing",
+                    "rp_regist: pairing try {n}: a registration is pending; again"
+                );
                 std::thread::sleep(wait);
             }
             r => return r,
@@ -966,7 +1092,9 @@ fn is_transport_failure(e: &anyhow::Error) -> bool {
     !m.starts_with("registration failed")
         && (m.starts_with("connecting to")
             || m.starts_with("sending the registration request")
-            || m.starts_with("reading the console's reply"))
+            || m.starts_with("reading the console's reply")
+            // Hung up with nothing said (#704): the same dropped connection as #609's.
+            || m.starts_with("The PS5 closed the connection"))
 }
 
 /// `attempt` up to `tries` times while it fails on the way, `wait` apart. The last failure is
@@ -982,7 +1110,9 @@ fn with_retries<T>(
         match attempt() {
             Ok(v) => return Ok(v),
             Err(e) if is_transport_failure(&e) && n < tries => {
-                crate::core_log!(
+                crate::clog!(
+                    Info,
+                    "pairing",
                     "rp_regist: pairing try {n} failed on the way ({e}); trying again"
                 );
                 std::thread::sleep(wait);
@@ -1006,8 +1136,20 @@ pub fn pair_with_pin(host: &str, account_id_b64: &str, pin: &str) -> Result<Pair
     if account_id_b64.trim().is_empty() {
         bail!("pairing with the PS5's PIN needs the account ID of the user on the console");
     }
+    crate::clog!(
+        Debug,
+        "pairing",
+        "rp_regist: {host}: pairing with the PIN the PS5 shows"
+    );
     let reg = with_retries(PIN_TRIES, PIN_RETRY_WAIT, || {
         register(host, account_id_b64, pin)
+    })
+    .inspect_err(|e| {
+        crate::clog!(
+            Info,
+            "pairing",
+            "rp_regist: {host}: pairing with a PIN failed: {e:#}"
+        )
     })
     .map_err(|e| match e.downcast_ref::<NotAnswering>() {
         Some(n) => pin_not_answering(&n.detail),
@@ -1022,12 +1164,42 @@ pub fn pair_with_pin(host: &str, account_id_b64: &str, pin: &str) -> Result<Pair
         mac: reg.mac,
         account_id_b64: account_id_b64.trim().to_string(),
         account_via: "manual_pin".into(),
+        // The caller names the user, when it knows the name.
+        user_name: String::new(),
     })
 }
 
 #[cfg(test)]
 mod manual_pin_tests {
     use super::*;
+
+    /// A console that waits for the sender to finish before it answers still gets an answer read,
+    /// and a reply is read while our side stays open.
+    #[test]
+    fn a_reply_is_read_with_our_side_open_and_a_half_close_still_works() {
+        use std::net::TcpListener;
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let t = std::thread::spawn(move || {
+            // Answers without waiting for the end of the stream.
+            let (mut s, _) = l.accept().unwrap();
+            let mut b = [0u8; 16];
+            let _ = s.read(&mut b).unwrap();
+            s.write_all(b"HTTP/1.1 403 x\r\n\r\n").unwrap();
+            drop(s);
+            // Reads to the end before it answers: only a half-close lets it.
+            let (mut s, _) = l.accept().unwrap();
+            let mut all = Vec::new();
+            s.read_to_end(&mut all).unwrap();
+            s.write_all(b"HTTP/1.1 200 x\r\n\r\n").unwrap();
+        });
+        let quick = Duration::from_secs(5);
+        let first = exchange(addr, b"hello", false, quick).unwrap();
+        assert!(first.starts_with(b"HTTP/1.1 403"));
+        let second = exchange(addr, b"hello", true, quick).unwrap();
+        assert!(second.starts_with(b"HTTP/1.1 200"));
+        t.join().unwrap();
+    }
 
     #[test]
     fn a_dropped_connection_is_tried_again_and_a_refusal_is_not() {
@@ -1066,6 +1238,20 @@ mod manual_pin_tests {
             m.contains("3 times") && m.contains("Press Pair again"),
             "{m}"
         );
+    }
+
+    #[test]
+    fn a_console_that_hangs_up_without_answering_is_tried_again() {
+        let quick = Duration::from_millis(0);
+        let n = std::cell::Cell::new(0);
+        let r = with_retries(3, quick, || {
+            n.set(n.get() + 1);
+            if n.get() == 1 {
+                return split_http(b"").map(|_| 0);
+            }
+            Ok(7)
+        });
+        assert_eq!((r.unwrap(), n.get()), (7, 2));
     }
 
     #[test]

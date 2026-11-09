@@ -120,6 +120,8 @@ test("the host invites, allows a friend, sees their delay and removes them", asy
   await page.getByTestId("rp-start").click();
   await page.getByTestId("rp-toolbar").hover();
   await page.getByTestId("rp-together").click();
+  // The stream bar's button switches to Play › Play together.
+  await expect(page.getByRole("radio", { name: "Play Together" })).toHaveAttribute("aria-checked", "true");
 
   // ① Invite: the QR code, the link and the other address.
   const panel = page.getByTestId("pt-panel");
@@ -168,6 +170,86 @@ test("the host invites, allows a friend, sees their delay and removes them", asy
   // The phones panel is one click away.
   await panel.getByTestId("pt-phones").click();
   await expect(page.getByTestId("rp-phone-pads")).toBeVisible();
+});
+
+test("Play together and Play my PS5 are one stream: switching pages never restarts or stops it", async ({ page }) => {
+  await consoleSetUp(page);
+  const posts: string[] = [];
+  await routeEngine(page, (path, req) => {
+    if (path === "/api/version") return { version: "10.8.0", caps: {} };
+    if (path === "/api/ps5/rp/session") return { host: null };
+    if (!path.startsWith("/api/join")) return {};
+    if (req.method() === "POST") posts.push(path);
+    const invite = { key: INVITE, code: "K7M2QX", code_display: "K7M-2QX", url: LINK, urls: [LINK], expires_in_s: 1800 };
+    if (path === "/api/join/invite") return invite;
+    return {
+      open: posts.includes("/api/join/open") && !posts.includes("/api/join/close"),
+      console: "192.168.1.100",
+      playing: true,
+      invite,
+      players_in: 0,
+      guests: [],
+      pending: [],
+      settings: { block_system_buttons: true, max_players: 3 },
+      max_guests: 3,
+    };
+  });
+  let streams = 0;
+  await page.routeWebSocket(/\/api\/ps5\/rp\/ws/, (ws) => {
+    streams += 1;
+    ws.onMessage((m) => {
+      if ((JSON.parse(String(m)) as { host?: string }).host) ws.send(JSON.stringify({ stage: "first_frame" }));
+    });
+  });
+
+  await page.goto("/play", { waitUntil: "domcontentloaded" });
+  // Before a stream: Play together explains itself and has one button.
+  await page.getByRole("radio", { name: "Play Together" }).click({ timeout: 30_000 });
+  await expect(page.getByTestId("pt-start")).toContainText("No app needed");
+  await expect(page.getByTestId("rp-start")).toHaveCount(0);
+  await page.getByTestId("pt-start-invite").click();
+
+  // Start and invite: the stream, then Play Together opened with its invite.
+  const panel = page.getByTestId("pt-panel");
+  await expect(panel.getByTestId("pt-url")).toHaveText(LINK, { timeout: 15_000 });
+  await expect.poll(() => posts).toContain("/api/join/open");
+  await expect(page.getByTestId("rp-stage")).toBeVisible();
+  expect(streams).toBe(1);
+
+  // To Play my PS5 and back: the same stream all along, never stopped.
+  await page.getByRole("radio", { name: "Play my PS5" }).click();
+  await expect(panel).toHaveCount(0);
+  await expect(page.getByTestId("rp-stop").first()).toBeAttached();
+  await page.getByRole("radio", { name: "Play Together" }).click();
+  await expect(panel.getByTestId("pt-url")).toHaveText(LINK);
+  await page.getByRole("radio", { name: "Join a friend" }).click();
+  await page.getByRole("radio", { name: "Play Together" }).click();
+  await expect(panel.getByTestId("pt-url")).toHaveText(LINK);
+  await expect(page.getByTestId("rp-stop").first()).toBeAttached();
+  expect(streams).toBe(1);
+  expect(posts).not.toContain("/api/join/close");
+
+  // Close Play Together: back to Play my PS5, still streaming.
+  await panel.getByTestId("pt-close").click();
+  await expect.poll(() => posts).toContain("/api/join/close");
+  await expect(page.getByRole("radio", { name: "Play my PS5" })).toHaveAttribute("aria-checked", "true");
+  await expect(page.getByTestId("rp-stop").first()).toBeAttached();
+  expect(streams).toBe(1);
+});
+
+test("Play together with no console set up says so, and Start and invite waits", async ({ page }) => {
+  await page.addInitScript(() => {
+    window.localStorage.setItem("ps5upload.host", "192.168.1.100");
+    window.localStorage.setItem(
+      "ps5upload.roster.v1",
+      JSON.stringify({ active_id: "p1", profiles: [{ id: "p1", name: "Living room", host: "192.168.1.100" }] }),
+    );
+  });
+  await routeEngine(page, (path) => (path === "/api/version" ? { version: "10.8.0", caps: {} } : path === "/api/ps5/rp/session" ? { host: null } : {}));
+  await page.goto("/play", { waitUntil: "domcontentloaded" });
+  await page.getByRole("radio", { name: "Play Together" }).click({ timeout: 30_000 });
+  await expect(page.getByTestId("pt-start-invite")).toBeDisabled();
+  await expect(page.getByTestId("play-open-setup")).toBeVisible();
 });
 
 test("an old helper is pointed at the update", async ({ page }) => {
@@ -314,8 +396,8 @@ test("a friend's browser joins, plays as Player 2, and survives a dropped connec
 
   allow();
   await expect(page.getByTestId("join-player")).toHaveText("You are Player 2");
-  await expect(page.getByTestId("join-picking")).toHaveText("On the TV: pick Quick Play");
-  await expect(page.getByTestId("join-guide")).toContainText("Press PS on your controller");
+  await expect(page.getByTestId("join-picking")).toHaveText("Press PS, then pick Quick Play on the TV");
+  await expect(page.getByTestId("join-guide")).toContainText("On your controller, press PS once");
   await expect(page.getByTestId("join-pad")).toHaveText("Your controller is ready");
   await expect.poll(() => page.getByTestId("watch-canvas").evaluate((c) => (c as HTMLCanvasElement).width)).toBe(320);
   await expect(page.getByTestId("join-delay")).toBeVisible({ timeout: 5_000 });
@@ -587,7 +669,7 @@ test("the app joins a friend from Play, and asks before starting its own Play", 
   await page.getByTestId("join-link").fill("http://192.168.1.9:19113/join#i=bad");
   await page.getByTestId("join-app-name").fill("Ben");
   await page.getByTestId("join-app-go").click();
-  await expect(page.getByText("That isn't a Play Together link.")).toBeVisible();
+  await expect(page.getByText("That isn't a Play Together invite link.")).toBeVisible();
   await page.getByTestId("join-link").fill(LINK);
   await page.getByTestId("join-app-go").click();
   await expect(page.getByTestId("join-player")).toHaveText("Playing at Ann's · You are Player 2", { timeout: 30_000 });
@@ -636,4 +718,121 @@ test.describe("a friend's phone in the app", () => {
     await full.tap();
     await expect(full).toHaveCount(0);
   });
+});
+
+/** A controller the browser has no layout for (mapping ""), `n` raw buttons: window.__pad. */
+async function fakeRawController(page: Page, id: string, n = 12, axes: number[] = [0, 0, 0, 0]) {
+  await page.addInitScript(
+    ([id, n, axes]) => {
+      const state = { buttons: new Array(n).fill(0) as number[], axes: [...axes] };
+      (window as unknown as { __pad: typeof state }).__pad = state;
+      navigator.getGamepads = () =>
+        [
+          {
+            id,
+            index: 0,
+            connected: true,
+            mapping: "",
+            timestamp: performance.now(),
+            axes: [...state.axes],
+            buttons: state.buttons.map((v) => ({ pressed: v > 0.5, touched: v > 0, value: v })),
+            vibrationActuator: null,
+          },
+        ] as unknown as (Gamepad | null)[];
+    },
+    [id, n, axes] as const,
+  );
+}
+
+/** Joined at once as Player 2; the pad frames the page sends land in `frames`. */
+async function joinedAsPlayer2(page: Page, frames: number[][]) {
+  await page.routeWebSocket(/\/api\/join\/ws/, (ws) => {
+    ws.onMessage((m) => {
+      if (typeof m !== "string") {
+        frames.push([...m]);
+        return;
+      }
+      const v = JSON.parse(m) as { hello?: Record<string, unknown>; ping?: number };
+      if (v.ping !== undefined) ws.send(JSON.stringify({ pong: v.ping }));
+      if (!v.hello) return;
+      ws.send(JSON.stringify({ stage: "joined", player: 2, token: "TOKEN-1", hevc: false }));
+      ws.send(JSON.stringify({ status: { player: 2, state: "playing", rtt_ms: 12, host: "Ann" } }));
+    });
+  });
+  await page.addInitScript(() => localStorage.setItem("ps5upload.join.guided", "1"));
+  await page.goto(`/join#i=${INVITE}&n=Ann`, { waitUntil: "domcontentloaded" });
+  await page.getByTestId("join-name").fill("Ben");
+  await page.getByTestId("join-go").click();
+  await expect(page.getByTestId("join-player")).toHaveText("You are Player 2", { timeout: 30_000 });
+}
+
+test("a friend checks a controller nobody knows: a live view, a quick mapping, Redo", async ({ page }) => {
+  await fakeRawController(page, "Mystery Pad (Vendor: 1234 Product: 5678)");
+  await serveJoinPage(page);
+  const frames: number[][] = [];
+  await joinedAsPlayer2(page, frames);
+  await expect(page.getByTestId("join-pad-unknown")).toContainText("Not on our list");
+
+  await page.getByTestId("join-pad-unknown-check").dispatchEvent("click");
+  const check = page.getByTestId("join-pad-check");
+  await expect(check).toBeVisible();
+  await expect(page.getByTestId("join-pad-check-kind")).toHaveAttribute("data-kind", "guess");
+  // Raw button 0 plays as ✕ for now (the standard order is the guess): it lights up.
+  await press(page, 0, 1);
+  await expect(page.getByTestId("join-pad-test")).toHaveAttribute("data-buttons", "1");
+  await press(page, 0, 0);
+  // While checking, the game gets nothing from this device.
+  frames.length = 0;
+  await press(page, 0, 1);
+  await page.waitForTimeout(300);
+  expect(frames.some((f) => f[5] !== 0)).toBe(false);
+  await press(page, 0, 0);
+
+  // This pad's bottom button is raw 3, right 2, left 1, top 0; the rest skipped.
+  await page.getByTestId("join-pad-learn-start").click();
+  await expect(page.getByTestId("join-pad-learn-step")).toHaveText("Press the bottom face button (✕)");
+  // The check's first reading is where everything rests: let it take one with nothing pressed
+  // (a press before it would be taken for rest, and never seen; a slow runner showed that).
+  await page.waitForTimeout(150);
+  for (const b of [3, 2, 1, 0]) {
+    const before = (await page.getByTestId("join-pad-learn-step").textContent()) ?? "";
+    await press(page, b, 1);
+    await expect(page.getByTestId("join-pad-learn-step")).not.toHaveText(before);
+    await press(page, b, 0);
+    // Let go for a few frames, as a hand does: the next step listens after that.
+    await page.waitForTimeout(100);
+  }
+  while (await page.getByTestId("join-pad-learn").count()) await page.getByTestId("join-pad-learn-skip").click();
+  await expect(check).toContainText("Saved for this controller on this device");
+  await expect(page.getByTestId("join-pad-check-kind")).toHaveAttribute("data-kind", "saved");
+  await press(page, 3, 1);
+  await expect(page.getByTestId("join-pad-test")).toHaveAttribute("data-buttons", "1");
+  await press(page, 3, 0);
+  await expect(page.getByTestId("join-pad-learn-start")).toHaveText("Redo");
+
+  // Back in the game: raw 3 is ✕ now.
+  await page.getByTestId("join-pad-check-done").click();
+  await expect(check).toHaveCount(0);
+  frames.length = 0;
+  await press(page, 3, 1);
+  await expect.poll(() => frames.some((f) => f[5] === 1)).toBe(true);
+  await press(page, 3, 0);
+  // Kept on this device, under the controller's name.
+  expect(await page.evaluate(() => localStorage.getItem("ps5upload.rp_pad_profiles.v1"))).toContain("Mystery Pad");
+});
+
+test("a friend's 8BitDo in D-input is told how to switch it to X-input", async ({ page }) => {
+  // Chrome's reading of a Pro 2 in D-input: axes by HID usage, triggers resting at -1, hat at 9.
+  await fakeRawController(page, "8BitDo Pro 2 (Vendor: 2dc8 Product: 6006)", 15, [0, 0, 0, -1, -1, 0, 0, 0, 0, 9 / 7]);
+  await serveJoinPage(page);
+  const frames: number[][] = [];
+  await joinedAsPlayer2(page, frames);
+  await expect(page.getByTestId("pad-8bitdo-hint")).toHaveText(
+    "For the best result, switch your 8BitDo to X-input mode: set the switch on the back to X, then press Start.",
+  );
+  // Known from the table: no "not on our list", and B (raw 1, the bottom button) plays as ✕.
+  await expect(page.getByTestId("join-pad-unknown")).toHaveCount(0);
+  frames.length = 0;
+  await press(page, 1, 1);
+  await expect.poll(() => frames.some((f) => f[5] === 1)).toBe(true);
 });

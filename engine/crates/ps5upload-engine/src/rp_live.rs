@@ -428,7 +428,7 @@ fn codec_name(c: Codec) -> &'static str {
 
 fn log_reader(what: &str, r: &Reader) {
     let s = &r.stats;
-    crate::log_info!(
+    crate::log_at!(Info, "rp", 
         "rp_live: reader {} ({}) {what} after {:.0} s: {} bytes, {} frames, {} keyframes, {} held after loss, {} dropped (slow reader)",
         r.id,
         r.peer,
@@ -484,7 +484,9 @@ impl ReaderMux {
                         self.stats.keyframes.fetch_add(1, Ordering::Relaxed);
                         if !self.first_key_logged {
                             self.first_key_logged = true;
-                            crate::log_info!(
+                            crate::log_at!(
+                                Info,
+                                "rp",
                                 "rp_live: reader {} playing: first keyframe after {} ms{}",
                                 self.id,
                                 self.origin.elapsed().as_millis(),
@@ -587,9 +589,24 @@ pub(crate) struct FeedReader {
     _leave: Leave,
     pub stats: Arc<ReaderStats>,
     pub session: SessionInfo,
+    /// Opus channels, from the console's audio header.
+    pub channels: u8,
 }
 
 impl FeedReader {
+    /// The next frame as the console sent it, for Go live's own muxer (golive_native/); None
+    /// once the session ended. A reader uses this or `next`, not both.
+    pub(crate) async fn next_event(&mut self) -> Option<FeedEvent> {
+        let ev = self.rx.recv().await?;
+        if let FeedEvent::Video { key, .. } = &ev {
+            self.stats.frames.fetch_add(1, Ordering::Relaxed);
+            if *key {
+                self.stats.keyframes.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        Some(ev)
+    }
+
     /// The next TS bytes; None once the session ended.
     pub(crate) async fn next(&mut self) -> Option<Vec<u8>> {
         loop {
@@ -609,14 +626,21 @@ pub(crate) fn open_reader(who: &str) -> Option<FeedReader> {
     let live = super::live()?;
     let feed = live.feed.clone();
     let (id, rx, stats) = feed.add(who.to_string(), true)?;
-    crate::log_info!("rp_live: reader {id} ({who}) connected to {}", live.host);
+    crate::log_at!(
+        Info,
+        "rp",
+        "rp_live: reader {id} ({who}) connected to {}",
+        live.host
+    );
     let mux = ReaderMux::new(&feed, id, stats.clone());
+    let channels = feed.channels.lock().map(|g| *g).unwrap_or(2);
     Some(FeedReader {
         rx,
         mux,
         _leave: Leave { feed, id },
         stats,
         session,
+        channels,
     })
 }
 
@@ -651,7 +675,9 @@ pub async fn live_ts(
             "Too many players are reading the live feed.",
         );
     };
-    crate::log_info!(
+    crate::log_at!(
+        Info,
+        "rp",
         "rp_live: reader {id} ({peer}) connected to {} ({} reading)",
         live.host,
         feed.readers()

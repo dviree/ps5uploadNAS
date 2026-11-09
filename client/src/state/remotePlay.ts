@@ -21,9 +21,9 @@ import {
   type StreamStats,
   type PasscodeAsk,
 } from "../lib/remotePlayStream";
-import type { MotionReading } from "../lib/motion";
 import { gamepadsOf } from "../lib/nativePad";
-import { profileFor } from "../lib/padProfiles";
+import { padKind, profileFor } from "../lib/padProfiles";
+import { describePads, padActive, padFromMessage, type PadInput } from "../lib/padFrom";
 import { safeGetItem, safeSetItem } from "../lib/safeStorage";
 import { setGameMode } from "../lib/gameMode";
 import { setScreenWakeReason } from "../lib/androidScreenWake";
@@ -85,8 +85,10 @@ export interface RpPrefs {
   /** On a phone, screenshots and clips go to the photo library (lib/rpCapture.ts saveCapture). */
   toPhotos: boolean;
   /** Decode on the graphics card when there is one (auto), or always in software: a way out
-   *  of a graphics driver's decoder bug (Windows' hardware HEVC, #538/#575). */
-  decoding: "auto" | "software";
+   *  of a graphics driver's decoder bug (Windows' hardware HEVC, #538/#575), or the system's
+   *  media player (MSE) with WebCodecs never tried ("mse": an older Mac whose WebCodecs says yes
+   *  and decodes nothing, #720). */
+  decoding: "auto" | "software" | "mse";
   /** The video format asked of the console: HEVC where this device decodes it (auto), always
    *  H.264, or HDR (HEVC Main10) where this device can show it in HDR (lib/rpHdr.ts). */
   codec: CodecPref;
@@ -101,6 +103,9 @@ export interface RpPrefs {
   escHoldRelease: boolean;
   /** On a touch screen: the on-screen controller, or the screen as the PS5 mouse's touchpad. */
   touchMode: "controller" | "touchpad";
+  /** Full screen: the Controller/Touchpad switch over the picture (it hides with the stream's
+   *  controls and a tap brings it back). Off, it shows only outside full screen (#722). */
+  touchModeSwitchFull: boolean;
   /** How far the PS5's pointer moves for a finger's movement on the touchpad. */
   touchpadSpeed: number;
   /** On other screens of the app, the picture in a small floating window (layout/RemotePlayMini). */
@@ -142,6 +147,7 @@ export const DEFAULT_RP_PREFS: RpPrefs = {
   kbmChip: true,
   escHoldRelease: true,
   touchMode: "controller",
+  touchModeSwitchFull: true,
   touchpadSpeed: 1.5,
   miniPlayer: true,
   systemPip: true,
@@ -178,10 +184,11 @@ export function loadRpPrefs(): RpPrefs {
       fps: one(p.fps, [60, 30], DEFAULT_RP_PREFS.fps),
       fit: one(p.fit, FIT_ORDER, DEFAULT_RP_PREFS.fit),
       touchSize: one(p.touchSize, ["s", "m", "l"], DEFAULT_RP_PREFS.touchSize),
-      decoding: one(p.decoding, ["auto", "software"], DEFAULT_RP_PREFS.decoding),
+      decoding: one(p.decoding, ["auto", "software", "mse"], DEFAULT_RP_PREFS.decoding),
       codec,
       bitrateKbps,
       touchMode,
+      touchModeSwitchFull: p.touchModeSwitchFull !== false,
       touchpadSpeed,
       picture: readPicture(p.picture),
       buttonMap: readButtonMap(p.buttonMap),
@@ -248,32 +255,10 @@ interface RpState {
  *  Picture-in-Picture; video: the browser's video picture in picture (picture only). */
 export type PipKind = "popup" | "document" | "video";
 
-/** Who holds the game's input back now (Settings, the passcode box, the keyboard box). */
-const inputPauses = new Set<string>();
-
-/** While any `owner` has it on, the console gets an idle pad. Each lets go only of its own: the
- *  keyboard box closing must not hand the pad back under open Settings. */
-export function pauseRpInput(owner: "settings" | "passcode" | "keyboard", on: boolean): void {
-  if (on) inputPauses.add(owner);
-  else inputPauses.delete(owner);
-}
-
-/** Keys held on the picture and a finger on the touchpad: read by the stream every frame. */
-export const rpInput = {
-  held: new Set<string>(),
-  touch: null as [number, number] | null,
-  /** The on-screen controller. */
-  touchPad: IDLE_PAD as PadState,
-  /** A controller is being mapped: its presses are answers, not play. */
-  mapping: false,
-  /** Remote Play's settings or a box are open over the stream: keys, controllers and touch are
-   *  theirs, and the console gets an idle pad until they close ([`pauseRpInput`]). */
-  get paused(): boolean {
-    return inputPauses.size > 0;
-  },
-  /** The phone's latest motion reading, while motion controls are on. */
-  motion: null as MotionReading | null,
-};
+// rpInput and pauseRpInput live in ./rpInput (kept small: the friend's and the phone's pages
+// read rpInput, and importing this store would carry all of Remote Play into them).
+export { pauseRpInput, rpInput } from "./rpInput";
+import { rpInput } from "./rpInput";
 
 /** Controllers as every window showing the stream sees them. A hidden page's list can be a
  *  stale snapshot (buttons stuck down), so only visible ones count. Read once each: the same
@@ -332,7 +317,22 @@ function readPad(): PadState {
   };
   // The running game's turbo, mouse aim and macros (Game panel › Controls).
   const now = typeof performance !== "undefined" ? performance.now() : Date.now();
-  return applyControls(merged, controls, rpInput.held, rpControls, now);
+  const out = applyControls(merged, controls, rpInput.held, rpControls, now);
+  // Which inputs fed the pad this session, for the engine's controller check (lib/padFrom.ts).
+  if (padActive(read)) padInputs.add("controller");
+  if (padActive(keys)) padInputs.add("keys");
+  if (padActive(rpInput.touchPad) || rpInput.touch) padInputs.add("touch");
+  if (pt?.click || pt?.touch) padInputs.add("touchpad");
+  if (out !== merged) padInputs.add("controls");
+  return out;
+}
+
+/** The inputs that fed the pad since the stream started (lib/padFrom.ts). */
+const padInputs = new Set<PadInput>();
+
+/** What feeds the pad, read by the stream only when the pad changed. */
+function readPadFrom(): { key: string; value: unknown } {
+  return padFromMessage(padInputs, describePads(rpGamepads(), padKind));
 }
 
 export const useRemotePlayStore = create<RpState>((set, get) => ({
@@ -487,8 +487,10 @@ export const useRemotePlayStore = create<RpState>((set, get) => ({
         set({ passcode: ask ? { ...ask, seq: (get().passcode?.seq ?? 0) + 1 } : null });
       },
       readPad,
+      padFrom: readPadFrom,
       gamepads: rpGamepads,
     });
+    padInputs.clear();
     stream.setVolume(prefs.muted ? 0 : prefs.volume);
     set({ stream, target: t, phase: "connecting", error: null, stats: null, light: null, keyboard: null, passcode: null, sessionQuality: quality, pictureHere: pictureHere !== false });
     await stream.start();

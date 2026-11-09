@@ -413,7 +413,7 @@ describe("fpkg pipeline", () => {
     expect(useFpkgConversion.getState().pipeline).toMatchObject({ phase: "running", stage: "extract" });
     expect(extract).toHaveBeenCalledWith("/dl/My Game.part1.rar", "/out", "pw");
     await tick();
-    expect(buildImage).toHaveBeenCalledWith(game, "/out", "ffpkg", true, undefined, 8192, false, "My Game", "balanced", undefined);
+    expect(buildImage).toHaveBeenCalledWith(game, "/out", "ffpkg", true, undefined, 8192, false, "My Game", "balanced", undefined, { add: true, build: "ampr_emu" });
     await tick();
     expect(useFpkgConversion.getState().pipeline).toMatchObject({
       phase: "done",
@@ -435,7 +435,7 @@ describe("fpkg pipeline", () => {
     });
     await useFpkgConversion.getState().buildImage("/games/PPSA1-app", "/out", false);
     await tick();
-    expect(buildImage).toHaveBeenCalledWith("/games/PPSA1-app", "/out", "exfat", false, undefined, 8192, false, undefined, "balanced", undefined);
+    expect(buildImage).toHaveBeenCalledWith("/games/PPSA1-app", "/out", "exfat", false, undefined, 8192, false, undefined, "balanced", undefined, { add: true, build: "ampr_emu" });
     expect(useFpkgConversion.getState().pipeline).toMatchObject({
       phase: "running",
       mode: "image",
@@ -474,6 +474,67 @@ describe("fpkg pipeline", () => {
     // A folder is never installed.
     await useFpkgConversion.getState().retryInstall("10.0.0.2");
     expect(useFpkgConversion.getState().pipeline).toBe(p);
+  });
+
+  it("sends a PS4 update to merge with the game's folder or image build", async () => {
+    const buildFolder = vi.fn().mockResolvedValue({ job_id: "m1" });
+    const buildImage = vi.fn().mockResolvedValue({ job_id: "m2" });
+    const { fpkg } = await import("../api/fpkg");
+    (fpkg as unknown as { buildFolder: unknown }).buildFolder = buildFolder;
+    (fpkg as unknown as { buildImage: unknown }).buildImage = buildImage;
+    jobStatus.mockResolvedValue({ status: "done", dest: "/out/G", bytes_sent: 9 });
+    await useFpkgConversion.getState().buildFolder("/games/G.pkg", "/out", false, { update: "/games/U.pkg" });
+    expect(buildFolder).toHaveBeenCalledWith(
+      "/games/G.pkg", "/out", undefined, false, undefined, false, undefined, "/games/U.pkg",
+    );
+    await tick();
+    useFpkgConversion.getState().reset();
+    await useFpkgConversion
+      .getState()
+      .buildImage("/games/G.pkg", "/out", false, "ffpkg", undefined, undefined, undefined, false, { update: "/games/U.pkg" });
+    const call = buildImage.mock.calls[0] ?? [];
+    expect(call[call.length - 1]).toBe("/games/U.pkg");
+    await tick();
+    jobStatus.mockReset();
+  });
+
+  it("sends a PS4 update to merge with the game's package build, which offers install like any package", async () => {
+    build.mockResolvedValueOnce({ job_id: "p1" });
+    jobStatus.mockResolvedValue({
+      status: "done",
+      dest: "/out/UP0000-CUSA99990_00-TESTGAME00000000.pkg",
+      bytes_sent: 9,
+      tx_id_hex: "UP0000-CUSA99990_00-TESTGAME00000000",
+    });
+    await useFpkgConversion
+      .getState()
+      .start({ source: "/games/G.pkg", outputDir: "/out", update: "/games/U.pkg" }, { install: false, host: null });
+    expect(build).toHaveBeenCalledWith(expect.objectContaining({ source: "/games/G.pkg", update: "/games/U.pkg" }));
+    await tick();
+    const p = useFpkgConversion.getState().pipeline;
+    expect(p).toMatchObject({ phase: "done", mode: "convert", packagePath: "/out/UP0000-CUSA99990_00-TESTGAME00000000.pkg" });
+    useFpkgConversion.getState().reset();
+    jobStatus.mockReset();
+  });
+
+  it("packs a game folder into a folder in zstd packs: pack first, the packs sent with the build", async () => {
+    const buildFolder = vi.fn().mockResolvedValue({ job_id: "f2" });
+    const { fpkg } = await import("../api/fpkg");
+    (fpkg as unknown as { buildFolder: unknown }).buildFolder = buildFolder;
+    jobStatus.mockResolvedValueOnce({
+      status: "running",
+      bytes_sent: 4,
+      total_bytes: 9,
+      stage: { id: "pack", index: 0, count: 3, done: 4, total: 18 },
+    });
+    const zstd = { level: 19, runtime: "pinned" as const };
+    await useFpkgConversion.getState().buildFolder("/games/PPSA1-app", "/out", true, { zstd });
+    expect(useFpkgConversion.getState().pipeline).toMatchObject({ phase: "running", mode: "folder", stage: "pack" });
+    await tick();
+    expect(buildFolder).toHaveBeenCalledWith("/games/PPSA1-app", "/out", undefined, false, undefined, true, zstd);
+    jobStatus.mockResolvedValueOnce({ status: "done", dest: "/out/PPSA1-app", bytes_sent: 9 });
+    await tick();
+    expect(useFpkgConversion.getState().pipeline).toMatchObject({ phase: "done", mode: "folder" });
   });
 
   it("puts the finished image in the Upload queue when the run was asked to", async () => {
@@ -563,11 +624,108 @@ describe("fpkg pipeline", () => {
     jobStatus.mockResolvedValueOnce({ status: "done", dest: "/out/G.ffpkg", bytes_sent: 9 });
     await useFpkgConversion.getState().buildImage("/games/G", "/out", false, "ffpkg");
     await tick();
-    expect(buildImage).toHaveBeenCalledWith("/games/G", "/out", "ffpkg", false, undefined, 8192, false, undefined, "balanced", undefined);
+    expect(buildImage).toHaveBeenCalledWith("/games/G", "/out", "ffpkg", false, undefined, 8192, false, undefined, "balanced", undefined, { add: true, build: "ampr_emu" });
     expect(useFpkgConversion.getState().pipeline).toMatchObject({
       phase: "done",
       packagePath: "/out/G.ffpkg",
     });
+  });
+
+  it("writes an image straight to the PS5 when it is saved there, and queues no upload", async () => {
+    const buildImage = vi.fn().mockResolvedValue({ job_id: "i9" });
+    const { fpkg } = await import("../api/fpkg");
+    (fpkg as unknown as { buildImage: unknown }).buildImage = buildImage;
+    jobStatus.mockResolvedValueOnce({ status: "done", dest: "/data/homebrew/G.exfat", bytes_sent: 9 });
+    const plan = { host: "10.0.0.2", volume: "/data", subpath: "homebrew", deleteAfter: false };
+    await useFpkgConversion
+      .getState()
+      .buildImage("/games/G", "/out", false, "exfat", undefined, undefined, undefined, false, { toConsole: plan });
+    await tick();
+    expect(buildImage).toHaveBeenCalledWith(
+      "/games/G",
+      "/out",
+      "exfat",
+      false,
+      undefined,
+      8192,
+      false,
+      undefined,
+      "balanced",
+      false,
+      { add: true, build: "ampr_emu" },
+      { kind: "console", addr: "10.0.0.2", dir: "/data/homebrew" },
+    );
+    expect(useFpkgConversion.getState().pipeline).toMatchObject({
+      phase: "done",
+      packagePath: "/data/homebrew/G.exfat",
+      onConsole: true,
+      uploadQueued: false,
+    });
+  });
+
+  it("writes an image straight to a server folder, and queues no upload nor offers a delete", async () => {
+    const buildImage = vi.fn().mockResolvedValue({ job_id: "s1" });
+    const deletePackage = vi.fn().mockResolvedValue({ ok: true });
+    const { fpkg } = await import("../api/fpkg");
+    (fpkg as unknown as { buildImage: unknown }).buildImage = buildImage;
+    (fpkg as unknown as { deletePackage: unknown }).deletePackage = deletePackage;
+    jobStatus.mockResolvedValueOnce({ status: "done", dest: "remote://nas1/games/ps5/G.exfat", bytes_sent: 9 });
+    const plan = { host: "10.0.0.2", volume: "/data", subpath: "homebrew", deleteAfter: false };
+    await useFpkgConversion
+      .getState()
+      .buildImage("/games/G", "/out", false, "exfat", plan, undefined, undefined, false, {
+        toServer: "remote://nas1/games/ps5",
+      });
+    await tick();
+    const call = buildImage.mock.calls[0] ?? [];
+    expect(call[call.length - 1]).toEqual({ kind: "server", source_id: "nas1", dir: "/games/ps5" });
+    expect(useFpkgConversion.getState().pipeline).toMatchObject({
+      phase: "done",
+      packagePath: "remote://nas1/games/ps5/G.exfat",
+      uploadQueued: false,
+    });
+    await useFpkgConversion.getState().deletePackage();
+    expect(deletePackage).not.toHaveBeenCalled();
+  });
+
+  it("writes a game folder straight to a server folder: the destination after the update slot", async () => {
+    const buildFolder = vi.fn().mockResolvedValue({ job_id: "s2" });
+    const { fpkg } = await import("../api/fpkg");
+    (fpkg as unknown as { buildFolder: unknown }).buildFolder = buildFolder;
+    jobStatus.mockResolvedValueOnce({ status: "done", dest: "remote://nas1/games/G", bytes_sent: 9 });
+    await useFpkgConversion
+      .getState()
+      .buildFolder("/games/G.ffpkg", "/out", false, { toServer: "remote://nas1/games" });
+    await tick();
+    expect(buildFolder).toHaveBeenCalledWith(
+      "/games/G.ffpkg",
+      "/out",
+      undefined,
+      false,
+      undefined,
+      false,
+      undefined,
+      undefined,
+      { kind: "server", source_id: "nas1", dir: "/games" },
+    );
+    expect(useFpkgConversion.getState().pipeline).toMatchObject({ phase: "done", packagePath: "remote://nas1/games/G" });
+  });
+
+  it("sends a PS4 game merged with its update straight to the PS5: the destination, then the update", async () => {
+    const buildImage = vi.fn().mockResolvedValue({ job_id: "i10" });
+    const { fpkg } = await import("../api/fpkg");
+    (fpkg as unknown as { buildImage: unknown }).buildImage = buildImage;
+    jobStatus.mockResolvedValueOnce({ status: "done", dest: "/data/homebrew/G.ffpkg", bytes_sent: 9 });
+    const plan = { host: "10.0.0.2", volume: "/data", subpath: "homebrew", deleteAfter: false };
+    await useFpkgConversion
+      .getState()
+      .buildImage("/games/G.pkg", "/out", false, "ffpkg", undefined, undefined, undefined, false, {
+        toConsole: plan,
+        update: "/games/U.pkg",
+      });
+    await tick();
+    const call = buildImage.mock.calls[0] ?? [];
+    expect(call.slice(-2)).toEqual([{ kind: "console", addr: "10.0.0.2", dir: "/data/homebrew" }, "/games/U.pkg"]);
   });
 
   it("packs LZ4 assets first when asked, and follows the engine's pack stage", async () => {
@@ -582,7 +740,7 @@ describe("fpkg pipeline", () => {
     await useFpkgConversion.getState().buildImage("/games/A", "/out", false, "exfat", undefined, lz4);
     expect(useFpkgConversion.getState().pipeline).toMatchObject({ phase: "running", stage: "pack" });
     await tick();
-    expect(buildImage).toHaveBeenCalledWith("/games/A", "/out", "exfat", false, lz4, 8192, false, undefined, "balanced", undefined);
+    expect(buildImage).toHaveBeenCalledWith("/games/A", "/out", "exfat", false, lz4, 8192, false, undefined, "balanced", undefined, { add: true, build: "ampr_emu" });
     expect(useFpkgConversion.getState().pipeline).toMatchObject({
       stage: "pack",
       stageDone: 5,
@@ -615,7 +773,7 @@ describe("fpkg pipeline", () => {
     try {
       await useFpkgConversion.getState().buildImage("/games/S", "/out", true, "ffpkg");
       await tick();
-      expect(buildImage).toHaveBeenCalledWith("/games/S", "/out", "ffpkg", true, undefined, 8192, false, undefined, "smallest", undefined);
+      expect(buildImage).toHaveBeenCalledWith("/games/S", "/out", "ffpkg", true, undefined, 8192, false, undefined, "smallest", undefined, { add: true, build: "ampr_emu" });
     } finally {
       useConvertPrefs.getState().setImageLevel("balanced");
       useFpkgConversion.setState({ pipeline: { phase: "idle" } });
@@ -634,7 +792,7 @@ describe("fpkg pipeline", () => {
     });
     await useFpkgConversion.getState().buildImage("/games/G", "/out", true, "ffpkg");
     await tick();
-    expect(buildImage).toHaveBeenCalledWith("/games/G", "/out", "ffpkg", true, undefined, 8192, false, undefined, "balanced", undefined);
+    expect(buildImage).toHaveBeenCalledWith("/games/G", "/out", "ffpkg", true, undefined, 8192, false, undefined, "balanced", undefined, { add: true, build: "ampr_emu" });
     expect(useFpkgConversion.getState().pipeline).toMatchObject({
       phase: "running",
       mode: "image",
@@ -994,7 +1152,7 @@ describe("fpkg pipeline", () => {
     expect(useFpkgConversion.getState().pipeline).toMatchObject({ phase: "running", mode: "image", stage: "extract" });
     expect(extract).toHaveBeenCalledWith("/dl/My Game.part1.rar", "/out", "pw");
     await tick();
-    expect(buildImage).toHaveBeenCalledWith(game, "/out", "exfat", true, undefined, 8192, false, "My Game", "balanced", undefined);
+    expect(buildImage).toHaveBeenCalledWith(game, "/out", "exfat", true, undefined, 8192, false, "My Game", "balanced", undefined, { add: true, build: "ampr_emu" });
     await tick();
     expect(useFpkgConversion.getState().pipeline).toMatchObject({
       phase: "done",

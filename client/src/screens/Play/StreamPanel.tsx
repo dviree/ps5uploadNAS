@@ -33,14 +33,17 @@ import { useTr } from "../../state/lang";
 import { phaseText } from "../../lib/rpPhaseText";
 import { useAndroidPipStore } from "../../lib/androidPip";
 import { useRosterStore } from "../../state/roster";
+import { chosenRpUser, rpUsersOf } from "../../lib/rpUsers";
+import { rpUserLabel } from "./setup/PairedUsers";
 import { deviceName, meshFor, othersRemotePlaying, remotePlayPads, useMeshStore } from "../../state/mesh";
 import { isTauriEnv } from "../../lib/tauriEnv";
-import { isLinuxDesktop, isMobile } from "../../lib/platform";
+import { isIOS, isLinuxDesktop, isMobile } from "../../lib/platform";
 import {
   streamRefusal,
   stopEngineSession,
   touchAt,
   FIT_ORDER,
+  PadButton,
   type PictureFit,
   type StreamError,
   type StreamStats,
@@ -51,18 +54,21 @@ import {
   useRemotePlayStore,
   type RpPrefs,
 } from "../../state/remotePlay";
-import { TouchControls, useTouchFirst, type TouchLayout } from "./TouchControls";
+import { SAFE_MIDDLE, TouchControls, useTouchFirst, type TouchLayout } from "./TouchControls";
 import {
   canDocFullscreen,
   COARSE_QUERY,
   COMPACT_QUERY,
   docFullscreen,
   focusForControllers,
+  focusTakenFrom,
+  holdControllerHome,
   holdPageStill,
   inAndroidApp,
   isPhoneSized,
   lockLandscape,
   PHONE_LANDSCAPE_QUERY,
+  setIosStatusBarHidden,
   setWindowFullscreen,
   unlockOrientation,
   useMedia,
@@ -73,10 +79,12 @@ import { rpBrowserAdvice } from "./browserAdvice";
 import { motionAvailable, startMotion } from "../../lib/motion";
 import { PadAsks, PhonePadsPanel, usePadLink } from "./PhonePads";
 import { JoinAsks, PlayTogetherPanel } from "./PlayTogether";
+import { PlayTogetherStart, togetherStartKind } from "./PlayTogetherStart";
 import { friendsIn, useJoinHost } from "./playTogetherState";
 import { okToStartPlay } from "./JoinAFriend";
 import { useConfirm } from "../../components/ConfirmDialog";
-import { GoLiveBarIcon, GoLiveChip, GoLivePanel, goLiveAvailable, useGoLivePolling } from "./GoLivePanel";
+import { log } from "../../state/logs";
+import { GoLiveBarIcon, GoLiveChip, GoLivePanel, goLiveAvailable, inAppPhoneEngine, useGoLivePolling } from "./GoLivePanel";
 import { GamePanel } from "./game/GamePanel";
 import { LaunchStatus } from "./game/LaunchStatus";
 import { DropChoice, DropZone, useStreamDropZone } from "./game/DropToInstall";
@@ -111,6 +119,9 @@ type Tr = ReturnType<typeof useTr>;
 /** Full screen on an upright phone: where the picture starts, under the menu handle's row. */
 const PICTURE_TOP = "calc(max(6px, env(safe-area-inset-top)) + 2.75rem)";
 
+/** Full screen: the room left each side of the picture. */
+const PICTURE_SIDE = "min(env(safe-area-inset-left), env(safe-area-inset-right))";
+
 /** Set once the browser advice was dismissed. */
 const BROWSER_ADVICE_KEY = "ps5upload.rp_browser_advice_dismissed";
 
@@ -118,6 +129,9 @@ const BROWSER_ADVICE_KEY = "ps5upload.rp_browser_advice_dismissed";
 const ESC_HOLD_MS = 700;
 /** How long a quick Esc press holds its button down on the console. */
 const ESC_TAP_MS = 80;
+/** After a switch into or out of full screen, how long the Mac's window animation is given before
+ *  the web view's focus is checked again. */
+const FULL_SETTLE_MS = 1000;
 
 export { streamErrorMessage };
 
@@ -382,7 +396,17 @@ function FitMenu({
  * leaving it keeps the stream running and coming back shows it again. Uses the Wake & sign in
  * keys stored for the console (never shown); a console without them is pointed at that setup.
  */
-export function StreamPanel() {
+export function StreamPanel({
+  together = false,
+  onTogether,
+}: {
+  /** Play › Play together is on show: before a stream, its Start and invite; during one, the
+   *  Play Together panel with the picture. */
+  together?: boolean;
+  /** Play Together is a page of Play (index.tsx): the stream bar's button and the menu switch
+   *  to it (true) or back (false). Without it, the panel opens here on its own. */
+  onTogether?: (open: boolean) => void;
+} = {}) {
   const tr = useTr();
   const navigate = useNavigate();
   const profiles = useRosterStore((s) => s.profiles);
@@ -413,7 +437,19 @@ export function StreamPanel() {
   const [gameOpen, setGameOpen] = useState(false);
   const [phonesOpen, setPhonesOpen] = useState(false);
   /** Play Together (#641): friends as Player 2–4. */
-  const [togetherOpen, setTogetherOpen] = useState(false);
+  const [togetherOpenHere, setTogetherOpenHere] = useState(false);
+  const togetherOpen = onTogether ? together : togetherOpenHere;
+  const setTogetherOpen = useCallback(
+    (open: boolean) => (onTogether ? onTogether(open) : setTogetherOpenHere(open)),
+    [onTogether],
+  );
+  // Read by start (a callback) without making it new on every switch of the page.
+  const togetherRef = useRef(togetherOpen);
+  useEffect(() => {
+    togetherRef.current = togetherOpen;
+  }, [togetherOpen]);
+  /** Start and invite: the Play Together panel takes the focus when it shows. */
+  const inviteFocus = useRef(false);
   const { confirm, dialog: confirmDialog } = useConfirm();
   /** The Stream panel (Go live, OBS; #635). */
   const [goLiveOpen, setGoLiveOpen] = useState(false);
@@ -430,6 +466,8 @@ export function StreamPanel() {
   const coarse = useMedia(COARSE_QUERY);
   const portrait = useMedia("(orientation: portrait)");
   const phoneLandscape = useMedia(PHONE_LANDSCAPE_QUERY);
+  // Too narrow for both names of the touch mode switch between the shoulder buttons.
+  const tightDeck = useMedia("(max-width: 619px)");
   // Settings as a sheet from the bottom on a phone (either way up), at the right edge elsewhere.
   const settingsSheet = useMedia("(max-width: 639px)") || phoneLandscape;
   const [menuOpen, setMenuOpen] = useState(false);
@@ -441,6 +479,9 @@ export function StreamPanel() {
   // Whether the last press on the picture was a mouse: only a mouse double-click toggles full
   // screen (a double tap of a finger is play).
   const lastPointer = useRef("mouse");
+  /** Whether the mouse was captured at the latest press, and at the one before it. */
+  const downCaptured = useRef(false);
+  const firstClickCaptured = useRef(false);
   const [elsewhere, setElsewhere] = useState<string | null>(null);
   const stage = useRef<HTMLDivElement>(null);
   const canvasHost = useRef<HTMLDivElement>(null);
@@ -453,6 +494,11 @@ export function StreamPanel() {
 
   const profile = useMemo(() => profiles.find((p) => p.id === profileId) ?? null, [profiles, profileId]);
   const paired = !!(profile?.wake_regist_key && profile?.wake_rp_key);
+  // The PS5 users this console is paired as: with more than one, Start says which to play as
+  // (the choice stays with the console, and Wake signs in the same user).
+  const rpUsers = useMemo(() => rpUsersOf(profile), [profile]);
+  const rpUser = chosenRpUser(profile);
+  const chooseRpUser = useRosterStore((s) => s.chooseRpUser);
   // One stream at a time, for whichever console it plays. This page shows the selected console:
   // the stream when it is that console's, otherwise that console's own Start, with the other
   // stream offered (show it, or stop it and play this one).
@@ -475,10 +521,22 @@ export function StreamPanel() {
   }, [joinHost, confirm, tr]);
   const otherStream = streaming && !running ? target : null;
   const otherProfile = otherStream ? profiles.find((p) => p.host === otherStream.host) ?? null : null;
-  // The iOS app hands controllers to the page only while it has the focus: take it on show and
-  // whenever a stream starts here.
+  // The iOS and Mac apps hand controllers to the page only while it has the focus: take it on
+  // show and whenever a stream starts here.
   useEffect(() => {
-    focusForControllers();
+    void focusForControllers();
+  }, [running]);
+  // iOS and the Mac app: the PS button goes to the console during a stream, not to the system's Games overlay
+  // (#675). A controller paired later gets the same.
+  useEffect(() => {
+    if (!running) return;
+    const hold = () => holdControllerHome(true);
+    hold();
+    window.addEventListener("gamepadconnected", hold);
+    return () => {
+      window.removeEventListener("gamepadconnected", hold);
+      holdControllerHome(false);
+    };
   }, [running]);
   // The phone's motion sensors as the controller's, while it plays and motion controls are on.
   useEffect(() => {
@@ -496,7 +554,7 @@ export function StreamPanel() {
   const pictureHere = useRemotePlayStore((s) => s.pictureHere);
   const setPictureHere = useRemotePlayStore((s) => s.setPictureHere);
   const playing = sessionPlaying && pictureHere;
-  const goLive = goLiveAvailable({ mobile: isMobile() });
+  const goLive = goLiveAvailable({ tauri: isTauriEnv(), mobile: isMobile() });
   useGoLivePolling(running && goLive, goLiveOpen);
   // Play a title on the stream (from a game's page, or the Game panel): stream, helper, launch.
   const launcher = useGameLaunch();
@@ -614,11 +672,8 @@ export function StreamPanel() {
   useEffect(() => {
     const host = canvasHost.current;
     if (!stream || !host || !running || pip === "popup" || pip === "document" || androidPip) return;
-    host.appendChild(stream.canvas);
-    return () => {
-      if (stream.canvas.parentElement === host) host.removeChild(stream.canvas);
-    };
-    // Full screen moves the stage (a portal), so the canvas follows it.
+    return stream.mount(host);
+    // Full screen moves the stage (a portal), so the picture follows it.
   }, [stream, full, running, pip, androidPip]);
 
   // A stream this page does not show (a reload, another window): offer it here. One whose stop is
@@ -657,6 +712,13 @@ export function StreamPanel() {
     window.addEventListener("focus", onFocus);
     return () => window.removeEventListener("focus", onFocus);
   }, [phase, stream]);
+
+  const showChrome = useCallback(() => {
+    setChrome(true);
+    window.clearTimeout(hideTimer.current);
+    hideTimer.current = window.setTimeout(() => setChrome(false), 2500);
+  }, []);
+  useEffect(() => () => window.clearTimeout(hideTimer.current), []);
 
   const leaveFullLayout = useCallback(() => {
     setFull(false);
@@ -764,23 +826,53 @@ export function StreamPanel() {
       if (menuOpen) return;
       const t = e.target as Element | null;
       if (t?.closest?.('[data-testid="rp-menu-handle"],[data-testid="rp-menu-backdrop"],[role="dialog"]')) return;
+      // A finger on the picture (not on the on-screen controller's buttons, which are the
+      // game's) brings back the controls hidden in full screen: the Controller/Touchpad switch.
+      if (full && e.pointerType !== "mouse" && !t?.closest?.('[data-testid="rp-touch"]')) showChrome();
       if (full && coarse && !docFullscreen() && canDocFullscreen()) void setWindowFullscreen(true);
     },
-    [full, coarse, menuOpen],
+    [full, coarse, menuOpen, showChrome],
   );
-  // Into or out of full screen the stage is a new element: keep the keyboard on it.
+  // Into or out of full screen the stage is a new element: keep the keyboard on it, both ways
+  // (out of full screen the keys went to the page, and the stream lost its controls: #720).
+  // The Mac app also gives the web view the window's focus back: WebKit sends the controller only
+  // to the key window's first responder, which after full screen may be another view (#720: the
+  // controller worked only in full screen). Asked again once the window's own animation is over;
+  // said in the log when it was needed, so a report shows it. Desktop app only (the command does
+  // nothing outside the Mac).
+  const wasFull = useRef(full);
   useEffect(() => {
-    if (full) stage.current?.focus();
+    if (wasFull.current === full) return;
+    wasFull.current = full;
+    stage.current?.focus();
+    if (!isTauriEnv() || isMobile()) return;
+    const take = (when: string) =>
+      void focusForControllers().then((was) => {
+        const from = focusTakenFrom(was);
+        if (from) log.info("remote-play", `full screen ${full ? "on" : "off"} (${when}): the focus was on ${from}, given back to the picture`);
+      });
+    take("at once");
+    const later = window.setTimeout(() => {
+      // Not taken from a box of the app the player went to meanwhile.
+      const active = document.activeElement;
+      if (!active || active === document.body) stage.current?.focus();
+      take("after the window settled");
+    }, FULL_SETTLE_MS);
+    return () => window.clearTimeout(later);
   }, [full]);
   // Leaving the screen leaves full screen.
   useEffect(() => () => void setWindowFullscreen(false), []);
-
-  const showChrome = useCallback(() => {
-    setChrome(true);
-    window.clearTimeout(hideTimer.current);
-    hideTimer.current = window.setTimeout(() => setChrome(false), 2500);
-  }, []);
-  useEffect(() => () => window.clearTimeout(hideTimer.current), []);
+  // The iOS app: no status bar (the clock) over the picture in full screen, however it started
+  // (the button or the phone turned sideways), and back on leaving (#722).
+  useEffect(() => {
+    if (!full) return;
+    setIosStatusBarHidden(true);
+    return () => setIosStatusBarHidden(false);
+  }, [full]);
+  // Into full screen: the controls (and the Controller/Touchpad switch) show, then hide.
+  useEffect(() => {
+    if (full) showChrome();
+  }, [full, showChrome]);
 
   const start = useCallback(
     async (attach = false, host?: string) => {
@@ -789,10 +881,15 @@ export function StreamPanel() {
       // One thing at a time: a friend's game this app joined is left first (asked).
       if (!(await okToStartPlay(tr, confirm))) return;
       const go = async () => {
+        // Started from Play together: the invite comes first (its panel takes the focus), so the
+        // page stays where it is.
+        const forTogether = togetherRef.current;
+        inviteFocus.current = forTogether;
         await startStream(
           { host: p.host, name: p.name, registKey: p.wake_regist_key!, rpKey: p.wake_rp_key! },
           { attach },
         );
+        if (forTogether) return;
         stage.current?.focus();
         if (compact) stage.current?.scrollIntoView?.({ block: "start", behavior: "smooth" });
       };
@@ -1044,6 +1141,16 @@ export function StreamPanel() {
     pipKind,
     onClose: () => setMenuOpen(false),
     onExitFull: exitFull,
+    // Always reachable, whatever the system does with a controller's own PS button (#675).
+    onPsButton: () => {
+      setMenuOpen(false);
+      rpInput.touchPad = { ...rpInput.touchPad, buttons: rpInput.touchPad.buttons | PadButton.PS };
+      stream?.sendPad();
+      window.setTimeout(() => {
+        rpInput.touchPad = { ...rpInput.touchPad, buttons: rpInput.touchPad.buttons & ~PadButton.PS };
+        stream?.sendPad();
+      }, 150);
+    },
     onPip: () => {
       setMenuOpen(false);
       void togglePip();
@@ -1060,6 +1167,16 @@ export function StreamPanel() {
       setSettingsOpen(false);
       setGameOpen(true);
     },
+    // A phone has no room for Stream on the bar: it is in this menu (#731).
+    onGoLive: goLive
+      ? () => {
+          setMenuOpen(false);
+          if (full) exitFull();
+          setGoLiveOpen(true);
+        }
+      : undefined,
+    // The iPhone/iPad app: the hint names Safari, so it is for iOS only.
+    goLiveHint: inAppPhoneEngine({ tauri: isTauriEnv(), mobile: isMobile() }) && isIOS(),
   };
 
   const stageView = (
@@ -1082,14 +1199,22 @@ export function StreamPanel() {
                   // The stage moves into a portal on body: an event left to bubble on reaches
                   // React a second time there and would toggle straight back.
                   e.stopPropagation();
-                  // A finger's double tap is play (or a mis-tap), never full screen.
-                  if (lastPointer.current === "mouse") toggleFull();
+                  // A finger's double tap is play (or a mis-tap), never full screen. Nor is a
+                  // double click while the mouse was already playing (a game's double click):
+                  // only one that started from the free cursor (its first click captures).
+                  if (lastPointer.current === "mouse" && !firstClickCaptured.current) toggleFull();
                 }
               : undefined
           }
           onPointerUpCapture={refullOnTouch}
           onContextMenu={running ? (e) => e.preventDefault() : undefined}
-          onPointerDown={(e) => onPointer(e, "down")}
+          onPointerDown={(e) => {
+            // Whether the mouse was captured at each of the last two presses: a double click
+            // whose first press was already captured belongs to the game.
+            firstClickCaptured.current = downCaptured.current;
+            downCaptured.current = isCaptured();
+            onPointer(e, "down");
+          }}
           onPointerMove={(e) => onPointer(e, "move")}
           onPointerUp={(e) => onPointer(e, "up")}
           onPointerLeave={(e) => onPointer(e, "up")}
@@ -1111,14 +1236,17 @@ export function StreamPanel() {
             // stage's handlers get every press, and controls over it are hit first everywhere.
             className="rp-place pointer-events-none absolute inset-0 z-0 flex items-center justify-center"
             style={
-              portraitFull
+              portraitFull && touchHere
                 ? { top: PICTURE_TOP, bottom: "auto", height: "56.25vw" }
                 : full
                   ? {
-                      paddingLeft: "env(safe-area-inset-left)",
-                      paddingRight: "env(safe-area-inset-right)",
-                      paddingTop: "env(safe-area-inset-top)",
-                      paddingBottom: "env(safe-area-inset-bottom)",
+                      // Both sides by the same amount, so the picture stays in the middle: a notch
+                      // has the same inset each side, and an iPhone Duo's column of system icons
+                      // is on one side only and can sit over the picture. Nothing top and bottom:
+                      // an open Duo held sideways has large insets there, and they left the picture
+                      // far shorter than the screen (#675). A video player draws under them too.
+                      paddingLeft: PICTURE_SIDE,
+                      paddingRight: PICTURE_SIDE,
                     }
                   : undefined
             }
@@ -1172,6 +1300,22 @@ export function StreamPanel() {
               🔇 {tr("rp_sound_unavailable", undefined, "This device can't play the stream's sound. Update your system or browser, then start again.")}
             </div>
           )}
+          {/* Picture for a while and not one sound frame: the PS5 sends none, or in a format we
+              don't play. Said so, instead of silence with no explanation. */}
+          {playing && stats?.soundMissing && !stats.soundUnavailable && !stats.soundBlocked && !settingsOpen && !pip && (
+            <div
+              className={`absolute right-3 z-20 max-w-[70%] rounded-2xl bg-black/70 px-3 py-1 text-xs text-white/90 ${showBar && !compact ? "top-16" : "top-3"}`}
+              data-testid="rp-sound-missing"
+              data-reason={stats.soundMissing}
+            >
+              🔇{" "}
+              {stats.soundMissing === "format"
+                ? tr("rp_sound_format", undefined, "The PS5 sends its sound in a format PS5Upload can't play yet. A bug report from now tells us which.")
+                : stats.soundMissing === "device"
+                  ? tr("rp_sound_device", undefined, "The PS5's sound reaches this device, but none of it plays. Check this device's sound output and volume, then stop and start the stream. Still silent? Send a bug report.")
+                  : tr("rp_sound_none", undefined, "The PS5 isn't sending any sound to this stream. Stop and start the stream again; if it stays silent, check where the PS5 plays its sound (Settings › Sound › Audio Output) and send a bug report.")}
+            </div>
+          )}
           {playing && kbm.pointerHeld && prefs.kbmChip && !settingsOpen && !pip && !kbm.hint && (
             <KbmReleaseChip low={showBar && !compact} />
           )}
@@ -1189,7 +1333,7 @@ export function StreamPanel() {
           )}
           {playing && kbm.toast && !pip && <KbmToast key={kbm.toast.n} mode={kbm.toast.mode} captured={kbm.toast.captured} />}
           {running && <PadAsks pending={padLink.pending} />}
-          {running && <JoinAsks addr={target?.host ?? null} asks={joinHost.asks} />}
+          {running && <JoinAsks addr={target?.host ?? null} asks={joinHost.asks} seatNext={joinHost.seatNext} nextProfile={joinHost.nextProfile?.name ?? null} />}
           {running && <RpKeyboardBox />}
           {running && <RpPasscodeBox />}
           {running && pip && (
@@ -1331,7 +1475,7 @@ export function StreamPanel() {
                   onClick={() => {
                     if (full) exitFull();
                     setPhonesOpen(false);
-                    setTogetherOpen((v) => !v);
+                    setTogetherOpen(!togetherOpen);
                   }}
                   testId="rp-together"
                 >
@@ -1432,12 +1576,16 @@ export function StreamPanel() {
               onMenu={touchMenu ? () => setMenuOpen(true) : undefined}
             />
           )}
-          {touchHere && playing && (
+          {touchHere && playing && (!full || prefs.touchModeSwitchFull) && (
             <TouchModeToggle
+              // Full screen: it hides with the stream's controls; a tap on the picture shows both.
+              hidden={full && !chrome}
               mode={touchpadOn ? "touchpad" : "controller"}
               onChange={(m) => setPrefs({ touchMode: m })}
               blocked={kbm.hostCaps?.mouse ? null : kbmBlockText(tr, kbmBlockReason(kbm.hostCaps))}
+              tight={tightDeck && touchLayout === "deck"}
               style={{
+                left: SAFE_MIDDLE,
                 top:
                   touchLayout === "deck"
                     ? `calc(${PICTURE_TOP} + 56.25vw + 8px)`
@@ -1516,9 +1664,52 @@ export function StreamPanel() {
         </div>
   );
 
+  const togetherStart = togetherStartKind({
+    otherStream: !!otherStream,
+    streaming,
+    elsewhere,
+    host: profile?.host ?? null,
+  });
+
   return (
     <div className="space-y-3">
-      {!running && (
+      {!running && togetherOpen && (
+        <PlayTogetherStart
+          host={profile?.host ?? null}
+          consoleName={profile?.name ?? null}
+          canStart={paired && !startHeld}
+          starting={startHeld}
+          startLabel={
+            togetherStart === "switch"
+              ? tr("pt_switch_invite", undefined, "Stop the other stream, start and invite")
+              : togetherStart === "attach"
+                ? tr("pt_show_invite", undefined, "Show it here and invite")
+                : tr("pt_start_invite", undefined, "Start and invite")
+          }
+          // Play my PS5's Start (or its Show it here / switch), the same code path.
+          onStart={() =>
+            void (togetherStart === "switch"
+              ? switchHere()
+              : togetherStart === "attach"
+                ? start(true, elsewhere ?? undefined)
+                : start())
+          }
+          playAs={
+            profile && rpUsers.length > 1 ? (
+              <Select
+                label={tr("rp_play_as", undefined, "Play as")}
+                block={false}
+                className="w-40"
+                value={rpUser ?? ""}
+                onChange={(e) => chooseRpUser(profile.id, e.target.value)}
+                options={rpUsers.map((u, i) => ({ value: u.wake_regist_key, label: rpUserLabel(u, i, tr) }))}
+                data-testid="pt-play-as"
+              />
+            ) : null
+          }
+        />
+      )}
+      {!running && !togetherOpen && (
         // Start first (10.0.1); the console is the one selected in the app (no picker of its own).
         <div className="flex flex-wrap items-end gap-2">
           <Button
@@ -1533,6 +1724,17 @@ export function StreamPanel() {
               ? tr("rp_switch_start", undefined, "Stop the other stream and start")
               : tr("rp_start", undefined, "Start")}
           </Button>
+          {profile && rpUsers.length > 1 && (
+            <Select
+              label={tr("rp_play_as", undefined, "Play as")}
+              block={false}
+              className="w-40"
+              value={rpUser ?? ""}
+              onChange={(e) => chooseRpUser(profile.id, e.target.value)}
+              options={rpUsers.map((u, i) => ({ value: u.wake_regist_key, label: rpUserLabel(u, i, tr) }))}
+              data-testid="rp-play-as"
+            />
+          )}
           <Select
             label={tr("rp_quality", undefined, "Picture")}
             block={false}
@@ -1702,7 +1904,8 @@ export function StreamPanel() {
         </Callout>
       )}
 
-      {profile && !paired && !running && (
+      {/* Play together says so with no console at all too: Start and invite is greyed out. */}
+      {(profile || togetherOpen) && !paired && !running && (
         <Callout
           tone="info"
           title={tr("play_not_ready", undefined, "Set up Play for this console first")}
@@ -1752,6 +1955,7 @@ export function StreamPanel() {
           addr={target.host}
           state={joinHost}
           onState={setJoinHost}
+          focusOnOpen={inviteFocus}
           onClose={() => setTogetherOpen(false)}
           onPhones={() => {
             setTogetherOpen(false);
@@ -1774,7 +1978,12 @@ export function StreamPanel() {
 
       {!full && settingsDrawer}
 
-      {full ? createPortal(stageView, document.body) : stageView}
+      {/* Play together before its stream: no empty picture ("Press Start…") under Start and
+          invite. Kept mounted (hidden) so the stage is the same element once it plays; it shows
+          while a start is held (the blocker check draws on it). */}
+      <div hidden={togetherOpen && !running && !startHeld}>
+        {full ? createPortal(stageView, document.body) : stageView}
+      </div>
 
       {/* Touch-sized player, on the page: the bar is under the picture, never on it, so every
           action fits at 360 px and nothing covers the game. More opens the rest. */}
@@ -1846,7 +2055,7 @@ export function StreamPanel() {
       )}
 
 
-      {compact && !running && (
+      {compact && !running && !togetherOpen && (
         <p className="text-xs text-[var(--color-muted)]">
           {tr(
             "rp_touch_hint",
@@ -1855,7 +2064,7 @@ export function StreamPanel() {
           )}
         </p>
       )}
-      {!compact && (
+      {!compact && !(togetherOpen && !running) && (
         <p className="text-xs text-[var(--color-muted)]">
           {tr(
             "rp_keys_body3",

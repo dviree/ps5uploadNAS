@@ -185,6 +185,14 @@ fn name_units(name: &str) -> Result<Vec<u16>> {
             "\"{name}\" cannot be stored: exFAT does not allow {bad:?} in a name"
         ));
     }
+    // macOS hands out decomposed names; a game looks its files up by the composed spelling, and
+    // exFAT compares units, not canonical equivalents. The UFS2 writer refuses these too.
+    if !unicode_normalization::is_nfc(name) {
+        return format_err(format!(
+            "\"{name}\" cannot be stored: the name is decomposed (NFD, usually from a Mac), so \
+             the game could not find the file. Rename it, or copy the game from another computer"
+        ));
+    }
     Ok(units)
 }
 
@@ -590,6 +598,21 @@ pub fn write_exfat<W: Write>(
     on_progress: &mut dyn FnMut(u64, u64),
     cancelled: &dyn Fn() -> bool,
 ) -> Result<u64> {
+    write_exfat_after(plan, source, w, 0, on_progress, cancelled)
+}
+
+/// [`write_exfat`] for a writer that drops the image's first `skip` bytes because they are on disk
+/// already: a file that ends before them isn't read, only stands in as zeros, so going on after a
+/// crash costs what is left. The image is the same bytes: its layout and serial follow from the
+/// files alone.
+pub fn write_exfat_after<W: Write>(
+    plan: &ExfatPlan,
+    source: &mut dyn SourceTree,
+    w: &mut W,
+    skip: u64,
+    on_progress: &mut dyn FnMut(u64, u64),
+    cancelled: &dyn Fn() -> bool,
+) -> Result<u64> {
     let (tree, l, used) = (&plan.tree, &plan.l, plan.used);
     let total = plan.data_bytes;
     let boot = boot_region(l, tree.nodes[0].first_cluster, used);
@@ -649,6 +672,16 @@ pub fn write_exfat<W: Write>(
     for &f in &l.files {
         let (src, size) = (tree.nodes[f].src.clone(), tree.nodes[f].size);
         let mut at = 0u64;
+        if skip > 0 && size > 0 {
+            let first = u64::from(tree.nodes[f].first_cluster);
+            let start = l.heap_sectors * SECTOR + (first - u64::from(FIRST_CLUSTER)) * l.cluster;
+            if start + tree.nodes[f].clusters * l.cluster <= skip {
+                zeros(w, tree.nodes[f].clusters * l.cluster)?;
+                done += size;
+                on_progress(done, total);
+                continue;
+            }
+        }
         while at < size {
             if cancelled() {
                 return Err(Error::Cancelled);
@@ -768,6 +801,14 @@ mod tests {
         let out = out_path(name);
         let built = build_exfat(src, &out, cluster, &mut |_, _| {}, &|| false).expect("build");
         (out, built)
+    }
+
+    #[test]
+    fn a_decomposed_name_is_refused_and_a_composed_one_is_not() {
+        let err = name_units("cafe\u{301}.bin").unwrap_err().to_string();
+        assert!(err.contains("decomposed"), "{err}");
+        assert!(name_units("caf\u{e9}.bin").is_ok());
+        assert!(name_units("\u{30b2}\u{30fc}\u{30e0}.bin").is_ok());
     }
 
     #[test]

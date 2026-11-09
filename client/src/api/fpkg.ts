@@ -6,10 +6,19 @@
 // browser build reaches the same routes through lib/browserInvoke.ts.
 
 import { invoke } from "../lib/invokeLogged";
+import { useConvertPrefs, type AmprEmuBuild, type ZstdRuntime } from "../state/convertPrefs";
 
 /** The game image filesystems the engine writes: UFS2 (`.ffpkg`, what ShadowMount+
  *  recommends), exFAT, or PFS (`.ffpfs`, experimental in ShadowMount+ 1.7). */
 export type ImageFormat = "ffpkg" | "exfat" | "ffpfs";
+
+/** Where an image build puts the image: this computer (the output folder), or straight into a
+ *  PS5's folder over AVA1, sent as it is written and read back there. */
+export type ImageDestination =
+  | { kind: "local" }
+  | { kind: "console"; addr: string; dir: string }
+  /** A saved server (`source_id`, a Connections id) and an absolute folder on it. */
+  | { kind: "server"; source_id: string; dir: string };
 /** How hard a .ffpfsc is compressed. */
 export type FfpfscLevel = "fast" | "balanced" | "smallest";
 
@@ -51,6 +60,33 @@ export interface FpkgInspection {
   /** Present for a title that reads its files through libSceAmpr: whether a game image can
    *  carry AMPR LZ4 asset packs, which the game's own ampr_emu (fakelib) must serve. */
   ampr_packs?: AmprPacksReadiness | null;
+  /** How many of its executables are plain ELF files, which a build fake-signs. */
+  unsigned_executables?: number;
+  /** A PS4 game, update or add-on: it becomes an image or a folder, not a PS5 package. */
+  ps4_game?: boolean;
+  /** The version it says it is: param.json's contentVersion, or param.sfo's APP_VER. */
+  content_version?: string | null;
+  /** What a PS4 source is: a game, an update (`patch`, which goes into its game) or an add-on. */
+  ps4_kind?: Ps4Kind | null;
+  /** The PS4 title it is or belongs to (CUSA…): an update's or add-on's game. */
+  ps4_title_id?: string | null;
+  /** An add-on: whether it holds files (false: a licence, nothing to convert). */
+  ps4_addon_data?: boolean | null;
+  /** Inspected with an update merged in: what the merge is. */
+  ps4_merge?: Ps4Merge | null;
+}
+
+export type Ps4Kind = "game" | "patch" | "addon";
+
+/** A PS4 update merged into its game (the engine's `ps4_merge::MergeInfo`). */
+export interface Ps4Merge {
+  title_id: string;
+  title?: string | null;
+  game_version: string;
+  update_version: string;
+  /** Files of the game the update replaces, and files it adds. */
+  replaced: number;
+  added: number;
 }
 
 export interface AmprPacksReadiness {
@@ -61,6 +97,8 @@ export interface AmprPacksReadiness {
   /** `ok`; `runtime` (installing ampr_emu 0.4.2.1 into the image makes packs possible);
    *  `no_ampr` (the game does not read through AMPR: .ffpfsc is its compression). */
   kind?: "ok" | "runtime" | "no_ampr";
+  /** The game reads through AMPR and ships no emulator: it won't start from an image without one. */
+  emulator_missing?: boolean;
 }
 
 /** Pack a game image's files into AMPR LZ4 asset packs first (exFAT images only). */
@@ -71,6 +109,24 @@ export interface AmprLz4Options {
   profileToml?: string;
   /** Put ampr_emu 0.4.2.1 into the image when the game's own is missing or too old. */
   installRuntime?: boolean;
+  /** zstd packs at this level in place of LZ4 ones, in a plain image of any format; ampr-emu-ng
+   *  goes in the image. */
+  zstdLevel?: number;
+  /** Which ampr-emu-ng goes in with zstd packs; Convert's setting when absent. */
+  zstdRuntime?: ZstdRuntime;
+}
+
+/** zstd packs for a plain folder (the engine's `ampr_zstd`). */
+export interface ZstdPacks {
+  level: number;
+  /** The newest ampr-emu-ng release (checked against GitHub's digest) or the tested one. */
+  runtime?: ZstdRuntime;
+}
+
+/** The engine's `ampr_zstd` body: the level and the runtime choice (Convert's setting unless
+ *  given). */
+function amprZstd(level: number, runtime: ZstdRuntime | undefined) {
+  return { level, runtime: runtime ?? useConvertPrefs.getState().zstdRuntime };
 }
 
 export interface FpkgBuildRequest {
@@ -92,6 +148,9 @@ export interface FpkgBuildRequest {
   /** When the package's name is taken in the output folder, name it `<name> (2).pkg` instead
    *  of refusing (Workshop's "Save each next to its source"). */
   keepBoth?: boolean;
+  /** A PS4 update merged into the PS4 game `source` first: the PS4 package is the game at the
+   *  update's version. */
+  update?: string;
 }
 
 /** `stored` = no compression: the fallback for a console that refuses a compressed package. */
@@ -107,8 +166,10 @@ export interface WorkshopRun {
 }
 
 export const fpkg = {
-  inspect: (source: string, outputDir?: string) =>
-    invoke<FpkgInspection>("fpkg_inspect", { source, outputDir }),
+  /** With `update`, the PS4 game `source` with that update merged in, or why they don't go
+   *  together. */
+  inspect: (source: string, outputDir?: string, update?: string) =>
+    invoke<FpkgInspection>("fpkg_inspect", { source, outputDir, update }),
   /** Starts a job; poll it with jobStatus from api/ps5. */
   build: (req: FpkgBuildRequest) =>
     invoke<{ job_id: string }>("fpkg_build", {
@@ -121,6 +182,7 @@ export const fpkg = {
       language: req.language,
       fullVerify: req.fullVerify ?? false,
       keepBoth: req.keepBoth ?? false,
+      update: req.update,
     }),
   /** Unpack a .zip / .7z / .rar into an unpack folder in `outputDir`, as a job; the job's
    *  `dest` is the game found inside. A RAR's password goes with it, never stored. */
@@ -160,13 +222,21 @@ export const fpkg = {
     ffpfscLevel?: FfpfscLevel,
     /** When the image's name is taken in the output folder, add " (2)" instead of refusing. */
     keepBoth = false,
+    /** The AMPR emulator choice for this build (a queued game's own); the settings when absent. */
+    amprEmu?: { add: boolean; build: AmprEmuBuild },
+    /** Straight to a PS5's folder, never stored on this computer; `outputDir` when absent. */
+    destination?: ImageDestination,
+    /** A PS4 update merged into the PS4 game `source`: the image is the game at its version. */
+    update?: string,
   ) =>
     invoke<{ job_id: string }>("exfat_build", {
+      update,
       source,
       outputDir,
       format,
       compress,
-      amprLz4: lz4
+      amprZstd: lz4?.zstdLevel ? amprZstd(lz4.zstdLevel, lz4.zstdRuntime) : undefined,
+      amprLz4: lz4 && !lz4.zstdLevel
         ? { level: lz4.level, profile_toml: lz4.profileToml, install_runtime: lz4.installRuntime ?? false }
         : undefined,
       verifyChunkKib,
@@ -174,6 +244,9 @@ export const fpkg = {
       name,
       ffpfscLevel: compress ? ffpfscLevel : undefined,
       keepBoth,
+      addAmprEmu: amprEmu?.add ?? useConvertPrefs.getState().addAmprEmu,
+      amprEmuBuild: amprEmu?.build ?? useConvertPrefs.getState().amprEmuBuild,
+      destination,
     }),
   /** Unpack a game image (.exfat, .ffpkg, .ffpfs, .ffpfsc) or a package made with the debug
    *  key into a plain folder in the output folder, named after the source (or `name`). One
@@ -190,9 +263,20 @@ export const fpkg = {
     entry?: string,
     /** When the folder's name is taken in the output folder, add " (2)" instead of refusing. */
     keepBoth = false,
+    /** Write the game with its files in zstd packs (ampr-emu-ng goes in too); the source may
+     *  then also be a game folder. */
+    zstd?: ZstdPacks,
+    /** A PS4 update merged into the PS4 game `source` (which may then also be a folder). */
+    update?: string,
+    /** Straight to a folder on a saved server, never stored on this computer; `outputDir`
+     *  when absent. */
+    destination?: ImageDestination,
+    /** This fork: pack the game into AMPR LZ4 asset packs first, written as `<name>-lz4`. */
     lz4?: AmprLz4Options,
   ) =>
     invoke<{ job_id: string }>("folder_build", {
+      update,
+      destination,
       source,
       outputDir,
       name,
@@ -202,6 +286,7 @@ export const fpkg = {
       amprLz4: lz4
         ? { level: lz4.level, profile_toml: lz4.profileToml, install_runtime: lz4.installRuntime ?? false }
         : undefined,
+      amprZstd: zstd ? amprZstd(zstd.level, zstd.runtime) : undefined,
     }),
   /** Write an edited COPY of a game image (#479): the image's files with `edits` applied,
    *  as the same kind of image (.exfat, .ffpkg, .ffpfs or .ffpfsc), read back and checked,
@@ -213,6 +298,9 @@ export const fpkg = {
    *  PS5 (`ps5://`), the game's own kept once as `ampr_emu.index.bak` (#621). A job: its stage
    *  is `list`, `check` or `write`; done, `dest` is the index and `commit_ack` the
    *  {@link AmprIndexOutcome}. */
+  /** The AMPR emulator added to a game where it stands: in a folder, or as a backport folder for
+   *  an image on the PS5. */
+  addAmprEmu: (source: string) => invoke<AmprEmuOutcome>("fpkg_ampr_emu", { source, build: useConvertPrefs.getState().amprEmuBuild }),
   rebuildAmprIndex: (source: string) => invoke<{ job_id: string }>("fpkg_ampr_index", { source }),
   /** An edited copy of a game image whose one change is a regenerated `ampr_emu.index` (#621),
    *  named `<name>-edited` next to it (`<name>-edited (2)` when a rebuild already made one).
@@ -220,6 +308,14 @@ export const fpkg = {
   rebuildImageAmprIndex: (source: string) =>
     invoke<{ job_id: string }>("exfat_build", { source, edits: [], rebuildAmprIndex: true, keepBoth: true }),
 };
+
+/** What adding the AMPR emulator to a game did. */
+export interface AmprEmuOutcome {
+  kind: "folder" | "backport";
+  folder: string;
+  written: string[];
+  rescanned: boolean;
+}
 
 /** What a folder's index rebuild did. */
 export interface AmprIndexOutcome {

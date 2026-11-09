@@ -13,7 +13,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } fro
 
 import { Folder, FolderSearch, HardDrive, Hammer, Send } from "lucide-react";
 
-import { fpkg, type AmprLz4Options, type FpkgEstimates, type FpkgInspection } from "../../api/fpkg";
+import { fpkg, type AmprLz4Options, type FpkgEstimates, type FpkgInspection, type ZstdPacks } from "../../api/fpkg";
 import { appLaunch } from "../../api/ps5";
 import { Button, Callout, Card, PageHeader } from "../../components";
 import { FakeGameFirmwareNotice } from "../../components/FakeGameFirmwareNotice";
@@ -25,7 +25,7 @@ import { isIOS } from "../../lib/platform";
 import { isTauriEnv } from "../../lib/tauriEnv";
 import { engineIsOnThisDevice } from "../../state/engine";
 import { profileNameForHost, useRosterStore } from "../../state/roster";
-import { useWebviewDrop } from "../../lib/useWebviewDrop";
+import { useWebviewDropAll } from "../../lib/useWebviewDrop";
 import { useConnectionStore } from "../../state/connection";
 import { useConvertPrefs } from "../../state/convertPrefs";
 import {
@@ -46,14 +46,28 @@ import { GameCard } from "./GameCard";
 import { ImageBrowser } from "../LocalImage/ImageBrowser";
 import { isDriveImage, LocalDrivesCard, useLocalDrives } from "../LocalImage/LocalDrives";
 import { BROWSE_IMAGE_EXTENSIONS } from "../LocalImage/imageTypes";
-import { isRemotePath } from "../../lib/remotePath";
+import { displayPath, isRemotePath, parseRemotePath } from "../../lib/remotePath";
+import { useConnectionsStore } from "../../state/connections";
 import { MakeCard } from "./MakeCard";
+import { mergeRole, Ps4MergePicker } from "./Ps4Merge";
 import { OptionsCard } from "./OptionsCard";
-import { OutputChoice, RunCard, idleRun, lz4Active, type Lz4Choice, type RunCardProps } from "./RunCard";
+import { folderPackOptions, folderPacks, packOptions } from "./ImageOptions";
+import {
+  OutputChoice,
+  RunCard,
+  idleRun,
+  lz4Active,
+  savesToPs5,
+  savesToServer,
+  type Lz4Choice,
+  type RunCardProps,
+  type SaveTo,
+} from "./RunCard";
 import { outputFor } from "../../lib/outputPlace";
 import { SwapJournals } from "./SwapJournals";
 import { nameOf, QueueCard } from "./QueueCard";
 import { isRarLaterVolume } from "../../lib/rarVolumes";
+import { AmprEmuTool, amprEmuOffered } from "./AmprEmuTool";
 import { AmprIndexTool, amprIndexPlan } from "./AmprIndexTool";
 import {
   imageBuildWith,
@@ -150,6 +164,17 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
   const queueAutoStart = useUploadSettingsStore((s) => s.queueAutoStart);
   // ③'s one choice of what happens after converting, for Convert and the queue alike.
   const [thenChoice, setThen] = useState<ConvertThen>("keep");
+  // An image saved on this computer, or written straight to the PS5 (nothing stored here).
+  const [saveTo, setSaveTo] = useState<SaveTo>("computer");
+  // Save to: a server: the folder there (remembered, as a `remote://` path).
+  const savedServerFolder = useConvertPrefs((s) => s.serverDir);
+  // Only a folder on a server that is still saved here (the folder is synced between devices,
+  // whose saved servers can differ): anything else is no destination, and Run waits for one.
+  const connections = useConnectionsStore((s) => s.connections);
+  const savedServerId = parseRemotePath(savedServerFolder)?.connectionId;
+  const serverFolder = savedServerId && connections.some((c) => c.id === savedServerId) ? savedServerFolder : "";
+  const setServerFolder = useConvertPrefs((s) => s.setServerDir);
+  const nameOfServer = useConnectionsStore((s) => s.nameOf);
   const [deleteAfter, setDeleteAfter] = useState(false);
   // Per game, not remembered: the wrong language carried into the next game would be a surprise.
   const [language, setLanguage] = useState("");
@@ -182,6 +207,9 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
   const [lz4On, setLz4On] = useState(false);
   const [lz4Profile, setLz4Profile] = useState<{ name: string; text: string } | null>(null);
   const [lz4InstallRuntime, setLz4InstallRuntime] = useState(false);
+  const [packKind, setPackKind] = useState<"lz4" | "zstd">("lz4");
+  const [emuAddedTo, setEmuAddedTo] = useState<string | null>(null);
+  const [zstdLevel, setZstdLevel] = useState(5);
   const build: ConvertBuild =
     make === "image"
       ? { kind: "image", format: imageFormat, compress: imageCompress }
@@ -190,17 +218,19 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
         : { kind: "pkg" };
   const then = thenFor(build.kind, thenChoice, canInstall);
   /** A skip says which build the source cannot become: an image needs a game folder, image,
-   *  package or archive (unpacked first); a folder needs an image or package. */
+   *  package or archive (unpacked first); a folder needs an image or package, or a game folder
+   *  when it is made in zstd packs (`zstd`, this game's own choice). */
   const queueAdd = (
     src: string,
     isFolder: boolean,
     lz4?: AmprLz4Options,
+    zstd?: ZstdPacks,
   ): boolean | QueueSkip => {
     // A later part of a multi-part archive is read through its first part.
     if (isRarLaterVolume(src)) return "later-part";
     if (build.kind === "image" && !isFolder && !isFolderableSource(src) && !isArchiveSource(src))
       return "not-image";
-    if (build.kind === "folder" && !isFolderableSource(src)) return "not-folder";
+    if (build.kind === "folder" && !isFolderableSource(src) && !(isFolder && zstd)) return "not-folder";
     const u = useUploadStore.getState();
     const out = outFor(src);
     const prefs = useConvertPrefs.getState();
@@ -214,7 +244,12 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
       outputDir: out.outputDir,
       keepBoth: out.keepBoth || undefined,
       compression,
-      build: build.kind === "image" ? imageBuildWith(build, lz4) : build,
+      build:
+        build.kind === "image"
+          ? imageBuildWith(build, lz4)
+          : build.kind === "folder" && zstd
+            ? { ...build, zstd }
+            : build,
       imageDest:
         build.kind === "image"
           ? { volume: u.destinationVolume, subpath: u.destinationSubpath || DEFAULT_IMAGE_SUBPATH }
@@ -225,6 +260,12 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
       deleteAfterInstall: then !== "keep" && deleteAfter,
       fullVerify: prefs.fullVerify,
       imageLevel: build.kind === "image" && build.compress && !lz4 ? prefs.imageLevel : undefined,
+      // The AMPR emulator choice as it is now: changing it later is for games added later.
+      addAmprEmu: prefs.addAmprEmu,
+      amprEmuBuild: prefs.amprEmuBuild,
+      // Save to: a server, as chosen now (an image or a game folder only).
+      toServer:
+        (build.kind === "image" || build.kind === "folder") && savesToServer(runChoice) ? serverFolder : undefined,
     });
   };
   /** Queue what was picked or found, then say what was left out. */
@@ -284,6 +325,21 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
   }, []);
   const [source, setSource] = useState(pipeline.phase === "idle" ? "" : pipeline.source);
   const [inspection, setInspection] = useState<FpkgInspection | null>(null);
+  // A PS4 add-on's files become a folder: ShadowMount+ mounts games, not add-ons.
+  const ps4Addon = inspection?.ps4_kind === "addon";
+  // A PS4 game's package is a PS4 one (the engine writes it; a PS5 package needs param.json).
+  const ps4 = !!inspection?.ps4_game && !ps4Addon;
+  useEffect(() => {
+    if (ps4Addon && make !== "folder") setMake("folder");
+  }, [ps4Addon, make, setMake]);
+  // A PS4 update and its game, merged into one image or folder: the other half of the pair is
+  // picked here, and the pair is checked by the engine before anything is made.
+  const role = mergeRole(inspection);
+  const [mergeOther, setMergeOther] = useState("");
+  const [merged, setMerged] = useState<FpkgInspection | null>(null);
+  const [mergeError, setMergeError] = useState<string | null>(null);
+  const [mergeChecking, setMergeChecking] = useState(false);
+  const mergeLatest = useRef(createLatest());
   // "pending" while the sample runs; null when it failed or there is no game.
   const [estimates, setEstimates] = useState<FpkgEstimates | "pending" | null>(null);
   // Only the newest check (and its estimate) may land: a slow check of an earlier game must not
@@ -381,7 +437,24 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
       .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
   };
 
-  const dropActive = useWebviewDrop(chooseOrQueue, true);
+  /** A drop: one game is chosen (or queued while one is being made); several go into the queue,
+   *  each looked at as a handed path is. A .pkg is a game here like an image (#716). */
+  const dropPaths = (paths: string[]) => {
+    if (paths.length === 1) {
+      chooseOrQueue(paths[0]);
+      return;
+    }
+    Promise.all(paths.map((p) => sourcesForPath(p)))
+      .then((found) =>
+        queueAll(
+          found.flatMap((f) => f.sources),
+          found.reduce((n, f) => n + f.skipped, 0),
+        ),
+      )
+      .catch((err: unknown) => setError(err instanceof Error ? err.message : String(err)));
+  };
+
+  const dropActive = useWebviewDropAll(dropPaths, true);
 
   // A game handed over from elsewhere (the viewer's Convert… on a drop).
   const location = useLocation();
@@ -485,42 +558,61 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
   const run = () => {
     if (!source.trim()) return;
     setError(null);
-    const out = outFor(src);
+    // With an update merged in, the game is what is made and the update goes into it.
+    const game = mergeReady && mergePair ? mergePair.game : src;
+    const update = mergeReady && mergePair ? mergePair.update : undefined;
+    const out = outFor(game);
     if (build.kind === "folder") {
-      void buildFolder(src, out.outputDir, out.keepBoth);
+      // Save to: a server writes it there; nothing is kept here.
+      const toServer = savesToServer(runChoice) ? serverFolder : undefined;
+      void buildFolder(game, out.outputDir, out.keepBoth, {
+        zstd: folderPackOptions(lz4Choice),
+        update,
+        ...(toServer ? { toServer } : {}),
+      });
       return;
     }
     if (build.kind === "image") {
       const u = useUploadStore.getState();
+      const plan = {
+        host,
+        volume: u.destinationVolume,
+        subpath: u.destinationSubpath || DEFAULT_IMAGE_SUBPATH,
+        deleteAfter,
+      };
+      // Save to: PS5 writes it there as it is built; nothing is kept here to upload after.
+      const direct = savesToPs5(runChoice);
+      // Save to: a server writes it there as it is built, the same way.
+      const toServer = !direct && savesToServer(runChoice) ? serverFolder : undefined;
       void buildImage(
-        src,
+        game,
         out.outputDir,
         build.compress && !lz4Active(build.format, lz4Choice),
         build.format,
-        then === "upload"
-          ? {
-              host,
-              volume: u.destinationVolume,
-              subpath: u.destinationSubpath || DEFAULT_IMAGE_SUBPATH,
-              deleteAfter,
-            }
-          : undefined,
-        lz4Active(build.format, lz4Choice)
-          ? { profileToml: lz4Profile?.text, installRuntime: lz4InstallRuntime }
-          : undefined,
+        !direct && !toServer && then === "upload" ? plan : undefined,
+        packOptions(build.format, lz4Choice, lz4Profile?.text),
         password || undefined,
         out.keepBoth,
+        direct || toServer || update
+          ? {
+              ...(direct ? { toConsole: plan } : {}),
+              ...(toServer ? { toServer } : {}),
+              ...(update ? { update } : {}),
+            }
+          : undefined,
       );
       return;
     }
     const install = then !== "keep";
     void start(
       {
-        source: source.trim(),
+        // A PS4 game with its update merged in: the game is the source of the PS4 package.
+        source: update ? game : source.trim(),
         outputDir: out.outputDir,
         compression,
         language: language || undefined,
         keepBoth: out.keepBoth,
+        update,
       },
       {
         install,
@@ -585,13 +677,20 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
   const runIsShown = pipeline.phase === "idle" || pipeline.source.trim() === src;
   const pipelineName = pipeline.phase === "idle" ? null : nameOf(pipeline.source);
   const isLocalFolder = inspection !== null && !noFiles && !isArchiveSource(src);
+  // The PS4 game and update to merge, once both are picked: the game is what is made, the update
+  // goes into it. `mergeReady` once the engine has checked that they go together.
+  const other = mergeOther.trim();
+  const mergePair =
+    role && other && src ? (role === "patch" ? { game: other, update: src } : { game: src, update: other }) : null;
+  const mergeReady = mergePair !== null && !!merged?.ps4_merge;
+  // An update alone is no game, and a game whose update was picked waits for the check.
+  const mergeBlocks = (role === "patch" || mergePair !== null) && !mergeReady;
   // An archive is not looked inside until the run unpacks it; an image run unpacks it first,
-  // as a package run does.
-  const canImage = isLocalFolder || (src !== "" && isArchiveSource(src));
+  // as a package run does. An add-on becomes a folder only.
+  const canImage = !ps4Addon && (isLocalFolder || (src !== "" && isArchiveSource(src)));
   // A game image or a package can be unpacked into a plain folder, wherever it is; a folder is
-  // one already, and an archive is unpacked first.
-  const canFolder = src !== "" && isFolderableSource(src);
-  const isFolderSource = src !== "" && !canFolder && !isArchiveSource(src);
+  // one already (it can become a folder in zstd packs, below), and an archive is unpacked first.
+  const unpackable = src !== "" && isFolderableSource(src);
   // A profile measured from play (the game page's Measure how it plays) is the LZ4 default
   // for this title; a file picked by hand replaces it.
   const measuredFor = titleIdOf(inspection?.content_id);
@@ -627,8 +726,62 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
         onProfile: setLz4Profile,
         installRuntime: lz4InstallRuntime,
         onInstallRuntime: setLz4InstallRuntime,
+        kind: packKind,
+        onKind: setPackKind,
+        zstdLevel,
+        onZstdLevel: setZstdLevel,
       }
     : undefined;
+  // A folder in zstd packs can be made of a game folder too.
+  const packsFolder = folderPacks(lz4Choice);
+  // A game folder with an update merged in is a new folder too.
+  const canFolder = unpackable || (isLocalFolder && (packsFolder || mergeReady));
+  const isFolderSource = src !== "" && !unpackable && !isArchiveSource(src) && !packsFolder && !mergeReady;
+
+  /** Check the picked pair: the merged game, or why the two don't go together. */
+  const checkMerge = async (pair = mergePair) => {
+    const token = mergeLatest.current.begin();
+    setMerged(null);
+    setMergeError(null);
+    if (!pair) {
+      setMergeChecking(false);
+      return;
+    }
+    setMergeChecking(true);
+    try {
+      const found = await fpkg.inspect(pair.game, outFor(pair.game).outputDir, pair.update);
+      if (mergeLatest.current.isCurrent(token)) setMerged(found);
+    } catch (e) {
+      if (mergeLatest.current.isCurrent(token)) setMergeError(e instanceof Error ? e.message : String(e));
+    } finally {
+      if (mergeLatest.current.isCurrent(token)) setMergeChecking(false);
+    }
+  };
+  // A new game under ① starts without a pair.
+  useEffect(() => {
+    mergeLatest.current.invalidate();
+    setMergeOther("");
+    setMerged(null);
+    setMergeError(null);
+    setMergeChecking(false);
+  }, [src]);
+  const browseMerge = async () => {
+    const picked = await pickPath({
+      mode: "any",
+      title:
+        role === "patch"
+          ? tr("fpkg.merge.pick_game", undefined, "Choose the PS4 game this update goes into")
+          : tr("fpkg.merge.pick_update", undefined, "Choose a PS4 update for this game"),
+      filters: [{ name: "Game image or package", extensions: ["pkg", "exfat", "ffpkg", "ffpfs", "ffpfsc"] }],
+    }).catch((e) => {
+      setError(e instanceof Error ? e.message : String(e));
+      return null;
+    });
+    if (!picked) return;
+    setMergeOther(picked);
+    const pair = role === "patch" ? { game: picked, update: src } : { game: src, update: picked };
+    void checkMerge(pair);
+  };
 
   // ④, and whether it is on screen: while it is scrolled away, a slim bar at the bottom of the
   // window offers its main button (the user asked for the main actions without scrolling).
@@ -678,10 +831,12 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
   // What else this source can be, besides converted: looked inside, written out as a folder, or
   // opened as a drive.
   const lookable = !locked && canLookInside(source);
-  const folderable = !locked && canFolder;
+  const folderable = !locked && unpackable;
   const mountable = drives.canMount && !locked && isDriveImage(source) && !source.startsWith("ps5://") && !isRemotePath(source);
   // #621: a libSceAmpr game's ampr_emu.index made again from its files, without converting.
   const indexable = !inside && amprIndexPlan(source, inspection) !== "hidden";
+  // Kept on screen after adding it, when the check no longer offers it: it says what it did.
+  const emulatable = !inside && (amprEmuOffered(source, inspection) || emuAddedTo === source);
   /** A .ffpfsc's index is renewed by making a fresh .ffpfsc of it. */
   const convertAgain = () => {
     if (!src || locked) return;
@@ -693,7 +848,7 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
     setTimeout(showRun, 50);
   };
   const tools =
-    lookable || mountable || folderable || indexable ? (
+    lookable || mountable || folderable || indexable || emulatable ? (
       <div className="flex flex-wrap gap-2 border-t border-[var(--color-border)] pt-2.5">
         {lookable && !inside && (
           <Button size="sm" variant="secondary" leftIcon={<FolderSearch size={14} />} onClick={() => setInside(true)}>
@@ -726,6 +881,16 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
           >
             {tr("workshop_open_as_drive", undefined, "Open as a Drive")}
           </Button>
+        )}
+        {emulatable && (
+          <AmprEmuTool
+            source={source}
+            locked={locked}
+            onAdded={() => {
+              setEmuAddedTo(source);
+              void recheckQuietly(source);
+            }}
+          />
         )}
         {indexable && (
           <AmprIndexTool
@@ -776,7 +941,32 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
       dropActive={dropActive}
       password={password}
       onPassword={setPassword}
-      tools={tools}
+      tools={
+        role && !inside ? (
+          <>
+            {tools}
+            <Ps4MergePicker
+              role={role}
+              other={mergeOther}
+              onOther={(v) => {
+                mergeLatest.current.invalidate();
+                setMergeOther(v);
+                setMerged(null);
+                setMergeError(null);
+                setMergeChecking(false);
+              }}
+              onCheck={() => void checkMerge()}
+              onBrowse={canBrowse ? () => void browseMerge() : undefined}
+              merged={merged}
+              error={mergeError}
+              checking={mergeChecking}
+              locked={locked}
+            />
+          </>
+        ) : (
+          tools
+        )
+      }
     />
   );
 
@@ -805,6 +995,27 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
   }
 
   const idle = pipeline.phase === "idle";
+  // Straight to the PS5 (first version): a plain .exfat, .ffpkg or .ffpfs, or .exfat with zstd packs.
+  const ps5Packs = build.kind === "image" ? packOptions(build.format, lz4Choice) : undefined;
+  const ps5Refusal =
+    build.kind === "image" &&
+    ((build.compress && !lz4Active(build.format, lz4Choice)) ||
+      (ps5Packs && !ps5Packs.zstdLevel) ||
+      (ps5Packs?.zstdLevel && build.format !== "exfat"))
+      ? tr(
+          "fpkg.save_to_ps5_unsupported",
+          undefined,
+          "Straight to the PS5 works for a plain .exfat, .ffpkg or .ffpfs image, or an .exfat with zstd packs. Save this one to this computer, or change the image above.",
+        )
+      : null;
+  // Straight to a server: the same images as straight to the PS5.
+  const serverRefusal = ps5Refusal
+    ? tr(
+        "fpkg.save_to_server_unsupported",
+        undefined,
+        "Straight to a server works for a plain .exfat, .ffpkg or .ffpfs image, or an .exfat with zstd packs. Save this one to this computer, or change the image above.",
+      )
+    : null;
   const runChoice: RunCardProps["choice"] = {
     make,
     onMake: setMake,
@@ -825,11 +1036,18 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
           onChange: (volume, subpath) => useUploadStore.getState().setDestination(volume, subpath),
         }
       : undefined,
+    // A folder can't go straight to the PS5: shown as this computer.
+    saveTo: make === "folder" && saveTo === "ps5" ? "computer" : saveTo,
+    onSaveTo: setSaveTo,
+    ps5Refusal,
+    serverFolder,
+    onServerFolder: setServerFolder,
+    serverRefusal,
   };
   const barRun = idleRun(
     {
       choice: runChoice,
-      canConvert: !noFiles && !checking && src !== "",
+      canConvert: !noFiles && !checking && src !== "" && !mergeBlocks,
       canFolder,
       canImage,
       replaces: src.startsWith("ps5://"),
@@ -883,6 +1101,7 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
             checked={!locked && inspection !== null}
             archive={!locked && isArchiveSource(src)}
             forNext={locked}
+            ps4={!locked && ps4}
           />
 
           <OptionsCard
@@ -908,6 +1127,7 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
             estimates={locked ? null : estimates}
             locked={false}
             forNext={locked}
+            ps4={!locked && ps4}
             plannedSize={locked ? undefined : inspection?.planned_size}
             outputFree={locked ? undefined : inspection?.output_free}
             compressedFrom={
@@ -937,7 +1157,7 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
             installTask={installTask}
             host={host}
             canInstall={canInstall}
-            canConvert={!noFiles && !checking && source.trim() !== ""}
+            canConvert={!noFiles && !checking && source.trim() !== "" && !mergeBlocks}
             isImage={isImage}
             deleteArmed={deleteArmed}
             // ①'s game is not the one a queue run is making: its name and size say nothing of it.
@@ -958,9 +1178,15 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
                           ? tr("fpkg.run.what_image", { ext: buildExtension(build) }, "a {ext} game image")
                           : build.kind === "folder"
                             ? tr("fpkg.run.what_folder", undefined, "a game folder")
-                            : tr("fpkg.run.what_pkg", undefined, "a package (.pkg)"),
+                            : ps4
+                              ? tr("fpkg.run.what_ps4_pkg", undefined, "a PS4 package (.pkg)")
+                              : tr("fpkg.run.what_pkg", undefined, "a package (.pkg)"),
                       title: inspection.title || inspection.content_id || source.trim(),
-                      dir: outFor(src).outputDir ?? "~/Downloads/fpkgs",
+                      dir: savesToPs5(runChoice)
+                        ? tr("fpkg.run.on_ps5", undefined, "the PS5")
+                        : savesToServer(runChoice)
+                          ? displayPath(serverFolder, nameOfServer)
+                          : (outFor(src).outputDir ?? "~/Downloads/fpkgs"),
                     },
                     "Makes {what} of {title} in {dir}.",
                   )
@@ -971,9 +1197,8 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
               const r = queueAdd(
                 source.trim(),
                 isLocalFolder,
-                build.kind === "image" && lz4Active(build.format, lz4Choice)
-                  ? { profileToml: lz4Profile?.text, installRuntime: lz4InstallRuntime }
-                  : undefined,
+                build.kind === "image" ? packOptions(build.format, lz4Choice, lz4Profile?.text) : undefined,
+                build.kind === "folder" ? folderPackOptions(lz4Choice) : undefined,
               );
               if (r === "not-image" || r === "not-folder" || r === "later-part") setError(skippedText(r, 1));
               else if (!r) setError(tr("cq_already", undefined, "This game is already in the queue."));

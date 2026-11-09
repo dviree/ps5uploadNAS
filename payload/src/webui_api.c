@@ -1314,6 +1314,112 @@ static void r_proc_list(const char *b, size_t n, uint8_t *out, int fd) {
     send_text_reply(fd, st, out, ol, t, tl);
 }
 
+/* {op?, hostname?}: Tailscale on this PS5 (AVA1 tailnet, the same call the app's Connection
+ * panel makes), so someone at the console can sign it in, pause it or sign it out without a
+ * computer. Only status / enable / disable / logout / rename / renew and a device name pass, and
+ * for a device the list turned away ("<device> tried to reach this PS5"): allow_add and
+ * blocked_ignore with its address. The control server, its address, an auth key and the rest of
+ * the allow-list stay the app's to set. Answers the node's status JSON. */
+static void r_tailnet(const char *b, size_t n, uint8_t *out, int fd) {
+    char op[20], host[64], ehost[160], ip[24], req[224];
+    const uint8_t *t;
+    size_t ol, tl;
+    int st, k;
+    if (n > 1024) {
+        send_error(fd, 413, "too_large", 9);
+        return;
+    }
+    ip[0] = 0;
+    if (webui_json_str(b, n, "op", op, sizeof op) < 0 ||
+        webui_json_str(b, n, "hostname", host, sizeof host) < 0 ||
+        webui_json_str(b, n, "ip", ip, sizeof ip) < 0) {
+        send_bad(fd, "bad_request");
+        return;
+    }
+    if (!op[0]) snprintf(op, sizeof op, "status");
+    if (strcmp(op, "status") && strcmp(op, "enable") && strcmp(op, "disable") && strcmp(op, "logout") &&
+        strcmp(op, "rename") && strcmp(op, "renew") && strcmp(op, "allow_add") && strcmp(op, "blocked_ignore")) {
+        send_bad(fd, "bad_op");
+        return;
+    }
+    /* An address is digits and dots only (the node checks it is a tailnet one). */
+    for (const char *c = ip; *c; c++)
+        if ((*c < '0' || *c > '9') && *c != '.') {
+            send_bad(fd, "bad_ip");
+            return;
+        }
+    if (webui_json_escape(ehost, sizeof ehost, host, strlen(host)) >= sizeof ehost) {
+        send_bad(fd, "bad_hostname");
+        return;
+    }
+    if ((!strcmp(op, "enable") || !strcmp(op, "rename")) && host[0])
+        k = snprintf(req, sizeof req, "{\"op\":\"%s\",\"hostname\":\"%s\"}", op, ehost);
+    else if (!strcmp(op, "allow_add") || !strcmp(op, "blocked_ignore"))
+        k = snprintf(req, sizeof req, "{\"op\":\"%s\",\"ip\":\"%s\"}", op, ip);
+    else
+        k = snprintf(req, sizeof req, "{\"op\":\"%s\"}", op);
+    if (k < 0 || (size_t)k >= sizeof req) {
+        send_bad(fd, "bad_request");
+        return;
+    }
+    st = call_text(AVA1_METHOD_TAILNET, req, (size_t)k, out, &ol, &t, &tl);
+    send_text_reply(fd, st, out, ol, t, tl);
+}
+
+/* {op?, id?}: the devices that use this PS5 (the mesh, the same list the app's Consoles page shows).
+ * No op: the picture ({devices, asks, settings, ...}), so someone at the console sees who is asking
+ * to connect and who may. allow / decline answer a device that asks (approval is on); remove takes a
+ * device off the list (its trust goes with it), block keeps it out. Names, settings and the rest stay
+ * the app's to change. Answers the mesh's JSON. An Allow names the address the page was opened from
+ * (`peer`, host order; 0 or loopback: the PS5's own browser), so a device on the network with LAN
+ * access on never allows itself here. Called with the request's peer by webui_api_route. */
+static void r_mesh_from(const char *b, size_t n, uint8_t *out, int fd, uint32_t peer) {
+    char op[16], id[80], req[200];
+    const uint8_t *t;
+    size_t ol, tl;
+    int st, k;
+    if (n > 512) {
+        send_error(fd, 413, "too_large", 9);
+        return;
+    }
+    op[0] = id[0] = 0;
+    if (webui_json_str(b, n, "op", op, sizeof op) < 0 || webui_json_str(b, n, "id", id, sizeof id) < 0) {
+        send_bad(fd, "bad_request");
+        return;
+    }
+    if (!op[0]) {
+        st = call_text(AVA1_METHOD_MESH_STATE, "{}", 2, out, &ol, &t, &tl);
+        send_text_reply(fd, st, out, ol, t, tl);
+        return;
+    }
+    if (strcmp(op, "allow") && strcmp(op, "decline") && strcmp(op, "remove") && strcmp(op, "block")) {
+        send_bad(fd, "bad_op");
+        return;
+    }
+    /* A device id is its key: 64 hex digits. */
+    if (strlen(id) != 64 || strspn(id, "0123456789abcdefABCDEF") != 64) {
+        send_bad(fd, "bad_id");
+        return;
+    }
+    if (!strcmp(op, "allow") && peer && (peer >> 24) != 127u)
+        k = snprintf(req, sizeof req, "{\"op\":\"%s\",\"id\":\"%s\",\"from\":\"%u.%u.%u.%u\"}", op, id,
+                     (unsigned)(peer >> 24), (unsigned)((peer >> 16) & 255u), (unsigned)((peer >> 8) & 255u),
+                     (unsigned)(peer & 255u));
+    else
+        k = snprintf(req, sizeof req, "{\"op\":\"%s\",\"id\":\"%s\"}", op, id);
+    if (k < 0 || (size_t)k >= sizeof req) {
+        send_bad(fd, "bad_request");
+        return;
+    }
+    st = call_text(AVA1_METHOD_MESH_DEVICE, req, (size_t)k, out, &ol, &t, &tl);
+    send_text_reply(fd, st, out, ol, t, tl);
+}
+
+/* The route table's entry; webui_api_route calls r_mesh_from with the request's peer instead. */
+static void r_mesh(const char *b, size_t n, uint8_t *out, int fd) {
+    r_mesh_from(b, n, out, fd, 0);
+}
+
 /* Whether a game with title id `tid` (other != 0: any other game) runs, from PROCESS_LIST. A list that
  * cannot be read counts as running: a guard never passes on a guess. */
 static int game_running(uint8_t *out, const char *tid, int other) {
@@ -1721,23 +1827,24 @@ void webui_api_settings_init(const webui_settings_t *s, int saved) {
 /* tile_busy / tile_failed: the tile switch is applied on the tile thread after this reply (Sony calls
  * take seconds), so the page re-reads /api/settings until tile_busy is false and then says so when
  * the last ensure/remove failed (webui_tile_state). tile_result: what the helper last did to the
- * tile ("added", "removed", "hidden", "failed" or ""; webui_tile_result_name). */
+ * tile ("added", "removed", "hidden", "failed" or ""; webui_tile_result_name). tile_error: why it
+ * failed, a short code ("not_listed", "register_install_api_error", ...; webui_tile_last_error). */
 /* `addr`: with LAN access on, the console's address a phone opens ("Continue on your phone"; the
  * page builds http://<addr>:<port>/ from it); "" when off or there is none. Dotted IPv4 only.
  * `enabled`: PS5Upload Minion as a whole (false only in the reply that turns it off: the page
  * stops right after). `start_cheats`: the page opens on Cheats instead of Home (#584). */
 static void send_settings(int fd, const webui_settings_t *s) {
-    char json[320], addr[INET_ADDRSTRLEN];
+    char json[448], addr[INET_ADDRSTRLEN];
     int busy, failed, k;
     webui_tile_result_t result;
     webui_tile_state(&busy, &failed, &result);
     if (!s->lan || !webui_lan_addr(addr)) addr[0] = '\0';
     k = snprintf(json, sizeof json,
                  "{\"lan\":%s,\"tile\":%s,\"enabled\":%s,\"start_cheats\":%s,\"tile_busy\":%s,\"tile_failed\":%s,"
-                 "\"tile_result\":\"%s\",\"version\":\"%s\",\"addr\":\"%s\"}",
+                 "\"tile_result\":\"%s\",\"tile_error\":\"%s\",\"version\":\"%s\",\"addr\":\"%s\"}",
                  s->lan ? "true" : "false", s->tile ? "true" : "false", s->enabled ? "true" : "false",
                  s->start_cheats ? "true" : "false", busy ? "true" : "false", failed ? "true" : "false",
-                 webui_tile_result_name(result), PS5UPLOAD2_VERSION, addr);
+                 webui_tile_result_name(result), webui_tile_last_error(), PS5UPLOAD2_VERSION, addr);
     if (k < 0 || (size_t)k >= sizeof json) {
         send_error(fd, 500, "bad_settings_reply", 18);
         return;
@@ -1959,10 +2066,10 @@ int webui_api_tile(const char *body, size_t len, char *out, size_t cap) {
     webui_tile_state(&busy, &failed, &result);
     n = snprintf(out, cap,
         "{\"tile\":%s,\"enabled\":%s,\"lan\":%s,\"saved\":%s,\"tile_busy\":%s,\"tile_failed\":%s,"
-        "\"tile_result\":\"%s\",\"port\":%d,\"version\":\"%s\"",
+        "\"tile_result\":\"%s\",\"tile_error\":\"%s\",\"port\":%d,\"version\":\"%s\"",
         s.tile ? "true" : "false", s.enabled ? "true" : "false", s.lan ? "true" : "false",
         g_saved ? "true" : "false", busy ? "true" : "false", failed ? "true" : "false",
-        webui_tile_result_name(result), (int)WEBUI_PORT, PS5UPLOAD2_VERSION);
+        webui_tile_result_name(result), webui_tile_last_error(), (int)WEBUI_PORT, PS5UPLOAD2_VERSION);
     if (n > 0 && (size_t)n < cap && removed >= 0) n += snprintf(out + n, cap - (size_t)n, ",\"removed\":%d", removed);
     if (n > 0 && (size_t)n < cap) n += snprintf(out + n, cap - (size_t)n, "}");
     pthread_mutex_unlock(&g_set_mu);
@@ -3024,6 +3131,8 @@ static const struct {
     { "/api/apps/uninstall", r_apps_uninstall },
     { "/api/apps/icon", r_apps_icon },
     { "/api/proc/list", r_proc_list },
+    { "/api/tailnet", r_tailnet },
+    { "/api/mesh", r_mesh },
     { "/api/proc/kill", r_proc_kill },
     { "/api/pkg/info", r_pkg_info },
     { "/api/pkg/icon", r_pkg_icon },
@@ -3096,22 +3205,44 @@ _Static_assert(sizeof(STRINGS_HEADERS) <= 300, "STRINGS_HEADERS must fit webui_s
 /* The offline copy's files (webui_offline.h): checked on every visit. */
 #define OFFLINE_HEADERS "Cache-Control: no-cache\r\n"
 
-/* GET /, GET /api/token, GET /strings/<lang>.json, GET /sw.js and GET /cache.appcache: the server
+/* An older page's token read refused at most once per window (webui_offline_nudge). */
+static pthread_mutex_t g_nudge_mu = PTHREAD_MUTEX_INITIALIZER;
+static webui_nudge_t g_nudge;
+
+static int nudge_old_page(const char *query) {
+    int refuse;
+    pthread_mutex_lock(&g_nudge_mu);
+    refuse = webui_offline_nudge(query, (uint64_t)mono_ms(), &g_nudge);
+    pthread_mutex_unlock(&g_nudge_mu);
+    if (refuse)
+        fprintf(stderr, "webui: an older stored copy of the page asked for the token; answering \"stopping\" "
+                        "once so it reloads from the helper\n");
+    return refuse;
+}
+
+/* GET /, GET /api/token, GET /strings/<lang>.json, GET /sw.js, GET /minion.appcache and the retired
+ * GET /cache.appcache (410): the server
  * checked Host/Origin but no token (is_api is 0 for all of them). None reaches a helper method, so they stay outside the in-flight RPC
  * gate. The token goes out as JSON with no CORS headers: another site's page cannot read the reply,
  * and loaded through a <script> tag it executes nothing. Never serve it as JavaScript. A strings
- * path names one of the embedded languages exactly (webui_strings_find) or answers 404. */
+ * path names one of the embedded languages exactly (webui_strings_find) or answers 404. The token
+ * reply carries the helper's version, so a page can tell it is older and reload itself; an older
+ * stored page that does not mark its token read is nudged into reloading (webui_offline.h). */
 static int serve_static(const webui_req_t *r, int fd) {
     int page = strcmp(r->path, "/") == 0;
     int strings = strncmp(r->path, STRINGS_PREFIX, sizeof STRINGS_PREFIX - 1) == 0;
     webui_offline_file_t off;
     int offline = webui_offline_find(r->path, &off);
-    if (!page && !strings && !offline && strcmp(r->path, "/api/token") != 0) return 0;
+    int retired = webui_offline_retired(r->path);
+    if (!page && !strings && !offline && !retired && strcmp(r->path, "/api/token") != 0) return 0;
     if (strcmp(r->method, "GET") != 0) {
         webui_send_json(fd, 405, "{\"error\":\"method_not_allowed\"}");
         return 1;
     }
-    if (offline) {
+    if (retired) {
+        /* 410: the browser deletes the appcache stored under this manifest ("obsolete"). */
+        webui_send_ex(fd, 410, "text/plain; charset=utf-8", (const unsigned char *)"", 0, WEBUI_OFFLINE_GONE_HEADERS);
+    } else if (offline) {
         webui_send_ex(fd, 200, off.ctype, off.data, off.len, OFFLINE_HEADERS);
     } else if (strings) {
         const webui_strings_entry_t *e = webui_strings_find(webui_strings_table, webui_strings_count, r->path);
@@ -3120,14 +3251,18 @@ static int serve_static(const webui_req_t *r, int fd) {
     } else if (page) {
         webui_send_ex(fd, 200, "text/html; charset=utf-8", webui_page_gz, webui_page_gz_len, PAGE_HEADERS);
     } else {
-        char tok[65], json[96];
+        char tok[65], json[160];
         int n;
         webui_token_copy(tok);
-        if (!tok[0]) {
+        if (!tok[0] || nudge_old_page(r->query)) {
             webui_send_json(fd, 503, "{\"error\":\"stopping\"}");
             return 1;
         }
-        n = snprintf(json, sizeof json, "{\"token\":\"%s\"}", tok);
+        n = webui_offline_token_json(json, sizeof json, tok, PS5UPLOAD2_VERSION);
+        if (n < 0) {
+            webui_send_json(fd, 500, "{\"error\":\"internal\"}");
+            return 1;
+        }
         send_json(fd, 200, json, (size_t)n);
     }
     return 1;
@@ -3199,7 +3334,10 @@ int webui_api_route(const webui_req_t *r, const uint8_t *body, size_t body_len, 
         webui_send_json(fd, 500, "{\"error\":\"out_of_memory\"}");
         return 0;
     }
-    k_routes[i].fn((const char *)body, body_len, out, fd);
+    if (k_routes[i].fn == r_mesh)
+        r_mesh_from((const char *)body, body_len, out, fd, r->peer);
+    else
+        k_routes[i].fn((const char *)body, body_len, out, fd);
     free(out);
     ava1_server_local_rpc_leave();
     return 0;

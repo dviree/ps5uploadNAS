@@ -104,11 +104,12 @@ running.
 1. Confirm the console's ELF loader is running (port 9021) and note the console's IP
    (**Settings → Network → View Connection Status**).
 2. Install ps5upload (or open the web UI). Use a wired connection if you can.
-3. Open **Connection**, enter the IP, click **Check**.
-4. Run **Set up your PS5**: it sends kstuff and ShadowMount+, then the helper, in order. If
-   something already loads kstuff, send only ps5upload.
-5. Wait for the `helper` dot to turn green. (If you turned on **Ask before a new device can
-   connect** in Devices, a new device types the 6-digit code the console shows, once.)
+3. Open **Connection** and press **Add a PS5**. **Scan** finds it on your home network; or type
+   its IP under **Or type its address**. Its card then shows **Finish setting up**: **Check**,
+   then **Send helper**.
+4. First time? **Open setup wizard** on the card runs **Set up your PS5**: it sends kstuff and
+   ShadowMount+, then the helper, in order. If something already loads kstuff, send only ps5upload.
+5. Wait for the card to say **Ready for uploads** (the `helper` dot at the bottom turns green).
 6. Open **Upload & Install**, drop or choose your game, pick the drive and click **Start**. The
    free-space check runs before anything is sent.
 7. Open **Games** to see it, and open the game for its actions (**On the PS5's drives** on its
@@ -123,8 +124,8 @@ Three ways, easiest first:
 - **The app on the phone.** Android: the `.apk` from Releases. iPhone: the `.ipa`, sideloaded with
   AltStore or Sideloadly and an Apple ID (a free one works); "How do I install it with AltStore?"
   under iPhone has the steps. The app has its own engine and talks to the PS5 directly: open
-  **Connection**, enter the PS5's IP, press **Check**, and send the helper. This is also the way
-  to **Play** on a phone.
+  **Connection › Add a PS5** and scan, open an invite from a device that already uses the PS5,
+  or type its IP. This is also the way to **Play** on a phone.
 - **A browser, with a computer at home running the web UI.** Run the
   `ps5upload-engine-webui` Docker image on a computer or NAS and open `http://<its IP>:19113/` on
   the same Wi-Fi ("How do I use PS5Upload from my phone or another computer?" walks through it).
@@ -138,30 +139,94 @@ Three ways, easiest first:
   when you're done.
 
 **Q: Can I play, or use the app, away from home?**
-Not over the internet by itself. PS5Upload talks to the PS5 on your home network, and the engine
-has no password, so never forward its ports on your router. Away from home, join your home network
-with a VPN; Tailscale is the easy one.
+Yes, with **Tailscale** built in (12.0.0): the PS5 and your devices join your own tailnet. Never
+forward the engine's ports on your router instead: it has no password.
 
-- **The phone or laptop app:** install Tailscale on that device, and on a computer at home that
-  stays on, set Tailscale up as a *subnet router* for your home network (and approve the route in
-  Tailscale's admin page). The app then reaches the PS5 at its usual home address. Or run the
-  [ps5-tailscale](https://github.com/holdmysocks/ps5-tailscale) payload, so the PS5 joins your
-  Tailscale network itself, and connect to its Tailscale address.
-- **The web UI:** if a computer at home runs it, open `http://<its Tailscale address>:19113/`
-  with Tailscale on (add `100.64.0.0/10`, Tailscale's addresses, to `PS5UPLOAD_ALLOW_IP` if the
-  page refuses you). The engine is at home, so waking the console and Stream & install work as
-  usual; Play in the browser still needs an `https://` page.
+1. **The PS5:** at home, open **Connection**; on the PS5's card, under **Ways to reach it**, press
+   **Set up** next to Tailscale, then **Put this PS5 on Tailscale**. Sign in with the link (or scan
+   the QR code on your phone) to add the PS5 to your tailnet. It is named after the PS5's own name
+   plus `-ps5u`; change the name any time in the same panel.
+2. **Each device you play from** (phone, laptop): **Settings › Tailscale › Sign in to Tailscale**
+   adds that device the same way, named after the device plus `-ps5u`. If the **Tailscale app**
+   already runs on that device, the app asks whether to use it (recommended) or to sign
+   PS5Upload in as its own device.
+3. **Test it now:** **Test** on the card's Tailscale row (or **Try Tailscale now** in its panel)
+   sends the app through Tailscale for two minutes, from home, so you can see it work before you
+   leave. **Back to the home network** ends it early. The row then says **Tested**.
 
-Through a VPN from the app, these don't work: **Stream & install and installs from a link** (the
-PS5 downloads from your device, which it can't reach; use Upload & install), and **waking the PS5
-from rest mode** may not (it drops off Tailscale in rest mode with ps5-tailscale, and we haven't
-tested it through a subnet router), so leave it on or wake it before you go. Play runs only as
-well as your home connection's upload speed allows; if it keeps dropping frames, take 720p. We
-haven't tested Play over Tailscale ourselves.
+The home network always comes first: the app uses Tailscale only when the PS5 doesn't answer at
+home, and says so ("Living room PS5: now through Tailscale", then "back on your home network").
+The connection chip says how it gets there: **via Tailscale (direct, 24 ms)**, **relayed** when it
+goes through Tailscale's servers (slower), or **the Tailscale app**. The **Check** in a card's
+setup steps shows what answered on the home network and, when nothing did, over Tailscale.
+
+**A device the PS5's list turned away:** when a device that isn't on the PS5's Tailscale list
+tries to reach it, the PS5's Tailscale panel says "*phone* tried to reach this PS5 over Tailscale",
+with **Allow** (adds it to the list) and **Ignore**. The PS5's own page (Settings › Tailscale) shows
+the same.
+
+**Settings › Tailscale** lists the devices on your tailnet with **Online**, **Offline** (and when
+it was last seen) or **Connected** (direct with its delay, or relayed), and **Refresh** reads the
+list again.
+
+**Who can reach the PS5:** only Remote Play and PS5Upload are reachable on it through Tailscale,
+and only from the devices on its list: the ones signed in through PS5Upload (each adds itself the
+next time it talks to the PS5 at home) and the ones you tick in the PS5's panel. **Every device on
+my Tailscale network** is a choice you can make there; don't, if you share your tailnet with other
+people.
+
+**Pause and renew:** the switch on the PS5's panel and in Settings › Tailscale pauses Tailscale and
+keeps the sign-in (it stays paused after a restart). **Sign out** forgets it, and the device may
+get a new address when it signs in again. When a key is about to expire, **Renew** signs in again
+and keeps the address and the name. For the PS5, turn off key expiry in Tailscale's admin page
+(open the PS5 under Machines › **Disable key expiry**) so it never has to.
+
+Using **Headscale**? Put its address under **Advanced › Control server** before you sign in. If
+your tailnet needs approval for new devices, approve them in its admin page.
+
+- **Keep the PS5 on.** In rest mode the PS5 drops off Tailscale, and waking it works only on its
+  home network, so leave it on (or wake it at home) before you go. It rejoins Tailscale after a
+  wake by itself.
+- **Through Tailscale the app can't** send payloads, install packages (any kind: the PS5 would
+  have to download from your device) or open the console's own page: it says so instead of
+  waiting. Uploads, files, games and Remote Play work.
+- A large upload (over 1 GB) on a relayed path or on phone data asks first. Play runs only as well
+  as your home connection's upload speed allows; on a relayed path the app offers 720p.
+- **Friends without a Tailscale account** don't need one: send them an internet invite (see "Can a
+  friend who isn't at my place play together").
+- **The web UI:** see the next question.
+
+**Q: Can I add my PS5 from a phone that was never at home?**
+Yes, when the PS5 is on Tailscale (set up once, at home, from another device: see above).
+
+1. On the phone, **Settings › Tailscale › Sign in to Tailscale** with the same tailnet.
+2. **Connection › Add a PS5 › Scan** looks on the home network and then on your Tailscale
+   network. A PS5 with PS5Upload's helper shows with a **Tailscale** badge; press **Add**. A PS5
+   found both ways is one row.
+3. If the phone uses the **Tailscale app** instead, PS5Upload can't read the device list: type the
+   PS5's Tailscale address (`100.x.y.z`, from Tailscale's app or admin page) or its Tailscale name
+   under **Or type its address**.
+
+The PS5 lets in only the devices on its Tailscale list. A phone that isn't on it yet is turned
+away, and the PS5's Tailscale panel then shows it with **Allow**: press it on a device that
+already uses the PS5, or on the PS5's own page. Or ask that device for an invite (see "How do I
+invite another phone or computer to my PS5?"). The card keeps the PS5's home address once the
+phone finds it at home; until then its **Home network** row says **Not known yet**.
+
+**Q: I run the engine in Docker on a NAS at home. Can I use it away from home?**
+Yes, through Tailscale. Put the NAS on your tailnet (Tailscale's own app or package for your NAS,
+or the `tailscale` container next to it), then on the device you're away with, open
+`http://<the NAS's Tailscale address>:19113/`, the 100.x address the Tailscale admin page lists
+for it. The engine only answers devices it was told to trust: add `100.64.0.0/10` (Tailscale's
+addresses) to `PS5UPLOAD_ALLOW_IP` in the compose file, for example
+`PS5UPLOAD_ALLOW_IP=192.168.1.0/24,100.64.0.0/10`, and restart the container. The engine at home
+still reaches the PS5 on the home network, so uploads, installs and the console's page all work
+from there. Play in the browser still needs an `https://` page.
 
 **Q: How do I play with a friend as Player 2?**
 With **Play Together** (11.0.0). Your friend uses their own phone, tablet or computer, on your
-network, and plays your PS5 as Player 2, 3 or 4 while you play as Player 1.
+network or anywhere else with an internet invite (11.6.0), and plays your PS5 as Player 2, 3 or 4
+while you play as Player 1.
 
 1. **Invite.** Start Play, then press the people button on the picture's bar (on a phone:
    **⋯ › Play Together**). Your friend scans the QR code with their phone's camera, or you send
@@ -236,20 +301,39 @@ is you on the TV. If there's only one user on the console, add one first.
   as always (they pick **Quick Play** on the TV), but this setup hasn't been tried with every game.
 
 **Q: Can a friend who isn't at my place play together, or use a phone controller?**
-Yes, with Tailscale (11.0.1). Your friend connects to your computer, not to the PS5, so only your
-computer and your friend's device need it; no payload on the PS5.
+Play Together, yes: with an **internet invite** (11.6.0). Your friend needs nothing installed;
+the link opens in any browser, a phone on mobile data included.
 
-1. Install [Tailscale](https://tailscale.com/download) on the computer that plays, and sign in.
-2. Your friend installs Tailscale on their phone, tablet or computer. Either sign them in to your
-   tailnet, or keep your tailnets apart and share just this computer with them: in Tailscale's
-   admin console, open the computer's **⋯ › Share…** and send them the invite.
-3. In Play Together (or the phone controller and watch panel), press **Tailscale** above the QR
-   code: the link and the code switch to your computer's Tailscale address. Send that link.
+1. In Play Together, choose **Internet** above the QR code (instead of **This network**).
+2. Send your friend that link, or let them scan the QR code.
+3. As at home: they type a name, you press **Allow**, and they pick **Quick Play** on the TV.
 
-The **This network | Tailscale** choice shows only while Tailscale is connected on your computer.
-The rest works as at home: they ask, you allow. Everything goes through Tailscale's encrypted
-connection; how smooth it is depends on both connections' upload speed (take 720p if it stutters).
+A small server (hub.phantomptr.com) only introduces the two of you. The game's picture, sound and
+controls go straight between your computer and your friend's browser, never through it, and the
+link carries your app's fingerprint, so it can only ever reach you. Most home routers work as they
+are; where yours allows it, the app opens a port on it for the session (UPnP / NAT-PMP / PCP).
+Some strict networks (some offices, schools and mobile carriers) can't connect directly: the panel
+then says **Couldn't connect from their network**. How smooth it is depends on both connections'
+upload speed (take 720p if it stutters). **Settings › Play Together** has the server address and
+these options, and **Allow internet invites** turns them off.
+
+A phone controller and a watch link work from somewhere else too (12.0.0): choose **Internet**
+for them the same way. Over the internet a watcher only watches and can't be handed the controller.
 We don't support forwarding the engine's port on your router: its pages use plain `http`.
+
+**Q: Which PS5 profile does a friend play as?**
+The one you choose (12.0.0). In **Settings › Play Together › Guests play as**, pick a profile for
+Player 2, 3 and 4, or **Let the TV ask** (the TV then asks the friend who they are, as before).
+Make profiles such as Guest 1 on the PS5 and sign them in there first: only profiles signed in on
+the PS5 are listed. Your own profile asks you to confirm, since a friend playing as it uses your
+saves and trophies. When you allow a friend, the request says which profile they'll play as. If
+the profile can't be used when they join (signed out, or an older helper), the TV asks them instead.
+
+**Q: A friend's controller has its buttons mixed up.**
+On the invite page, **Check your controller** lights up what they press (12.0.0), and a
+controller the app doesn't know is offered it. **Set up the buttons** has them press each face
+button as asked, and it's saved for that controller on that device. 8BitDo controllers work best in X-input mode, and the page
+says how to switch.
 
 **Q: Can a friend join over WireGuard (or another VPN) instead?**
 Yes (11.0.1). Your friend only needs to reach the computer that plays, on TCP 19113. If their VPN
@@ -268,6 +352,34 @@ controller. **Continue in browser** plays in the page, no app needed. Tick **Rem
 on this device** to skip the question next time. If **Open in the app** does nothing, the app
 isn't on that device: press **Continue in browser** (that also forgets a remembered "app").
 A remembered "browser" lasts until you clear that page's site data in the browser.
+
+**Q: What can I share with a friend, and what can't I?**
+Open a game's page (or **Share…** on a Collection item) and press **Share**. You can send:
+
+- **The app itself, homebrew only**, in any form: a folder, a dump, a mount image (`.exfat`,
+  `.ffpkg`, `.ffpfs`) or a homebrew package.
+- **Saves of any game**, homebrew or retail: that's your progress, not the game. Your friend puts
+  it into their own save of the game; their trophies and account stay theirs.
+- **Screenshots and clips** of that game, which **cheats** you have on, your
+  **controls** (button remaps, keyboard and mouse, macros), and **a short note**.
+
+PS5Upload **never shares a retail game**: not as a folder, dump, image or package, and not its
+updates or add-ons. It doesn't go by the game's name or ID, which homebrew often borrows: it looks
+at how the app was built, from the app's own files, and a game made for the PlayStation Store is
+built differently from homebrew. The check runs in the engine, on your side and again on your
+friend's, so the app's screens can't skip it. A retail game gets "This is a retail game
+(PPSA01234). PS5Upload only shares homebrew." When the app's build can't be read at all (an
+archive, an encrypted package, a folder missing its `sce_sys`), it says "PS5Upload can't confirm
+this is homebrew, so it can't share it." Sharing games you bought would be piracy, and PS5Upload
+is for your own console and homebrew.
+
+You get a link and a QR code. Your friend opens the link (or pastes it in PS5Upload's **Share** screen), sees what you offer and
+picks what they want; nothing is sent until you press **Allow**. The files go straight from your
+computer to theirs, encrypted (over your Wi-Fi, Tailscale or the internet). PS5Upload's hub only
+introduces the two computers and never sees the files. A link stops working after 1 hour, 24
+hours or 7 days, as you choose. With **One friend**, it also stops working once you allow the
+first person; with **Anyone with the link**, you can allow several friends. You can cancel a
+share at any time.
 
 **Q: Can the app wake the PS5 without turning on the TV?**
 Yes. The TV comes on because of HDMI-CEC: a PS5 that wakes up tells the TV to turn on and switch
@@ -349,15 +461,42 @@ Things to know:
 
 **Q: Do I need the helper?**
 Yes. The PS5 has to be running `ps5upload.elf` before the app can do anything beyond the
-Connection tab. The app walks you through sending it on first run.
+Connection page. The app walks you through sending it on first run.
+
+**Q: How do I add a PS5?**
+Open **Connection** (its page lists your PS5s as cards) and press **Add a PS5**. Three ways, in
+one sheet:
+
+- **Scan** looks on your home network, then on your Tailscale network. A PS5 found both ways is
+  one row, with both badges. One already on your list says **On your list · Open**.
+- **An invite** from a device that already uses the PS5: scan its code with this device's camera,
+  or paste its `ps5upload://console?…` link (see the next question).
+- **Or type its address**: the IP from the PS5's **Settings → Network → View Connection Status**,
+  or its `100.x` Tailscale address.
+
+Each PS5 then has a card: whether it's online and how this device reaches it (home network or
+Tailscale), its helper and firmware, **Ways to reach it**, **Devices allowed to use it**, and,
+until it is ready, **Finish setting up**.
 
 **Q: How do I send the helper?**
-Open ps5upload → **Connection** tab → enter your PS5's IP → click
-**Check**, then **Send helper**. The app waits up to 20 seconds
-for the payload to come up, then unlocks the rest of the tabs.
+On the PS5's card in **Connection**, **Finish setting up** shows **Check**, then **Send helper**.
+The app waits up to 20 seconds for the payload to come up, then unlocks the rest of the app.
+Once it runs, **Resend helper** (or **Replace helper** when it is older than the app) stays on
+the card.
+
+**Q: How long until a PS5 shows as connected?**
+About a second when its helper is running. Right after the app opens, a card says **Checking…**
+until the PS5 answers. A PS5 that was connected stays connected through a slow answer (a long
+scan or a busy upload keeps the helper busy); it shows **Not reachable** only after three checks
+in a row get no answer, a few seconds apart. A PS5 in rest mode says **In rest mode**, with
+**Wake** where this device can wake it. After you press Wake, or the network comes back, the app
+checks more often for a while. If it keeps saying Not reachable, check that the PS5 is on and
+on the same network, then use **Check** on its card. A bug report includes how the last checks
+went.
 
 **Q: Can the app load everything by itself after the console starts?**
-Yes, on the desktop. **Quick bring-up** on the Connection screen runs your bring-up playlist,
+Yes, on the desktop. **Quick bring-up** (in the selected PS5's **Finish setting up** steps, on
+the Connection page) runs your bring-up playlist,
 sends the helper and runs your auto-loader playlist in one click, once your playlists are set.
 Its **Bring up automatically** switch (also in **Settings → Connecting**) does that with no
 clicks: when a saved PS5's loader (elfldr, port 9021) is up and the helper isn't running, the
@@ -366,7 +505,7 @@ each time the console starts; after rest mode only the helper is sent again, if 
 
 **Q: How do I send a different payload (kstuff, kernel patches,
 plugin scripts, etc)?**
-Open **Payloads → Send payload** (the Connection screen has an **Open Send
+Open **Payloads → Send payload** (a PS5's setup steps in Connection have an **Open Send
 payload** button that goes there; Connection itself only sends the PS5Upload helper), click
 **Choose**, pick any `.elf`,
 `.bin`, `.js`, `.lua`, or `.jar` file, set the port to whatever your
@@ -377,6 +516,17 @@ the file, shows you whether it looks like a ps5upload payload or
 something else, and records the send in a history panel so you
 can replay it without re-picking the file.
 
+**Q: How do I keep my payloads up to date?**
+Open **Payloads › Catalog › Payload updates** (12.0.0). **Check for payload updates** compares each
+payload you downloaded with its latest release; update one, or **Update all**. Turn on **Keep
+payloads up to date** and the app checks when it starts and once a day, and downloads newer
+releases by itself. The version an update replaced is kept: **Roll back** puts it back.
+
+If you use itsPLK's Payload Manager on the PS5, tick **Keep in Payload Manager** (and **Payload
+Manager loads it at boot** if you want it at boot) on a payload, and **Sync with Payload Manager**
+copies the ones you keep into it when they change and adds the marked ones to its boot list.
+Nothing else in its list is changed. Payload Manager has to be running on the PS5 for this.
+
 **Q: The Send button says "Waiting for the helper to start…" for a long time.**
 That is the normal probe window, up to 20 seconds. If it times out, the helper likely crashed on
 load; send it again.
@@ -385,6 +535,38 @@ load; send it again.
 Yes. Open **Connection** while it is up and the app skips the send step and connects. If the
 helper is older than this app, a banner says so: its **Send helper** sends this app's helper
 right there and waits until the new version answers.
+
+**Q: How do I invite another phone or computer to my PS5?**
+On a device that already uses the PS5, open **Connection** and press **Invite a device** on the
+PS5's card. It shows a code and a `ps5upload://console?…` link. On the new device, open
+**Connection › Add a PS5** and scan the code with its camera, or paste the link; the PS5 shows in
+the list with an **Invite** badge, and **Add** puts it on that device.
+
+The link only says where the PS5 is (its home and Tailscale addresses) and which PS5 it is. It
+lets nobody in by itself: the PS5 lets the new device in the way it lets in any device. If the
+address in an invite answers as a different PS5, Add says so and adds nothing.
+
+**Q: How do I approve a new device, and what happens when approval is off?**
+**Ask before a new device can connect** is a switch in the invite sheet and under **Devices
+allowed to use it** on the PS5's card.
+
+- **On:** a new device waits until someone allows it. "*Pixel* wants to use *Living room PS5*"
+  shows with **Allow** and **Decline** on every device that already uses the PS5 (over any
+  screen, and on the PS5's card in Connection), and on the PS5's own page (Home, and Settings ›
+  Devices). The new device's pairing window waits and gets in by itself once allowed. An ask runs
+  out after 10 minutes. A device can't allow itself from the PS5's page.
+- **Off (the default):** any device that reaches the helper gets in without asking: any device on
+  your home network, and over Tailscale the devices on the PS5's Tailscale list. Turn it on if
+  other people use your network.
+
+Devices already on the list keep working either way.
+
+**Q: Who may use my PS5, and how do I take a device off?**
+Open **Devices allowed to use it** on the PS5's card (or **Connection › Devices**, or Settings ›
+Devices on the PS5's own page). Each device shows how it got in: on the home network, over
+Tailscale, invited and approved, or paired with a code (or sent the helper). **Revoke** takes it
+off the list; with approval on it has to be allowed again, with it off it can come back on the
+home network. **Block** keeps it out until you unblock it.
 
 **Q: Can multiple computers connect to the same PS5 at the same time?**
 Yes: computers, phones and Docker, up to 16 at once, with no pairing code. **Devices**
@@ -411,17 +593,19 @@ To see every port in use on your PS5, and which payload usually sits on it, open
 Running**.
 
 Every connection is encrypted, and the console remembers each device the first time it connects.
-A 6-digit code only appears when **Ask before a new device can connect** is on in **Connection →
-Devices**. If a different PS5 answers at an address you reuse, forget the old one and connect
-again.
+With **Ask before a new device can connect** on (on the PS5's card, or **Connection → Devices**),
+a new device waits for an Allow, or types the 6-digit code the TV shows. If a different PS5
+answers at an address you reuse, forget the old one and connect again.
 
 **Q: The web UI says it isn't paired, and no code shows on the console.**
 This only happens when **Ask before a new device can connect** is on, or the device is blocked
-(Devices). Let it in from a connected device (**Connection → Let another device pair**), or press
-**Send helper** in the web UI: the helper it sends lets it in.
+(Devices). With approval on, the PS5 lists it as asking: press **Allow** on a device that already
+uses the PS5 (the prompt shows there, and on the PS5's card in Connection) or on the PS5's own
+page (Settings › Devices). Or press **Send helper** in the web UI: the helper it sends lets it in.
 
 **Q: I updated and the app says the helper is old.**
-Press **Send helper** in the banner that says the helper is older (or on the Connection screen)
+Press **Send helper** in the banner that says the helper is older (or **Replace helper** on the
+PS5's card in Connection)
 and the app replaces it, waiting until the new version
 answers. If the old helper will not exit, restart the
 console and try again.
@@ -465,8 +649,8 @@ pre-release.
 The container lost its key: `/data` was not mapped to a host folder (see above), so it came back
 as a new device. With an 8.0.0 helper a new device simply connects, unless approval is turned on
 in Devices. Map `/data` to a host folder first so it stops happening, then press **Send helper**
-in the web UI (the helper it sends lets it in), or let it in from the desktop app (**Connection →
-Let another device pair**). If Send helper says the loader (port 9021) isn't running, load elfldr
+in the web UI (the helper it sends lets it in), or press **Allow** for it in the desktop app (the
+prompt, or the PS5's card in **Connection**). If Send helper says the loader (port 9021) isn't running, load elfldr
 on the PS5 again first.
 
 **Q: Docker or a NAS says "Permission denied" when I save or upload.**
@@ -1437,8 +1621,8 @@ while it is built; **Delete the image from this computer once it is on the PS5**
 In **Workshop**, a finished image also has **Upload to PS5**.
 
 **Q: Can I wake the PS5 from standby, or turn it off, from the app?**
-Yes. The Connection screen has **Rest mode**, **Reboot**, and **Shut down**
-buttons, and — when the console is asleep — a **Wake** button.
+Yes. **Home** has **Rest mode**, **Reboot**, and **Shut down** buttons, and when the console is
+asleep its card in **Connection** has a **Wake** button.
 
 Waking uses Sony's own discovery protocol (a PS5 ignores Wake-on-LAN magic
 packets), and it only works if three settings are enabled on the console
@@ -2178,6 +2362,42 @@ ShadowMount+ 1.7, a game image made by the app in each of `.exfat`, `.ffpkg`, `.
 compressed `.ffpfsc` mounted, registered and ran its game. A folder that is on the console or on
 a saved server cannot be made into an image from here; copy it to this computer first.
 
+**Q: Can I convert a PS4 update or add-on (DLC)?**
+An update, yes, by merging it into its game; an add-on with files becomes a folder; an add-on
+that is only a licence has nothing in it to convert. Only fake packages with the usual all-zero
+passcode open, as for PS4 games.
+
+- **An update** (a `.pkg` whose PARAM.SFO category is `gp`) holds only the files that changed,
+  and the console normally lays it over the installed game. ShadowMount+ mounts one image or
+  folder per game and has no such layer, so an update goes into its game: pick the update (or the
+  game) under **① Game**, then the other half under **Merge into the game**, and make an image or a
+  folder. The app checks that both are for the same title ID and that the update's version is
+  newer than the game's. The result is the game at the update's version: the game's files with
+  every file the update carries in place of the game's own, the files it adds, and the update's
+  PARAM.SFO (made a game's again). This is how merged backups are made. The game can be a PS4
+  package, an image or a folder; an update that stores differences instead of files (a delta
+  update) is refused. An update on its own can't become an image or folder: it isn't a game.
+- **An add-on with files** (category `ac`) becomes a folder of its files only, never an image or a
+  package. ShadowMount+ doesn't mount add-ons, so a game reads them only where it looks for them
+  itself, for example a folder inside the game.
+- **An add-on that is a licence** unlocks something the game already has and holds no files.
+- Not yet tried on a console: a merged game, and an add-on folder in use.
+
+**Q: Can Workshop make a PS4 package, or save straight to my NAS?**
+Both (12.0.0).
+
+- **A PS4 package:** pick a PS4 game, or a PS4 game merged with its update, and choose **A PS4
+  package (.pkg)** under **② What to make**. It is a fake package made with the usual fake keys:
+  the game's files stay as they are (nothing is compressed, all languages are kept), and every file
+  is read back and compared before the package is kept. Stream or upload it to install it like
+  any other PS4 package.
+- **Straight to a server:** for a game image or a folder, set **Save to** to **A server, straight**
+  and choose a server you saved under **Connections** and a folder on it (SMB, NFS, FTP, SFTP or
+  WebDAV). It is written there as it is made and read back there before it gets its name; nothing
+  is stored on this computer. On SMB, NFS and SFTP a build that was cut off picks up where it
+  stopped; FTP and WebDAV start the file over. Images work as plain `.exfat`, `.ffpkg` or `.ffpfs`,
+  or `.exfat` with zstd packs.
+
 **Q: Can I add games to Workshop's queue while one is converting?**
 Yes. While a game is being made, pick or drop more under **① Game** (also **On the PS5…**, or
 **Convert first** from elsewhere): they go into **⑤ Queue** and are made one at a time after it,
@@ -2267,7 +2487,7 @@ ps5upload. In order:
 5. **Can your computer reach it?** "AP / client isolation" on the router blocks device-to-device
    traffic; wired Ethernet avoids it.
 
-If **Find PS5s on the network** finds the console but 9021 is closed, the loader is the problem;
+If **Add a PS5 › Scan** finds the console but 9021 is closed, the loader is the problem;
 if discovery finds nothing, it is the network.
 
 **Q: A PS4 `.pkg` update won't install.**
@@ -2315,7 +2535,9 @@ people do there, most common first:
 - **Use a save you downloaded** (a 100% save, say): **Copy to… › Load a save file**, if it was
   shared from PS5Upload. A save folder copied off another console as it is can't be used this way.
 - **Look inside or edit a save** (save editors): **Open** mounts it on the PS5 and shows it in
-  Files; **Close & write back** puts your changes into the save.
+  Files; **Close & write back** puts your changes into the save. It compares the opened copy with
+  the save byte by byte, so an edit is written back even when the file's date didn't change (on
+  some firmware, 9.60 for one, it doesn't). "Nothing changed" means the copy really is the same.
 
 A game's save is often several parts (files such as `sdimg_STARBOARD` and `sdimg_sce_sdmemory`
 in its folder, which the app names "STARBOARD" and "main save"). Back up, Restore, Copy, Save as
@@ -2708,8 +2930,8 @@ open, because the agent talks to its engine. Setup for each client is in
 
 **Q: Is it safe to connect an AI agent to my PS5?**
 It can do whatever you can, including delete files, and there is no password. By default only the
-engine's own computer can reach it. Set `PS5UPLOAD_MCP_READ_ONLY=1` for an agent that may only look,
-and keep your client asking before the tools marked destructive. The keys that sign in to your console
+engine's own computer can reach it. Turn off "Agents can change things" under MCP & API (or set
+`PS5UPLOAD_MCP_READ_ONLY=1`) for an agent that may only look, and keep your client asking before the tools marked destructive. The keys that sign in to your console
 never reach the agent. MCP.md lists those tools.
 
 **Q: What can't the API or an agent do?**
@@ -3132,8 +3354,9 @@ doing. The footer shows how many others are connected.
 
 **Q: Do I still need to pair?**
 No, unless you want to. Devices paired before 8.0.0 keep working. To make new devices ask first,
-turn on **Ask before a new device can connect** in **Devices**. A new device then types the code
-shown on the TV, or a connected device lets it in from Connection (**Let another device pair**).
+turn on **Ask before a new device can connect** in **Devices**. A new device then waits until
+someone presses **Allow** (on a device that already uses the PS5, or on the PS5's own page), or
+types the code shown on the TV. See "How do I approve a new device".
 
 **Q: How do I keep a device out?**
 Open **Devices** and press **Block** next to it. It is disconnected and can't connect again until

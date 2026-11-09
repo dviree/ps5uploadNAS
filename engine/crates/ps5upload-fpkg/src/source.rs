@@ -239,10 +239,25 @@ pub fn open(path: &Path) -> Result<Box<dyn SourceTree>> {
             Box::new(std::fs::File::open(path)?),
             format!("ffpfs {}", path.display()),
         ),
-        "pkg" => Ok(Box::new(crate::pkg_source::open(
-            path,
-            crate::crypto::DEFAULT_PASSCODE,
-        )?)),
+        "pkg" => {
+            let mut magic = [0u8; 4];
+            let mut file = std::fs::File::open(path)?;
+            let ps4 = std::io::Read::read_exact(&mut file, &mut magic).is_ok()
+                && crate::ps4_pkg::is_ps4_magic(&magic);
+            if ps4 {
+                let len = file.metadata()?.len();
+                return Ok(Box::new(crate::ps4_pkg::Ps4Package::open(
+                    Box::new(file),
+                    len,
+                    crate::crypto::DEFAULT_PASSCODE,
+                    format!("pkg {}", path.display()),
+                )?));
+            }
+            Ok(Box::new(crate::pkg_source::open(
+                path,
+                crate::crypto::DEFAULT_PASSCODE,
+            )?))
+        }
         _ => format_err(format!(
             "{} is neither a folder nor a supported image (.exfat, .ffpkg, .ffpfs, .ffpfsc) or debug package (.pkg)",
             path.display()
@@ -748,6 +763,18 @@ const AMPR_SCAN_LIMIT: u64 = 16 * 1024 * 1024;
 const AMPR_SEGMENT_LIMIT: u64 = 64 * 1024 * 1024;
 /// The import whose presence means the title needs `ampr_emu` on the console.
 const AMPR_LIB: &[u8] = b"libSceAmpr";
+
+/// Is `tree` an LZ4-packed game: a root `ampr_assets.index` that starts with `AMPRPAK4`? Its
+/// `ampr_emu.index` also lists the files inside the packs, and `ampr_emu` checks each one it opens
+/// against the pack's list (id = record order, path, size), so that index is carried as it is. A
+/// list that can't be read is an error, never "not packed": that answer would drop those records.
+pub fn lz4_packed(tree: &mut dyn SourceTree) -> Result<bool> {
+    let listed = tree
+        .files()
+        .iter()
+        .any(|f| f.path == "ampr_assets.index" && f.size >= 8);
+    Ok(listed && tree.read_range("ampr_assets.index", 0, 8)? == b"AMPRPAK4")
+}
 
 /// Does `rel` import `libSceAmpr`?
 ///

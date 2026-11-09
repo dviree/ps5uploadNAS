@@ -76,6 +76,109 @@ pub(crate) fn redact_keys(value: &mut Value) -> bool {
     any
 }
 
+/// A tailnet's sign-in link (`login_url`, while a node waits for a sign-in): whoever opens it
+/// first signs that node into *their* tailnet. An agent that read it could put this computer, or
+/// the PS5, on a tailnet it controls and reach the console from there. So it never reaches an
+/// agent, whichever route answered with it (`/api/tailnet`, `/api/ps5/tailnet`, GET or POST); the
+/// app's own HTTP calls go around the MCP server and still get it to show the link and QR code.
+const SIGN_IN_FIELDS: &[&str] = &["login_url"];
+
+/// Fields of a live invite that let someone in: Play Together's invite key, short code and links,
+/// and the phone link's QR address (`#t=<key>`, which lets a phone on the LAN in without the
+/// host's Allow) and internet link. Taken out of the passive reads (`GET /api/join`, `GET
+/// /api/ps5/rp/pad-link`: `together_status`, `api_request`), which an agent that may only look can
+/// call too. Making an invite (`together_invite`, a POST) still answers with its link: sharing it
+/// is what the user asked the agent for.
+const INVITE_FIELDS: &[&str] = &["key", "k", "code", "code_display", "url", "urls"];
+
+/// The passive reads whose answers hold live invites ([`INVITE_FIELDS`]).
+const INVITE_READS: &[&str] = &["/api/join", "/api/ps5/rp/pad-link"];
+
+/// What a Share link is made of: the link itself, the home network's, and the room it names
+/// (share/mod.rs: whoever has the room can ask the sender). Taken out of every read of
+/// `/api/share` (`share_status`, `api_request`), the receiving side's too; making a share
+/// (`share_create`, a POST) answers with its link, which is what the user asked for.
+const SHARE_LINK_FIELDS: &[&str] = &["url", "lan_url", "room", "link"];
+
+/// A read of `/api/share` or anything below it.
+fn is_share_read(method: &str, plain: &str) -> bool {
+    method.eq_ignore_ascii_case("GET")
+        && (plain == "/api/share" || plain.starts_with("/api/share/"))
+}
+
+/// Whether the answer to `method path` may hold something [`redact_for_agents`] takes out, so
+/// only those answers are parsed.
+pub(crate) fn may_hold_agent_secrets(method: &str, path: &str) -> bool {
+    let plain = plain_path(path);
+    plain.contains("tailnet")
+        || (method.eq_ignore_ascii_case("GET") && INVITE_READS.contains(&plain.as_str()))
+        || is_share_read(method, &plain)
+}
+
+/// What an agent may not read in an in-process answer (`McpState::api_call`): a tailnet sign-in
+/// link anywhere ([`SIGN_IN_FIELDS`]), and in the passive invite reads the invite's key, code and
+/// links ([`INVITE_FIELDS`]; `invite.hidden` and `link_hidden` say they were there). What is left
+/// says whether it is open, when it expires, and who is in or asking. Returns whether anything
+/// went.
+pub(crate) fn redact_for_agents(method: &str, path: &str, value: &mut Value) -> bool {
+    fn strip(value: &mut Value, fields: &[&str]) -> bool {
+        let mut any = false;
+        match value {
+            Value::Object(map) => {
+                for f in fields {
+                    any |= map.remove(*f).is_some();
+                }
+                for v in map.values_mut() {
+                    any |= strip(v, fields);
+                }
+            }
+            Value::Array(items) => {
+                for v in items {
+                    any |= strip(v, fields);
+                }
+            }
+            _ => {}
+        }
+        any
+    }
+    let mut any = strip(value, SIGN_IN_FIELDS);
+    let plain = plain_path(path);
+    if is_share_read(method, &plain) && strip(value, SHARE_LINK_FIELDS) {
+        if let Value::Object(map) = value {
+            map.insert("link_hidden".to_string(), json!(true));
+        }
+        any = true;
+    }
+    if method.eq_ignore_ascii_case("GET") && INVITE_READS.contains(&plain.as_str()) {
+        let Value::Object(map) = value else {
+            return any;
+        };
+        if plain == "/api/join" {
+            // Play Together: the invite and its internet link. The guests' list keeps no key.
+            if let Some(inv) = map.get_mut("invite").filter(|v| v.is_object()) {
+                if strip(inv, INVITE_FIELDS) {
+                    inv["hidden"] = json!(true);
+                    any = true;
+                }
+            }
+        } else {
+            // The phone link: its QR addresses at the top, and the internet link.
+            let mut gone = false;
+            for f in ["url", "urls"] {
+                gone |= map.remove(f).is_some();
+            }
+            if let Some(net) = map.get_mut("internet") {
+                gone |= strip(net, INVITE_FIELDS);
+            }
+            if gone {
+                map.insert("link_hidden".to_string(), json!(true));
+                any = true;
+            }
+        }
+    }
+    any
+}
+
 /// Percent-escapes undone and letters lowered, `.` and repeated or trailing slashes gone.
 fn plain_path(text: &str) -> String {
     let bytes = text.as_bytes();
@@ -174,6 +277,17 @@ pub(crate) fn holds_console_keys(path: &str) -> bool {
     HOLD_CONSOLE_KEYS.contains(&plain_path(path).as_str())
 }
 
+/// `path` names the switch that decides whether agents can change things (`access.rs`), however it
+/// is written: percent-escapes, case, repeated or trailing slashes, `.` and `..`.
+pub(crate) fn reaches_agent_access(path: &str) -> bool {
+    let plain = plain_path(path);
+    let route = super::access::ROUTE;
+    plain == route
+        || plain
+            .strip_prefix(route)
+            .is_some_and(|rest| rest.starts_with('/'))
+}
+
 /// `(method, path)`, sorted by path, then method.
 pub(crate) const ROUTES: &[(&str, &str)] = &[
     ("GET", "/"),
@@ -188,6 +302,7 @@ pub(crate) const ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/ampr/trace/generate"),
     ("POST", "/api/ampr/trace/start"),
     ("POST", "/api/ampr/trace/stop"),
+    ("GET", "/api/ava1/console"),
     ("GET", "/api/ava1/pairing"),
     ("POST", "/api/ava1/pairing/allow"),
     ("POST", "/api/ava1/pairing/cancel"),
@@ -229,10 +344,17 @@ pub(crate) const ROUTES: &[(&str, &str)] = &[
     ("PUT", "/api/collection/settings"),
     ("POST", "/api/collection/trash/apply"),
     ("POST", "/api/collection/trash/preview"),
+    ("POST", "/api/console-backup/backup"),
+    ("POST", "/api/console-backup/cancel"),
+    ("POST", "/api/console-backup/inspect"),
+    ("POST", "/api/console-backup/restore"),
+    ("POST", "/api/console-backup/scan"),
+    ("GET", "/api/console-backup/status"),
     ("POST", "/api/console-snapshots/forget"),
     ("POST", "/api/console-snapshots/keep"),
     ("GET", "/api/consoles"),
     ("PUT", "/api/consoles"),
+    ("PATCH", "/api/consoles/settings"),
     ("GET", "/api/debug/crash"),
     ("GET", "/api/diag/features"),
     ("GET", "/api/diag/log-level"),
@@ -269,6 +391,7 @@ pub(crate) const ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/files/upload"),
     ("DELETE", "/api/files/upload/{id}"),
     ("POST", "/api/folder/build"),
+    ("POST", "/api/fpkg/ampr-emu"),
     ("POST", "/api/fpkg/ampr-index"),
     ("POST", "/api/fpkg/build"),
     ("POST", "/api/fpkg/delete"),
@@ -300,8 +423,10 @@ pub(crate) const ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/join/kick"),
     ("POST", "/api/join/open"),
     ("POST", "/api/join/playing"),
+    ("GET", "/api/join/profiles"),
     ("GET", "/api/join/relay"),
     ("POST", "/api/join/settings"),
+    ("GET", "/api/join/signal"),
     ("GET", "/api/join/ws"),
     ("POST", "/api/link/download"),
     ("POST", "/api/link/probe"),
@@ -313,6 +438,9 @@ pub(crate) const ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/local/list-dir"),
     ("GET", "/api/local/path-kind"),
     ("GET", "/api/local/storage-roots"),
+    ("GET", "/api/logs/level"),
+    ("PUT", "/api/logs/level"),
+    ("GET", "/api/logs/recent"),
     ("GET", "/api/lz4/building"),
     ("GET", "/api/lz4/compat"),
     ("GET", "/api/lz4/ffpfsc"),
@@ -337,6 +465,22 @@ pub(crate) const ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/pad/ws"),
     ("POST", "/api/payload/send"),
     ("POST", "/api/payload/send-check"),
+    ("GET", "/api/payloads"),
+    ("GET", "/api/payloads/pm-sync"),
+    ("PUT", "/api/payloads/pm-sync"),
+    ("POST", "/api/payloads/pm-sync/run"),
+    ("POST", "/api/payloads/repos"),
+    ("DELETE", "/api/payloads/repos/{id}"),
+    ("GET", "/api/payloads/updates"),
+    ("POST", "/api/payloads/updates/apply"),
+    ("POST", "/api/payloads/updates/check"),
+    ("GET", "/api/payloads/updates/settings"),
+    ("PUT", "/api/payloads/updates/settings"),
+    ("POST", "/api/payloads/{id}/download"),
+    ("POST", "/api/payloads/{id}/download/cancel"),
+    ("GET", "/api/payloads/{id}/releases"),
+    ("GET", "/api/payloads/{id}/releases/latest"),
+    ("POST", "/api/payloads/{id}/rollback"),
     ("POST", "/api/pkg/console-probe"),
     ("POST", "/api/pkg/install"),
     ("GET", "/api/pkg/install/history"),
@@ -403,6 +547,7 @@ pub(crate) const ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/ps5/cleanup/scan/{id}"),
     ("POST", "/api/ps5/cleanup/scan/{id}/apply"),
     ("GET", "/api/ps5/companions"),
+    ("GET", "/api/ps5/connect-timings"),
     ("GET", "/api/ps5/console-shares"),
     ("POST", "/api/ps5/console-shares/remove"),
     ("POST", "/api/ps5/console-shares/save"),
@@ -448,9 +593,16 @@ pub(crate) const ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/ps5/hearbridge/status"),
     ("GET", "/api/ps5/helper-log-ftp"),
     ("POST", "/api/ps5/helper/replace-copy"),
+    ("POST", "/api/ps5/helper/restore-previous"),
     ("POST", "/api/ps5/helper/stop"),
+    ("POST", "/api/ps5/helper/store-in-pldmgr"),
     ("GET", "/api/ps5/hw/drive-sensors"),
     ("POST", "/api/ps5/hw/fan-threshold"),
+    ("GET", "/api/ps5/hw/fps"),
+    ("GET", "/api/ps5/hw/fps/capture"),
+    ("GET", "/api/ps5/hw/fps/capture/csv"),
+    ("POST", "/api/ps5/hw/fps/capture/start"),
+    ("POST", "/api/ps5/hw/fps/capture/stop"),
     ("GET", "/api/ps5/hw/info"),
     ("GET", "/api/ps5/hw/power"),
     ("GET", "/api/ps5/hw/storage"),
@@ -490,6 +642,7 @@ pub(crate) const ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/ps5/remoteplay/readiness"),
     ("POST", "/api/ps5/remoteplay/request"),
     ("GET", "/api/ps5/remoteplay/status"),
+    ("GET", "/api/ps5/rp/controller"),
     ("GET", "/api/ps5/rp/frame"),
     ("POST", "/api/ps5/rp/input"),
     ("POST", "/api/ps5/rp/input/release"),
@@ -501,8 +654,10 @@ pub(crate) const ROUTES: &[(&str, &str)] = &[
     ("POST", "/api/ps5/rp/pad-link"),
     ("POST", "/api/ps5/rp/pad-link/control"),
     ("POST", "/api/ps5/rp/pad-link/decide"),
+    ("POST", "/api/ps5/rp/pad-link/internet"),
     ("POST", "/api/ps5/rp/pad-link/kick"),
     ("GET", "/api/ps5/rp/pad-relay"),
+    ("GET", "/api/ps5/rp/pair/attempts"),
     ("POST", "/api/ps5/rp/passcode"),
     ("POST", "/api/ps5/rp/picture"),
     ("GET", "/api/ps5/rp/replay"),
@@ -527,9 +682,12 @@ pub(crate) const ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/ps5/smp/image-rw"),
     ("POST", "/api/ps5/smp/image-rw/begin"),
     ("POST", "/api/ps5/smp/image-rw/finish"),
+    ("POST", "/api/ps5/smp/rescan"),
     ("GET", "/api/ps5/smp/status"),
     ("GET", "/api/ps5/status"),
     ("GET", "/api/ps5/syslog/tail"),
+    ("GET", "/api/ps5/tailnet"),
+    ("POST", "/api/ps5/tailnet"),
     ("GET", "/api/ps5/time/get"),
     ("POST", "/api/ps5/time/sync"),
     ("GET", "/api/ps5/title-sdk-pair"),
@@ -571,6 +729,8 @@ pub(crate) const ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/save-backup"),
     ("PUT", "/api/save-backup"),
     ("POST", "/api/save-backup/copy"),
+    ("POST", "/api/save-backup/copy-console"),
+    ("GET", "/api/save-backup/copy-console/targets"),
     ("POST", "/api/save-backup/import-ps4"),
     ("GET", "/api/save-backup/latest"),
     ("GET", "/api/save-backup/list"),
@@ -594,6 +754,19 @@ pub(crate) const ROUTES: &[(&str, &str)] = &[
     ("PATCH", "/api/settings"),
     ("GET", "/api/settings-backup"),
     ("POST", "/api/settings-backup"),
+    ("GET", "/api/share"),
+    ("POST", "/api/share"),
+    ("POST", "/api/share/check"),
+    ("POST", "/api/share/receive"),
+    ("DELETE", "/api/share/receive/{id}"),
+    ("GET", "/api/share/receive/{id}"),
+    ("POST", "/api/share/receive/{id}/accept"),
+    ("GET", "/api/share/receive/{id}/data/{item}"),
+    ("POST", "/api/share/receive/{id}/use-save"),
+    ("GET", "/api/share/ws"),
+    ("DELETE", "/api/share/{id}"),
+    ("GET", "/api/share/{id}"),
+    ("POST", "/api/share/{id}/decide"),
     ("GET", "/api/shared/{name}"),
     ("PUT", "/api/shared/{name}"),
     ("GET", "/api/shared/{name}/schema"),
@@ -606,6 +779,13 @@ pub(crate) const ROUTES: &[(&str, &str)] = &[
     ("GET", "/api/stream/status"),
     ("POST", "/api/stream/stop"),
     ("POST", "/api/stream/tools/ffmpeg/install"),
+    ("GET", "/api/tailnet"),
+    ("POST", "/api/tailnet"),
+    ("GET", "/api/tailnet/check"),
+    ("GET", "/api/tailnet/consoles"),
+    ("POST", "/api/tailnet/consoles/add"),
+    ("GET", "/api/tailnet/route"),
+    ("GET", "/api/tailnet/via"),
     ("POST", "/api/transfer/7z"),
     ("POST", "/api/transfer/dir"),
     ("POST", "/api/transfer/dir-diff-preview"),
@@ -630,6 +810,7 @@ pub(crate) const ROUTES: &[(&str, &str)] = &[
     ("GET", "/pkg-host/link/{file}"),
     ("GET", "/pkg-host/{session}/{filename}"),
     ("GET", "/rp-player"),
+    ("GET", "/share"),
 ];
 
 /// The catalog as `ps5upload://catalog` serves it. Pages for people and for the console
@@ -755,6 +936,14 @@ mod tests {
             "pub fn router<",
         )));
         routes.extend(routes_in(function(
+            include_str!("../payloads_api.rs"),
+            "fn router_with<",
+        )));
+        routes.extend(routes_in(function(
+            include_str!("../payload_updates_api.rs"),
+            "pub(crate) fn routes_with<",
+        )));
+        routes.extend(routes_in(function(
             include_str!("../console_tools_api.rs"),
             "pub fn router<",
         )));
@@ -862,6 +1051,12 @@ mod tests {
                 ["GET", "POST", "DELETE"]
                     .iter()
                     .map(|method| (method.to_string(), "/mcp".to_string())),
+            )
+            .chain(
+                // The owner's switch for agents, mounted beside /mcp so no tool can reach it.
+                ["GET", "PUT"]
+                    .iter()
+                    .map(|method| (method.to_string(), super::super::access::ROUTE.to_string())),
             )
             .collect();
         let documented: BTreeSet<(String, String)> =
@@ -1064,5 +1259,145 @@ mod tests {
         let catalog = as_json();
         assert_eq!(catalog["count"], ROUTES.len());
         assert_eq!(catalog["routes"].as_array().unwrap().len(), ROUTES.len());
+    }
+
+    /// A tailnet sign-in link never reaches an agent, from any route or method: whoever opens it
+    /// first could sign the node into a tailnet of their own.
+    #[test]
+    fn a_tailnet_sign_in_link_never_reaches_an_agent() {
+        for (method, path) in [
+            ("GET", "/api/tailnet"),
+            ("POST", "/api/tailnet"),
+            ("GET", "/api/ps5/tailnet"),
+            ("POST", "/api/PS5//tailnet/"),
+        ] {
+            assert!(may_hold_agent_secrets(method, path), "{method} {path}");
+            let mut answer = json!({
+                "ok": true, "state": "needs-login", "login_url": "https://login.example/a/1",
+                "peers": [{"name": "pc", "login_url": "https://login.example/a/2"}],
+            });
+            assert!(redact_for_agents(method, path, &mut answer));
+            assert!(
+                !answer.to_string().contains("login.example"),
+                "a sign-in link is left"
+            );
+            assert_eq!(answer["state"], "needs-login");
+        }
+        assert!(!may_hold_agent_secrets("GET", "/api/ps5/volumes"));
+    }
+
+    /// The passive reads of Play Together and the phone link keep whether an invite is open, when
+    /// it expires and who is in, never what lets someone in. Making an invite (a POST) answers with
+    /// its link: that is what the user asked for.
+    #[test]
+    fn live_invites_leave_the_passive_reads_only() {
+        let join = || {
+            json!({
+                "open": true,
+                "guests": [{"id": 1, "name": "Sam", "player": 2}],
+                "invite": {
+                    "key": "k1", "code": "ABCD12", "code_display": "ABC-D12",
+                    "url": "http://10.0.0.2:3000/join#i=k1", "urls": ["http://10.0.0.2:3000/join#i=k1"],
+                    "expires_in_s": 1700,
+                    "share": {"url": "https://ps5upload.phantomptr.com/join/#room=r&k=k2", "works": "anywhere"},
+                    "internet": {"url": "https://ps5upload.phantomptr.com/join/#room=r&k=k2", "room": "r", "state": "open"},
+                },
+            })
+        };
+        let mut a = join();
+        assert!(may_hold_agent_secrets("GET", "/api/join"));
+        assert!(redact_for_agents("GET", "/api/join", &mut a));
+        let text = a.to_string();
+        let gone = ["k1", "k2", "ABCD12", "ABC-D12", "#i="];
+        assert!(
+            gone.iter().all(|g| !text.contains(g)),
+            "the invite still lets someone in"
+        );
+        assert_eq!(a["invite"]["expires_in_s"], 1700);
+        assert_eq!(a["invite"]["hidden"], true);
+        assert_eq!(a["invite"]["internet"]["state"], "open");
+        // The one link goes too; where it works stays.
+        assert_eq!(a["invite"]["share"]["works"], "anywhere");
+        assert_eq!(a["guests"][0]["name"], "Sam");
+        // together_invite and together_open (POSTs) are not touched
+        for path in ["/api/join/invite", "/api/join/open"] {
+            let mut b = join();
+            assert!(!may_hold_agent_secrets("POST", path));
+            assert!(!redact_for_agents("POST", path, &mut b));
+            assert_eq!(b, join());
+        }
+
+        let pad = || {
+            json!({
+                "open": true,
+                "url": "http://10.0.0.2:3000/pad#t=deadbeef",
+                "urls": ["http://10.0.0.2:3000/pad#t=deadbeef"],
+                "internet": {"url": "https://ps5upload.phantomptr.com/pad/#room=r&k=cafe", "state": "open"},
+                "pads": [{"id": 3, "name": "iphone"}],
+                "pending": [],
+            })
+        };
+        let mut p = pad();
+        assert!(redact_for_agents("GET", "/api/ps5/rp/pad-link", &mut p));
+        let text = p.to_string();
+        assert!(
+            !text.contains("deadbeef") && !text.contains("cafe"),
+            "the phone link still lets someone in"
+        );
+        assert_eq!(
+            (&p["open"], &p["link_hidden"]),
+            (&json!(true), &json!(true))
+        );
+        assert_eq!(p["pads"][0]["id"], 3);
+        let mut p = pad();
+        assert!(!redact_for_agents("POST", "/api/ps5/rp/pad-link", &mut p));
+        // a closed link has nothing to hide
+        let mut closed = json!({"open": false, "url": null, "urls": [], "pads": []});
+        assert!(redact_for_agents(
+            "GET",
+            "/api/ps5/rp/pad-link",
+            &mut closed
+        ));
+        assert!(closed.get("url").is_none());
+    }
+
+    /// A Share link lets whoever has it ask for the files: the reads (share_status, api_request)
+    /// keep what is shared and who asked, never the link or its room. Making one answers with it.
+    #[test]
+    fn share_links_leave_every_read_of_api_share() {
+        let shares = || {
+            json!({
+                "shares": [{
+                    "id": "s1",
+                    "state": "open",
+                    "url": "https://ps5upload.phantomptr.com/share/#room=ROOMROOMROOM&fp=AA&hub=h",
+                    "lan_url": "http://10.0.0.2:3000/share#room=ROOMROOMROOM",
+                    "room": "ROOMROOMROOM",
+                    "items": [{"id": "i1", "name": "My App", "size": 5}],
+                    "requests": [{"request": 1, "name": "Alex", "state": "asking"}],
+                }],
+                "receives": [{"id": "r1", "state": "done", "from": "Sam"}],
+                "history": [],
+            })
+        };
+        for path in [
+            "/api/share",
+            "/api/share/s1",
+            "/API/share/s1/",
+            "/api/share/receive/r1",
+        ] {
+            let mut v = shares();
+            assert!(may_hold_agent_secrets("GET", path), "{path}");
+            assert!(redact_for_agents("GET", path, &mut v), "{path}");
+            let text = v.to_string();
+            assert!(!text.contains("ROOMROOMROOM"), "{path}: the link is left");
+            assert_eq!(v["link_hidden"], true);
+            assert_eq!(v["shares"][0]["requests"][0]["name"], "Alex");
+            assert_eq!(v["shares"][0]["items"][0]["name"], "My App");
+        }
+        // share_create answers with the link: the user asked for it.
+        let mut made = json!({"id": "s1", "url": "https://x/share/#room=ROOMROOMROOM"});
+        assert!(!redact_for_agents("POST", "/api/share", &mut made));
+        assert!(made["url"].as_str().unwrap().contains("ROOMROOMROOM"));
     }
 }

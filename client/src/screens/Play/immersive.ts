@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 
 import { invoke } from "../../lib/invokeLogged";
-import { isAndroid, isIOS, isMobile } from "../../lib/platform";
+import { isAndroid, isIOS, isMacOrLinuxDesktop, isMobile } from "../../lib/platform";
 import { isTauriEnv } from "../../lib/tauriEnv";
 
 /**
@@ -51,8 +51,16 @@ export function docFullscreen(): boolean {
   return !!(d.fullscreenElement || d.webkitFullscreenElement);
 }
 
+/** The iOS app: its web view already has the whole screen. Asking WebKit for full screen on top
+ *  of that adds Apple's own close button over the controller's L2, and WebKit leaves full screen
+ *  when the keyboard opens, so the picture jumped each time ⌨ was tapped (an iPhone Duo, #675). */
+function inIosApp(): boolean {
+  return isTauriEnv() && isIOS();
+}
+
 /** Whether the page can ask the browser for full screen at all (not iPhone Safari). */
 export function canDocFullscreen(): boolean {
+  if (inIosApp()) return false;
   const el = document.documentElement as FsEl;
   return (
     typeof el.requestFullscreen === "function" ||
@@ -84,10 +92,37 @@ function setAndroidUi(immersive: boolean, landscape: boolean): Promise<void> {
   );
 }
 
-/** The iOS app: make the page the first responder, so controllers (MFi, Backbone, any
- *  Bluetooth pad) reach its Gamepad API; WKWebView gives them only to the first responder. */
-export function focusForControllers(): void {
-  if (isTauriEnv() && isIOS()) void invoke("focus_webview").catch(() => {});
+/** The iOS and Mac apps: make the page the first responder, so controllers (MFi, Backbone, a
+ *  DualSense, any Bluetooth pad) reach its Gamepad API; WKWebView gives them only to the first
+ *  responder (on the Mac, the key window's). Answers what had the focus before on the Mac
+ *  ("webview" when the page already had it, see focus_webview), "" on iOS, null where nothing was
+ *  asked or the app did not answer. */
+export async function focusForControllers(): Promise<string | null> {
+  if (!isTauriEnv() || !(isIOS() || isMacOrLinuxDesktop())) return null;
+  try {
+    return await invoke<string>("focus_webview");
+  } catch {
+    return null;
+  }
+}
+
+/** What `focusForControllers` answered, as the log says it: null when the page had the focus
+ *  already (or nothing was asked), else who had the keyboard and the controllers before. */
+export function focusTakenFrom(was: string | null): string | null {
+  return !was || was === "webview" ? null : was;
+}
+
+/** The iOS and Mac apps: ask for the controller's PS button for the page rather than the
+ *  system's Games overlay. On iOS the system only agrees when the user's Home button setting
+ *  allows it; otherwise the menu's PS button is the way. Elsewhere the command is a no-op. */
+export function holdControllerHome(on: boolean): void {
+  if (isTauriEnv() && (isIOS() || isMacOrLinuxDesktop())) void invoke("hold_controller_home", { on }).catch(() => {});
+}
+
+/** The iOS app: hide the status bar (the clock) while the picture fills the screen, and show it
+ *  again after (#722). Elsewhere a no-op: the browser and the other apps have their own way. */
+export function setIosStatusBarHidden(hidden: boolean): void {
+  if (inIosApp()) void invoke("set_status_bar_hidden", { hidden }).catch(() => {});
 }
 
 /** Test hook: forget what the Android app was asked for. */
@@ -111,6 +146,10 @@ export async function setWindowFullscreen(on: boolean): Promise<void> {
   try {
     if (inAndroidApp()) {
       await setAndroidUi(on, on && androidUi.landscape);
+      return;
+    }
+    if (inIosApp()) {
+      setIosStatusBarHidden(on);
       return;
     }
     if (isTauriEnv() && !isMobile()) {

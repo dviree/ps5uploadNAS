@@ -157,9 +157,9 @@ describe("stageRows", () => {
     }
   });
 
-  it("an LZ4 game folder packs, then writes and reads back", () => {
+  it("a folder build with zstd packs packs first, from a game folder too", () => {
     const rows = stageRows(
-      { phase: "running", ...base, source: "/games/Game", mode: "folder", stage: "write", stageDone: 1, stageTotal: 4, stageMs: { pack: 9 } },
+      { phase: "running", ...base, source: "/g/PPSA01234-app", mode: "folder", stage: "write", stageDone: 1, stageTotal: 2, stageMs: { pack: 5 } },
       null,
     );
     expect(rows.map((r) => [r.stage, r.state])).toEqual([

@@ -2,7 +2,8 @@
  * The Play Together guest page (src/join/, #641): `npm run build:join` writes ONE file, script and
  * styles inlined, to engine/crates/ps5upload-engine/src/join_page.html, which the engine embeds
  * and serves at GET /join to a friend who opened the host's link or QR code (the same way /pad is
- * served, vite.pad.config.ts). Commit the result.
+ * served, vite.pad.config.ts). The same file goes to site/join/index.html, the website's copy that
+ * internet invites open (WebRTC, src/join/rtcTransport.ts). Commit both.
  *
  * - Localized, unlike /pad: state/lang is swapped for src/join/joinLang.ts, whose strings come
  *   from `virtual:join-strings`: every locale, but only the keys the page's own modules use
@@ -10,7 +11,10 @@
  *   /pad, vite.pagePlugins.ts).
  * - The built CSS goes through what the app's does (oneLangPerSelector): older Android WebViews
  *   and Safari 14.0 are friends' phones too.
- * - Budget: the build fails over 900 KiB raw.
+ * - Budget: the build fails over 906 KiB raw (900 until the picture as a video track,
+ *   join/trackPlayer.ts, took 2.4 KiB; nothing it replaces can go: the data channel's picture
+ *   stays as its fallback. 904 until "Open on this Wi-Fi", join/lanHint.ts and OpenOnWifi.tsx,
+ *   took 1.7 KiB: the page was at 903.3 before it).
  */
 import { fileURLToPath } from "node:url";
 import { defineConfig, type Plugin } from "vite";
@@ -19,8 +23,13 @@ import tailwindcss from "@tailwindcss/vite";
 import { oneLangPerSelector, pageModuleSwap, pageStrings } from "./vite.pagePlugins";
 import { pageCss } from "./vite.pageCss";
 
-const RAW_BUDGET = 900 * 1024;
+// 768 KiB in 12.1.0, once the page stopped importing the host's whole Remote Play store for rpInput
+// (state/rpInput.ts): kept close, so that does not creep back in.
+const RAW_BUDGET = 800 * 1024;
 const OUT = fileURLToPath(new URL("../engine/crates/ps5upload-engine/src/join_page.html", import.meta.url));
+/** The same page on the website (https://ps5upload.phantomptr.com/join/, .github/workflows/
+ *  pages.yml), where internet invites open (#room=…&k=…&fp=…&hub=…, join/rtcTransport.ts). */
+const SITE_OUT = fileURLToPath(new URL("../site/join/index.html", import.meta.url));
 
 const escapeRe = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 
@@ -49,8 +58,11 @@ function singleFile(): Plugin {
       const raw = Buffer.byteLength(page);
       this.info(`join page: ${(raw / 1024).toFixed(1)} KiB (budget ${RAW_BUDGET / 1024} KiB)`);
       if (raw > RAW_BUDGET) this.error(`join page over budget: ${(raw / 1024).toFixed(1)} KiB`);
-      const { writeFileSync } = await import("node:fs");
+      const { mkdirSync, writeFileSync } = await import("node:fs");
+      const { dirname } = await import("node:path");
       writeFileSync(OUT, page);
+      mkdirSync(dirname(SITE_OUT), { recursive: true });
+      writeFileSync(SITE_OUT, page);
     },
   };
 }

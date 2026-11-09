@@ -2,12 +2,13 @@ import { useActivityHistoryStore } from "../state/activityHistory";
 import { useNotificationsStore } from "../state/notifications";
 import { useLogsStore } from "../state/logs";
 import { useRosterStore } from "../state/roster";
+import { defaultConsoleSettings, settingsOfProfile, type ConsoleSettings } from "../state/consoleSettings";
 import { useScheduleStore } from "../state/schedules";
 import { useConnectionStore } from "../state/connection";
 import { useInstallSettingsStore } from "../state/installSettings";
 import { usePlayTimeStore } from "../state/playTime";
 import { useUploadSettingsStore } from "../state/uploadSettings";
-import { detailedActive, useDiagSettingsStore } from "../state/diagSettings";
+import { levelsSummary } from "../state/diagSettings";
 import { appLinkDiag, type AppLinkDiag } from "./appLinkDiag";
 import { useThemeStore } from "../state/theme";
 import { useEditSessionStore } from "../state/editSession";
@@ -108,6 +109,8 @@ export interface DiagnosticBundle {
     last_seen_kernel: string | null | undefined;
     last_seen_payload: string | null | undefined;
     notes: string | null | undefined;
+    /** This console's own settings (Settings › This PS5), defaults filled in. */
+    settings: ConsoleSettings;
   }>;
   /** User settings snapshot — the behaviour toggles. Essential for "the tool
    *  did X even though I had Y off" reports: captures the ACTUAL stored value
@@ -124,11 +127,13 @@ export interface DiagnosticBundle {
     queue_auto_start: boolean;
     auto_redeploy_on_wake: boolean;
     system_file_read: boolean;
+    /** The global log level in force. */
     log_level: string;
-    /** "Detailed logs" (Logs tab) when the report was made: on, and until when (ISO). While
-     *  on, the engine writes its Remote Play handshake and Play Together detail and debug lines
-     *  are recorded, so a report without them may simply not have that detail. */
-    detailed_logs: { on: boolean; until: string | null };
+    /** The log levels when the report was made (state/diagSettings `levelsSummary`): the global
+     *  level, per-category overrides, whether a raise above info was on and until when (ISO), and
+     *  whether they came from the engine or the app's fallback. A report made at info may simply
+     *  not have the debug detail. */
+    log_levels: ReturnType<typeof levelsSummary>;
     theme: string;
   };
   /** ps5upload:// links (a Play Together invite's or a phone link's "Open in the app"): what
@@ -186,13 +191,14 @@ export function buildDiagnosticBundle(opts: {
   const conn = useConnectionStore.getState();
   const installSettings = useInstallSettingsStore.getState();
   const roster = useRosterStore.getState().profiles;
+  const consoleDefaults = defaultConsoleSettings();
   const schedules = useScheduleStore.getState().schedules;
   const playTimesByHost = usePlayTimeStore.getState().byHost;
   const activity = useActivityHistoryStore.getState().entries;
   const notifications = useNotificationsStore.getState().entries;
   const logs = useLogsStore.getState().entries;
   const uploadSettings = useUploadSettingsStore.getState();
-  const diagSettings = useDiagSettingsStore.getState();
+  const levels = levelsSummary();
   const theme = useThemeStore.getState();
   const editSession = useEditSessionStore.getState();
 
@@ -203,7 +209,7 @@ export function buildDiagnosticBundle(opts: {
     typeof b === "number" ? Math.round(b / 1048576) : null;
 
   return {
-    schema: 4,
+    schema: 5,
     generated_at: new Date().toISOString(),
     app_version: opts.appVersion,
     user_agent: typeof navigator !== "undefined" ? navigator.userAgent : "n/a",
@@ -271,6 +277,7 @@ export function buildDiagnosticBundle(opts: {
       last_seen_kernel: p.last_seen_kernel,
       last_seen_payload: p.last_seen_payload,
       notes: p.notes,
+      settings: settingsOfProfile(p, consoleDefaults),
     })),
     settings: {
       auto_install_after_upload: installSettings.autoInstallAfterUpload,
@@ -283,14 +290,8 @@ export function buildDiagnosticBundle(opts: {
       queue_auto_start: uploadSettings.queueAutoStart,
       auto_redeploy_on_wake: uploadSettings.autoRedeployOnWake,
       system_file_read: uploadSettings.systemFileRead,
-      log_level: diagSettings.logLevel,
-      detailed_logs: {
-        on: detailedActive(diagSettings.detailedUntil),
-        until:
-          detailedActive(diagSettings.detailedUntil) && diagSettings.detailedUntil !== null
-            ? new Date(diagSettings.detailedUntil).toISOString()
-            : null,
-      },
+      log_level: levels.level,
+      log_levels: levels,
       theme: theme.theme,
     },
     app_links: appLinkDiag(),

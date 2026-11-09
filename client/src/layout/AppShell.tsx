@@ -30,6 +30,7 @@ import { usePayloadPlaylistsStore } from "../state/payloadPlaylists";
 import { log } from "../state/logs";
 import { playlistResendsOurHelper } from "../lib/playlistOps";
 import { startSaveBackupSync } from "../state/autoSaveBackup";
+import { startPayloadUpdateNotices } from "../lib/payloadUpdateNotices";
 import { useConsoleHandoff } from "./useConsoleHandoff";
 import {
   autoRunStillLoaded,
@@ -89,9 +90,7 @@ import {
   autoRedeployDecision,
   liveHelperDecision,
   loaderSettled,
-  LOADER_SETTLE_MS,
   MAX_REDEPLOYS_WITHOUT_RECOVERY,
-  redeployAction,
   type RedeployAction,
 } from "../lib/autoRedeploy";
 import { bringUpStatusFor, useBringUpStore } from "../state/bringUp";
@@ -127,6 +126,8 @@ import {
 } from "../state/fsUploadRuntime";
 import { isDragOutCopy } from "../lib/dragOut";
 import { keepMinionOff } from "../state/minionMemory";
+import { syncHelperAtBootNow } from "../state/helperAtBootRuntime";
+import { helperAtBootSettleMs, loadBootRecord } from "../lib/helperAtBoot";
 import { startRosterShare } from "../state/rosterShare";
 import { startStagedRelease } from "../lib/browserStaging";
 import { startSharedPrefs } from "../lib/sharedPrefs";
@@ -137,6 +138,14 @@ import { useNavSidebarStore, navListsFromStorage } from "../state/navSidebar";
 import { UpdateCheckButton } from "./UpdateCheckButton";
 import { useTransferStore } from "../state/transfer";
 import { useUploadSettingsStore } from "../state/uploadSettings";
+import {
+  consoleSettingFor,
+  defaultConsoleSettings,
+  ensureConsoleSettingsMigrated,
+  keepAwakeHosts,
+  keepAwakeModesInUse,
+  redeployActionForProfile,
+} from "../state/consoleSettings";
 import { ensurePayloadCurrent } from "../lib/ensurePayloadCurrent";
 import { isHelperStopped, noteHelperAnswering } from "../state/helperStopped";
 import { guardElfldr } from "../lib/elfldrGuard";
@@ -153,6 +162,15 @@ import { dropTarget, usePackageViewer } from "../state/packageViewer";
 import { installConvertRunner } from "../lib/convertQueueRunner";
 import { recordAppEvent } from "../lib/appJournal";
 import { engineProbeVerdict } from "../lib/engineUnreachable";
+import {
+  nextCheckDelay,
+  statusAfterMiss,
+  STATUS_SLOW_REASON,
+  UP_MISS_THRESHOLD,
+  WAKE_WINDOW_MS,
+  type CheckOutcome,
+} from "../lib/statusSchedule";
+import { onStatusRecheck } from "../lib/statusRecheck";
 import { useConfirm } from "../components/ConfirmDialog";
 
 // The Convert queue builds through the Convert pipeline wherever the user is in the app.
@@ -166,10 +184,10 @@ installConvertRunner();
  *  - Payload: the PS5's :9120 via `payload_check`, every 10s, and only
  *    when a host is configured (no point spamming DOWN probes against
  *    the default IP if the user hasn't entered theirs). */
-/** Consecutive failed payload probes required before the UI flips a host
- *  from "up" to "down". At a 10s poll interval, 2 means a real drop is
- *  reflected within ~20s, while a single jittery/busy poll is absorbed. */
-const PROBE_MISS_THRESHOLD = 2;
+/** Consecutive failed payload probes required before the UI flips a host from "up" to
+ *  "down": lib/statusSchedule (three, spread over several seconds, so one busy or jittery
+ *  check is absorbed). */
+const PROBE_MISS_THRESHOLD = UP_MISS_THRESHOLD;
 
 /** Same debounce, but while an upload to that console is in flight.
  *
@@ -300,6 +318,8 @@ function useStatusPolling() {
   // uploads on its down→up edge. Same cooldown discipline as the auto-loader
   // — a flapping helper must not loop-restart the queue.
   const uploadResumeFiredAtRef = useRef<Record<string, number>>({});
+  /** Per host: quick checks until this time (a wake was sent, the network came back). */
+  const wakeUntilRef = useRef<Record<string, number>>({});
   // Load the saved queue at startup, not when a Queue panel first mounts:
   // installs from any screen go into it, and must never race the load.
   useEffect(() => {
@@ -409,14 +429,27 @@ function useStatusPolling() {
       transferProgressRef,
       warnedMismatchRef,
       warnedNoUcredRef,
+      blindProbeRef,
+      wakeUntilRef,
     ]) {
       for (const k of Object.keys(ref.current)) {
         if (!liveKeys.has(k)) delete ref.current[k];
       }
     }
+    // And what was known about it: the same address added again starts as "checking", not with
+    // the old "not reachable" (which would also skip the checks that confirm a "down").
+    const known = useConnectionStore.getState().runtimeByHost;
+    const gone = Object.keys(known).filter((k) => k !== "_" && !liveKeys.has(k));
+    if (gone.length > 0) {
+      useConnectionStore.setState((s) => {
+        const next = { ...s.runtimeByHost };
+        for (const k of gone) delete next[k];
+        return { runtimeByHost: next };
+      });
+    }
     const isActive = (key: string) =>
       key === (hostOf(useConnectionStore.getState().host) || "_");
-    const probeOne = async (probedHost: string) => {
+    const probeOne = async (probedHost: string): Promise<CheckOutcome> => {
       const key = hostOf(probedHost) || "_";
       // ── Transfer progress IS the liveness signal ────────────────────
       //
@@ -445,14 +478,14 @@ function useStatusPolling() {
           missCountRef.current[key] = 0;
           setHostStatus(probedHost, { payloadStatus: "up", power: "awake" });
           if (isActive(key)) setStatus({ payloadProbing: false });
-          return;
+          return "up";
         }
       } else {
         delete transferProgressRef.current[key];
       }
       try {
         const s = await payloadCheck(probedHost);
-        if (cancelled) return;
+        if (cancelled) return "blind";
         const prev =
           useConnectionStore.getState().runtimeByHost[key] ??
           EMPTY_HOST_RUNTIME;
@@ -486,7 +519,13 @@ function useStatusPolling() {
             );
           }
           if (isActive(key)) setStatus({ payloadProbing: false });
-          return;
+          return "blind";
+        }
+        // The helper is there and talking, only slow to answer (a long scan): no verdict
+        // either way. Holding what was known keeps a busy console from reading as "down".
+        if (carryOver && s.reason === STATUS_SLOW_REASON) {
+          if (isActive(key)) setStatus({ payloadProbing: false });
+          return "blind";
         }
         if (blindProbeRef.current[key]) {
           blindProbeRef.current[key] = false;
@@ -495,7 +534,8 @@ function useStatusPolling() {
         // Debounce up→down: a reachable probe clears the miss counter; an
         // unreachable one only flips to "down" after MISS_THRESHOLD misses in
         // a row, so one busy/jittery poll holds the last-known "up".
-        let newStatus: "up" | "down";
+        let newStatus: "up" | "down" | "unknown";
+        let outcome: CheckOutcome;
         // Awake, in rest mode or not answering, from the same reply (lib/consolePower).
         const power = powerFromCheck(s) ?? prev.power;
         if (power !== prev.power && (power === "rest" || prev.power === "rest")) {
@@ -512,6 +552,7 @@ function useStatusPolling() {
         if (s.reachable || sessionNeedsAttention(s.session)) {
           missCountRef.current[key] = 0;
           newStatus = "up";
+          outcome = "up";
           // What the console's own page has running, for Activity (#658): one small read with
           // this tick, and only when the helper can answer it.
           if (s.reachable && !sessionNeedsAttention(s.session)) void readConsoleTasks(probedHost);
@@ -525,14 +566,18 @@ function useStatusPolling() {
           // "in rest mode", not "helper isn't running").
           missCountRef.current[key] = PROBE_MISS_THRESHOLD;
           newStatus = "down";
+          outcome = "rest";
         } else {
           const misses = (missCountRef.current[key] ?? 0) + 1;
           missCountRef.current[key] = misses;
           const threshold = transferScreenBusy(probedHost)
             ? PROBE_MISS_THRESHOLD_DURING_TRANSFER
             : PROBE_MISS_THRESHOLD;
-          newStatus =
-            prev.payloadStatus === "up" && misses < threshold ? "up" : "down";
+          // Not believed until confirmed: a console not yet seen this run stays "checking"
+          // through a few quick checks, one that was up holds through a few slower ones. One
+          // failed check is never "Helper isn't running" (lib/statusSchedule).
+          newStatus = statusAfterMiss(prev.payloadStatus, misses, { upThreshold: threshold });
+          outcome = "miss";
         }
         // Keep a copy of the helper's own logs every time it arrives at "up" —
         // including the first sighting after the app starts, which the
@@ -681,6 +726,7 @@ function useStatusPolling() {
         });
         // Clear the active console's "rechecking…" flag once its probe lands.
         if (isActive(key)) setStatus({ payloadProbing: false });
+        const verdict = outcome;
         // The install daemon (:9115) is no longer pre-armed or liveness-polled
         // from the client — the engine brings it up per-install during
         // `POST /api/pkg/install` and restores the main payload afterward.
@@ -720,8 +766,9 @@ function useStatusPolling() {
             warnedNoUcredRef.current[key] = false;
           }
         }
+        return verdict;
       } catch (e) {
-        if (cancelled) return;
+        if (cancelled) return "blind";
         const prev =
           useConnectionStore.getState().runtimeByHost[key] ??
           EMPTY_HOST_RUNTIME;
@@ -740,16 +787,88 @@ function useStatusPolling() {
           );
         }
         if (isActive(key)) setStatus({ payloadProbing: false });
+        return "blind";
       }
     };
-    const tick = () => {
-      for (const h of hosts) void probeOne(h);
+    // Each console on its own timer: asked again soon while a check said nothing or a failure
+    // is being confirmed, every 10 s once settled (lib/statusSchedule). Never two checks of
+    // one console at once; a request that arrives during one runs right after it.
+    const timers: Record<string, ReturnType<typeof setTimeout>> = {};
+    const running = new Set<string>();
+    const again = new Set<string>();
+    const blindStreak: Record<string, number> = {};
+    const lastRun: Record<string, number> = {};
+    const run = async (probedHost: string): Promise<void> => {
+      const key = hostOf(probedHost) || "_";
+      if (running.has(key)) {
+        again.add(key);
+        return;
+      }
+      clearTimeout(timers[key]);
+      running.add(key);
+      lastRun[key] = Date.now();
+      let outcome: CheckOutcome;
+      try {
+        outcome = await probeOne(probedHost);
+      } catch {
+        outcome = "blind";
+      } finally {
+        running.delete(key);
+      }
+      if (cancelled) return;
+      blindStreak[key] = outcome === "blind" ? (blindStreak[key] ?? 0) + 1 : 0;
+      const rt = useConnectionStore.getState().runtimeByHost[key];
+      const delay = again.delete(key)
+        ? 0
+        : nextCheckDelay({
+            outcome,
+            status: rt?.payloadStatus ?? "unknown",
+            streak: outcome === "blind" ? blindStreak[key] : (missCountRef.current[key] ?? 0),
+            engineStarting:
+              useConnectionStore.getState().engineStatus !== "up" && engineStartupGrace(),
+            transferring: transferScreenBusy(probedHost),
+            wakeUntil: wakeUntilRef.current[key],
+          });
+      timers[key] = setTimeout(() => void run(probedHost), delay);
     };
-    tick();
-    const h = setInterval(tick, 10000);
+    // The last state each console was seen in, while its first check runs: its helper version
+    // and kernel from the roster (the light itself says "Checking…" until the check answers).
+    const seen = useRosterStore.getState().profiles;
+    for (const h of hosts) {
+      const key = hostOf(h) || "_";
+      if (useConnectionStore.getState().runtimeByHost[key]) continue;
+      const p = seen.find((x) => (hostOf(x.host) || "_") === key);
+      if (p?.last_seen_payload || p?.last_seen_kernel)
+        setHostStatus(h, {
+          payloadVersion: p.last_seen_payload ?? null,
+          ps5Kernel: p.last_seen_kernel ?? null,
+        });
+    }
+    // Every console at once, right away.
+    for (const h of hosts) void run(h);
+    const recheck = (only: string | undefined, wake: boolean, minGapMs: number) => {
+      for (const h of hosts) {
+        const key = hostOf(h) || "_";
+        if (only && key !== (hostOf(only) || "_")) continue;
+        if (wake) wakeUntilRef.current[key] = Date.now() + WAKE_WINDOW_MS;
+        // Focus can come and go quickly; a console just asked is not asked again.
+        if (Date.now() - (lastRun[key] ?? 0) < minGapMs) continue;
+        void run(h);
+      }
+    };
+    const offRecheck = onStatusRecheck((r) => recheck(r.host, !!r.wake, 0));
+    // Back to the window: what changed while away shows now, not at the next round.
+    const onFocus = () => recheck(undefined, false, 3000);
+    // A network that comes back (Wi-Fi, a laptop waking): every console, often, for a while.
+    const onOnline = () => recheck(undefined, true, 0);
+    window.addEventListener("focus", onFocus);
+    window.addEventListener("online", onOnline);
     return () => {
       cancelled = true;
-      clearInterval(h);
+      for (const t of Object.values(timers)) clearTimeout(t);
+      offRecheck();
+      window.removeEventListener("focus", onFocus);
+      window.removeEventListener("online", onOnline);
     };
   }, [hostsKey, activeHost, setHostStatus, setStatus, visible]);
 }
@@ -907,10 +1026,13 @@ function useAutoRedeployDownHelpers() {
           (await portCheck(hostOf(host) || host, PS5_LOADER_PORT).catch(() => false)) ||
           (await portCheck(hostOf(host) || host, PAYLOAD_MANAGER_PORT).catch(() => false));
         if (cancelled) return;
+        // Payload Manager starts the helper at boot here: give its boot list time first.
+        const settleMs = helperAtBootSettleMs(loadBootRecord(host));
         const settle = loaderSettled({
           loaderOpen,
           firstOpenAt: loaderFirstOpenRef.current[key],
           now: Date.now(),
+          settleMs,
         });
         if (settle === "closed") {
           delete loaderFirstOpenRef.current[key];
@@ -921,7 +1043,7 @@ function useAutoRedeployDownHelpers() {
             loaderFirstOpenRef.current[key] = Date.now();
             log.info(
               "connection",
-              `auto-redeploy: ${host}'s loader just came up — waiting ${Math.round(LOADER_SETTLE_MS / 1000)}s for the console to finish booting before sending the helper`,
+              `auto-redeploy: ${host}'s loader just came up — waiting ${Math.round(settleMs / 1000)}s for the console to finish booting before sending the helper`,
             );
           }
           return;
@@ -977,10 +1099,9 @@ function useAutoRedeployDownHelpers() {
 
     const tick = () => {
       if (cancelled) return;
-      const { autoRedeployOnWake, autoBringUp } = useUploadSettingsStore.getState();
-      if (!autoRedeployOnWake && !autoBringUp) return;
       const { runtimeByHost } = useConnectionStore.getState();
       const roster = useRosterStore.getState();
+      const defaults = defaultConsoleSettings();
       for (const p of roster.profiles) {
         const h = (p.host ?? "").trim();
         if (!h) continue;
@@ -1019,11 +1140,8 @@ function useAutoRedeployDownHelpers() {
             log.info("connection", `auto-redeploy: ${h} is back up — re-armed`);
           }
         } else if (decision === "redeploy") {
-          const action = redeployAction({
-            autoBringUp,
-            autoRedeploy: autoRedeployOnWake,
-            upThisBoot: upThisBootRef.current[key] === true,
-          });
+          // This console by its own settings (Settings › This PS5), not the selected one's.
+          const action = redeployActionForProfile(p, defaults, upThisBootRef.current[key] === true);
           if (action !== "none") void tryRedeploy(h, action);
         }
       }
@@ -1129,7 +1247,14 @@ function useAgentMcpStaleNotice() {
 }
 
 function useKeepPs5Awake() {
-  const mode = useUploadSettingsStore((s) => s.keepPs5AwakeMode);
+  // Each console has its own mode (Settings › This PS5): the tick runs when any console wants it,
+  // and each tick resets only the consoles whose own mode asks for it.
+  const profiles = useRosterStore((s) => s.profiles);
+  const defaultMode = useUploadSettingsStore((s) => s.keepPs5AwakeMode);
+  const { anyOn, anyAlways } = keepAwakeModesInUse(profiles, {
+    ...defaultConsoleSettings(),
+    keep_awake_mode: defaultMode,
+  });
   const queueRunning = useUploadQueueStore((s) => s.running);
   // Plain loop instead of Object.values().some(): this selector runs on
   // EVERY transfer-store write (multiple per second during an upload),
@@ -1144,9 +1269,7 @@ function useKeepPs5Awake() {
   });
   // Installs and copies count as transfers too (they register tasks).
   const taskWork = useTaskStore((s) => anyAwakeWork(s.tasks));
-  const active =
-    mode === "always" ||
-    (mode === "transfers" && (queueRunning || transferActive || taskWork));
+  const active = anyAlways || (anyOn && (queueRunning || transferActive || taskWork));
   useEffect(() => {
     if (!active) return;
     const tickAll = () => {
@@ -1156,29 +1279,29 @@ function useKeepPs5Awake() {
       // upload on console A keeps A awake even after the user switches to tab B
       // — otherwise A could drop to rest mid-upload (the spool_apply_failed bug
       // this exists to prevent).
-      const hosts = new Set<string>();
+      const busy = new Set<string>();
       for (const [h, p] of Object.entries(
         useTransferStore.getState().phasesByHost,
       )) {
         if ((p.kind === "starting" || p.kind === "running") && h) {
-          hosts.add(hostOf(h));
+          busy.add(hostOf(h));
         }
       }
       for (const it of useUploadQueueStore.getState().items) {
-        if (it.status === "running") hosts.add(hostOf(it.addr));
+        if (it.status === "running") busy.add(hostOf(it.addr));
       }
       // Installs (stream, link, archive, upload) and console copies too, not only uploads.
-      for (const h of awakeConsoles(useTaskStore.getState().tasks)) hosts.add(hostOf(h));
-      if (useUploadSettingsStore.getState().keepPs5AwakeMode === "always") {
-        // Every console whose helper currently answers — read live at tick
-        // time (not effect deps) so consoles joining/leaving are picked up
-        // on the next tick without restarting the interval.
-        for (const [h, rt] of Object.entries(
-          useConnectionStore.getState().runtimeByHost,
-        )) {
-          if (rt.payloadStatus === "up" && h && h !== "_") hosts.add(h);
-        }
+      for (const h of awakeConsoles(useTaskStore.getState().tasks)) busy.add(hostOf(h));
+      // Every console whose helper currently answers — read live at tick time (not effect deps)
+      // so consoles joining/leaving are picked up on the next tick without restarting the
+      // interval. Only those set to "Always while connected" are ticked for it.
+      const up: string[] = [];
+      for (const [h, rt] of Object.entries(
+        useConnectionStore.getState().runtimeByHost,
+      )) {
+        if (rt.payloadStatus === "up" && h && h !== "_") up.push(h);
       }
+      const hosts = keepAwakeHosts(busy, up, (h) => consoleSettingFor(h, "keep_awake_mode"));
       const runtimes = useConnectionStore.getState().runtimeByHost;
       for (const h of keepAwakeTargets(hosts, runtimes)) {
         void powerTick(mgmtAddr(h)).catch(() => {
@@ -1190,6 +1313,23 @@ function useKeepPs5Awake() {
     const id = window.setInterval(tickAll, KEEP_PS5_AWAKE_TICK_MS);
     return () => window.clearInterval(id);
   }, [active]);
+}
+
+/** The helper copy Payload Manager starts at boot (lib/helperAtBoot): judged or brought up to
+ *  date once per helper connection, after the connection settles (a send that brought the
+ *  helper up has recorded itself by then). */
+function useHelperAtBootSync() {
+  const host = useConnectionStore((s) => s.host);
+  const up = useConnectionStore((s) => s.payloadStatus === "up");
+  useEffect(() => {
+    if (!host || !up) return;
+    const t = window.setTimeout(() => {
+      if (useConnectionStore.getState().payloadStatus !== "up") return;
+      if (transferScreenBusy(host)) return;
+      void syncHelperAtBootNow(host);
+    }, 20_000);
+    return () => window.clearTimeout(t);
+  }, [host, up]);
 }
 
 /** A console this computer turned Minion off on stays off when it loses its settings
@@ -1664,6 +1804,7 @@ export default function AppShell() {
   useWindowStatePersistence();
   usePkgAutoRoute();
   useKeepMinionOff();
+  useHelperAtBootSync();
   // Schedule runner — fires while window open. Browser-side; for
   // true cron behaviour the user needs an external scheduler.
   useScheduleRunner(runScheduleAction);
@@ -1681,6 +1822,9 @@ export default function AppShell() {
     // Migrate single-host users into the multi-PS5 roster on first
     // start. Idempotent — no-op when the roster is already populated.
     ensureRosterMigrated();
+    // Settings › This PS5: the app-wide values copied into each console once, before the list
+    // is shared (so a console's value set on another device wins over this copy).
+    ensureConsoleSettingsMigrated();
     // The console list is kept in the engine too: every browser of the self-hosted web UI sees the
     // same consoles, and an app's list reaches /api/consoles.
     const stopRosterShare = startRosterShare();
@@ -1698,6 +1842,8 @@ export default function AppShell() {
     const stopMeshShare = startMeshShare(() => useNavSidebarStore.setState(navListsFromStorage()));
     // Automatic save backups are run by the engine; it backs up the consoles in this list.
     const stopSaveBackupSync = startSaveBackupSync();
+    // A notice when the engine finds or applies payload updates (lib/payloadUpdateNotices).
+    const stopPayloadUpdateNotices = startPayloadUpdateNotices();
     // Subscribe-once: cross-store accumulator that credits running
     // titles with elapsed wall-clock between updates. Idempotent.
     installPlayTimeAccumulator();
@@ -1720,6 +1866,7 @@ export default function AppShell() {
       stopSharedPrefs();
       stopMeshShare();
       stopSaveBackupSync();
+      stopPayloadUpdateNotices();
     };
   }, []);
   // Window title follows the active console so the macOS Dock / app
@@ -1771,19 +1918,24 @@ export default function AppShell() {
       <div className="h-top-bar flex shrink-0 items-center gap-2.5 pb-2 pt-[calc(var(--safe-top)_+_0.5rem)] md:hidden">
         <NavigationControls />
         <AppLogo size={28} />
-        <span className="text-base font-semibold tracking-[-0.02em]">PS5Upload</span>
+        {/* One word that never breaks (on a 320 px phone it wrapped its last letter onto a
+            second line). */}
+        <span className="shrink-0 whitespace-nowrap text-base font-semibold tracking-[-0.02em]">PS5Upload</span>
         {/* The bell on a phone too: its panel is a full-width sheet there. */}
         <div className="ms-auto">
           <NotificationInbox align="right" placement="below" variant="orb" />
         </div>
       </div>
-      <HelperVersionBanner />
-      <SessionBanner />
-      <RemotePlayBanner />
-      <MovedConsoleBanner />
-      <EngineDownBanner />
-      <AndroidLocalNetworkBanner />
-      <AndroidStorageAccessBanner />
+      {/* Clear of a column of system icons, as the page is (an iPhone Duo folded, #675). */}
+      <div className="shell-safe-x shrink-0">
+        <HelperVersionBanner />
+        <SessionBanner />
+        <RemotePlayBanner />
+        <MovedConsoleBanner />
+        <EngineDownBanner />
+        <AndroidLocalNetworkBanner />
+        <AndroidStorageAccessBanner />
+      </div>
 
       {/* Desktop: the sidebar runs to the window edge, the content beside it. */}
       <div className="shell-safe-x flex min-h-0 flex-1">
@@ -1828,7 +1980,7 @@ export default function AppShell() {
                 guarantees scroll position resets per screen. Same-path query
                 changes (e.g. /payloads?tab=send) keep the node, so tab
                 switches inside a screen don't re-animate. */}
-            <KeptScreens pathname={location.pathname} className="anim-screen flex-1 overflow-y-auto overflow-x-hidden pb-[calc(88px+var(--safe-bottom))] md:pb-0 [overscroll-behavior:contain]" />
+            <KeptScreens pathname={location.pathname} className="tab-room anim-screen flex-1 overflow-y-auto overflow-x-hidden pb-[calc(88px+var(--safe-bottom))] md:pb-0 [overscroll-behavior:contain]" />
           </main>
         </div>
       </div>

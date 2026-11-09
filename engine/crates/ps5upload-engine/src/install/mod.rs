@@ -608,7 +608,11 @@ async fn recycle_daemon(ip: &str) {
     let _ = tokio::task::spawn_blocking(move || {
         // Forced: a plain stop is refused for exactly the job this is clearing.
         if let Err(e) = ic::stop_forced(&ip_s) {
-            crate::log_warn!("installer daemon on {ip_s} did not stop: {e}");
+            crate::log_at!(
+                Warn,
+                "install",
+                "installer daemon on {ip_s} did not stop: {e}"
+            );
             return;
         }
         use ps5upload_core::payload_lifecycle as pl;
@@ -974,6 +978,28 @@ pub async fn install_handler(
                 .into_response();
         }
     }
+    // Away on Tailscale: an install talks to the installer daemon (port 9040) and the PS5
+    // fetches the package from this device, neither of which Tailscale carries (the console
+    // serves only Remote Play and the helper there, and never dials out over it). Say so now
+    // instead of a timeout.
+    {
+        let ip = ip.clone();
+        let away =
+            tokio::task::spawn_blocking(move || ps5upload_core::route::via(&ip).is_tailnet())
+                .await
+                .unwrap_or(false);
+        if away {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "ok": false,
+                    "reason": "tailnet_home_only",
+                    "error": ps5upload_core::route::home_only("Installing a package"),
+                })),
+            )
+                .into_response();
+        }
+    }
     let job = match state.jobs.begin(&req.ps5_addr) {
         Ok(j) => j,
         Err(active) => {
@@ -1083,7 +1109,12 @@ async fn ended_by_stop(
     if !state.jobs.is_cancelled(job) {
         return false;
     }
-    crate::log_info!("{}: stopped by the user", correlation_tag(job));
+    crate::log_at!(
+        Info,
+        "install",
+        "{}: stopped by the user",
+        correlation_tag(job)
+    );
     if let Some(sid) = session {
         crate::pkg_install::release_serve_session(&state.sessions, sid);
     }
@@ -1174,13 +1205,39 @@ async fn run_install(state: PkgInstallStateHandle, job: String, mut req: Install
             );
         }
     }
-    crate::log_info!(
+    crate::log_at!(
+        Info,
+        "install",
         "{tag}: install start ps5={ip} source={} content_id={} category={} app_ver={}",
         req.source.kind(),
         req.content_id,
         req.category.as_deref().unwrap_or("?"),
         req.package_app_ver.as_deref().unwrap_or("?")
     );
+    // A category that says full game, for a package whose header says add-on: go on the header
+    // for every check below (#724, #776). Read only when the category says game. A bare link is
+    // left alone: the console fetches it itself and nothing is verified against it.
+    if let Some(sent) = req
+        .category
+        .clone()
+        .filter(|c| certainly_a_game(c) && !matches!(req.source, Source::Url(_)))
+    {
+        let header = unless_stopped(
+            &state,
+            &job,
+            read_source_header(&req.source, &mgmt, req.options.insecure_tls),
+        )
+        .await
+        .flatten();
+        if let Some(fixed) = category_from_header(&sent, header.as_ref()) {
+            crate::log_at!(
+                Info,
+                "install",
+                "{tag}: the category sent says full game ({sent}), the package's header says add-on: going on {fixed}"
+            );
+            req.category = Some(fixed);
+        }
+    }
     ps5upload_core::events::emit_detail(
         ps5upload_core::events::Cat::Install,
         ps5upload_core::events::Level::Info,
@@ -1196,6 +1253,13 @@ async fn run_install(state: PkgInstallStateHandle, job: String, mut req: Install
         Delivery::Loopback => Route::Loopback,
         Delivery::Stream => Route::Stream,
     };
+    crate::log_at!(
+        Debug,
+        "install",
+        "{tag}: first route {route:?}; category {category:?}, patch check {}, title id {}",
+        patch_ver.is_some(),
+        title_id.as_deref().unwrap_or("-")
+    );
     state.jobs.update(&job, |s| {
         s.content_id = req.content_id.clone();
         s.title_id = title_id.clone();
@@ -1359,7 +1423,7 @@ async fn run_install(state: PkgInstallStateHandle, job: String, mut req: Install
                 // through the helper, one job, one result.
                 match staged_retry_through_engine(&r) {
                     Some(code) => {
-                        crate::log_info!(
+                        crate::log_at!(Info, "install", 
                             "{tag}: the console refused its own copy (0x{code:08X}); serving it from this engine instead"
                         );
                         // A network refusal stays with Sony's library for the life of the
@@ -1388,7 +1452,9 @@ async fn run_install(state: PkgInstallStateHandle, job: String, mut req: Install
                                 (r2, Some(sid), false)
                             }
                             Err(e) => {
-                                crate::log_warn!(
+                                crate::log_at!(
+                                    Warn,
+                                    "install",
                                     "{tag}: could not serve the console's copy: {}",
                                     e.message
                                 );
@@ -1441,9 +1507,13 @@ async fn run_install(state: PkgInstallStateHandle, job: String, mut req: Install
                         if STAGED_ROUTE_REFUSALS.contains(code) =>
                     {
                         if proxied {
-                            crate::log_info!("{tag}: streaming the link through this engine");
+                            crate::log_at!(
+                                Info,
+                                "install",
+                                "{tag}: streaming the link through this engine"
+                            );
                         } else {
-                            crate::log_info!(
+                            crate::log_at!(Info, "install", 
                                 "{tag}: the console refused the link (0x{code:08X}); proxying it through this engine instead"
                             );
                         }
@@ -1459,7 +1529,12 @@ async fn run_install(state: PkgInstallStateHandle, job: String, mut req: Install
                                 (r2, Some(sid), false)
                             }
                             Err(e) => {
-                                crate::log_warn!("{tag}: could not proxy the link: {}", e.message);
+                                crate::log_at!(
+                                    Warn,
+                                    "install",
+                                    "{tag}: could not proxy the link: {}",
+                                    e.message
+                                );
                                 // When the proxy was the only thing asked for, its own
                                 // failure is the answer, not a made-up refusal code.
                                 if proxied {
@@ -1522,7 +1597,7 @@ async fn run_install(state: PkgInstallStateHandle, job: String, mut req: Install
             already_installed,
             unreachable,
         ) {
-            crate::log_info!(
+            crate::log_at!(Info, "install", 
                 "{tag}: the console cannot fetch from this engine (0x{code:08X}); last resort: installing its own copy by file path"
             );
             if let Some(sid) = session_id.take() {
@@ -1544,7 +1619,11 @@ async fn run_install(state: PkgInstallStateHandle, job: String, mut req: Install
         (&reply, &req.source)
     {
         if session_id.is_none() && (via == "path" || via == "file") {
-            crate::log_warn!("{tag}: the daemon installed by file path ({via}) by itself");
+            crate::log_at!(
+                Warn,
+                "install",
+                "{tag}: the daemon installed by file path ({via}) by itself"
+            );
             route = Route::Path;
             via_plain_path = true;
             state.jobs.update(&job, |s| s.route = Some(Route::Path));
@@ -1553,6 +1632,11 @@ async fn run_install(state: PkgInstallStateHandle, job: String, mut req: Install
     let deliver_ms = deliver_started.elapsed().as_millis() as u64;
 
     // interpret the daemon reply.
+    crate::log_at!(
+        Debug,
+        "install",
+        "{tag}: the installer daemon answered after {deliver_ms} ms on route {route:?} (plain path {via_plain_path}): {reply:?}"
+    );
     let (accepted, code, hint) = match &reply {
         Ok(ic::InstallReply::Accepted { .. }) => (true, 0u32, None),
         Ok(ic::InstallReply::Busy { job: j }) => (
@@ -1637,8 +1721,13 @@ async fn run_install(state: PkgInstallStateHandle, job: String, mut req: Install
         // A link the console fetches by itself has no session and never counts as fetched, and it
         // poisons Sony's library just the same.
         let nothing_fetched = fetched.is_none_or(|(served, _)| served == 0);
+        crate::log_at!(
+            Info,
+            "install",
+            "{tag}: refused on route {route:?}: Sony code 0x{code:08X}, nothing fetched {nothing_fetched}, hint {hint:?}"
+        );
         if should_recycle_daemon(route == Route::Stream, nothing_fetched, code) {
-            crate::log_warn!(
+            crate::log_at!(Warn, "install", 
                 "{tag}: network-class refusal 0x{code:08X} before any fetch — recycling the installer daemon so the next install starts clean"
             );
             recycle_daemon(&ip).await;
@@ -1768,7 +1857,11 @@ async fn run_install(state: PkgInstallStateHandle, job: String, mut req: Install
         // engine cannot see (the console just stops asking for data). The stream source is
         // already released above; a daemon still serving a staged copy is recycled so the
         // next install is not refused as busy.
-        crate::log_info!("{tag}: stopped by the user at {last_served} bytes");
+        crate::log_at!(
+            Info,
+            "install",
+            "{tag}: stopped by the user at {last_served} bytes"
+        );
         if session_id.is_none() && install_job_id.is_some() {
             recycle_daemon(&ip).await;
         }
@@ -1784,7 +1877,11 @@ async fn run_install(state: PkgInstallStateHandle, job: String, mut req: Install
         return;
     }
     if link_changed {
-        crate::log_warn!("{tag}: the file behind the link changed at {last_served} bytes");
+        crate::log_at!(
+            Warn,
+            "install",
+            "{tag}: the file behind the link changed at {last_served} bytes"
+        );
         state.jobs.update(&job, |s| {
             s.phase = Phase::Failed;
             s.verdict = Some(Verdict::Failed);
@@ -1797,7 +1894,9 @@ async fn run_install(state: PkgInstallStateHandle, job: String, mut req: Install
         return;
     }
     if delivery == DeliveryProgress::Stalled {
-        crate::log_warn!(
+        crate::log_at!(
+            Warn,
+            "install",
             "{tag}: delivery stalled at {last_served} bytes — source kept, reporting failed"
         );
         // A daemon serving this job is left alone too: it gives way to the next install by itself
@@ -1821,7 +1920,7 @@ async fn run_install(state: PkgInstallStateHandle, job: String, mut req: Install
                     never_reached,
                 )
             {
-                crate::log_info!(
+                crate::log_at!(Info, "install", 
                     "{tag}: the console never fetched from this engine; last resort: installing its own copy by file path"
                 );
                 if let Some(sid) = &session_id {
@@ -1882,6 +1981,8 @@ async fn run_install(state: PkgInstallStateHandle, job: String, mut req: Install
     // Whether the console is known to hold the whole package now. A bare link is fetched by the
     // console itself, so nothing here saw any of it.
     let delivered = observable && delivery == DeliveryProgress::Complete;
+    // An add-on the check found nothing of: worded as such (see `ADDON_UNVERIFIED_HINT`).
+    let mut addon_not_seen = false;
     let (verdict, patch_verdict, app_ver_after) = match (&title_id, &patch_ver) {
         (Some(t), Some(pv)) => {
             let (m, t, pv, before) = (mgmt.clone(), t.clone(), pv.clone(), app_ver_before.clone());
@@ -1923,6 +2024,20 @@ async fn run_install(state: PkgInstallStateHandle, job: String, mut req: Install
                 _ => None,
             };
             let sid = session_id.clone();
+            let addon = is_addon_type(&ptype);
+            // Say what the 99% waits for, so a report settles it from the log (#776).
+            crate::log_at!(
+                Info,
+                "install",
+                "{tag}: verify: waiting for {} ({ptype}, {cid}): {}",
+                if addon {
+                    "the add-on"
+                } else {
+                    "the package file"
+                },
+                verify_target_text(&cid, &ptype, t, budget)
+            );
+            let (cid_log, ptype_log) = (cid.clone(), ptype.clone());
             let found = tokio::task::spawn_blocking(move || {
                 let fingerprint = console_copy
                     .map(|p| crate::pkg_install::remote_pkg_identity(&m, &p).1)
@@ -1932,23 +2047,58 @@ async fn run_install(state: PkgInstallStateHandle, job: String, mut req: Install
                         s.get(&sid).map(|x| x.package_fingerprint.clone())
                     })
                     .unwrap_or_default();
-                crate::pkg_install::wait_for_installed_artifact(
-                    &m,
-                    &cid,
-                    &ptype,
-                    total,
-                    &fingerprint,
-                    budget,
-                    &|| st.jobs.is_cancelled(&jb),
-                )
+                let stop = || st.jobs.is_cancelled(&jb);
+                if addon {
+                    crate::pkg_install::wait_for_installed_addon(
+                        &m,
+                        &cid,
+                        &ptype,
+                        total,
+                        &fingerprint,
+                        &stop,
+                    )
+                } else {
+                    crate::pkg_install::wait_for_installed_artifact(
+                        &m,
+                        &cid,
+                        &ptype,
+                        total,
+                        &fingerprint,
+                        budget,
+                        &stop,
+                    )
+                }
             })
             .await
-            .unwrap_or(crate::pkg_install::ArtifactWait::CannotTell);
+            .ok();
+            let outcome = found.map_or(crate::pkg_install::ArtifactWait::CannotTell, |r| r.outcome);
+            match &found {
+                Some(r) => crate::log_at!(
+                    Info,
+                    "install",
+                    "{tag}: verify: {outcome:?} for {ptype_log} {cid_log} after {} ms, {} checks; last check {}, title files {} bytes{}",
+                    r.waited_ms,
+                    r.checks,
+                    r.last_check,
+                    r.most_seen,
+                    if r.hit_ceiling { ", ceiling reached" } else { "" }
+                ),
+                None => crate::log_at!(
+                    Warn,
+                    "install",
+                    "{tag}: verify: the check for {ptype_log} {cid_log} did not run to the end"
+                ),
+            }
             (
-                match found {
+                match outcome {
                     crate::pkg_install::ArtifactWait::Landed
                     | crate::pkg_install::ArtifactWait::CannotTell => verdict_no_identity(true),
-                    crate::pkg_install::ArtifactWait::NotSeen => Verdict::Unverified,
+                    crate::pkg_install::ArtifactWait::NotSeen => {
+                        if addon {
+                            addon_not_seen = true;
+                        }
+                        Verdict::Unverified
+                    }
                 },
                 None,
                 None,
@@ -1966,39 +2116,40 @@ async fn run_install(state: PkgInstallStateHandle, job: String, mut req: Install
     // Sony's "accepted" is not proof there: one form of it returned 0 and left a tile with no
     // content. So this route is only "installed" once the content is on a drive.
     let mut no_content_hint: Option<String> = None;
-    let verdict = match (&title_id, via_plain_path && route == Route::Path) {
-        (Some(t), true) => {
-            let (m, t) = (mgmt.clone(), t.clone());
-            let (st, jb) = (state.clone(), job.clone());
-            let present = tokio::task::spawn_blocking(move || {
-                let deadline = std::time::Instant::now() + PLAIN_PATH_CONTENT_WAIT;
-                loop {
-                    if crate::pkg_install::base_content_present(&m, &t) {
-                        return true;
+    let verdict =
+        match (&title_id, via_plain_path && route == Route::Path) {
+            (Some(t), true) => {
+                let (m, t) = (mgmt.clone(), t.clone());
+                let (st, jb) = (state.clone(), job.clone());
+                let present = tokio::task::spawn_blocking(move || {
+                    let deadline = std::time::Instant::now() + PLAIN_PATH_CONTENT_WAIT;
+                    loop {
+                        if crate::pkg_install::base_content_present(&m, &t) {
+                            return true;
+                        }
+                        if std::time::Instant::now() >= deadline || st.jobs.is_cancelled(&jb) {
+                            return false;
+                        }
+                        std::thread::sleep(std::time::Duration::from_secs(1));
                     }
-                    if std::time::Instant::now() >= deadline || st.jobs.is_cancelled(&jb) {
-                        return false;
-                    }
-                    std::thread::sleep(std::time::Duration::from_secs(1));
+                })
+                .await
+                .unwrap_or(false);
+                if ended_by_stop(&state, &job, &req, started, None).await {
+                    return;
                 }
-            })
-            .await
-            .unwrap_or(false);
-            if ended_by_stop(&state, &job, &req, started, None).await {
-                return;
-            }
-            if present {
-                verdict
-            } else {
-                crate::log_warn!(
+                if present {
+                    verdict
+                } else {
+                    crate::log_at!(Warn, "install", 
                     "{tag}: the console accepted the package by file path but no content appeared"
                 );
-                no_content_hint = Some(PLAIN_PATH_NO_CONTENT_HINT.to_string());
-                Verdict::Failed
+                    no_content_hint = Some(PLAIN_PATH_NO_CONTENT_HINT.to_string());
+                    Verdict::Failed
+                }
             }
-        }
-        _ => verdict,
-    };
+            _ => verdict,
+        };
     let verify_ms = verify_started.elapsed().as_millis() as u64;
 
     // metrics: served bytes + throughput.
@@ -2033,7 +2184,11 @@ async fn run_install(state: PkgInstallStateHandle, job: String, mut req: Install
             s.hint = Some(h.clone());
         }
         if verdict == Verdict::Unverified {
-            s.hint = Some(unverified_hint(delivered, verify_ms));
+            s.hint = Some(if addon_not_seen && delivered {
+                ADDON_UNVERIFIED_HINT.to_string()
+            } else {
+                unverified_hint(delivered, verify_ms)
+            });
         }
         s.patch_verdict = patch_verdict;
         s.app_ver_after = app_ver_after.clone();
@@ -2058,6 +2213,68 @@ fn unverified_hint(delivered: bool, waited_ms: u64) -> String {
     } else {
         "the PS5 took the link and downloads it by itself; check Downloads on the PS5".to_string()
     }
+}
+
+/// An add-on the console has all of, with nothing of it found on a drive (#776). An add-on that
+/// only unlocks content leaves no files, so this is no sign of a failure.
+pub const ADDON_UNVERIFIED_HINT: &str = "the PS5 has the whole add-on, but no files of it were found to confirm it installed; an add-on that only unlocks content leaves none, so check the game's add-ons on the PS5. The package was kept";
+
+/// The package type is an add-on (`PS5AC`, `PS4AC`).
+pub fn is_addon_type(package_type: &str) -> bool {
+    package_type.to_ascii_uppercase().ends_with("AC")
+}
+
+/// What the verify step looks for, in words for the log.
+pub fn verify_target_text(
+    content_id: &str,
+    package_type: &str,
+    title_id: &str,
+    budget: std::time::Duration,
+) -> String {
+    if is_addon_type(package_type) {
+        let label = crate::pkg_install::addon_label(content_id).unwrap_or_else(|| "?".into());
+        format!(
+            "an ac.pkg with this content id under <drive>/user/addcont/{title_id}/, or {} (idle {} s, at most {} s)",
+            crate::pkg_install::addon_appmeta_path(title_id, &label),
+            crate::pkg_install::ADDON_VERIFY_IDLE.as_secs(),
+            crate::pkg_install::ADDON_VERIFY_CEILING.as_secs()
+        )
+    } else {
+        let file = match package_type.to_ascii_uppercase() {
+            p if p.ends_with("DP") => format!("<drive>/user/patch/{title_id}/patch.pkg"),
+            _ => format!("<drive>/user/app/{title_id}/app.pkg"),
+        };
+        format!(
+            "{file} matching this package (idle {} s, at most 4 h)",
+            budget.as_secs()
+        )
+    }
+}
+
+/// The category to go on when the caller's says full game and the package's own header says
+/// add-on. A PS5 add-on's param.json has no category, so a client that derives the package type
+/// from it sends `PS5GD` (#724). Kept past the image check, that sent the add-on's verify looking
+/// for a game's `app.pkg` it never writes, at 99% for the whole wait (#776). The caller's form is
+/// kept: `PS5GD` becomes `PS5AC`, `gd` becomes `ac`. `None`: keep what was sent.
+pub fn category_from_header(
+    sent: &str,
+    header: Option<&ps5upload_pkg::ReaderMetadata>,
+) -> Option<String> {
+    let h = header?;
+    if !certainly_a_game(sent) {
+        return None;
+    }
+    let (kind, _, _) = ps5upload_pkg::kind::classify(h.content_type, h.content_flags, &h.category);
+    if kind != ps5upload_pkg::kind::Kind::Dlc {
+        return None;
+    }
+    let s = sent.trim();
+    let upper = s.to_ascii_uppercase();
+    Some(if upper.starts_with("PS5") || upper.starts_with("PS4") {
+        format!("{}AC", &upper[..3])
+    } else {
+        "ac".to_string()
+    })
 }
 
 /// Reuse the existing start handler in serve-only mode to create a pkg-host
@@ -2204,6 +2421,271 @@ fn read_host_header(path: &str) -> Option<ps5upload_pkg::ReaderMetadata> {
     })
 }
 
+/// The package is a full game, known from its category: a PARAM one (`gd`, `gde`, ...) or the
+/// BGFT package type the client sends in its place (`PS5GD`). Anything else, unknown or not
+/// sent, is not a game for a refusal: an add-on whose category the caller didn't send was
+/// refused as one whenever its base game ran from an image (#721).
+fn certainly_a_game(category: &str) -> bool {
+    let c = category.trim().to_ascii_lowercase();
+    let c = c
+        .strip_prefix("ps4")
+        .or_else(|| c.strip_prefix("ps5"))
+        .unwrap_or(&c);
+    matches!(
+        ps5upload_pkg::kind::classify_category(c),
+        (ps5upload_pkg::kind::Kind::Base, true, _)
+    )
+}
+
+/// Whether the image-or-folder refusal applies: the category says a full game, and the
+/// package's own header, when it could be read, does not say otherwise. A PS5 add-on's
+/// param.json has no category, so only its header says add-on, and a client that sent the
+/// package type it derived (`PS5GD`) had the add-on refused as the game (#724).
+fn image_refusal_applies(category: &str, header: Option<&ps5upload_pkg::ReaderMetadata>) -> bool {
+    if !certainly_a_game(category) {
+        return false;
+    }
+    match header {
+        Some(h) => {
+            ps5upload_pkg::kind::classify(h.content_type, h.content_flags, &h.category).0
+                == ps5upload_pkg::kind::Kind::Base
+        }
+        None => true,
+    }
+}
+
+#[cfg(test)]
+mod certainly_a_game_tests {
+    #[test]
+    fn only_a_known_game_category_is_a_game() {
+        assert!(super::certainly_a_game("gd"));
+        assert!(super::certainly_a_game("GDE"));
+        assert!(super::certainly_a_game("PS5GD"));
+        assert!(super::certainly_a_game("PS4GD"));
+        assert!(!super::certainly_a_game("ac"));
+        assert!(!super::certainly_a_game("PS5AC"));
+        assert!(!super::certainly_a_game("gp"));
+        assert!(!super::certainly_a_game("PS5DP"));
+        assert!(!super::certainly_a_game("dp"));
+        // Not sent or not known: an add-on is never refused as a game (#721, #724).
+        assert!(!super::certainly_a_game(""));
+        assert!(!super::certainly_a_game("  "));
+        assert!(!super::certainly_a_game("la"));
+        assert!(!super::certainly_a_game("PS5LA"));
+        assert!(!super::certainly_a_game("zz"));
+    }
+
+    /// A PS5 package as a FIH envelope around a CNT with no param category, as Sony's are.
+    fn ps5_pkg(content_type: u32, content_flags: u32) -> Vec<u8> {
+        let base = 0x1000usize;
+        let mut pkg = vec![0u8; base + 0x100];
+        pkg[0..4].copy_from_slice(&ps5upload_pkg::PKG_MAGIC_FIH.to_be_bytes());
+        pkg[6..8].copy_from_slice(&3u16.to_le_bytes());
+        pkg[0x58..0x60].copy_from_slice(&(base as u64).to_le_bytes());
+        let cnt = &mut pkg[base..];
+        cnt[0..4].copy_from_slice(&ps5upload_pkg::PKG_MAGIC.to_be_bytes());
+        let cid = b"UP0000-PPSA01234_00-DELUXEUPGRADE000";
+        cnt[0x40..0x40 + cid.len()].copy_from_slice(cid);
+        cnt[0x74..0x78].copy_from_slice(&content_type.to_be_bytes());
+        cnt[0x78..0x7C].copy_from_slice(&content_flags.to_be_bytes());
+        pkg
+    }
+
+    fn header_of(bytes: Vec<u8>) -> ps5upload_pkg::ReaderMetadata {
+        ps5upload_pkg::metadata_from_reader(move |off, len| {
+            let (o, l) = (off as usize, len as usize);
+            bytes.get(o..(o + l).min(bytes.len())).map(<[u8]>::to_vec)
+        })
+        .expect("a PS5 package header")
+    }
+
+    const ADD_ON: (u32, u32) = (0x21, 0x0a02_0000);
+    const GAME: (u32, u32) = (0x20, 0x0a02_0000);
+
+    /// #724, on every route the title's image is registered: what each route's caller sends as
+    /// the category, with the package's own header. An add-on, or a package whose category is
+    /// not known, is never refused as the game; a full game still is.
+    #[test]
+    fn only_a_full_game_is_refused_for_an_image_on_every_route() {
+        use super::image_refusal_applies as refused;
+        let add_on = header_of(ps5_pkg(ADD_ON.0, ADD_ON.1));
+        let game = header_of(ps5_pkg(GAME.0, GAME.1));
+        assert_eq!(add_on.category, "ac");
+        assert_eq!(game.category, "gd");
+
+        // Stream from this computer (host_file): the client sends the probe's package type,
+        // which for a PS5 add-on is PS5GD. Upload then install / staged (console_path), a saved
+        // server (remote) and a link (url) send the same field, or nothing.
+        for sent in ["PS5GD", "gd"] {
+            assert!(!refused(sent, Some(&add_on)), "add-on sent as {sent}");
+            assert!(refused(sent, Some(&game)), "game sent as {sent}");
+        }
+        // The header read fills a missing category itself: an add-on's is ac.
+        assert!(!refused(&add_on.category, Some(&add_on)));
+        assert!(refused(&game.category, Some(&game)));
+        // Category ac: never refused, whatever the header.
+        for sent in ["ac", "PS5AC"] {
+            assert!(!refused(sent, Some(&add_on)));
+            assert!(!refused(sent, Some(&game)));
+            assert!(!refused(sent, None));
+        }
+        // No category or an unknown one: never refused.
+        for sent in ["", "  ", "la", "PS5LA", "zz"] {
+            assert!(!refused(sent, Some(&game)), "{sent:?}");
+            assert!(!refused(sent, None), "{sent:?}");
+        }
+        // The header unreadable: a category that says game is all there is, so it stands.
+        assert!(refused("PS5GD", None));
+        assert!(refused("gd", None));
+        // A patch's header is not the game either.
+        let patch = header_of(ps5_pkg(0x20, 0x4000_0000));
+        assert!(!refused("PS5GD", Some(&patch)));
+    }
+
+    /// #776: past the image check, an add-on sent as PS5GD went on being a game, and its verify
+    /// waited for a game's app.pkg it never writes. The header puts it right, in the caller's form.
+    #[test]
+    fn an_add_on_sent_as_a_game_is_verified_as_an_add_on() {
+        use super::category_from_header as fix;
+        let add_on = header_of(ps5_pkg(ADD_ON.0, ADD_ON.1));
+        let game = header_of(ps5_pkg(GAME.0, GAME.1));
+        let patch = header_of(ps5_pkg(0x20, 0x4000_0000));
+        assert_eq!(fix("PS5GD", Some(&add_on)).as_deref(), Some("PS5AC"));
+        assert_eq!(fix("ps4gd", Some(&add_on)).as_deref(), Some("PS4AC"));
+        assert_eq!(fix("gd", Some(&add_on)).as_deref(), Some("ac"));
+        // What it fixes is what the verify step goes on.
+        let ptype =
+            super::package_type_for_verify(&fix("PS5GD", Some(&add_on)).unwrap(), "PPSA11386");
+        assert_eq!(ptype, "PS5AC");
+        assert!(super::is_addon_type(&ptype));
+        assert!(!super::is_addon_type(&super::package_type_for_verify(
+            "PS5GD",
+            "PPSA11386"
+        )));
+        // A game stays a game; an unread header or a category that is not a game changes nothing.
+        assert_eq!(fix("PS5GD", Some(&game)), None);
+        assert_eq!(fix("PS5GD", None), None);
+        assert_eq!(fix("PS5AC", Some(&add_on)), None);
+        assert_eq!(fix("", Some(&add_on)), None);
+        // Patches are out of scope here: their own check reads the version.
+        assert_eq!(fix("PS5GD", Some(&patch)), None);
+    }
+
+    /// The log says what the 99% waits for (#776).
+    #[test]
+    fn the_verify_target_is_named() {
+        let d = std::time::Duration::from_secs(240);
+        let a = super::verify_target_text(
+            "EP3969-PPSA11386_00-007FLCOSTUME0001",
+            "PS5AC",
+            "PPSA11386",
+            d,
+        );
+        assert!(a.contains("/user/addcont/PPSA11386/"), "{a}");
+        assert!(
+            a.contains("/user/appmeta/addcont/PPSA11386/007FLCOSTUME0001"),
+            "{a}"
+        );
+        let g = super::verify_target_text(
+            "EP3969-PPSA11386_00-0000000000000000",
+            "PS5GD",
+            "PPSA11386",
+            d,
+        );
+        assert!(
+            g.contains("/user/app/PPSA11386/app.pkg") && g.contains("240 s"),
+            "{g}"
+        );
+        let p = super::verify_target_text(
+            "EP3969-PPSA11386_00-0000000000000000",
+            "PS5DP",
+            "PPSA11386",
+            d,
+        );
+        assert!(p.contains("/user/patch/PPSA11386/patch.pkg"), "{p}");
+    }
+
+    /// The stream route reads the header from the file on this computer.
+    #[tokio::test]
+    async fn the_stream_route_reads_the_add_on_header_from_the_file_here() {
+        let dir = std::env::temp_dir().join(format!("ps5u-724-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut verdicts = Vec::new();
+        for (name, (t, f)) in [("addon.pkg", ADD_ON), ("game.pkg", GAME)] {
+            let path = dir.join(name);
+            std::fs::write(&path, ps5_pkg(t, f)).unwrap();
+            let source = super::Source::HostFile(path.to_string_lossy().into_owned());
+            let h = super::read_source_header(&source, "192.0.2.1:9113", false).await;
+            assert!(h.is_some(), "{name} header read");
+            verdicts.push(super::image_refusal_applies("PS5GD", h.as_ref()));
+            let _ = std::fs::remove_file(&path);
+        }
+        let _ = std::fs::remove_dir(&dir);
+        assert_eq!(
+            verdicts,
+            [false, true],
+            "the add-on installs, the game is refused"
+        );
+    }
+}
+
+/// The package's header, read from wherever the install takes it. Asked for only when a
+/// refusal is about to be given, so it costs a few ranged reads on that path alone.
+async fn read_source_header(
+    source: &Source,
+    mgmt: &str,
+    insecure_tls: bool,
+) -> Option<ps5upload_pkg::ReaderMetadata> {
+    match source {
+        Source::HostFile(path) => {
+            let p = path.clone();
+            tokio::task::spawn_blocking(move || read_host_header(&p))
+                .await
+                .ok()
+                .flatten()
+        }
+        Source::ConsolePath(path) => {
+            let (m, p) = (mgmt.to_string(), path.clone());
+            tokio::task::spawn_blocking(move || {
+                ps5upload_pkg::metadata_from_reader(|off, len| {
+                    ps5upload_core::fs_ops::fs_read(&m, &p, off, len).ok()
+                })
+            })
+            .await
+            .ok()
+            .flatten()
+        }
+        Source::Remote { connection, path } => {
+            let remote = format!("remote://{connection}/{path}");
+            crate::pkg_install::open_remote_package(&remote)
+                .await
+                .ok()
+                .map(|(_, _, h, _, _)| h)
+        }
+        Source::Url(url) => {
+            let u = url.clone();
+            tokio::task::spawn_blocking(move || {
+                let probe =
+                    crate::remote_pkg::RemoteSource::probe_with_options(&u, insecure_tls).ok()?;
+                let remote = crate::remote_pkg::RemoteSource::new_with_options(
+                    u,
+                    probe.total_size,
+                    insecure_tls,
+                );
+                ps5upload_pkg::metadata_from_reader(|off, len| {
+                    if len == 0 {
+                        return Some(Vec::new());
+                    }
+                    remote.read_range(off, off + len - 1).ok()
+                })
+            })
+            .await
+            .ok()
+            .flatten()
+        }
+    }
+}
+
 /// What refuses an install before anything reaches the console, when it is certain. Reads that
 /// fail refuse nothing.
 async fn refusal_before_delivery(
@@ -2212,9 +2694,7 @@ async fn refusal_before_delivery(
     title_id: &str,
     mgmt: &str,
 ) -> Option<(FailReason, String)> {
-    let c = category.to_ascii_lowercase();
-    let is_game = !(c.ends_with("gp") || c.ends_with("dp") || c.ends_with("ac"));
-    if is_game {
+    if certainly_a_game(category) {
         let (m, t) = (mgmt.to_string(), title_id.to_string());
         let mounted = tokio::task::spawn_blocking(move || {
             ps5upload_core::fs_ops::app_list_registered(&m)
@@ -2228,10 +2708,18 @@ async fn refusal_before_delivery(
         .await
         .unwrap_or(false);
         if mounted {
-            return Some((
-                FailReason::ImageMounted,
-                format!("{title_id} is registered on the PS5 from a game image or folder; move that off the scan folder first"),
-            ));
+            let header = read_source_header(&req.source, mgmt, req.options.insecure_tls).await;
+            if image_refusal_applies(category, header.as_ref()) {
+                return Some((
+                    FailReason::ImageMounted,
+                    format!("{title_id} is registered on the PS5 from a game image or folder; move that off the scan folder first"),
+                ));
+            }
+            crate::log_at!(
+                Info,
+                "install",
+                "{title_id} runs from an image or folder, but this package's header says it is not the full game (category {category:?}); installing"
+            );
         }
     }
     if let Some(kind) = base_check_applies(category, title_id) {
@@ -2258,7 +2746,9 @@ async fn finalize(
     _started: std::time::Instant,
 ) {
     if let Some(st) = state.jobs.get(job) {
-        crate::log_info!(
+        crate::log_at!(
+            Info,
+            "install",
             "{}: done phase={:?} verdict={:?} route={:?} code=0x{:08X} served={} MB/s={:.1}",
             correlation_tag(job),
             st.phase,

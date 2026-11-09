@@ -43,18 +43,142 @@ async fn timed<T>(
     })
 }
 
+/// A listing line the library refused, read for its name, kind and size alone. None when it isn't
+/// a line of a listing at all.
+fn plain_listing_line(line: &str, mlsd: bool) -> Option<Entry> {
+    if mlsd {
+        let (facts, name) = line.split_once(' ')?;
+        let fact = |key: &str| {
+            facts.split(';').find_map(|f| {
+                let (k, v) = f.split_once('=')?;
+                k.eq_ignore_ascii_case(key).then_some(v)
+            })
+        };
+        let kind = fact("type")?.to_ascii_lowercase();
+        if kind == "cdir" || kind == "pdir" || name.is_empty() {
+            return None;
+        }
+        let is_dir = kind == "dir";
+        return Some(Entry {
+            name: name.to_string(),
+            is_dir,
+            size: if is_dir {
+                0
+            } else {
+                fact("size").and_then(|v| v.parse().ok()).unwrap_or(0)
+            },
+            mtime: None,
+        });
+    }
+    if let Some(e) = plain_dos_line(line) {
+        return Some(e);
+    }
+    // `ls -l`: mode, links, owner, [group], size, three parts of a date, then the name, which may
+    // hold any spaces. Split by hand, so the name comes out as it is.
+    let mut rest = line.trim_start();
+    let mut fields: Vec<&str> = Vec::with_capacity(8);
+    while fields.len() < 8 {
+        let end = rest.find(char::is_whitespace)?;
+        fields.push(&rest[..end]);
+        rest = rest[end..].trim_start();
+    }
+    let mode = fields[0];
+    if mode.len() < 10 || !matches!(mode.as_bytes()[0], b'-' | b'd' | b'l') {
+        return None;
+    }
+    let numeric = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    let (size, name) = if numeric(fields[4]) {
+        (fields[4], rest)
+    } else if numeric(fields[3]) {
+        // No group column: the date ends a field sooner, and the eighth field starts the name.
+        let start = line.find(fields[7])?;
+        (fields[3], &line[start..])
+    } else {
+        return None;
+    };
+    let name = name.split(" -> ").next().unwrap_or(name).trim_end();
+    if name.is_empty() {
+        return None;
+    }
+    let is_dir = mode.starts_with('d');
+    Some(Entry {
+        name: name.to_string(),
+        is_dir,
+        size: if is_dir { 0 } else { size.parse().unwrap_or(0) },
+        mtime: None,
+    })
+}
+
+/// A Windows (IIS) `DIR` line the library refuses: it reads only `MM-DD-YY  HH:MMAM`, and IIS set
+/// to four-digit years or a 24-hour clock writes `11-06-2026  14:00`. Date, time, an optional
+/// AM/PM, then `<DIR>` or the size (commas allowed), then the name, spaces and all.
+fn plain_dos_line(line: &str) -> Option<Entry> {
+    fn token(s: &str) -> Option<(&str, &str)> {
+        let s = s.trim_start();
+        let end = s.find(char::is_whitespace)?;
+        Some((&s[..end], &s[end..]))
+    }
+    let (date, rest) = token(line)?;
+    let parts: Vec<&str> = date.split(['-', '/', '.']).collect();
+    let digits = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
+    if parts.len() != 3 || !parts.iter().all(|p| digits(p) && p.len() <= 4) {
+        return None;
+    }
+    let (time, mut rest) = token(rest)?;
+    let time_core = time.trim_end_matches(|c: char| c.is_ascii_alphabetic());
+    let (h, m) = time_core.split_once(':')?;
+    if !digits(h) || !digits(m) {
+        return None;
+    }
+    if let Some((ampm, after)) = token(rest) {
+        if ampm.eq_ignore_ascii_case("AM") || ampm.eq_ignore_ascii_case("PM") {
+            rest = after;
+        }
+    }
+    let (size, rest) = token(rest)?;
+    let name = rest.trim_start().trim_end_matches(['\r', '\n']);
+    if name.is_empty() {
+        return None;
+    }
+    let is_dir = size.eq_ignore_ascii_case("<DIR>");
+    let bytes: String = size.chars().filter(|c| *c != ',' && *c != '.').collect();
+    if !is_dir && !digits(&bytes) {
+        return None;
+    }
+    Some(Entry {
+        name: name.to_string(),
+        is_dir,
+        size: if is_dir {
+            0
+        } else {
+            bytes.parse().unwrap_or(0)
+        },
+        mtime: None,
+    })
+}
+
 /// Turn a directory listing into entries: MLSD lines when the server speaks it, else the
 /// Unix `ls -l` or Windows `DIR` lines `LIST` returns. `.` and `..` are dropped.
 pub fn parse_listing(lines: &[String], mlsd: bool) -> Vec<Entry> {
+    let mut unread = 0usize;
     let mut out: Vec<Entry> = lines
         .iter()
         .filter_map(|l| {
-            let f = if mlsd {
-                ListParser::parse_mlsd(l).ok()?
+            let parsed = if mlsd {
+                ListParser::parse_mlsd(l).ok()
             } else {
                 ListParser::parse_posix(l)
                     .or_else(|_| ListParser::parse_dos(l))
-                    .ok()?
+                    .ok()
+            };
+            let Some(f) = parsed else {
+                // The library wants a date it can read (an English month, a real day), and a line
+                // it refuses was a file that just wasn't there: name and size are all we need.
+                let e = plain_listing_line(l, mlsd);
+                if e.is_none() && !l.trim().is_empty() && !l.starts_with("total ") {
+                    unread += 1;
+                }
+                return e.filter(|e| e.name != "." && e.name != "..");
             };
             let name = f.name().to_string();
             if name.is_empty() || name == "." || name == ".." {
@@ -74,6 +198,11 @@ pub fn parse_listing(lines: &[String], mlsd: bool) -> Vec<Entry> {
             })
         })
         .collect();
+    if unread > 0 {
+        crate::log_warn!(
+            "remote ftp: {unread} listing lines could not be read, so those files don't show"
+        );
+    }
     out.sort_by_key(|e| e.name.to_lowercase());
     out
 }
@@ -190,19 +319,53 @@ impl rustls::client::danger::ServerCertVerifier for Tofu {
     }
 }
 
+/// The fingerprint of the certificate a TLS server at `addr` (`host:port`) shows. The handshake
+/// stops there, before anything is sent.
+pub(super) async fn certificate_fingerprint(addr: &str) -> Result<String, RemoteError> {
+    let seen = Arc::new(StdMutex::new(None));
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
+    let config = rustls::ClientConfig::builder_with_provider(Arc::clone(&provider))
+        .with_safe_default_protocol_versions()
+        .map_err(|e| RemoteError::Io(e.to_string()))?
+        .dangerous()
+        .with_custom_certificate_verifier(Arc::new(Tofu {
+            accepted: None,
+            seen: Arc::clone(&seen),
+            provider,
+        }))
+        .with_no_client_auth();
+    let host = addr.rsplit_once(':').map_or(addr, |(h, _)| h);
+    let host = host
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_string();
+    let name = rustls::pki_types::ServerName::try_from(host)
+        .map_err(|e| RemoteError::Io(format!("{addr}: {e}")))?;
+    let attempt = async {
+        let tcp = tokio::net::TcpStream::connect(addr)
+            .await
+            .map_err(|e| RemoteError::Unreachable(format!("{addr}: {e}")))?;
+        // It fails at the verifier, on purpose: all this wants is what it was shown.
+        let _ = tokio_rustls::TlsConnector::from(Arc::new(config))
+            .connect(name, tcp)
+            .await;
+        Ok(())
+    };
+    tokio::time::timeout(STEP, attempt)
+        .await
+        .map_err(|_| RemoteError::Io(format!("{addr}: no answer to TLS after 30 s")))??;
+    let shown = seen.lock().unwrap_or_else(|e| e.into_inner()).clone();
+    shown.ok_or_else(|| RemoteError::Io(format!("{addr}: the server showed no certificate")))
+}
+
+/// The port implicit FTPS listens on: TLS from the first byte, where other ports start in the
+/// clear and ask for it.
+const IMPLICIT_FTPS_PORT: u16 = 990;
+
 async fn sign_in(t: &Target) -> Result<Ftp, RemoteError> {
     let addr = addr_of(&t.conn);
-    let mut ftp = timed(&addr, "connecting", async {
-        Ftp::connect(addr.as_str())
-            .await
-            .map_err(|e| RemoteError::Unreachable(format!("{addr}: {e}")))
-    })
-    .await?;
-    // A NAS behind a router often names its private address for passive data; use the one
-    // we connected to instead.
-    ftp.set_passive_nat_workaround(true);
-    if t.tls {
-        let seen = Arc::new(StdMutex::new(None));
+    let seen: Arc<StdMutex<Option<String>>> = Arc::new(StdMutex::new(None));
+    let connector = |seen: &Arc<StdMutex<Option<String>>>| -> Result<_, RemoteError> {
         let provider = Arc::new(rustls::crypto::ring::default_provider());
         // TLS 1.2: vsftpd (behind many NAS FTP servers) requires each data connection to resume
         // the control connection's TLS session, and that check fails under TLS 1.3 — curl
@@ -213,33 +376,63 @@ async fn sign_in(t: &Target) -> Result<Ftp, RemoteError> {
             .dangerous()
             .with_custom_certificate_verifier(Arc::new(Tofu {
                 accepted: t.conn.host_key.clone(),
-                seen: Arc::clone(&seen),
+                seen: Arc::clone(seen),
                 provider,
             }))
             .with_no_client_auth();
-        let connector = suppaftp::tokio::AsyncRustlsConnector::from(
+        Ok(suppaftp::tokio::AsyncRustlsConnector::from(
             tokio_rustls::TlsConnector::from(Arc::new(config)),
-        );
-        let domain = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(&addr);
-        let domain = domain
-            .trim_start_matches('[')
-            .trim_end_matches(']')
-            .to_string();
-        let secured = tokio::time::timeout(STEP, ftp.into_secure(connector, &domain))
+        ))
+    };
+    let domain = addr.rsplit_once(':').map(|(h, _)| h).unwrap_or(&addr);
+    let domain = domain
+        .trim_start_matches('[')
+        .trim_end_matches(']')
+        .to_string();
+    // What a failed handshake means: a certificate to accept, or just a failure.
+    let tls_failed = |e: FtpError| {
+        let shown = seen.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        match shown {
+            Some(fp) => host_key::check_host_key(t.conn.host_key.as_deref(), &fp)
+                .err()
+                .unwrap_or_else(|| RemoteError::Io(e.to_string())),
+            None => RemoteError::Io(format!("TLS: {e}")),
+        }
+    };
+    let implicit = t.tls && t.conn.port == IMPLICIT_FTPS_PORT;
+    let mut ftp = if implicit {
+        let connecting = Ftp::connect_secure_implicit(addr.as_str(), connector(&seen)?, &domain);
+        tokio::time::timeout(STEP, connecting)
+            .await
+            .map_err(|_| RemoteError::Unreachable(format!("{addr}: no answer after 30 s")))?
+            .map_err(tls_failed)?
+    } else {
+        timed(&addr, "connecting", async {
+            Ftp::connect(addr.as_str())
+                .await
+                .map_err(|e| RemoteError::Unreachable(format!("{addr}: {e}")))
+        })
+        .await?
+    };
+    // A NAS behind a router often names its private address for passive data; use the one
+    // we connected to instead.
+    ftp.set_passive_nat_workaround(true);
+    if implicit {
+        // The library secures only the control connection here; the data connections want this.
+        for command in ["PBSZ 0", "PROT P"] {
+            timed(&addr, "securing data", async {
+                ftp.custom_command(command, &[suppaftp::Status::CommandOk])
+                    .await
+                    .map_err(|e| map_err(&addr, e))
+            })
+            .await?;
+        }
+    }
+    if t.tls && !implicit {
+        let secured = tokio::time::timeout(STEP, ftp.into_secure(connector(&seen)?, &domain))
             .await
             .map_err(|_| RemoteError::Io(format!("{addr}: no answer to TLS after 30 s")))?;
-        ftp = match secured {
-            Ok(f) => f,
-            Err(e) => {
-                let shown = seen.lock().unwrap_or_else(|e| e.into_inner()).clone();
-                return Err(match shown {
-                    Some(fp) => host_key::check_host_key(t.conn.host_key.as_deref(), &fp)
-                        .err()
-                        .unwrap_or_else(|| RemoteError::Io(e.to_string())),
-                    None => RemoteError::Io(format!("TLS: {e}")),
-                });
-            }
-        };
+        ftp = secured.map_err(tls_failed)?;
     }
     let (user, pass) = if t.conn.user.is_empty() {
         ("anonymous".to_string(), "anonymous@".to_string())
@@ -285,6 +478,36 @@ pub struct FtpFs {
     /// back is not an option there.
     mlsd: bool,
     session: Mutex<Ftp>,
+}
+
+/// A file being written over STOR, holding the session it was started on. A failed or given-up
+/// write drops the data connection, which the session remembers: its next command reads the
+/// reply first.
+struct FtpWriter<'a> {
+    _session: tokio::sync::MutexGuard<'a, Ftp>,
+    stream: suppaftp::tokio::TransferStream<suppaftp::tokio::AsyncRustlsStream>,
+    host: String,
+    path: String,
+}
+
+#[async_trait::async_trait]
+impl super::RemoteWriter for FtpWriter<'_> {
+    async fn write(&mut self, data: &[u8]) -> Result<(), RemoteError> {
+        super::write_all_to(&mut self.stream, data, &self.path)
+            .await
+            .map_err(|e| RemoteError::Io(format!("{}: {e}", self.host)))
+    }
+
+    async fn finish(self: Box<Self>) -> Result<(), RemoteError> {
+        let (host, path) = (self.host, self.path);
+        // The server answers once the file is on its disk, which a slow NAS takes a while over.
+        tokio::time::timeout(PUT_COMMIT, self.stream.finish())
+            .await
+            .map_err(|_| RemoteError::Io(format!("{host}: no answer after writing {path}")))?
+            .map_err(|e| map_err(&host, e))
+    }
+
+    async fn abort(self: Box<Self>) {}
 }
 
 /// `path` ("/games/x") under `home` ("/ftp/t") on the server.
@@ -373,10 +596,17 @@ impl FtpFs {
         let host = self.host.as_str();
         let mlsd = self.mlsd;
         timed(host, "a folder listing", async move {
+            // Into the folder, then list it with no argument (as FileZilla does): many servers
+            // (Pure-FTPd, a Keenetic router's) read a LIST/MLSD argument as a pattern, so a
+            // folder named "[PS5] Hellblade [RUS text, …]" listed by its path matched nothing
+            // and showed empty (Discord: its .ffpfsc showed over SMB, not FTP). Every
+            // other command here names an absolute path, so the working folder is free to move.
+            let here = s.cwd(dir).await.is_ok();
+            let arg = if here { None } else { Some(dir) };
             let listed = if mlsd {
-                s.mlsd(Some(dir)).await
+                s.mlsd(arg).await
             } else {
-                s.list(Some(dir)).await
+                s.list(arg).await
             };
             match listed {
                 Ok(lines) => Ok(parse_listing(&lines, mlsd)),
@@ -732,14 +962,20 @@ impl RemoteFs for FtpFs {
     /// STOR in binary mode on the shared session: no limit on the whole file (a game file takes
     /// minutes), only on a server that stops taking bytes. A failed or cancelled write drops the
     /// data connection, which the session remembers: its next command reads the reply first.
-    async fn put_file(
-        &self,
+    /// The writer holds the session for the whole file: FTP has one transfer per session.
+    /// Always from the start (STOR): REST before STOR is not one every server keeps to.
+    async fn create_writer<'a>(
+        &'a self,
         path: &str,
-        src: &std::path::Path,
-        progress: &super::PutProgress,
-    ) -> Result<(), RemoteError> {
+        _size: u64,
+        from: u64,
+    ) -> Result<Box<dyn super::RemoteWriter + 'a>, RemoteError> {
+        if from != 0 {
+            return Err(RemoteError::Unsupported(format!(
+                "FTP writes {path} from the start"
+            )));
+        }
         let full = under(&self.home, path);
-        let file = tokio::fs::File::open(src).await.map_err(super::local_io)?;
         let mut s = self.session.lock().await;
         let host = self.host.as_str();
         timed(host, "starting an upload", async {
@@ -748,19 +984,18 @@ impl RemoteFs for FtpFs {
                 .map_err(|e| map_err(host, e))
         })
         .await?;
-        let mut stream = timed(host, "starting an upload", async {
+        let stream = timed(host, "starting an upload", async {
             s.put_with_stream(full.as_str())
                 .await
                 .map_err(|e| map_err(host, e))
         })
         .await?;
-        super::send_to_server(file, &mut stream, progress, STEP, host, path).await?;
-        // The server answers once the file is on its disk, which a slow NAS takes a while over.
-        tokio::time::timeout(PUT_COMMIT, stream.finish())
-            .await
-            .map_err(|_| RemoteError::Io(format!("{host}: no answer after writing {path}")))?
-            .map_err(|e| map_err(host, e))?;
-        Ok(())
+        Ok(Box::new(FtpWriter {
+            _session: s,
+            stream,
+            host: self.host.clone(),
+            path: path.to_string(),
+        }))
     }
 
     async fn remove_file(&self, path: &str) -> Result<(), RemoteError> {
@@ -795,6 +1030,155 @@ mod tests {
 
     fn lines(v: &[&str]) -> Vec<String> {
         v.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn a_line_the_library_refuses_still_shows_its_file() {
+        // Russian months, a day that doesn't exist this year, no group column: name and size are
+        // all a listing needs. (#Discord: a .ffpfsc seen over SMB and not over FTP.)
+        let got = parse_listing(
+            &lines(&[
+                "-rw-r--r-- 1 root root 53687091200 ноя 6 12:00 Hell blade [RUS] v1.ffpfsc",
+                "-rw-r--r-- 1 root root 12 Feb 30 12:00 odd date.bin",
+                "-rw-r--r-- 1 root 34 ноя 6 12:00 no group.bin",
+                "drwxr-xr-x 2 root root 4096 ноя 6 12:00 папка",
+                "lrwxrwxrwx 1 root root 7 ноя 6 12:00 link -> elsewhere",
+                "total 12",
+                "not a listing line",
+            ]),
+            false,
+        );
+        let got: Vec<(&str, bool, u64)> = got
+            .iter()
+            .map(|e| (e.name.as_str(), e.is_dir, e.size))
+            .collect();
+        assert!(
+            got.contains(&("Hell blade [RUS] v1.ffpfsc", false, 53_687_091_200)),
+            "{got:?}"
+        );
+        assert!(got.contains(&("odd date.bin", false, 12)), "{got:?}");
+        assert!(got.contains(&("no group.bin", false, 34)), "{got:?}");
+        assert!(got.contains(&("папка", true, 0)), "{got:?}");
+        assert!(got.contains(&("link", false, 7)), "{got:?}");
+        assert_eq!(got.len(), 5, "{got:?}");
+    }
+
+    #[test]
+    fn an_mlsd_line_with_a_bad_date_still_shows_its_file() {
+        let got = parse_listing(
+            &lines(&[
+                "type=file;size=53687091200;modify=00000000000000; game [v1].ffpfsc",
+                "type=dir;modify=bad; folder name",
+                "type=cdir; .",
+            ]),
+            true,
+        );
+        let got: Vec<(&str, bool, u64)> = got
+            .iter()
+            .map(|e| (e.name.as_str(), e.is_dir, e.size))
+            .collect();
+        assert!(
+            got.contains(&("game [v1].ffpfsc", false, 53_687_091_200)),
+            "{got:?}"
+        );
+        assert!(got.contains(&("folder name", true, 0)), "{got:?}");
+    }
+
+    fn triples(got: &[Entry]) -> Vec<(&str, bool, u64)> {
+        got.iter()
+            .map(|e| (e.name.as_str(), e.is_dir, e.size))
+            .collect()
+    }
+
+    #[test]
+    fn real_servers_listings_show_every_file() {
+        const BIG: u64 = 53_687_091_200;
+        // vsftpd (numeric ids, padded columns, this year's time and an older year).
+        let vsftpd = parse_listing(
+            &lines(&[
+                "-rw-r--r--    1 1000     1000     53687091200 Nov 06 12:00 Hellblade [RUS] v1.ffpfsc",
+                "-rw-r--r--    1 1000     1000         1024 Jan 02  2024 notes (copy).txt",
+                "drwxr-xr-x    2 1000     1000         4096 Nov 06 12:00 Games [EU]",
+                "lrwxrwxrwx    1 1000     1000           14 Nov 06 12:00 latest -> Games [EU]",
+            ]),
+            false,
+        );
+        let v = triples(&vsftpd);
+        assert!(
+            v.contains(&("Hellblade [RUS] v1.ffpfsc", false, BIG)),
+            "{v:?}"
+        );
+        assert!(v.contains(&("notes (copy).txt", false, 1024)), "{v:?}");
+        assert!(v.contains(&("Games [EU]", true, 0)), "{v:?}");
+        assert!(v.iter().any(|e| e.0 == "latest"), "{v:?}");
+        assert_eq!(v.len(), 4, "{v:?}");
+
+        // ProFTPD MLSD with UNIX facts, a symlink type the library doesn't know, and a name with
+        // "; " in it.
+        let proftpd = parse_listing(
+            &lines(&[
+                "modify=20261106120000;perm=adfrw;size=53687091200;type=file;unique=FD01U2;UNIX.group=100;UNIX.mode=0644;UNIX.owner=1000; Hellblade [RUS] v1.ffpfsc",
+                "modify=20261106120000;perm=flcdmpe;type=dir;unique=FD01U3;UNIX.group=100;UNIX.mode=0755;UNIX.owner=1000; Games [EU]",
+                "modify=20261106120000;perm=adfrw;size=14;type=OS.unix=symlink;unique=FD01U4;UNIX.mode=0777; latest",
+                "modify=20261106120000;perm=adfrw;size=10;type=file;UNIX.mode=0644; a; b.txt",
+                "modify=20261106120000;perm=flcdmpe;type=cdir;unique=FD01U1; .",
+                "modify=20261106120000;perm=flcdmpe;type=pdir;unique=FD01U0; ..",
+            ]),
+            true,
+        );
+        let p = triples(&proftpd);
+        assert!(
+            p.contains(&("Hellblade [RUS] v1.ffpfsc", false, BIG)),
+            "{p:?}"
+        );
+        assert!(p.contains(&("Games [EU]", true, 0)), "{p:?}");
+        assert!(p.iter().any(|e| e.0 == "latest"), "{p:?}");
+        assert!(p.contains(&("a; b.txt", false, 10)), "{p:?}");
+        assert_eq!(p.len(), 4, "{p:?}");
+
+        // Windows IIS: the default two-digit year with AM/PM, four-digit years, a 24-hour clock,
+        // and sizes with thousands separators.
+        let iis = parse_listing(
+            &lines(&[
+                "11-06-26  12:00PM          53687091200 Hellblade [RUS] v1.ffpfsc",
+                "11-06-2026  02:15PM       <DIR>          Games [EU]",
+                "11-06-2026  14:15            1,048,576 big file.pkg",
+                "06.11.2026  14:15       53.687.091.200 dotted.ffpfsc",
+            ]),
+            false,
+        );
+        let i = triples(&iis);
+        assert!(
+            i.contains(&("Hellblade [RUS] v1.ffpfsc", false, BIG)),
+            "{i:?}"
+        );
+        assert!(i.contains(&("Games [EU]", true, 0)), "{i:?}");
+        assert!(i.contains(&("big file.pkg", false, 1_048_576)), "{i:?}");
+        assert!(i.contains(&("dotted.ffpfsc", false, BIG)), "{i:?}");
+        assert_eq!(i.len(), 4, "{i:?}");
+
+        // Synology DSM: ACL `+` after the mode, named owner and group, and the MLSD form.
+        let syno = parse_listing(
+            &lines(&[
+                "-rwxrwxrwx+  1 admin    users    53687091200 Nov  6 12:00 Hellblade [RUS] v1.ffpfsc",
+                "drwxrwxrwx+  3 admin    users           4096 Nov  6 12:00 #recycle",
+            ]),
+            false,
+        );
+        let s = triples(&syno);
+        assert!(
+            s.contains(&("Hellblade [RUS] v1.ffpfsc", false, BIG)),
+            "{s:?}"
+        );
+        assert!(s.contains(&("#recycle", true, 0)), "{s:?}");
+        let syno_mlsd = parse_listing(
+            &lines(&["type=file;size=53687091200;modify=20261106120000;UNIX.mode=0777;UNIX.owner=admin;UNIX.group=users; Hellblade [RUS] v1.ffpfsc"]),
+            true,
+        );
+        assert_eq!(
+            triples(&syno_mlsd),
+            [("Hellblade [RUS] v1.ffpfsc", false, BIG)]
+        );
     }
 
     fn ent(name: &str) -> Entry {
@@ -1012,5 +1396,139 @@ mod tests {
             sign_ins - before.0
         );
         assert_eq!(listings - before.1, 0, "listed a folder to open a file");
+    }
+
+    /// The folder and file of the Discord report (title id changed), as Pure-FTPd lists them.
+    const GLOB_DIR: &str =
+        "/torrents/[PS5] Hellblade - Senua’s Sacrifice [RUS text, RUS sound, USA, v01.003.000, ffpfsc]";
+    const GLOB_FILE: &str = "PPSA00000_Game_v01.003.000_FW10.ffpfsc";
+    const GLOB_SIZE: u64 = 13_851_336_704;
+
+    /// A server that, like Pure-FTPd (and the Keenetic router's FTP server of the report), reads a
+    /// LIST argument as a glob: `[PS5]` is a character class, so listing the folder by its path
+    /// matches nothing and answers an empty listing with success. Speaks no FEAT, so no MLSD.
+    async fn globbing_server() -> u16 {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let ctl = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = ctl.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((sock, _)) = ctl.accept().await {
+                tokio::spawn(async move {
+                    let (rd, mut wr) = sock.into_split();
+                    let mut rd = BufReader::new(rd);
+                    let mut cwd = "/".to_string();
+                    let mut data: Option<tokio::net::TcpListener> = None;
+                    wr.write_all(b"220 Welcome to Pure-FTPd.\r\n").await.ok();
+                    let mut line = String::new();
+                    while matches!(rd.read_line(&mut line).await, Ok(n) if n > 0) {
+                        let l = line.trim_end_matches(['\r', '\n']).to_string();
+                        line.clear();
+                        let (cmd, arg) = l.split_once(' ').unwrap_or((l.as_str(), ""));
+                        let reply = match cmd.to_ascii_uppercase().as_str() {
+                            "USER" => "331 Password required".to_string(),
+                            "PASS" => "230 OK".into(),
+                            "TYPE" => "200 TYPE is now 8-bit binary".into(),
+                            "PWD" => format!("257 \"{cwd}\" is your current location"),
+                            "CWD" if arg == GLOB_DIR || arg == "/" || arg == "/torrents" => {
+                                cwd = arg.to_string();
+                                "250 OK".into()
+                            }
+                            "CWD" => "550 No such directory".into(),
+                            "PASV" => {
+                                let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                                let p = l.local_addr().unwrap().port();
+                                data = Some(l);
+                                format!(
+                                    "227 Entering Passive Mode (127,0,0,1,{},{})",
+                                    p / 256,
+                                    p % 256
+                                )
+                            }
+                            "LIST" => {
+                                let Some(l) = data.take() else {
+                                    wr.write_all(b"425 No data connection\r\n").await.ok();
+                                    continue;
+                                };
+                                wr.write_all(b"150 Accepted data connection\r\n").await.ok();
+                                let (mut d, _) = l.accept().await.unwrap();
+                                // A path argument is a pattern: one with `[` matches nothing.
+                                let at = if arg.is_empty() { cwd.as_str() } else { arg };
+                                if at == GLOB_DIR && !arg.contains('[') {
+                                    let row = format!(
+                                        "-rw-r--r--    1 1000       1000              {GLOB_SIZE} Nov  8 04:11 {GLOB_FILE}\r\n"
+                                    );
+                                    d.write_all(row.as_bytes()).await.ok();
+                                }
+                                drop(d);
+                                "226 Options: -l".into()
+                            }
+                            "QUIT" => {
+                                wr.write_all(b"221 Goodbye\r\n").await.ok();
+                                break;
+                            }
+                            _ => "500 Unknown command".into(),
+                        };
+                        wr.write_all(format!("{reply}\r\n").as_bytes()).await.ok();
+                    }
+                });
+            }
+        });
+        port
+    }
+
+    /// Discord (11.2.6): a .ffpfsc in a folder named with `[…]` showed over SMB but the folder
+    /// was empty over FTP, because the folder's path went to LIST as an argument and the server
+    /// globbed it. Listing from inside the folder shows the file, with its size past 4 GiB.
+    #[tokio::test]
+    async fn a_folder_named_with_brackets_lists_on_a_server_that_globs() {
+        let port = globbing_server().await;
+        let mut conn = crate::remote::store::conn("t", crate::remote::store::Protocol::Ftp);
+        conn.host = "127.0.0.1".into();
+        conn.port = port;
+        conn.user = "t".into();
+        let secret = Secret::Password {
+            password: "t".into(),
+        };
+        let fs = FtpFs::connect(&conn, &secret, false).await.unwrap();
+        assert!(!fs.mlsd);
+        let page = fs.list(GLOB_DIR, None).await.unwrap();
+        assert_eq!(
+            triples(&page.entries),
+            [(GLOB_FILE, false, GLOB_SIZE)],
+            "the folder listed empty"
+        );
+        let e = fs.stat(&format!("{GLOB_DIR}/{GLOB_FILE}")).await.unwrap();
+        assert_eq!((e.is_dir, e.size), (false, GLOB_SIZE));
+        // A folder the server won't enter falls back to listing by its path.
+        assert!(fs.list("/nope", None).await.unwrap().entries.is_empty());
+    }
+
+    /// The same against a real Pure-FTPd: in `<dir>`, make the report's folder
+    /// ([`GLOB_DIR`]) holding a sparse [`GLOB_FILE`] of [`GLOB_SIZE`] bytes (`truncate -s`), then
+    /// `docker run -d -p 2122:21 -p 30000-30009:30000-30009 -v <dir>:/home/t alpine:3.20 sh -c
+    /// 'apk add -q pure-ftpd && (echo t; echo t) | pure-pw useradd t -u 1000 -g 1000 -d /home/t -m
+    /// && exec pure-ftpd -l puredb:/etc/pureftpd.pdb -E -P 127.0.0.1 -p 30000:30009'`
+    /// and `PS5UPLOAD_PUREFTPD_TEST=127.0.0.1:2122`.
+    #[tokio::test]
+    #[ignore = "needs a Pure-FTPd server; see the doc comment"]
+    async fn pure_ftpd_lists_and_reads_a_folder_named_with_brackets() {
+        let Ok(addr) = std::env::var("PS5UPLOAD_PUREFTPD_TEST") else {
+            return;
+        };
+        let (host, port) = addr.split_once(':').unwrap();
+        let mut conn = crate::remote::store::conn("t", crate::remote::store::Protocol::Ftp);
+        conn.host = host.into();
+        conn.port = port.parse().unwrap();
+        conn.user = "t".into();
+        let secret = Secret::Password {
+            password: "t".into(),
+        };
+        let fs = FtpFs::connect(&conn, &secret, false).await.unwrap();
+        let page = fs.list(GLOB_DIR, None).await.unwrap();
+        assert_eq!(triples(&page.entries), [(GLOB_FILE, false, GLOB_SIZE)]);
+        let f = fs.open(&format!("{GLOB_DIR}/{GLOB_FILE}")).await.unwrap();
+        assert_eq!(f.size(), GLOB_SIZE);
+        let tail = f.read_at(GLOB_SIZE - 4096, 4096).await.unwrap();
+        assert_eq!(tail.len(), 4096);
     }
 }

@@ -13,10 +13,13 @@ import {
   backoffMs,
   encodePadFrame,
   HOST_RESTART_WINDOW_MS,
+  netFailure,
   readServerMessage,
   RESUME_WINDOW_MS,
   type ByeWhy,
   type JoinStatus,
+  type NetWhy,
+  type TrackMedia,
   type RefuseWhy,
 } from "./joinProtocol";
 import { IDLE_PAD, type PadState } from "./remotePlayStream";
@@ -31,8 +34,9 @@ export type JoinStage =
    *  the host stopped playing, and the guest waits for them to start again. */
   | { kind: "reconnecting"; player: number; attempt: number; deadline: number; hostStopped?: boolean }
   | { kind: "refused"; why: RefuseWhy }
-  /** `gave_up`: the place was lost (60 s without the host); `lost`: never got in; `left`: Leave. */
-  | { kind: "ended"; why: ByeWhy | "gave_up" | "lost" | "left" };
+  /** `gave_up`: the place was lost (60 s without the host); `lost`: never got in; `left`: Leave;
+   *  a NetWhy: an internet invite's connection could not be made (join/rtcTransport). */
+  | { kind: "ended"; why: ByeWhy | "gave_up" | "lost" | "left" | NetWhy };
 
 type Timer = ReturnType<typeof setTimeout>;
 
@@ -55,9 +59,14 @@ export interface JoinClientOptions {
   /** Round trip measured by this page's own pings, in ms. */
   onRtt?: (ms: number) => void;
   onFrame?: (data: ArrayBuffer) => void;
-  onCodec?: (hevc: boolean) => void;
+  /** The session's codec, and its video track when the pictures come on one (an internet socket
+   *  that has it, and the engine said `track`); null: they come on the socket. */
+  onCodec?: (hevc: boolean, track: TrackMedia | null, audio?: boolean) => void;
   onRumble?: (strong: number, weak: number) => void;
   onLight?: (rgb: [number, number, number]) => void;
+  /** The picture's numbers (drawn, dropped, stalls…), sent to the host every STATS_EVERY_PINGS
+   *  pings as `{"stats": …}` so the host's panel can say how the picture looks here. */
+  readStats?: () => Record<string, unknown> | null;
   /** Where the resume token is kept (sessionStorage by default; null: nowhere). */
   storage?: JoinStorage | null;
   /** Tests: a fake socket and clock. */
@@ -85,6 +94,8 @@ export const KEEPALIVE_MS = 100;
 export const SILENCE_MS = 3500;
 /** Waiting for the host past the window this much longer, the engine's own answer not come: give up. */
 export const HOST_WAIT_SLACK_MS = 5000;
+/** The picture's report goes with every this-many pings (one a second): every 2 s. */
+export const STATS_EVERY_PINGS = 2;
 
 export class JoinClient {
   private ws: WebSocket | null = null;
@@ -129,6 +140,11 @@ export class JoinClient {
 
   get current(): JoinStage {
     return this.stage;
+  }
+
+  /** The socket now (an internet invite's transport says which way it goes: join/pathRace). */
+  get socket(): WebSocket | null {
+    return this.ws;
   }
 
   /** The token this guest resumes with (tests). */
@@ -182,9 +198,21 @@ export class JoinClient {
       }
       this.onText(e.data);
     };
-    ws.onclose = () => {
+    ws.onclose = (e?: CloseEvent) => {
       if (this.ws !== ws) return;
       this.ws = null;
+      // An internet invite's transport says why it could not connect (join/rtcTransport).
+      const why = netFailure(e);
+      if (why === "mismatch") {
+        // Not the host's engine: never with this link, resume or not.
+        this.forgetToken();
+        this.finish({ kind: "ended", why });
+        return;
+      }
+      if (why && this.stage.kind !== "joined" && this.stage.kind !== "reconnecting") {
+        this.finish({ kind: "ended", why });
+        return;
+      }
       this.dropped();
     };
     ws.onerror = () => {
@@ -224,7 +252,11 @@ export class JoinClient {
         } catch {
           // Private mode: a reload asks again.
         }
-        this.o.onCodec?.(m.hevc);
+        {
+          const media = (m.track && (this.ws as { media?: TrackMedia | null } | null)?.media) || null;
+          // The sound on the track too: the engine said so and the answer brought it.
+          this.o.onCodec?.(m.hevc, media, !!media && m.audio && !!media.audio);
+        }
         this.setStage({ kind: "joined", player: m.player, hevc: m.hevc });
         this.sendPad(true);
         return;
@@ -232,7 +264,8 @@ export class JoinClient {
         // A resume the engine no longer knows: the place is gone, not this invite's fault.
         this.forgetToken();
         // Waiting for the host, the place went with Play Together: they did not play again.
-        if (this.hostAway) this.finish({ kind: "ended", why: "host_stopped" });
+        // (Not when the host came back and needed their stream's controller: that says so.)
+        if (this.hostAway && m.why !== "seat_taken") this.finish({ kind: "ended", why: "host_stopped" });
         else this.finish({ kind: "refused", why: m.why });
         return;
       case "bye":
@@ -246,6 +279,12 @@ export class JoinClient {
         this.finish({ kind: "ended", why: m.why });
         return;
       case "status":
+        // Moved to another player while in (off the host's stream's controller onto a
+        // controller of their own, #720): the place is the new one.
+        if (this.stage.kind === "joined" && m.status.player > 0 && m.status.player !== this.stage.player) {
+          this.player = m.status.player;
+          this.setStage({ ...this.stage, player: m.status.player });
+        }
         this.o.onStatus?.(m.status);
         return;
       case "feedback":
@@ -354,7 +393,12 @@ export class JoinClient {
       return;
     }
     ws.send(JSON.stringify({ ping: this.now() }));
+    if (this.stage.kind === "joined" && this.o.readStats && ++this.pings % STATS_EVERY_PINGS === 0) {
+      const stats = this.o.readStats();
+      if (stats) ws.send(JSON.stringify({ stats }));
+    }
   }
+  private pings = 0;
 
   /** Let go of everything (the page is hidden or lost the focus), or take the pad back. */
   setNeutral(on: boolean): void {

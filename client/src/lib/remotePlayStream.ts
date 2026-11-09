@@ -25,6 +25,7 @@ import { decoderVerdict, FED_RECENT_MS, MAX_REBUILDS } from "./rpDecoderWatch";
 import type { RpKeyboardMsg, RpKeyboardSend } from "./rpKeyboard";
 import { parseSnapshotRequest, takeSnapshot } from "./rpSnapshot";
 import { OpusPipe } from "./rpAudioPipe";
+import { wasmOpusCodecs } from "./rpOpusWasm";
 import { relayoutElement, watchRestore } from "./repaintOnRestore";
 // A file of the app's own: the apps' Content-Security-Policy refuses a worklet from a blob: URL.
 import audioWorkletUrl from "./rpAudioWorklet.js?url&no-inline";
@@ -194,8 +195,9 @@ export function padFromKeys(held: Iterable<string>, keymap: Record<string, KeyAc
   return p;
 }
 
-/** Gamepad API "standard" mapping, button index → pad bit (6/7 are the analog triggers). */
-const STANDARD_BUTTONS = [
+/** Gamepad API "standard" mapping, button index → pad bit (6/7 are the analog triggers; 17 is
+ *  the touchpad click Chrome adds for PlayStation pads). */
+export const STANDARD_BUTTON_BITS: readonly number[] = [
   PadButton.CROSS, PadButton.CIRCLE, PadButton.SQUARE, PadButton.TRIANGLE, PadButton.L1, PadButton.R1, 0, 0,
   PadButton.SHARE, PadButton.OPTIONS, PadButton.L3, PadButton.R3, PadButton.UP, PadButton.DOWN, PadButton.LEFT,
   PadButton.RIGHT, PadButton.PS, PadButton.TOUCHPAD,
@@ -226,10 +228,25 @@ export function hatPosition(v: number): number | null {
   return Math.round((v + 1) * 3.5) % 8;
 }
 
-/** A stick axis: the controller's axis index, inverted when it reads the other way round. */
+/** A stick axis: the controller's axis index, inverted when it reads the other way round. `hat`:
+ *  the axis is a hat (a Joy-Con held sideways has its d-pad as the stick), read as its x or y. */
 export interface PadAxis {
   a: number;
   inv?: boolean;
+  hat?: "x" | "y";
+}
+
+const HAT_X = [0, 1, 1, 1, 0, -1, -1, -1];
+const HAT_Y = [-1, -1, 0, 1, 1, 1, 0, -1];
+
+/** A stick axis's reading on `g`, -1..1. */
+export function axisValue(g: Gamepad, ax: PadAxis): number {
+  const v = g.axes[ax.a] ?? 0;
+  if (ax.hat) {
+    const at = hatPosition(v);
+    return at === null ? 0 : (ax.hat === "x" ? HAT_X : HAT_Y)[at];
+  }
+  return ax.inv ? -v : v;
 }
 
 /** How a controller's buttons and axes become the console's pad. Several sources may drive one
@@ -246,7 +263,7 @@ export interface PadProfile {
 
 /** The browser's "standard" layout (W3C Gamepad standard mapping). */
 export const STANDARD_PROFILE: PadProfile = {
-  buttons: STANDARD_BUTTONS.flatMap((bit, i): Array<[number, PadSource]> => (bit ? [[bit, { b: i }]] : [])),
+  buttons: STANDARD_BUTTON_BITS.flatMap((bit, i): Array<[number, PadSource]> => (bit ? [[bit, { b: i }]] : [])),
   l2: { b: 6 },
   r2: { b: 7 },
   lx: { a: 0 },
@@ -255,11 +272,16 @@ export const STANDARD_PROFILE: PadProfile = {
   ry: { a: 3 },
 };
 
-/** How far (0-1) a source is pressed on `g`. */
-export function sourceValue(g: Gamepad, src: PadSource): number {
+/** How far (0-1) a source is pressed on `g`. `analog`: read for a trigger, where a button's
+ *  value is how far it is pulled. Browsers set `pressed` on an analog trigger from about a tenth
+ *  of the way (Chromium at 30/255), so taken as all the way it made every pull a full one; a
+ *  button that says pressed with no value (a digital one some browsers report so) is all the way. */
+export function sourceValue(g: Gamepad, src: PadSource, analog = false): number {
   if ("b" in src) {
     const b = g.buttons[src.b];
-    return b ? Math.max(b.pressed ? 1 : 0, b.value) : 0;
+    if (!b) return 0;
+    if (analog && b.value > 0) return Math.min(1, b.value);
+    return Math.max(b.pressed ? 1 : 0, b.value);
   }
   if ("h" in src) {
     const at = hatPosition(g.axes[src.h] ?? 9);
@@ -309,13 +331,13 @@ export function padFromGamepads(
   const axis = (v: number) => (Math.abs(v) < 0.08 ? 0 : clampAxis(v * 32767));
   // Several pads: the stick pushed furthest wins, so a resting pad does not cancel another.
   const pick = (cur: number, v: number) => (Math.abs(v) > Math.abs(cur) ? v : cur);
-  const stick = (g: Gamepad, ax: PadAxis | null) => (ax ? axis((g.axes[ax.a] ?? 0) * (ax.inv ? -1 : 1)) : 0);
+  const stick = (g: Gamepad, ax: PadAxis | null) => (ax ? axis(axisValue(g, ax)) : 0);
   for (const g of pads) {
     if (!g || !g.connected) continue;
     const prof = profileOf(g);
     for (const [bit, src] of prof.buttons) if (sourceValue(g, src) > 0.5) p.buttons |= bit;
-    if (prof.l2) p.l2 = Math.max(p.l2, Math.round(sourceValue(g, prof.l2) * 255));
-    if (prof.r2) p.r2 = Math.max(p.r2, Math.round(sourceValue(g, prof.r2) * 255));
+    if (prof.l2) p.l2 = Math.max(p.l2, Math.round(sourceValue(g, prof.l2, true) * 255));
+    if (prof.r2) p.r2 = Math.max(p.r2, Math.round(sourceValue(g, prof.r2, true) * 255));
     p.lx = pick(p.lx, stick(g, prof.lx));
     p.ly = pick(p.ly, stick(g, prof.ly));
     p.rx = pick(p.rx, stick(g, prof.rx));
@@ -369,6 +391,14 @@ export function playRumble(
 export { avcCodecString, isKeyframe, supportedHevc } from "./rpCodec";
 import { avcCodecString, isKeyframe, noPictureStep, supportedHevc } from "./rpCodec";
 import { avcDescription, lengthPrefixed } from "./fmp4";
+import { HOST_MSE_EDGE, MsePlayer, MseSound, mseJumpsText, mseOpusSupported } from "../pad/watchPlayer";
+import {
+  beginRpClientSession,
+  videoConfigFacts,
+  webcodecsPath,
+  type RpClientSessionHandle,
+  type RpDecoderEvent,
+} from "./rpClientSessions";
 
 function sameBytes(a: Uint8Array | null, b: Uint8Array): boolean {
   return !!a && a.length === b.length && a.every((x, i) => x === b[i]);
@@ -380,7 +410,9 @@ const AVC_CANDIDATES = ["avc1.4d4032", "avc1.640032", "avc1.4d4028", "avc1.42e01
 /** False only when this device answers that it decodes none of the H.264 forms; a check that
  *  throws is not a no, so a device with a quirky check still gets to try. */
 export async function canDecodeAvc(width: number, height: number): Promise<boolean> {
-  if (typeof VideoDecoder === "undefined") return false;
+  // No WebCodecs (an older WebKit, #766/#769): the stream goes to the system media player, so ask
+  // it instead. Only a player that says no to every H.264 profile means "no decoder".
+  if (typeof VideoDecoder === "undefined") return mseCanPlayAvc();
   return withDecoderStart(async () => {
     let answered = false;
     for (const codec of AVC_CANDIDATES) {
@@ -394,6 +426,24 @@ export async function canDecodeAvc(width: number, height: number): Promise<boole
       }
     }
     return !answered;
+  });
+}
+
+/** Whether the system media player (MSE) plays H.264 in MP4 here, for any of the profiles the
+ *  PS5 sends. */
+export function mseCanPlayAvc(): boolean {
+  const w = globalThis as {
+    MediaSource?: { isTypeSupported?: (t: string) => boolean };
+    ManagedMediaSource?: { isTypeSupported?: (t: string) => boolean };
+  };
+  const ms = w.ManagedMediaSource ?? w.MediaSource;
+  if (!ms || typeof ms.isTypeSupported !== "function") return false;
+  return AVC_CANDIDATES.some((codec) => {
+    try {
+      return ms.isTypeSupported!(`video/mp4; codecs="${codec}"`);
+    } catch {
+      return false;
+    }
   });
 }
 
@@ -450,7 +500,9 @@ export function pictureUnseen(s: {
 
 /** True when this device can play a stream at all. */
 export function canStream(): boolean {
-  return typeof VideoDecoder !== "undefined" && typeof WebSocket !== "undefined";
+  // WebCodecs, or the system's media player (an older WebKit has MSE but no WebCodecs: macOS 11
+  // and 12 without Safari 16.4, #766).
+  return typeof WebSocket !== "undefined" && (typeof VideoDecoder !== "undefined" || mseAvailable());
 }
 
 /** Why a stream can't play here: browsers only give VideoDecoder to a secure page, so on a plain
@@ -461,12 +513,67 @@ export function streamRefusal(): "insecure_page" | "no_decoder" | null {
   return typeof window !== "undefined" && window.isSecureContext === false ? "insecure_page" : "no_decoder";
 }
 
+/** A record as the engine sends it: [kind][payload]. */
+export function tagRecord(kind: number, payload: Uint8Array): ArrayBuffer {
+  const out = new Uint8Array(payload.length + 1);
+  out[0] = kind;
+  out.set(payload, 1);
+  return out.buffer;
+}
+
+/** Whether this device has Media Source Extensions (the media player fallback, #683). */
+export function mseAvailable(): boolean {
+  const w = globalThis as { MediaSource?: unknown; ManagedMediaSource?: unknown };
+  return typeof w.MediaSource === "function" || typeof w.ManagedMediaSource === "function";
+}
+
+/** The least time between two "media player: <problem>" log lines (#720: a failing player logged
+ *  thousands a second); the ones in between are counted into the next. */
+export const MSE_PROBLEM_LOG_GAP_MS = 5000;
+
+/** A line to log now, or null while within `gapMs` of the last one (those are counted). */
+export function rateLimitedLine(gapMs: number, now: () => number = () => performance.now()): (line: string) => string | null {
+  let last = -Infinity;
+  let held = 0;
+  return (line) => {
+    const t = now();
+    if (t - last < gapMs) {
+      held++;
+      return null;
+    }
+    last = t;
+    const out = held ? `${line} (${held} more since the last)` : line;
+    held = 0;
+    return out;
+  };
+}
+
+/** Seconds of picture with no sound before the stream says so. */
+export const SOUND_MISSING_AFTER_S = 6;
+
+/** Whether the engine's stats say no sound reaches this device, and why. Engines before 11.5
+ *  don't report it (no audio_frames_total), and then nothing is said. */
+export function soundMissingFrom(
+  st: Record<string, unknown>,
+  silentSeconds: number,
+  played = true,
+): "none" | "format" | "device" | undefined {
+  if (typeof st.audio_frames_total !== "number") return undefined;
+  if (silentSeconds < SOUND_MISSING_AFTER_S) return undefined;
+  // Sound reaches this device, but none of it ever got to the speakers.
+  if (st.audio_frames_total > 0) return played ? undefined : "device";
+  return typeof st.audio_other_codec === "number" && st.audio_other_codec > 0 ? "format" : "none";
+}
+
 export interface StreamStats {
   /** The browser holds the sound back until the page is clicked or a key pressed (autoplay
    *  rules: the session started without a click right before it). */
   soundBlocked?: boolean;
   /** This device can't decode the stream's sound, so there is none. */
   soundUnavailable?: boolean;
+  /** Seconds of picture went by and no sound reached this device: the PS5 sends none ("none")
+   *  or sends it in a format the engine doesn't play ("format"). Unset while sound comes. */
+  soundMissing?: "none" | "format" | "device";
   fps: number;
   mbps: number;
   decodeMs: number;
@@ -547,7 +654,8 @@ export type StreamPhase =
   | "error";
 
 export interface StreamError {
-  /** Stable, from the engine: busy, in_use (another device has the console), busy_other, asleep,
+  /** Stable, from the engine: busy, held (our last session, still not let go after minutes of
+   *  waiting), in_use (another device has the console), busy_other, asleep,
    *  unreachable, keys, wake_failed, passcode_cancelled, passcode_timeout, video_refused, lost
    *  (dropped mid-stream), other — or client-side: decode, no_decoder, socket, console_ended (the
    *  console ended it; `detail` is what it said), no_session (over while the socket was away). */
@@ -591,8 +699,9 @@ export interface StreamOptions {
   dualSense?: DualSenseSink;
   /** Picture tools to start with (rpPicture.ts). */
   picture?: PictureTools;
-  /** "software": never the hardware decoder (Settings › Video decoding). */
-  decoding?: "auto" | "software";
+  /** "software": never the hardware decoder; "mse": the system's media player from the start,
+   *  WebCodecs never tried (Settings › Video decoding). */
+  decoding?: "auto" | "software" | "mse";
   /** "h264": never ask for HEVC; "hdr": the console's HDR stream where it can be shown in HDR
    *  here (Settings › Video format). */
   codec?: CodecPref;
@@ -635,6 +744,9 @@ export interface StreamOptions {
   onPasscode?: (ask: PasscodeAsk | null) => void;
   /** The pad state to send; polled every animation frame and on key events. */
   readPad: () => PadState;
+  /** What feeds the pad (the controllers read, their mapping and reader, the inputs used), for
+   *  the engine's `GET /api/ps5/rp/controller`: sent along with a pad only when it changed. */
+  padFrom?: () => { key: string; value: unknown } | null;
   /** The controllers rumble is played on (default: this page's). A picture-in-picture window
    *  has its own list where the engine gives controllers only to the window in front. */
   gamepads?: () => ReadonlyArray<Gamepad | null>;
@@ -676,6 +788,23 @@ export class RemotePlayStream {
   get canvas(): HTMLCanvasElement {
     return this.cv;
   }
+  /** Shows the picture in `host`: the canvas, and the system media player's picture when that
+   *  plays the stream (it sits beside the canvas). Returns how to take it out again. A screen
+   *  that moves its host (full screen is a portal) mounts again: the media player's picture goes
+   *  along instead of staying in the old host, which left it black (#720). */
+  mount(host: HTMLElement): () => void {
+    host.appendChild(this.cv);
+    const el = this.mse?.element;
+    if (el) {
+      host.appendChild(el);
+      this.mse?.resume();
+    }
+    return () => {
+      if (this.cv.parentElement === host) host.removeChild(this.cv);
+      const m = this.mse?.element;
+      if (m && m.parentElement === host) host.removeChild(m);
+    };
+  }
   private cv: HTMLCanvasElement;
   private ws: WebSocket | null = null;
   private video: VideoDecoder | null = null;
@@ -684,6 +813,12 @@ export class RemotePlayStream {
   private header: Uint8Array | null = null;
   private hevc = false;
   private codecChoice: StreamCodec = "h264";
+  /** This session in the report's list of the page's sessions (lib/rpClientSessions). */
+  private diag: RpClientSessionHandle | null = null;
+  /** The config the video decoder was given last, for its failures' report. */
+  private lastVideoCfg: VideoDecoderConfig | null = null;
+  /** Why the session ended, when something said (the first one counts). */
+  private endReason: string | null = null;
   private sawKey = false;
   private ts = 0;
   private queued: EncodedVideoChunk[] = [];
@@ -725,6 +860,23 @@ export class RemotePlayStream {
   /** The last audio header, for the page to take over if the worker fails. */
   private audioHeader: Uint8Array | null = null;
   private soundUnavailable = false;
+  /** Seconds with picture and no sound played yet, and what that means: the engine got no
+   *  sound frame (none, format), or got them and this device played none (device). */
+  private silentSeconds = 0;
+  private soundMissing: "none" | "format" | "device" | undefined;
+  /** Some sound was buffered for the speakers at some point this session. */
+  private soundEverPlayed = false;
+  /** No WebCodecs decoder gives a picture here (#683: Safari 18 on an older Intel Mac): the
+   *  stream plays through the system's media player instead (MSE, the watch page's player), over
+   *  the canvas. Its sound too when this device can't decode Opus itself. */
+  private mse: MsePlayer | null = null;
+  private mseSound = false;
+  /** This device can't decode Opus itself (an older Safari or WebKit): the sound goes through
+   *  the system's media player instead, while the picture stays on WebCodecs. */
+  private mseAudio: MseSound | null = null;
+  /** Neither WebCodecs nor the media player has Opus here (Safari 16, #720): the page's pipe
+   *  decodes with the WebAssembly decoder (lib/rpOpusWasm) into the same worklet or schedule. */
+  private wasmAudio = false;
   /** No worklet: when the next scheduled buffer starts (AudioContext time). */
   private audioNext = 0;
   private audioMs = 0;
@@ -734,6 +886,7 @@ export class RemotePlayStream {
   private workerConcealed = 0;
   private volume = 1;
   private lastPad = "";
+  private lastPadFrom = "";
   private raf = 0;
   /** The window whose animation frames poll the pad: this page's, or a picture-in-picture
    *  window's, which keeps them coming while this page is hidden or minimized. */
@@ -777,6 +930,10 @@ export class RemotePlayStream {
   private loggedVisibleFix = false;
   /** The hardware decoder gave a picture that could not be put right: software from now on. */
   private softwareAfterBadFrame = false;
+  /** H.264 fed as Annex B (start codes, parameter sets in each keyframe, no description): the
+   *  next try when the usual AVC form gave no picture. An older WebKit on macOS (#683, an M1 Pro
+   *  on an older macOS) failed every decode of the AVC form. */
+  private annexB = false;
   /** Decoder failures in a row before any picture came. */
   private noPictureFails = 0;
 
@@ -975,17 +1132,23 @@ export class RemotePlayStream {
   /** The drawer for the next frame, made on first use. */
   private pickDrawer(): NonNullable<RemotePlayStream["drawer"]> {
     if (linuxApp() && sharpens(this.tools)) this.picturePassOff("linux");
-    if (this.hdr && !this.hdr.lost && this.hdr.canvas === this.cv) return (this.drawer = { kind: "hdr", hdr: this.hdr });
+    if (this.hdr && !this.hdr.lost && this.hdr.canvas === this.cv) {
+      this.diag?.set({ draw_path: "hdr" });
+      return (this.drawer = { kind: "hdr", hdr: this.hdr });
+    }
     if (!this.noGl) {
       try {
         const pass = new PicturePass(this.cv);
         this.watchGl(this.cv);
+        this.diag?.set({ draw_path: "gl" });
         return (this.drawer = { kind: "gl", pass });
       } catch (e) {
         log.warn("remote-play", `no WebGL 2 for the picture (${String(e)}): drawing with the 2D canvas`);
+        this.diag?.fallback(`no WebGL 2: 2D canvas (${String(e)})`);
         this.noGl = true;
       }
     }
+    this.diag?.set({ draw_path: "2d" });
     let ctx = this.cv.getContext("2d", { alpha: false });
     if (!ctx) {
       // The canvas already holds another kind of context (WebGL made, then a shader failed).
@@ -1024,6 +1187,7 @@ export class RemotePlayStream {
   /** WebGL cannot draw the picture: the 2D canvas from now on, on a new canvas element. */
   private glFailed(why: string): void {
     log.warn("remote-play", `the picture could not be drawn with WebGL (${why}): drawing with the 2D canvas`);
+    this.diag?.fallback(`WebGL failed: 2D canvas (${why})`);
     this.noGl = true;
     this.replaceCanvas();
   }
@@ -1032,6 +1196,7 @@ export class RemotePlayStream {
    *  browser converts it to SDR); the next start asks for SDR (the store sets that). */
   private hdrFailed(why: string): void {
     log.warn("remote-play", `HDR could not be shown (${why}): showing the picture as SDR`);
+    this.diag?.fallback(`HDR display failed: SDR (${why})`);
     this.hdr?.dispose();
     this.hdr = null;
     this.replaceCanvas();
@@ -1121,7 +1286,10 @@ export class RemotePlayStream {
     } catch {
       this.audioCtx = new AudioContext({ latencyHint: "interactive" });
     }
-    void this.audioCtx.resume();
+    // iOS refuses to start the output while another app or a call holds the audio session
+    // ("Failed to start the audio device"): not a crash. The next tap or key tries again
+    // (watchSoundBlocked), and the stream shows Turn on sound meanwhile.
+    this.audioCtx.resume().catch((e: unknown) => log.info("remote-play", `sound output not started yet: ${String(e)}`));
     this.watchSoundBlocked(this.audioCtx);
     this.gainNode = this.audioCtx.createGain();
     this.gainNode.gain.value = this.volume;
@@ -1168,6 +1336,8 @@ export class RemotePlayStream {
   /** Everything that works for this device's picture and sound goes. The codec headers stay. */
   private dropPicture(): void {
     this.ticking = false;
+    // Its sound goes too; the next header decides again how this device plays it.
+    this.stopMseAudio();
     try {
       this.rafWin.cancelAnimationFrame(this.raf);
     } catch {
@@ -1187,6 +1357,7 @@ export class RemotePlayStream {
     this.replaceCanvas();
     this.laidOut = "";
     this.lastPad = "";
+    this.lastPadFrom = "";
     for (const w of [...this.frameWaiters]) w();
   }
 
@@ -1234,6 +1405,7 @@ export class RemotePlayStream {
     }
     if (this.pictureOn) this.openSound();
     const pref = this.o.codec ?? "auto";
+    this.diag = beginRpClientSession(pref);
     const [hevc, hdr] = await Promise.all([
       pref === "h264" ? Promise.resolve(false) : chooseCodec(width, height).then((c) => c === "h265"),
       pref === "hdr" ? hdrSupport(width, height) : Promise.resolve(null),
@@ -1254,11 +1426,15 @@ export class RemotePlayStream {
     }
     if (hdrOff) {
       log.warn("remote-play", `HDR was asked for but is not used (${hdrOff}): streaming ${codec}`);
+      this.diag?.fallback(`HDR not used (${hdrOff}): ${codec}`);
       this.o.onHdrOff?.(hdrOff, false);
     }
+    this.diag?.set({ codec_asked: codec, hdr: codec === "h265_hdr" });
     if (codec === "h264" && !(await canDecodeAvc(width, height))) {
       // Found before the console is woken or asked to stream.
       if (this.ended) return;
+      this.decoderEvent({ event: "no_decoder", codec: "avc1", coded_width: width, coded_height: height });
+      this.endReason ??= "no H.264 decoder";
       this.o.onError({ code: "no_decoder", detail: "" });
       this.finish();
       return;
@@ -1276,6 +1452,7 @@ export class RemotePlayStream {
       this.o.onStats({
         soundBlocked: this.soundBlocked(),
         soundUnavailable: this.soundUnavailable,
+        soundMissing: this.soundMissing,
         fps: this.decoded - lastDecoded,
         mbps: ((this.bytes - lastBytes) * 8) / 1e6,
         decodeMs: this.decodeMs,
@@ -1326,6 +1503,8 @@ export class RemotePlayStream {
   resumeSound(): void {
     const actx = this.audioCtx;
     if (actx && this.soundBlocked()) void actx.resume().catch(() => {});
+    this.mseAudio?.resume();
+    this.mse?.resumeSound();
   }
 
   /** The browser may refuse to start the sound when the session did not start right after a
@@ -1454,6 +1633,8 @@ export class RemotePlayStream {
     const w = this.audioWorker;
     if (!w) return;
     log.warn("remote-play", `sound: the decoding worker failed (${why}): decoded on the page from now on`);
+    this.decoderEvent({ event: "audio_error", path: "worker", codec: "opus", error: why });
+    this.diag?.fallback(`sound worker failed: decoded on the page (${why})`);
     this.audioWorker = null;
     w.onmessage = null;
     w.onerror = null;
@@ -1492,12 +1673,41 @@ export class RemotePlayStream {
         (planes, scale) => this.play(planes, scale),
         undefined,
         () => {
-          this.soundUnavailable = true;
-          log.warn("remote-play", "sound: this device can't decode the stream's Opus sound, so there is none");
+          if (this.startMseAudio()) return;
+          if (this.mse && !this.mseSound && mseOpusSupported()) {
+            this.mseSound = true;
+            this.mse.startSound();
+            if (this.audioHeader) this.mse.onMessage(tagRecord(3, this.audioHeader));
+            return;
+          }
+          this.startWasmAudio();
         },
       );
     }
     return this.audioPipe;
+  }
+
+  /** The sound decoded by the WebAssembly Opus decoder, for a device with no Opus in WebCodecs or
+   *  its media player. The same pipe (order, FEC, concealment) and the same worklet or schedule
+   *  as WebCodecs' sound, so it counts as played the same way. */
+  private startWasmAudio(): void {
+    if (this.wasmAudio || this.ended) return;
+    this.wasmAudio = true;
+    log.warn("remote-play", "sound: no Opus decoder in WebCodecs or the media player here: decoding it with WebAssembly");
+    this.audioPipe?.reset();
+    this.audioPipe = new OpusPipe(
+      (planes, scale) => this.play(planes, scale),
+      wasmOpusCodecs,
+      () => {
+        this.soundUnavailable = true;
+        log.warn("remote-play", "sound: this device can't decode the stream's Opus sound, so there is none");
+        this.decoderEvent({ event: "audio_error", path: "wasm", codec: "opus", error: "no Opus decoder" });
+        this.diag?.set({ audio_path: "none" });
+      },
+    );
+    this.diag?.set({ audio_path: "wasm" });
+    this.decoderEvent({ event: "audio_decoder", path: "wasm", codec: "opus" });
+    if (this.audioHeader) this.audioPipe.header(this.audioHeader);
   }
 
   /** The sound's parts go: worker, worklet, context (the worklet's port would otherwise keep
@@ -1568,6 +1778,7 @@ export class RemotePlayStream {
     this.ws = ws;
     // The engine let go of this page's pad when its last socket left: what is held goes again.
     this.lastPad = "";
+    this.lastPadFrom = "";
     if (!attachOnly) this.setPhase("connecting");
     ws.onopen = () => {
       this.socketOpened = true;
@@ -1615,6 +1826,7 @@ export class RemotePlayStream {
         } else if (kind === 3) this.audioHeader = payload.slice();
         return;
       }
+      if (this.mse && this.routeToMse(kind, b, m.data as ArrayBuffer)) return;
       if (kind <= 1) this.onVideo(kind, payload, recv, NaN);
       else if (kind === 7) {
         if (b.length < 9) return;
@@ -1745,8 +1957,15 @@ export class RemotePlayStream {
     const input = inputEstimate({ pageRttMs: this.rttMs, consoleRttMs: this.consoleRttMs, stages });
     return (
       `${stagesLogText(stages)}; round trip to the engine ${ms(this.rttMs)}, engine to PS5 ${ms(this.consoleRttMs)}; ` +
-      `input ≈ ${ms(input)} + the game; PS5 report ${this.quality ? JSON.stringify(this.quality) : "none yet"}`
+      `input ≈ ${ms(input)} + the game; PS5 report ${this.quality ? JSON.stringify(this.quality) : "none yet"}` +
+      this.mseLogText()
     );
+  }
+
+  /** On the system's media player: how often it jumped to the live edge (each one a hitch, #720). */
+  private mseLogText(): string {
+    if (!this.mse) return "";
+    return mseJumpsText(this.mse.videoSeeks);
   }
 
   /** Time a round trip to the engine (answered with `{"pong": t}`). */
@@ -1805,6 +2024,12 @@ export class RemotePlayStream {
     const s = JSON.stringify(p);
     if (s === this.lastPad) return;
     this.lastPad = s;
+    const from = this.o.padFrom?.();
+    if (from && from.key !== this.lastPadFrom) {
+      this.lastPadFrom = from.key;
+      ws.send(JSON.stringify({ pad: p, pad_from: from.value }));
+      return;
+    }
     ws.send(JSON.stringify({ pad: p }));
   }
 
@@ -1867,6 +2092,8 @@ export class RemotePlayStream {
   setVolume(v: number): void {
     this.volume = Math.max(0, Math.min(1, v));
     if (this.gainNode) this.gainNode.gain.value = this.volume;
+    if (this.mseAudio) this.mseAudio.el.volume = this.volume;
+    this.mse?.setMuted(this.volume === 0);
   }
 
   setAudioBuffer(ms: number): void {
@@ -1893,6 +2120,15 @@ export class RemotePlayStream {
   private finish(): void {
     if (this.ended) return;
     this.ended = true;
+    if (this.diag) {
+      if (!this.mseAudio && !this.mseSound && !(this.wasmAudio && !this.soundUnavailable)) {
+        this.diag.set({ audio_path: this.soundUnavailable ? "none" : this.audioHealth.path });
+      }
+      this.diag.set({ frames_decoded: this.decoded });
+      this.diag.end(this.endReason ?? (this.stopping ? "stopped" : this.engineEnded ? "ended" : "closed"));
+    }
+    this.stopMse();
+    this.stopMseAudio();
     this.endDecoderStart();
     this.ticking = false;
     try {
@@ -2030,6 +2266,14 @@ export class RemotePlayStream {
         };
         this.consoleRttMs = typeof st.console_rtt_ms === "number" && Number.isFinite(st.console_rtt_ms) ? st.console_rtt_ms : null;
         if (st.quality && typeof st.quality === "object") this.quality = st.quality;
+        if (this.audioMs > 0) this.soundEverPlayed = true;
+        const silent = num(st.audio_frames_total) === 0 || !this.soundEverPlayed;
+        this.silentSeconds = num(st.frames) > 0 && silent && this.pictureOn ? this.silentSeconds + 1 : 0;
+        const missing = soundMissingFrom(st, this.silentSeconds, this.soundEverPlayed);
+        if (missing && missing !== this.soundMissing) {
+          log.warn("remote-play", `no sound (${missing}): engine ${num(st.audio_frames_total)} sound frames, ${num(st.audio_other_codec)} in another format, header ${st.audio_header === true ? "yes" : "no"}`);
+        }
+        this.soundMissing = missing;
         break;
       }
       case "moved":
@@ -2040,12 +2284,14 @@ export class RemotePlayStream {
         // The player's own Stop needs no word; anything else does, or the picture just goes.
         if (this.stopping) break;
         const why = typeof s.reason === "string" ? s.reason : "";
+        this.endReason ??= why ? `console: ${why}` : "ended";
         if (why === "no session") this.o.onError({ code: "no_session", detail: "" });
         else if (why) this.o.onError({ code: "console_ended", detail: why });
         break;
       }
       case "error":
         this.engineEnded = true;
+        this.endReason ??= `error ${s.code ?? "other"}${s.error ? `: ${s.error}` : ""}`;
         this.o.onError({
           code: s.code ?? "other",
           retryS: s.retry_s ?? undefined,
@@ -2091,7 +2337,7 @@ export class RemotePlayStream {
     if (!this.sawKey && !key) return;
     this.sawKey = true;
     let data = payload;
-    if (!this.hevc) {
+    if (!this.hevc && !this.annexB) {
       // AVC form (length-prefixed, parameter sets in the description): the Linux app's
       // WebKitGTK decodes no H.264 given as Annex B ("Decode error", a black picture).
       data = lengthPrefixed(payload, false, true);
@@ -2132,6 +2378,8 @@ export class RemotePlayStream {
   private watchDecoder(): void {
     // Nothing goes in while the picture is off here: that is the point, not a stall.
     if (this.gaveUp || !this.pictureOn) return;
+    // The media player shows the stream: it watches itself (MsePlayer gives up on its own).
+    if (this.mse) return;
     const verdict = decoderVerdict({
       now: performance.now(),
       haveHeader: !!this.header,
@@ -2398,6 +2646,12 @@ export class RemotePlayStream {
   }
 
   private openVideo(): void {
+    // The media player shows the stream: no WebCodecs decoder beside it.
+    if (this.mse) return;
+    // Settings › Video decoding › System media player: straight to MSE, WebCodecs never tried.
+    if (this.o.decoding === "mse" && this.startMse("chosen in Settings › Video decoding", true)) return;
+    // No WebCodecs on this system at all (an older WebKit, #766): the media player from the start.
+    if (typeof VideoDecoder === "undefined" && this.startMse("this system has no WebCodecs", true)) return;
     // A new decoder: its wait for a picture starts with its first frame.
     this.waitingSince = 0;
     // Linux: the GL display WebKitGTK needs first, and the crash marker until the first picture.
@@ -2435,6 +2689,7 @@ export class RemotePlayStream {
       error: (e) => {
         if (video !== this.video) return;
         if (this.decoderStart === start) this.endDecoderStart();
+        this.videoDecoderEvent("decode_error", String(e));
         if (isNoDecoderError(e)) {
           // Starting over would fail the same way, forever: end the session instead.
           this.video = null;
@@ -2465,16 +2720,22 @@ export class RemotePlayStream {
       };
       await start.ready;
       if (video !== this.video) return;
+      const asked = cfg.hardwareAcceleration;
       try {
         if (!(await VideoDecoder.isConfigSupported(cfg)).supported) cfg = base;
       } catch {
         cfg = base;
       }
       if (video !== this.video) return;
+      if (cfg === base) this.diag?.fallback(`${codec} ${asked} not supported: the browser's default decoder`);
       this.codec = codec;
+      this.lastVideoCfg = cfg;
       try {
         video.configure(cfg);
+        this.diag?.set({ video_path: webcodecsPath(cfg.hardwareAcceleration) });
+        this.videoDecoderEvent("configure");
       } catch (e) {
+        this.videoDecoderEvent("configure_error", String(e));
         this.video = null;
         this.o.onError({ code: isNoDecoderError(e) ? "no_decoder" : "decode", detail: String(e) });
         this.stop();
@@ -2513,7 +2774,8 @@ export class RemotePlayStream {
       });
     } else if (this.header) {
       const description = avcDescription(this.header);
-      if (description) void configure(avcCodecString(this.header), description);
+      if (this.annexB) void configure(avcCodecString(this.header));
+      else if (description) void configure(avcCodecString(this.header), description);
       else this.cannotDecode("The stream's H.264 header has no SPS/PPS.");
     }
   }
@@ -2525,26 +2787,221 @@ export class RemotePlayStream {
     const software = this.o.decoding === "software" || this.softwareAfterBadFrame || linuxSoftwareVideo();
     const step = noPictureStep(this.noPictureFails, { hevc: this.hevc, software });
     if (step === "retry") return true;
+    if (step === "software" && !this.hevc && !this.annexB) {
+      // The hardware decoder once more, fed Annex B, before software.
+      log.warn("remote-play", `no picture from H.264 in AVC form (${detail}): trying Annex B`);
+      this.annexB = true;
+      this.noPictureFails = 0;
+      return true;
+    }
     if (step === "software") {
+      // Software in the AVC form first, the one software decoders (WebKitGTK's) take.
+      this.annexB = false;
       log.warn("remote-play", `no picture from the hardware decoder (${detail}): decoding in software`);
+      this.diag?.fallback(`no picture in hardware: software (${detail})`);
       this.softwareAfterBadFrame = true;
       this.noPictureFails = 0;
       return true;
     }
     if (step === "h264") {
       log.warn("remote-play", `no picture from HEVC (${detail}): ending the stream, the next start asks for H.264`);
+      this.diag?.fallback(`no picture from HEVC: the next start asks for H.264 (${detail})`);
+      this.endReason ??= "no picture from HEVC";
       this.o.onHevcFailed?.();
       this.stop();
       return false;
     }
+    if (this.startMse(detail)) return false;
     log.warn("remote-play", `no picture with any decoder (${detail})`);
     this.cannotDecode(detail);
     return false;
   }
 
+  /** The system's media player (MSE), when WebCodecs gave no picture with any decoder. False
+   *  when this device has none either, or it was tried already. */
+  private startMse(detail: string, chosen = false): boolean {
+    if (this.mse || !mseAvailable()) return false;
+    const parent = this.cv.parentElement;
+    if (!parent) return false;
+    if (chosen) log.info("remote-play", "Settings › Video decoding: playing through the system's media player (MSE)");
+    else log.warn("remote-play", `no picture with WebCodecs (${detail}): playing through the system's media player (MSE)`);
+    const managed = typeof (globalThis as { MediaSource?: unknown }).MediaSource !== "function";
+    const path = managed ? "managed-mse" : "mse";
+    if (!chosen) this.diag?.fallback(`no picture with WebCodecs: ${path} (${detail})`);
+    this.diag?.set({ video_path: path });
+    this.decoderEvent({ event: "mse", path, codec: this.hevc ? "hevc" : "avc1", error: detail });
+    this.endDecoderStart();
+    try {
+      this.video?.close();
+    } catch {
+      // Already closed.
+    }
+    this.video = null;
+    const problemLine = rateLimitedLine(MSE_PROBLEM_LOG_GAP_MS);
+    const mse = new MsePlayer(
+      (p) => {
+        const line = p ? problemLine(`media player: ${p}`) : null;
+        if (line) log.warn("remote-play", line);
+      },
+      "player",
+      () => this.ws?.send(JSON.stringify({ keyframe: true })),
+    );
+    mse.setHevc(this.hevc);
+    mse.setVideoEdge(HOST_MSE_EDGE);
+    mse.onSoundFail = () => log.warn("remote-play", "media player: no sound on this device either");
+    // The media player failed too, again and again: no decoder here shows this stream.
+    mse.onGiveUp = () => {
+      if (this.mse !== mse) return;
+      log.warn("remote-play", "media player: it failed every time it was opened: giving up");
+      this.cannotDecode(`${detail}; the system's media player failed too`);
+    };
+    const el = mse.element;
+    el.classList.add("pointer-events-none", "absolute", "inset-0");
+    el.dataset.testid = "rp-mse";
+    parent.append(el);
+    this.cv.style.visibility = "hidden";
+    this.mse = mse;
+    const tagged = tagRecord;
+    if (this.header) mse.onMessage(tagged(0, this.header));
+    // This device can't decode the sound itself: the media player plays it.
+    if (this.soundUnavailable) {
+      this.mseSound = true;
+      mse.startSound();
+      mse.setMuted(this.volume === 0);
+      if (this.audioHeader) mse.onMessage(tagged(3, this.audioHeader));
+    }
+    this.ws?.send(JSON.stringify({ keyframe: true }));
+    return true;
+  }
+
+  /** A record while the media player shows the stream: true when it took it. */
+  private routeToMse(kind: number, b: Uint8Array, whole: ArrayBuffer): boolean {
+    const mse = this.mse;
+    if (!mse) return false;
+    if (kind === 0) {
+      this.header = b.slice(1);
+      mse.onMessage(whole);
+      return true;
+    }
+    if (kind === 1) {
+      mse.onMessage(whole);
+      this.decoded++;
+      return true;
+    }
+    if (kind === 7) {
+      // A timed access unit: the media player takes it as a plain one.
+      if (b.length < 9) return true;
+      const out = new Uint8Array(b.length - 8);
+      out[0] = 1;
+      out.set(b.subarray(9), 1);
+      mse.onMessage(out.buffer);
+      this.decoded++;
+      return true;
+    }
+    if ((kind === 3 || kind === 4) && this.mseSound) {
+      if (kind === 3) this.audioHeader = b.slice(1);
+      // Sound through the media player counts as played: the no-sound notice is not for it.
+      else if (mse.sound) this.soundEverPlayed = true;
+      mse.onMessage(whole);
+      return true;
+    }
+    return false;
+  }
+
+  /** The sound through the system's media player (MSE), for a device whose WebCodecs has no
+   *  Opus. False when it has no MSE either, or MSE has no Opus in MP4. */
+  private startMseAudio(): boolean {
+    if (this.mseAudio || this.mse || !mseAvailable()) return false;
+    // No Opus in MP4 here (Safari 16, #720): straight to the WebAssembly decoder.
+    if (!mseOpusSupported()) {
+      log.info("remote-play", "sound: the system's media player takes no Opus here");
+      return false;
+    }
+    let failed = false;
+    let starting = true;
+    const ms = new MseSound("player", () => {
+      failed = true;
+      log.warn("remote-play", "sound: the system's media player can't play Opus either");
+      this.decoderEvent({ event: "audio_error", path: "mse", codec: "opus", error: "no Opus in the media player" });
+      this.stopMseAudio();
+      // Failed later, mid-session: the WebAssembly decoder takes over (while starting, the
+      // caller goes on to it).
+      if (!starting) this.startWasmAudio();
+    });
+    ms.el.hidden = true;
+    ms.el.volume = this.volume;
+    document.body.append(ms.el);
+    this.mseAudio = ms;
+    if (this.audioHeader) ms.setHeader(this.audioHeader);
+    ms.start();
+    starting = false;
+    if (failed) return false;
+    log.warn("remote-play", "sound: no Opus decoder here, playing it through the system's media player");
+    this.diag?.set({ audio_path: "mse" });
+    this.decoderEvent({ event: "audio_decoder", path: "mse", codec: "opus" });
+    return true;
+  }
+
+  private stopMseAudio(): void {
+    const ms = this.mseAudio;
+    if (!ms) return;
+    this.mseAudio = null;
+    try {
+      ms.stop();
+    } catch {
+      // Already stopped.
+    }
+    ms.el.remove();
+  }
+
+  private stopMse(): void {
+    if (!this.mse) return;
+    try {
+      this.mse.stop();
+    } catch {
+      // Already stopped.
+    }
+    this.mse.element.remove();
+    this.mse = null;
+    this.mseSound = false;
+    this.cv.style.visibility = "";
+  }
+
+  /** A decoder decision or failure: kept for the report (rpClientSessions), logged, and told to the
+   *  engine, which keeps it with its own record of the session. Rare: never per frame. Once the
+   *  session's record is full (MAX_EVENTS) the rest go nowhere: a decoder that fails on every
+   *  frame does not flood the log or the socket. */
+  private decoderEvent(ev: RpDecoderEvent): void {
+    if (this.diag && !this.diag.event(ev)) return;
+    const text = JSON.stringify(ev);
+    if (ev.error !== undefined) log.warn("remote-play", `decoder ${ev.event}: ${text}`);
+    else log.debug("remote-play", `decoder ${ev.event}: ${text}`);
+    const ws = this.ws;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      try {
+        ws.send(JSON.stringify({ decoder: ev }));
+      } catch {
+        // The socket is closing: the record above is enough.
+      }
+    }
+  }
+
+  /** [`decoderEvent`] for the video decoder, with the config it was given last. */
+  private videoDecoderEvent(event: string, error?: string): void {
+    const cfg = this.lastVideoCfg;
+    const facts = cfg
+      ? videoConfigFacts(cfg, { width: this.o.width, height: this.o.height })
+      : { codec: this.codec || this.codecChoice };
+    const ev: RpDecoderEvent = { event, path: webcodecsPath(cfg?.hardwareAcceleration), ...facts };
+    if (error !== undefined) ev.error = error;
+    this.decoderEvent(ev);
+  }
+
   /** No decoder will ever take this stream: said, and the session ends rather than go on streaming
    *  to nothing (with its frames piling up). */
   private cannotDecode(detail: string): void {
+    this.decoderEvent({ event: "cannot_decode", codec: this.codecChoice, error: detail });
+    this.endReason ??= `cannot decode: ${detail}`;
     this.o.onError({ code: "decode", detail });
     this.stop();
   }
@@ -2554,6 +3011,14 @@ export class RemotePlayStream {
   private onAudio(kind: number, payload: Uint8Array, whole: ArrayBuffer): void {
     if (!this.audioCtx) return;
     if (kind === 3) this.audioHeader = payload.slice();
+    const ms = this.mseAudio;
+    if (ms) {
+      if (kind === 3) ms.setHeader(payload.slice());
+      else ms.frame(payload);
+      // Counted as played once it plays: the no-sound notice is about this path now.
+      if (ms.playing) this.soundEverPlayed = true;
+      return;
+    }
     const w = this.audioWorker;
     if (w) {
       w.postMessage(whole, [whole]);

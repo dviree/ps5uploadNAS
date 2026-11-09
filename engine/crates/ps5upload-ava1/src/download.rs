@@ -120,6 +120,26 @@ impl Drop for Ticker {
     }
 }
 
+/// The name `src` lands under on this computer. With `escape_names` (see
+/// [`to_local_with_in`]) a name this computer can't hold is kept under its reversible form
+/// instead of refused.
+fn basename_kept(src: &str, escape_names: bool) -> Result<String> {
+    if !escape_names {
+        return basename(src).map(str::to_owned);
+    }
+    let name = src.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+    if name.is_empty() || name == "." || name == ".." {
+        return Err(anyhow!("{src:?} has no usable file name"));
+    }
+    ps5upload_core::host_names::escape_name(name).map_err(|why| {
+        UploadFailure {
+            reason: "ava1_bad_manifest".into(),
+            detail: why,
+        }
+        .into()
+    })
+}
+
 fn basename(src: &str) -> Result<&str> {
     let name = src.trim_end_matches('/').rsplit('/').next().unwrap_or("");
     if name.is_empty() || name == "." || name == ".." || name.contains('\\') {
@@ -141,9 +161,27 @@ fn basename(src: &str) -> Result<&str> {
 /// from_pages` already ran `check_path` on every path; this adds the shape the request
 /// promised and the one path rule `check_path` leaves to the host OS).
 pub(crate) fn check_shape(m: &Manifest, single: bool) -> io::Result<()> {
+    check_shape_with(m, single, false)
+}
+
+/// `check_shape`; with `escape_names` a name this computer can't hold is fine, since it is
+/// written under its reversible form (`kept_manifest`), which can neither climb nor misname.
+fn check_shape_with(m: &Manifest, single: bool, escape_names: bool) -> io::Result<()> {
     let bad = |why: String| io::Error::new(io::ErrorKind::InvalidData, why);
     for e in &m.entries {
         manifest::check_path(&e.path).map_err(|e| bad(e.to_string()))?;
+        if escape_names {
+            // Component by component: a '\' is part of a name here, never a separator.
+            let kept = ps5upload_core::host_names::escape_path(&e.path)
+                .map_err(|why| bad(format!("{:?}: {why}", e.path)))?;
+            if kept
+                .split('/')
+                .any(|c| c.contains('\\') || host_unsafe_component(c).is_some())
+            {
+                return Err(bad(format!("{:?} cannot be kept on this computer", e.path)));
+            }
+            continue;
+        }
         // A backslash is a separator on Windows: `a\..\b` would climb out of the root.
         if e.path.contains('\\') {
             return Err(bad(format!("{:?} contains a backslash", e.path)));
@@ -182,11 +220,31 @@ struct CheckedSink {
     inner: LocalSink,
     root: PathBuf,
     single: bool,
+    /// Names this computer can't hold are written under their reversible form.
+    escape_names: bool,
+}
+
+/// `m` with every path in the form it is kept under on this computer
+/// (`host_names::escape_path`). The entries keep their order, so their file ids.
+fn kept_manifest(m: &Manifest) -> io::Result<Manifest> {
+    let mut kept = m.clone();
+    for e in &mut kept.entries {
+        e.path = ps5upload_core::host_names::escape_path(&e.path)
+            .map_err(|why| io::Error::new(io::ErrorKind::InvalidData, why))?;
+    }
+    Ok(kept)
 }
 
 impl Sink for CheckedSink {
     fn prepare(&self, m: &Manifest) -> io::Result<()> {
-        check_shape(m, self.single)?;
+        check_shape_with(m, self.single, self.escape_names)?;
+        let kept;
+        let m = if self.escape_names {
+            kept = kept_manifest(m)?;
+            &kept
+        } else {
+            m
+        };
         if self.single && self.root.is_dir() {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
@@ -552,6 +610,20 @@ impl Sink for ZipSink {
 fn terminal(e: SendError) -> anyhow::Error {
     match e {
         SendError::Cancelled => anyhow!("transfer_cancelled"),
+        // This computer's receiver refused where it would write (AVA1 1.0.7: a symbolic link or
+        // a file where a folder of the download goes): this computer's doing, not the PS5's. A
+        // path the PS5 refused to send (a protected folder) stays ava1_not_allowed.
+        SendError::Refused { status, message }
+            if status == gen::ERR_PATH
+                && (message.contains("is a symbolic link")
+                    || message.contains("is not a folder")) =>
+        {
+            UploadFailure {
+                reason: "ava1_local_path".into(),
+                detail: format!("this computer will not save it there: {message}"),
+            }
+            .into()
+        }
         SendError::Refused { status, message } => refusal(status, message).into(),
         SendError::Source(e) if e.kind() == io::ErrorKind::InvalidData => UploadFailure {
             reason: "ava1_bad_manifest".into(),
@@ -613,7 +685,14 @@ fn run(
     let cancel = cancel.unwrap_or_else(|| Arc::new(AtomicBool::new(false)));
     let jobs_dir = pool.ava_dir().join("jobs");
     let _live = pool.live_job(&job_id); // the journal sweep leaves a running job alone
-    crate::block_on(async {
+    ps5upload_core::clog!(
+        Debug,
+        "transfer",
+        "ava1 download {} from {console}:{src}: flags {flags:#x}, fresh per attempt {fresh_per_attempt}",
+        crate::upload::hex(&job_id)
+    );
+    let t0 = Instant::now();
+    let outcome = crate::block_on(async {
         SessionGate::identity(pool)?;
         let mut sink = make_sink();
         let mut backoff = Duration::from_millis(250);
@@ -651,6 +730,12 @@ fn run(
             };
             gate.connected();
             let id = attempt_id(job_id, attempt);
+            ps5upload_core::clog!(
+                Debug,
+                "transfer",
+                "ava1 download {}: session up, attempt {attempt}, {base_bytes} bytes already done",
+                crate::upload::hex(&job_id)
+            );
             let _live_attempt = pool.live_job(&id);
             let mut link = session.job(id);
             let _ticker = Ticker::start(progress.clone(), counters, base_bytes, base_files);
@@ -725,7 +810,24 @@ fn run(
                 wait(&mut backoff, &format!("{why} ({durable} bytes durable)")).await;
             }
         }
-    })
+    });
+    match &outcome {
+        Ok(bytes) => ps5upload_core::clog!(
+            Debug,
+            "transfer",
+            "ava1 download {}: done, {bytes} bytes in {} ms",
+            crate::upload::hex(&job_id),
+            t0.elapsed().as_millis()
+        ),
+        Err(e) => ps5upload_core::clog!(
+            Debug,
+            "transfer",
+            "ava1 download {}: ended after {} ms: {e:#}",
+            crate::upload::hex(&job_id),
+            t0.elapsed().as_millis()
+        ),
+    }
+    outcome
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -740,10 +842,41 @@ pub fn to_local_in(
     counters: &Counters,
     cancel: Option<Arc<AtomicBool>>,
 ) -> Result<u64> {
+    to_local_with_in(
+        pool,
+        console,
+        src,
+        kind,
+        dest_dir,
+        unsafe_read,
+        false,
+        job_id,
+        counters,
+        cancel,
+    )
+}
+
+/// `to_local_in`, with `escape_names`: a console name this computer can't hold (`a\b`, `a:b`,
+/// `CON`, `x.`) is written under its reversible form (`ps5upload_core::host_names`) instead of
+/// refusing the download, and an upload with `TransferConfig::unescape_names` puts it back
+/// under the exact name. For the saves code, whose files go back to the console (#729).
+#[allow(clippy::too_many_arguments)]
+pub fn to_local_with_in(
+    pool: &Pool,
+    console: &str,
+    src: &str,
+    kind: DownloadKind,
+    dest_dir: &Path,
+    unsafe_read: bool,
+    escape_names: bool,
+    job_id: [u8; 16],
+    counters: &Counters,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Result<u64> {
     // The manifest's paths are root-relative, so the landing root is
     // `dest_dir/<basename>` for both kinds; for a file that root is the file's own path.
     // Not `dest_dir` (loses the basename) and not a stripped component (double-nests).
-    let target = dest_dir.join(basename(src)?);
+    let target = dest_dir.join(basename_kept(src, escape_names)?);
     // The request kind decides single-file, never the manifest's shape: a folder holding
     // exactly one file must stay a folder.
     let single = kind == DownloadKind::File;
@@ -771,6 +904,7 @@ pub fn to_local_in(
         inner: LocalSink::new(target.clone(), single),
         root: target,
         single,
+        escape_names,
     });
     let r = run(
         pool,
@@ -784,7 +918,7 @@ pub fn to_local_in(
         cancel,
     );
     if let Err(e) = &r {
-        cleanup_after_failure(e, &job_dir, &part, &target_dir, single);
+        cleanup_after_failure(e, &job_dir, &part, &target_dir, single, escape_names);
     }
     r
 }
@@ -805,13 +939,14 @@ fn cleanup_after_failure(
     part: &Path,
     target: &Path,
     single: bool,
+    escape_names: bool,
 ) {
     let recoverable = e
         .downcast_ref::<UploadFailure>()
         .is_some_and(|f| f.reason == "ava1_local_io");
     if !recoverable {
         if !single {
-            remove_part_files(job_dir, target);
+            remove_part_files(job_dir, target, escape_names);
         }
         let _ = std::fs::remove_dir_all(job_dir);
         remove_path(part);
@@ -819,10 +954,17 @@ fn cleanup_after_failure(
 }
 
 /// Removes the in-place `<file>.ava-part` of every file the job's saved manifest lists, under
-/// `target`. Nothing when the manifest is missing or unreadable (a job that never got that far
-/// wrote no part files).
-fn remove_part_files(job_dir: &Path, target: &Path) {
+/// `target` (by their kept names, with `escape_names`). Nothing when the manifest is missing or
+/// unreadable (a job that never got that far wrote no part files).
+fn remove_part_files(job_dir: &Path, target: &Path, escape_names: bool) {
     let Ok(m) = journal::read_manifest(job_dir) else {
+        return;
+    };
+    let Ok(m) = (if escape_names {
+        kept_manifest(&m)
+    } else {
+        Ok(m)
+    }) else {
         return;
     };
     for e in m.entries.iter().filter(|e| e.kind == gen::ENTRY_FILE) {
@@ -870,6 +1012,32 @@ pub fn to_local(
         kind,
         dest_dir,
         unsafe_read,
+        job_id,
+        counters,
+        cancel,
+    )
+}
+
+/// `to_local` with `escape_names` (see [`to_local_with_in`]).
+#[allow(clippy::too_many_arguments)]
+pub fn to_local_escaped(
+    console: &str,
+    src: &str,
+    kind: DownloadKind,
+    dest_dir: &Path,
+    unsafe_read: bool,
+    job_id: [u8; 16],
+    counters: &Counters,
+    cancel: Option<Arc<AtomicBool>>,
+) -> Result<u64> {
+    to_local_with_in(
+        pool(),
+        console,
+        src,
+        kind,
+        dest_dir,
+        unsafe_read,
+        true,
         job_id,
         counters,
         cancel,
@@ -1160,6 +1328,37 @@ mod tests {
             check_shape(&files(&[good]), false)
                 .unwrap_or_else(|e| panic!("{good:?} must be accepted: {e}"));
         }
+    }
+
+    /// #729: keeping names takes a '\' as part of a name, so `..\..\x` is one file inside the
+    /// download, while a real `..` component is still refused, and a name that could be read
+    /// two ways is too.
+    #[test]
+    fn kept_names_never_climb_out() {
+        for name in [
+            "options\\gabindings.xml",
+            "..\\..\\x",
+            "a\\..\\..\\b",
+            "C:evil",
+            "CON",
+        ] {
+            check_shape_with(&files(&[name]), false, true)
+                .unwrap_or_else(|e| panic!("{name:?} must be kept: {e}"));
+            let kept = kept_manifest(&files(&[name])).unwrap();
+            let p = &kept.entries[0].path;
+            assert!(!p.contains(['\\', ':', '/']), "{p:?}");
+            assert!(host_unsafe_component(p).is_none(), "{p:?}");
+        }
+        for bad in ["../x", "a/../../b", "/abs", "a//b", "a\u{F05C}b"] {
+            assert!(
+                check_shape_with(&files(&[bad]), false, true).is_err(),
+                "{bad:?} must be refused"
+            );
+        }
+        let e = basename_kept("/data/options\\x.xml", true).unwrap();
+        assert_eq!(e, "options\u{F05C}x.xml");
+        assert!(basename_kept("/data/..", true).is_err());
+        assert!(basename_kept("/data/a\\b", false).is_err());
     }
 
     #[test]
@@ -1783,7 +1982,7 @@ mod tests {
         };
         let local_io = terminal(SendError::Source(io::Error::other("disk full")));
         fill();
-        cleanup_after_failure(&local_io, &job, &part, &d, false);
+        cleanup_after_failure(&local_io, &job, &part, &d, false, false);
         assert!(job.exists() && part.exists(), "resume lost its work");
         for e in [
             anyhow!("transfer_cancelled"),
@@ -1794,7 +1993,7 @@ mod tests {
             }),
         ] {
             fill();
-            cleanup_after_failure(&e, &job, &part, &d, false);
+            cleanup_after_failure(&e, &job, &part, &d, false, false);
             assert!(!job.exists() && !part.exists(), "a final failure left work");
         }
         let _ = std::fs::remove_dir_all(&d);
@@ -1830,6 +2029,13 @@ mod tests {
                 message: "no".into()
             }),
             "ava1_not_allowed"
+        );
+        assert_eq!(
+            reason(SendError::Refused {
+                status: gen::ERR_PATH,
+                message: "Saves/slot1 is a symbolic link".into()
+            }),
+            "ava1_local_path"
         );
     }
 
@@ -1879,12 +2085,19 @@ mod tests {
         std::fs::write(target.join("other.ava-part"), b"mine").unwrap();
         let part = d.join("Game.ava-part"); // staging: absent, the folder existed
         let local_io = terminal(SendError::Source(io::Error::other("disk full")));
-        cleanup_after_failure(&local_io, &job, &part, &target, false);
+        cleanup_after_failure(&local_io, &job, &part, &target, false, false);
         assert!(
             target.join("big.bin.ava-part").exists(),
             "a recoverable failure keeps its work"
         );
-        cleanup_after_failure(&anyhow!("transfer_cancelled"), &job, &part, &target, false);
+        cleanup_after_failure(
+            &anyhow!("transfer_cancelled"),
+            &job,
+            &part,
+            &target,
+            false,
+            false,
+        );
         assert!(!target.join("big.bin.ava-part").exists());
         assert!(!target.join("sub/big2.bin.ava-part").exists());
         assert!(!job.exists());

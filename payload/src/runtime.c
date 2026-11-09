@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include "file_compare.h"
 #include "app_dump.h"
 #include <stdlib.h>
 #include <stdarg.h>
@@ -35,7 +36,9 @@
 #include "webui_api.h"
 #include "webui_smb.h"
 #include "runtime.h"
+#include "plog.h"
 #include "sandbox_unmount.h"
+#include "image_mount.h"
 #include "instance_verdict.h"
 
 #include "content_db.h"
@@ -59,11 +62,14 @@
 #include "sys_registry.h"
 #include "profile.h"
 #include "sony_api_lock.h"
+#include "power_phase.h"
 #include "net_probe.h"
 #include "net_ports.h"
 #include "files_handoff.h"
 #include "vinput.h"
 #include "vinput_ps5.h"
+#include "vinput_relay.h"
+#include "vinput_wire.h"
 #include "vpad.h"
 #include "focus_probe.h"
 #include "proc_list.h"
@@ -85,6 +91,8 @@
 #include "ownership_record.h"
 #include "storage_cleanup.h"
 #include "mesh.h"
+#include "tailnet_node.h"
+#include "game_fps.h"
 #include "ava1_server.h"
 
 /* The frame numbers the management table (mgmt_table.def) carries per method. They are not on any wire now:
@@ -357,6 +365,14 @@
 #define MGMT_FRAME_CONSOLE_TASKS_ACK 361u
 #define MGMT_FRAME_CONSOLE_TASK_CANCEL 362u
 #define MGMT_FRAME_CONSOLE_TASK_CANCEL_ACK 363u
+/* the log levels the engine hands the helper (plog.c) */
+#define MGMT_FRAME_LOG_LEVEL 364u
+#define MGMT_FRAME_LOG_LEVEL_ACK 365u
+#define MGMT_FRAME_TAILNET 366u
+#define MGMT_FRAME_TAILNET_ACK 367u
+/* the running game's frame count, for the sampled frame rate (game_fps.c, #774) */
+#define MGMT_FRAME_HW_FPS 368u
+#define MGMT_FRAME_HW_FPS_ACK 369u
 #define MGMT_FRAME_SDK_SCAN 214u
 #define MGMT_FRAME_SDK_SCAN_ACK 215u
 #define MGMT_FRAME_SDK_PATCH 216u
@@ -1887,13 +1903,20 @@ static int is_user_storage_path(const char *path) {
 }
 
 /* fs.freespace's policy (mgmt_fs_policy_t): the mount holding `path` is an attached disk image. Its
- * source is an LVD/MD device, or for a nullfs of one (a title's /system_ex/app link) its mount point. */
-static int mount_is_disk_image(const char *path) {
+ * source is an LVD/MD device, or for a nullfs of one (a title's /system_ex/app link) the mount it
+ * views, followed to the image wherever that is mounted (image_mount.h). */
+static int image_mount_statfs(const char *path, char *fstype, size_t fstype_n, char *from,
+                              size_t from_n, void *ctx) {
     struct statfs s;
-    if (statfs(path, &s) != 0) return 0;
-    return strncmp(s.f_mntfromname, "/dev/lvd", 8) == 0 || strncmp(s.f_mntfromname, "/dev/md", 7) == 0 ||
-           strncmp(s.f_mntfromname, "/mnt/shadowmnt/", 15) == 0 ||
-           strncmp(s.f_mntfromname, "/mnt/ps5upload/", 15) == 0;
+    (void)ctx;
+    if (statfs(path, &s) != 0) return -1;
+    snprintf(fstype, fstype_n, "%.*s", (int)sizeof s.f_fstypename, s.f_fstypename);
+    snprintf(from, from_n, "%.*s", (int)sizeof s.f_mntfromname, s.f_mntfromname);
+    return 0;
+}
+
+static int mount_is_disk_image(const char *path) {
+    return image_mount_walk(path, image_mount_statfs, NULL);
 }
 
 static int handle_fs_list_volumes(runtime_state_t *state) {
@@ -3832,6 +3855,16 @@ static int handle_hw_temps(runtime_state_t *state, const char *request_body, uin
     return mgmt_reply(MGMT_FRAME_HW_TEMPS_ACK, body, (uint64_t)written);
 }
 
+/* The display's frame count and the helper's clock, for the app's sampled frame rate (#774). One
+ * ioctl on /dev/dce, no Sony call and no ptrace (game_fps.h). "No game" is an answer, not an error. */
+static int handle_hw_fps(runtime_state_t *state) {
+    char body[GAME_FPS_JSON_MAX];
+    if (!state) return -1;
+    int n = game_fps_read_json(body, sizeof body);
+    if (n <= 0) return mgmt_reply(MGMT_FRAME_ERROR, "internal", 8);
+    return mgmt_reply(MGMT_FRAME_HW_FPS_ACK, body, (uint64_t)n);
+}
+
 static int handle_hw_power(runtime_state_t *state) {
     return handle_hw_text_op(state, hw_power_get_text,
                               MGMT_FRAME_HW_POWER_ACK, "hw_power_failed");
@@ -4727,6 +4760,9 @@ typedef struct {
 /* Runs on the deferred power thread only, which holds no lock: take sony_api_lock so a reboot or
  * power-off never overlaps another Sony call (the lock is held until the console goes down). */
 static void power_do_action(int action) {
+    /* Before the lock: from here until the console has settled after the wake, the fan re-apply and
+     * the wake watchdog's kernel work hold off and the tailnet node drops its sockets (power_phase.h). */
+    if (action == SC_ACTION_STANDBY) power_phase_note_standby();
     pthread_mutex_lock(&sony_api_lock);
     if (action == SC_ACTION_REBOOT) {
         sceSystemServiceRequestReboot();
@@ -4742,7 +4778,8 @@ static void power_do_action(int action) {
         void *h = dlsym(RTLD_DEFAULT, "sceSystemStateMgrEnterStandby");
         if (h) {
             int (*enter_standby)(void) = (int (*)(void))h;
-            enter_standby();
+            int rc = enter_standby();
+            fprintf(stderr, "[power] sceSystemStateMgrEnterStandby returned 0x%x\n", (unsigned)rc);
         }
     }
     pthread_mutex_unlock(&sony_api_lock);
@@ -4999,12 +5036,18 @@ static int handle_user_list(runtime_state_t *state) {
      * entry max = ~1.3 KB. 4 KB gives generous headroom. */
     char body[4096];
     int n = 0;
-    n += snprintf(body + n, sizeof(body) - n,
-                  "{\"foreground\":%d,\"err_fg\":%d,\"err_list\":%d,\"users\":[",
-                  rc_fg == 0 ? foreground : -1, rc_fg, rc_list);
+    /* Ids are printed unsigned: a user id may be above 0x7fffffff ("negative" as an int); only -1
+     * (0xffffffff) means nobody, and 0 is no user either. Play Together's "Guests play as" lists
+     * these (the engine's /api/join/profiles). */
+    int fg_ok = rc_fg == 0 && foreground != -1 && foreground != 0;
+    if (fg_ok)
+        n += snprintf(body + n, sizeof(body) - n, "{\"foreground\":%u,", (unsigned)foreground);
+    else
+        n += snprintf(body + n, sizeof(body) - n, "{\"foreground\":-1,");
+    n += snprintf(body + n, sizeof(body) - n, "\"err_fg\":%d,\"err_list\":%d,\"users\":[", rc_fg, rc_list);
     int wrote_one = 0;
     for (int i = 0; i < USER_SERVICE_MAX_USERS; i++) {
-        if (ids[i] < 0) continue;
+        if (ids[i] == -1 || ids[i] == 0) continue;
         char name[64];
         name[0] = '\0';
         int rc_name = sceUserServiceGetUserName(ids[i], name, sizeof(name));
@@ -5016,9 +5059,9 @@ static int handle_user_list(runtime_state_t *state) {
         char esc[128];
         json_escape_into(name, esc, sizeof(esc));
         n += snprintf(body + n, sizeof(body) - n,
-                      "{\"id\":%d,\"name\":\"%s\",\"foreground\":%s,\"err_name\":%d}",
-                      ids[i], esc,
-                      ids[i] == foreground ? "true" : "false", rc_name);
+                      "{\"id\":%u,\"name\":\"%s\",\"foreground\":%s,\"err_name\":%d}",
+                      (unsigned)ids[i], esc,
+                      fg_ok && ids[i] == foreground ? "true" : "false", rc_name);
     }
     pthread_mutex_unlock(&sony_api_lock);
     if (n < (int)sizeof(body) - 2) {
@@ -7564,6 +7607,13 @@ static int save_do_unmount(int *written_back, char *kept, size_t kept_sz) {
         struct stat ist;
         int image_moved = stat(g_save_image, &ist) != 0 || ist.st_mtime != g_save_image_mtime ||
                           ist.st_size != g_save_image_size;
+        /* A save image is a fixed size, and edits made through the mount do not always move the
+         * copy's mtime (FW 9.60, #770: "Nothing changed" and the edit was lost). When neither the
+         * copy nor the real image looks touched, compare the bytes: the copy started as the
+         * image, so any difference is an edit. (Not when the image moved: the game saved, and
+         * that is handled below.) */
+        if (!changed && !image_moved && file_contents_differ(g_save_copy, g_save_image) == 1)
+            changed = 1;
         if (!changed) {
             unlink(g_save_copy);
         } else if (image_moved) {
@@ -8211,9 +8261,11 @@ static int handle_files_handoff_take(runtime_state_t *state, const char *body, u
 /* The console's devices replace the stub on first use, when vinput_ps5.c allows them (on by
  * default). */
 static pthread_once_t g_vinput_backend_once = PTHREAD_ONCE_INIT;
+static int g_vinput_relay_on; /* the companion is in use (Play Together's binds go through it too) */
 static void vinput_backend_pick(void) {
     const vinput_backend_t *b = vinput_ps5_backend();
     if (b) vinput_set_backend(b);
+    g_vinput_relay_on = b != NULL;
 }
 
 static int handle_vinput_caps(runtime_state_t *state) {
@@ -8260,10 +8312,59 @@ static uint32_t vpad_pick_user(void) {
     return uid ? uid : vpad_home_user("/user/home");
 }
 
+/* Play Together's "Guests play as": a guest's pad seated in the user the host chose, by the
+ * keyboard & mouse companion (vinput_relay.c; sceMbusInit must not run in the helper,
+ * payload/vinput/README.md). Off when the companion is (vinput_ps5.c's switch). */
+static const char *vpad_bind_hold(void) {
+    pthread_once(&g_vinput_backend_once, vinput_backend_pick);
+    if (!g_vinput_relay_on) return "off";
+    /* A minute per ask: the engine asks every 20 s while Play Together is open. */
+    return vinput_relay_hold(60000);
+}
+
+static int vpad_bind_signed_in(uint32_t user, int *foreground) {
+    int ids[USER_SERVICE_MAX_USERS], fg = -1, rc_fg, rc_list, found = 0;
+    for (int i = 0; i < USER_SERVICE_MAX_USERS; i++) ids[i] = -1;
+    pthread_mutex_lock(&sony_api_lock);
+    sceUserServiceInitialize(NULL); /* idempotent */
+    rc_fg = sceUserServiceGetForegroundUser(&fg);
+    rc_list = sceUserServiceGetLoginUserIdList(ids);
+    pthread_mutex_unlock(&sony_api_lock);
+    if (rc_list != 0) return -1;
+    for (int i = 0; i < USER_SERVICE_MAX_USERS; i++)
+        if (ids[i] != -1 && ids[i] != 0 && (uint32_t)ids[i] == user) found = 1;
+    /* Not knowing who is in front is no answer either: the owner must never slip through. */
+    if (rc_fg != 0) return -1;
+    *foreground = fg != -1 && (uint32_t)fg == user;
+    return found;
+}
+
+static int vpad_bind_seat(int handle, uint32_t user, uint32_t age_ms, int *code, uint32_t *owner) {
+    vrelay_bind_t b;
+    int rc = vinput_relay_bind((uint32_t)handle, user, age_ms, &b);
+    *code = rc == VWIRE_RC_OK ? 0 : b.sce ? b.sce : rc;
+    *owner = b.owner;
+    fprintf(stderr, "[vpad] bind pad %d to 0x%08x: relay %d, sce 0x%08x, owner 0x%08x, %d tries, %u us\n", handle,
+            (unsigned)user, rc, (unsigned)b.sce, (unsigned)b.owner, b.tries, (unsigned)b.us);
+    return rc == VWIRE_RC_OK ? 0 : -1;
+}
+
+static void vpad_bind_forget(int handle) {
+    vinput_relay_forget((uint32_t)handle);
+}
+
+static const vpad_binder_t VPAD_BINDER = {vpad_bind_hold, vpad_bind_signed_in, vpad_bind_seat, vpad_bind_forget};
+
+static pthread_once_t g_vpad_binder_once = PTHREAD_ONCE_INIT;
+static void vpad_binder_install(void) {
+    vpad_set_binder(&VPAD_BINDER);
+}
+
 static int handle_vpad_open(runtime_state_t *state, const char *body, uint64_t body_len) {
     char out[VPAD_OUT_MAX];
     int n;
     if (!state || body_len > VPAD_REQ_MAX) return mgmt_reply(MGMT_FRAME_ERROR, "bad_request", 11);
+    pthread_once(&g_vpad_binder_once, vpad_binder_install);
     n = vpad_open_json(body ? body : "", (size_t)body_len, vpad_now_ms(), vpad_pick_user, out, sizeof out);
     if (n < 0) return mgmt_reply(MGMT_FRAME_ERROR, "internal", 8);
     return mgmt_reply(MGMT_FRAME_VPAD_OPEN_ACK, out, (uint64_t)n);
@@ -8275,6 +8376,7 @@ static int vpad_reply(runtime_state_t *state, vpad_call_fn fn, uint32_t ack, con
     char out[VPAD_OUT_MAX];
     int n;
     if (!state || body_len > VPAD_REQ_MAX) return mgmt_reply(MGMT_FRAME_ERROR, "bad_request", 11);
+    pthread_once(&g_vpad_binder_once, vpad_binder_install);
     n = fn(body ? body : "", (size_t)body_len, vpad_now_ms(), out, sizeof out);
     if (n < 0) return mgmt_reply(MGMT_FRAME_ERROR, "internal", 8);
     return mgmt_reply(ack, out, (uint64_t)n);
@@ -8310,7 +8412,7 @@ static int handle_vpad_status(runtime_state_t *state) {
 }
 
 static int handle_minion_tile(runtime_state_t *state, const char *body, uint64_t body_len) {
-    char reply[384];
+    char reply[512];
     int n;
     if (!state || body_len > 256) return -1;
     n = webui_api_tile(body, (size_t)body_len, reply, sizeof reply);
@@ -8413,6 +8515,38 @@ static int handle_console_task_cancel(runtime_state_t *state, const char *body, 
     if (!state || body_len > 1024u) return mgmt_reply(MGMT_FRAME_ERROR, "bad_request", 11);
     n = webui_console_task_cancel(body ? body : "", (size_t)body_len, out, sizeof out);
     return mgmt_reply(MGMT_FRAME_CONSOLE_TASK_CANCEL_ACK, out, (uint64_t)(n > 0 ? n : 0));
+}
+
+/* log.level: the engine's log level setting for this helper (plog.h). An empty body only reads. */
+static int handle_log_level(runtime_state_t *state, const char *body, uint64_t body_len) {
+    char out[512];
+    uint64_t now = plog_now_s();
+    if (!state || body_len > 2048u) return mgmt_reply(MGMT_FRAME_ERROR, "bad_request", 11);
+    if (body_len > 0) {
+        char before[512];
+        int had = plog_describe(before, sizeof before, now);
+        if (plog_apply(body, (size_t)body_len, now) != 0) {
+            const char *err = "{\"ok\":false,\"err\":\"bad_request\"}";
+            return mgmt_reply(MGMT_FRAME_LOG_LEVEL_ACK, err, strlen(err));
+        }
+        int n = plog_describe(out, sizeof out, now);
+        if (n > 0 && (had <= 0 || strcmp(before, out) != 0)) fprintf(stderr, "[log] levels now %s\n", out);
+    }
+    int n = plog_describe(out, sizeof out, now);
+    if (n < 0) return mgmt_reply(MGMT_FRAME_ERROR, "internal", 8);
+    return mgmt_reply(MGMT_FRAME_LOG_LEVEL_ACK, out, (uint64_t)n);
+}
+
+/* tailnet: "Put this PS5 on Tailscale" (tailnet_node.c). An empty body reads the status. */
+#define TAILNET_OUT_MAX (24u * 1024u)
+static int handle_tailnet(runtime_state_t *state, const char *body, uint64_t body_len) {
+    if (!state || body_len > 4096u) return mgmt_reply(MGMT_FRAME_ERROR, "bad_request", 11);
+    char *out = malloc(TAILNET_OUT_MAX);
+    if (!out) return mgmt_reply(MGMT_FRAME_ERROR, "out_of_memory", 13);
+    int n = tailnet_node_call(body ? body : "", (size_t)body_len, out, TAILNET_OUT_MAX);
+    int rc = n > 0 ? mgmt_reply(MGMT_FRAME_TAILNET_ACK, out, (uint64_t)n) : mgmt_reply(MGMT_FRAME_ERROR, "internal", 8);
+    free(out);
+    return rc;
 }
 
 /* ── The devices that use this console (mesh.c) ─────────────────────────

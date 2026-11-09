@@ -4,6 +4,363 @@ What's new in ps5upload, written for humans.
 
 ---
 
+## Unreleased
+
+Remote Play:
+
+- Play connects again after another device or a controller at the console took the session over, or right after a Stop. Before, PS5Upload could keep failing until the PS5 was restarted while other apps got in. It now asks the PS5 to start the same way other Remote Play apps do.
+
+Installing:
+
+- Add-ons (DLC) no longer sit at 99%. An add-on is now treated as an add-on even when its package doesn't say so, the check after installing ends within about a minute, and an add-on that leaves no files says to look for it in the game's add-ons on the PS5.
+
+PS5 helper and rest mode:
+
+- While the console goes to rest and for a minute after it wakes, the helper holds its background work (fan, cheats, home-screen tile and icon fixes, its own checks) and pauses Tailscale, then picks up again. Tailscale can no longer get stuck in a busy loop when the network goes away.
+- Each rest and wake is written to a small log on the console (power.log), collected by the Bug Report, so a console that switches off in rest can be traced.
+
+Game frame rate:
+
+- While a capture runs, Stop capture is red with a Recording label beside it.
+
+## 12.4.0
+
+Play Together:
+
+- Join a friend in the app works again with the one invite link (the invite service refused the app; fixed on the service, so 12.3.0 joins too).
+- Joining picks the shortest way by itself: on the host's Wi-Fi it connects straight to the host, with no internet or invite service needed; over Tailscale it uses the host's Tailscale address; otherwise it goes over the internet. Whichever connects first is used, and a reconnect tries the last good way first.
+- Friends on the host's Wi-Fi now get the picture and sound the way internet friends do (a smooth, low-delay stream), with the old way kept only as a fallback. This should bring back the picture on iPhones on the same Wi-Fi.
+- A friend's sound now plays through the browser's own audio playback, which should end the sound stutter on iPhones.
+- The host sees each friend's connection (Good, OK, or Slow with about how fast) and which way they joined. If a friend's connection can't keep up, it offers a lower quality that fits everyone, only when you tap it.
+- The Play Together panel says plainly that friends don't need Tailscale.
+
+Remote Play:
+
+- On a Mac, the controller keeps working after leaving full screen.
+- When the PS5 refuses to start a new session, the log now says what it reported, and the stutter on older Macs is logged in more detail, to find their causes.
+
+Game frame rate (new):
+
+- Hardware shows the game's frame rate live, sampled once a second, and Capture records a run with a graph, min, average, 1% low and max, and a CSV to export. It reads on the console; it isn't drawn on the TV.
+
+Go live from your phone (new):
+
+- The iPhone and Android apps can go live by themselves, without a computer. The PS5's picture goes out as it is and the sound is converted on the phone. Keep the app open on screen while live. SRT addresses still need a computer.
+
+Agents:
+
+- AI agents that use the newest MCP version (like Codex with it turned on) connect again.
+
+Website:
+
+- Shorter: each section's extra details and the full feature list fold away until you open them.
+
+## 12.3.0
+
+Connecting:
+
+- Connection shows the PS5s your Tailscale network can see that aren't on this device's list yet, with Add. No more going through Settings › Tailscale or a scan to find them. If one doesn't let this device in yet, it says where to allow it.
+- When Tailscale is paused on this device, Connection offers to turn it back on.
+
+Play Together:
+
+- An invite link opens in the PS5Upload app again. Since 12.1 the invite is one https link for everywhere, and the app couldn't read it: the page stopped offering the app, and the app's QR scanner ignored the code. The app now joins it directly, at home or over the internet.
+- The QR scanners in Join a friend and Add a PS5 say when the code in view is the wrong kind, instead of looking stuck.
+
+Share:
+
+- Receive moved out of Play into its own Share screen in Games & Content, with what you've sent and received. Share links and old links land there.
+
+Website:
+
+- New sections for every PS5 on one page and for Share, updated Play Together and Tailscale sections, and new screenshots in all 21 languages.
+
+## 12.2.0
+
+Your PS5s, on one page:
+
+- Connection lists each PS5 as a card: online or not, how this device reaches it (home network or Tailscale), its helper and firmware, the ways to reach it, and the devices allowed to use it. Setup steps show only until it is ready.
+- **Add a PS5** finds it on your home network and on your Tailscale network in one scan, opens an invite from another device (scan the code or paste the link), or takes an address. A PS5 found two ways shows once.
+- **Invite a device**: a code and link that add the PS5 on a new phone or computer. The link only says where the PS5 is; it lets nobody in.
+- With "Ask before a new device can connect" on, a new device asks and you press Allow or Decline: on any device that uses the PS5, on its card, or on the PS5's own page. A device can't allow itself.
+- **Devices allowed to use it** shows how each device got in, with Revoke and Block.
+
+Connecting:
+
+- PS5s show as connected in about a second, not ten. One slow answer no longer reads as "Helper isn't running"; a PS5 shows as not reachable only after three checks in a row fail.
+- The app opens on the screen you were last on (or Home), not back on Connection.
+
+Tailscale:
+
+- "Try Tailscale now" works again.
+- Find your PS5 on Tailscale from a phone that was never at home, or add it by its Tailscale address.
+- A PS5 shows the devices its Tailscale list turned away, with Allow and Ignore.
+- Settings › Tailscale lists your devices as online, offline or connected, with Refresh.
+
+Share:
+
+- Homebrew is recognised by how the app was built, so homebrew that borrows a game's ID can be shared, and retail games still can't.
+- Cleaner Share and Receive panels.
+
+Fixes:
+
+- Remote Play: full screen no longer goes black when the system media player shows the picture (#720), and Macs without WebCodecs (macOS 12) can play again (#769).
+- Save Data: an edit made inside an open save is written back even when the file's date didn't change (#770).
+
+## 12.1.0
+
+Play Together:
+
+- One invite link works everywhere. A friend on your Wi-Fi connects over your home network, a friend on Tailscale over Tailscale, anyone else directly over the internet; the app picks the best way by itself. Settings › App › Play Together: "Invites work: Anywhere" or "Only on my Wi-Fi".
+- Over the internet the picture now comes as a video stream the browser plays smoothly: on a link that loses a few packets it goes from a few frames a second to a steady 60. If a friend's connection can't carry your stream, the panel tells you to lower its quality.
+- Without internet, the invite becomes a Wi-Fi link by itself, and a friend whose page can't reach the invite service gets "Open on this Wi-Fi".
+- The panel shows how each friend is connected: home network, Tailscale or internet, and the delay.
+
+Share (new):
+
+- Each game and Collection item has Share: send a friend your saves, screenshots and clips, which cheats are on, your controls, a note, and homebrew apps (folder, image or package). Your friend opens the link, accepts, you allow, and it goes straight between you.
+- PS5Upload only shares homebrew: a retail game, its updates and add-ons can't be shared, in any format.
+
+Tailscale:
+
+- Your home network always comes first; Tailscale is only used when the PS5 doesn't answer at home.
+- Already using the Tailscale app? PS5Upload can use it instead of signing in on its own.
+- Pause Tailscale on the PS5 or on this device without signing out, from Settings, Connection, Home, or the console's own page.
+- Only devices you add can reach the PS5 over Tailscale.
+- Names are your device's name plus "-ps5u"; rename any time. Renew a key without losing the address.
+- Its address shows in the console list and on Home; Connection's check runs over Tailscale too; a notice says when a console switches to Tailscale and back. Big uploads over a slow path ask first.
+- A guided setup, and "Try Tailscale now" from home.
+- Things Tailscale can't carry (waking a resting PS5, sending payloads, some installs) now say so instead of timing out.
+- The PS5 goes to sleep and wakes up safely with Tailscale on or paused.
+
+Settings:
+
+- Settings has two tabs: App, and This PS5 with a console picker. Settings that belong to one console (keep awake, rest after uploads, wake for uploads, bring up automatically and its payloads, reconnect after rest, install fallback) are now kept for each console, starting from what you had.
+
+Fixes and smaller changes:
+
+- Mac app: the PS button reaches the PS5 during Remote Play.
+- Controller and pairing checks for AI agents; agents can read and change each console's own settings.
+- AVA1 1.0.7: safer transfers. A shortcut inside a destination folder now stops the transfer with a clear message instead of writing somewhere else.
+- Translations for everything new, in all 21 languages.
+
+## 12.0.0
+
+Tailscale, built in:
+
+- Play your PS5 from anywhere through your own Tailscale network, with no Tailscale app on the PS5 or a VPN router. Sign in once in Settings › Tailscale, then use Connection › "Put this PS5 on Tailscale".
+- On Tailscale, the PS5 only answers to Remote Play and PS5Upload, nothing else.
+- Settings and the console's Tailscale panel say in plain words when something is wrong: sign-in refused, signed out, server unreachable, or a key that has expired or is about to.
+
+Play Together:
+
+- Play together has its own page, with Start and Invite.
+- A friend can play as a profile you pick, such as a guest, so the game uses that profile's saves and trophies and nothing pops up on the TV.
+- A friend who reconnects gets the same profile back.
+- When an internet friend or phone would play as you, the Allow box says so and asks a second time.
+- The phone controller and the watch link now work over the internet too. A phone that reconnects is let back in only with the token it got when you allowed it.
+- Third-party controllers (8BitDo and other popular pads) are mapped correctly, and a friend can check their controller and set it up from the invite page.
+
+Convert:
+
+- Save to a server: an image or folder can be written straight to a NAS or server over SMB, NFS, FTP, SFTP or WebDAV.
+- Convert can now make PS4 fake packages (.pkg).
+- Not yet tried on a PS5.
+
+Payloads:
+
+- Payloads can keep themselves up to date, and stay in step with Payload Manager when you use it.
+
+Agents (MCP):
+
+- A switch in the app decides whether AI agents can only look or can change things too. When agents can only look, they can't see invite or phone-link secrets.
+
+Fixes and smaller changes:
+
+- Remote Play: L2 and R2 are real triggers again. A half pull reached the PS5 as a full press in the app, browsers, phones, the Windows DualSense reader and Android; now the PS5 gets how far you pull.
+- Mac app: the controller's PS button reaches the PS5 again during Remote Play. macOS was taking it for its own Games overlay while every other button worked.
+- Pairing refused (80108b03): the message now says what to check (the PS5 shows you signed in, Remote Play is on) and points to pairing with the PIN the PS5 shows.
+- Tailscale: turning it off or changing its settings just as a connection error came in could hang the helper on the PS5. Fixed.
+- Play Together over the internet: when the invite server restarts, friends are told to reconnect instead of being told the room ended, and a friend still joining tries again by itself.
+- The invite server uses far less memory per connection, limits how many connections one address can hold, and closes connections that never say who they are.
+- Translations: every new string was checked in all 21 languages, and many were corrected.
+- Web UI: add files from the device you're browsing on (#730), and Go live works from an iPhone's Safari (#731).
+- Saves: saves whose file names Windows can't hold (such as RDR2) now copy and restore (#729).
+- Install: a PS5 add-on is no longer taken for the game when the game runs from an image (#724).
+- Remote Play waits for a PS5 that is still holding its last session instead of failing (#720).
+- The PS5Upload tile on the console's home screen is put back if it's missing, and an old offline copy of the console page can update itself.
+- The website lists everything the app does, has a FAQ, and covers Tailscale and playing over the internet.
+
+## 11.6.0
+
+Play Together over the internet:
+
+- Friends no longer need to be on your Wi-Fi. When you invite, choose Internet, and the link works from anywhere: a phone on mobile data, a friend's home. A small server at hub.phantomptr.com only introduces the two sides; the game's picture, sound and controls go straight between you and your friend, never through it.
+- The link carries your app's fingerprint, so a friend can only ever connect to you.
+- Most home routers work as they are. Where yours allows it, the app opens a port on it for the session (UPnP / NAT-PMP / PCP). Settings › Play Together has the server address and these options.
+- Not yet tried from outside a home network: tell us how it goes.
+
+Convert:
+
+- Save to: The PS5, straight. An image is written to the PS5 as it's built, with no copy on this computer and no upload afterwards. A dropped connection or a restart picks up where it stopped, and the image is checked on the PS5 when it's done. For .exfat, .ffpkg and .ffpfs images, and .exfat with zstd packs.
+- PS4 updates: pick a PS4 game and its update, and Convert merges them into one image or folder of the game at the update's version. It checks that the update belongs to the game and is newer.
+- PS4 add-ons (DLC) with files become a folder of their data. A licence-only add-on says there's nothing to convert.
+- A .ffpkg, .ffpfs or .ffpfsc build that stops partway (a crash, the app closed) now goes on from where it stopped, as .exfat already did. Every byte is read back afterwards, and a game that changed in between is built again from the start.
+
+None of the Convert changes have been tried on a PS5 yet.
+
+## 11.5.2
+
+Remote Play on older Macs (#720, #683):
+
+- Picture: the system media player fallback now works inside the app. The app's own security rules blocked it, so it failed and retried in a loop; that's fixed, a player that still fails gives up after three tries with one error, and Settings › Video decoding has a new choice, System media player, to go straight to it.
+- Sound: where the system can't decode the PS5's Opus sound (macOS 13 and older Safari), the app now decodes it itself (opus-decoder, WebAssembly), in the app and for Play Together friends in Safari. Not yet confirmed on a macOS 13 Mac.
+
+Play Together (#720):
+
+- Player 1 (a friend on this stream's own controller, playing as your PS5 user) is now a setting, off by default. With it on, the Allow prompt and the player card say so, and the friend's page says they play as your user. Turning the picture back on, restarting Play or a friend rejoining gives the controller back to you at once, moving the friend to their own controller. A phone linked as a controller keeps the seat even while it's idle.
+- Clearer steps for friends: they press PS on their own controller and pick Quick Play or their user on the TV; the host does nothing.
+
+iPhone and iPad (#722):
+
+- Full screen hides the status bar (the clock), and brings it back when you leave.
+- The Controller/Touchpad switch fades out in full screen and comes back for a moment on a tap on the picture. Settings › Play: "Show the Controller/Touchpad switch in full screen" hides it there altogether.
+
+Also:
+
+- Installing an add-on (DLC) is no longer refused with "move the game out of the scan folder" when its base game runs from a ShadowMount+ image. A package already on the PS5 came with no category, and the check took it for a full game. (#721)
+- A build only ever clears its own leftover files (.partial, .lz4spool) before starting.
+
+## 11.5.1
+
+- Keyboard & mouse in Play: a double click in a game no longer switches full screen and drops the mouse; only one started from the free cursor does. Ctrl+R and F5 reach the game instead of being swallowed (the app still never reloads). In a window, Esc gives the mouse back (the browser always does that); the stream now says so and suggests full screen, where a quick Esc goes to the game.
+- Accounts: an avatar that is a JPEG named .png shows instead of the placeholder. (#718)
+
+## 11.5.0
+
+Remote Play:
+
+- No sound? The stream now says why after a few seconds: the PS5 is sending none, it sends a format the app can't play, or it arrives and this device plays none of it. The log says which, so a bug report shows it. Both of our consoles send sound normally.
+- A device that can't decode the stream's Opus sound now plays it through the system's media player instead of staying silent.
+- A device where no video decoder gives a picture now plays the stream through the system's media player instead of ending. This is for older Macs whose Safari can't decode it, and it's untested on such a Mac. (#683)
+- Starting again right after a stream ended no longer says to close Remote Play on another device. The PS5 holds Remote Play for up to half a minute after a session ends; the app now says so and starts by itself once it's free. A pairing PIN refused for the same reason (0x80FC0101) says so too.
+- No picture from H.264: before falling back to software, the app tries the hardware decoder with the stream in its other form (Annex B), which an older macOS WebKit needed, then the system's media player.
+- Streaming over a VPN on cellular: a console reached through a tunnel or another network now streams with smaller packets. The full-size first message was dropped in a WireGuard tunnel on cellular, and the stream never started. (#713)
+- iOS refusing to start the sound output (another app or a call holding it) is no longer logged as a crash. (#713)
+- Pairing refused, or Remote Play greyed out on the PS5: the message now mentions that a PS5 switched to the sp-int NP environment does this.
+- Play as: pair more than one PS5 user on a console and choose which one Remote Play signs in as. Pairing another user adds them instead of replacing the first, and Wake & sign in follows the choice. Pairing a second user from this app's side isn't tried on a console yet.
+- For agents: rp_session shows the stream's last second (frames, loss, sound) and how the last session started and ended.
+
+Logs and bug reports:
+
+- One set of log levels for the app, the engine and the PS5 helper: error to trace, for everything or per area (Remote Play, pairing, transfers, installs, Clean-up and more). Settings › Logs sets them; a raised level goes back to Info by itself after the time you choose. Detailed logs is now part of this.
+- Bug report: "Record more for 30 minutes" turns on detailed logging while you reproduce a problem, then you send the report.
+- Bug reports now include the real system version (macOS, Windows, Linux, Android), the computer model, which video and sound formats this device can decode, the last several Remote Play sessions with what the player tried, and the console's loaded payloads. Logs are capped in size, and what was cut is listed.
+- The Remote Play pairing PIN no longer reaches logs or bug reports.
+- For agents and scripts: GET/PUT /api/logs/level and GET /api/logs/recent, and the MCP tools logs_level_get, logs_level_set and logs_recent.
+
+Files and transfers:
+
+- Extracting a big archive on the console no longer fails after 60 seconds while it carries on. Long copies, moves, deletes and extracts follow the work to the end. (#712)
+- Clean-up: Stop always ends a run, and a helper that stops answering ends the wait for the PS5 instead of hanging. (#714)
+- Writing into a game that runs from a disk image no longer says "0 bytes are safely allocatable" when the image is nearly full but has room.
+- Phones: the first file's menu in a folder of files no longer covers its own Download button.
+- Files: game images and folders show a small format tag (exFAT, FFPFSC, FFPFS, UFS2, PKG, Folder).
+- FTP: a folder whose name has square brackets, like [PS5], lists its files. Some servers read the brackets as a pattern and listed nothing.
+- Update notice: Details shows the release notes, fetched from GitHub when the update check has none.
+
+Saves:
+
+- Backups made before a reset, a crash or a new account ID restore from the list onto the current user. They used to fail as another user's save, and backups of users no longer on the console now show too.
+- Load a save file accepts the app's own backup zip.
+- Changing the backup folder keeps earlier backups listed and restorable.
+
+Workshop and Convert:
+
+- zstd packs into a folder: Convert writes a packed game as a plain folder too, from an image, a package or a game folder, and reads every file back through the packs.
+- The zstd pack runtime (ampr-emu-ng) follows its newest release, checked against the SHA-256 GitHub publishes for it, so its fixes reach packed games without waiting for us. It falls back to the tested 0.3.2 when that can't be checked, and Convert can be set to always use 0.3.2. The game's job says which went in.
+- A .pkg dropped onto Workshop is taken; several go into the queue. (#716)
+- A queued game keeps the AMPR emulator choice it was added with.
+- PS4 packages: a package whose image has an empty folder that the container fills (Resident Evil 2) no longer fails its read-back check. A real PS4 game converted this way was installed by ShadowMount+ and ran to its title screen.
+- The PS4 or PS5 platform of a game folder without a usual title ID is read from its eboot.bin.
+
+PS5Upload Minion and Payload Manager:
+
+- Settings › PS5Upload Minion: "Keep Minion off on consoles I add" turns it off once on each new console. (#715)
+- Payload Manager: "Load the PS5Upload helper at boot" stores the helper there and loads it after your other payloads, so Minion works with no PC. Each connect updates the stored copy and keeps the previous one; if the new one doesn't come up after a restart, the previous one goes back. (#715)
+
+## 11.4.0
+
+Games and formats:
+
+- New: zstd asset packs in Convert, smaller than LZ4 and for any plain image (.ffpkg, .exfat, .ffpfs), with levels 1, 5 and 19. They're written straight into the image with no temporary copy, and the image gets ampr-emu-ng as its emulator. A game already in LZ4 packs can switch to zstd, or back, without its original files. Tried on a PS5: a 29.9 GB game became 15.9 GB and reached its main menu.
+- New: PS4 fake packages open in Convert and become a game image or a folder, with no key file needed. Only packages with the usual all-zero passcode; updates and add-ons aren't covered, and a PS4 game can't become a PS5 package.
+- PS4 games: an image or folder now gets the sce_sys/param.json ShadowMount+ reads. Without it a game has been reported to mount and then refuse to start (NP-103270-3). ShadowMount+ installed a test image of ours, but no real PS4 game has been started from one yet.
+- Games that read through AMPR and have no emulator: Convert now adds one to a plain image, because some such games won't start without it. It's on by default, with a switch and a choice of ampr_emu or ampr-emu-ng. A new Add the AMPR emulator button does it for a game you already have: in the folder, or as a ShadowMount+ backport folder for an image on the PS5, .ffpfsc included.
+- A plain .exfat build goes on after a crash or a killed engine, instead of starting over. Every byte is read back afterwards. Other image formats still start over.
+- Convert says beforehand how many plain executables will be fake-signed, and where an LZ4-packed image belongs.
+
+Files and ShadowMount+:
+
+- ShadowMount+ panel: Scan now picks up a new image without deleting the game from the home screen, and gives games that failed to mount another try.
+- Files: Rename from title offers names from a game's title, title ID, version and format, with your own format too. A name too long for ShadowMount+ to mount is flagged, with a shortened one offered, and a typed one asks first.
+- Files: Hide from ShadowMount+ renames with a dot in front, so it uses another copy of the game, and Show puts it back.
+
+Servers:
+
+- New: NFS exports (NFSv3), to read games from and write to. Tested against rclone's server, not yet a NAS or Linux server.
+- WebDAV: Digest sign-in, and a NAS's self-signed certificate over HTTPS can be accepted on first use, as with FTPS.
+- FTPS: implicit TLS on port 990.
+
+Also:
+
+- Automation: the engine's queue takes conversions (image_build, package_build, folder_build), so convert-then-send can run unattended.
+- A stored helper in Payload Manager named with its version now follows the new version, so the slot stops showing the old one.
+- Crop to 21:9 now says what it cuts: the top and bottom of any game not made for ultrawide screens. (#675)
+- Phones: banners no longer run under a side column of system icons, as on a folded iPhone Duo, which hid Stop. (#675)
+
+Parts of this follow findings and code from Alembic and PS5 Dump Forge.
+
+## 11.3.0
+
+- New: Backup & Restore (Console section). Choose what to keep on your computer: saves, payload settings, screenshots and clips, homebrew and other folders in /data, each with its size. It says what it leaves out and why: installed games, because copying them back doesn't install them, and the console's own system files. (#707)
+- Restoring after a reset: settings and folders go straight back. A save goes into that user's own save of the game, so start each game once and save; any that aren't ready are listed, and running the restore again is safe. Saves only open on the PS5 that made them. (#707)
+- New guide, "If your PS5 won't start": the Safe Mode options in the order to try them, which ones erase your data, how to set up the USB drive, and why reinstalling from Sony's file can end a jailbreak. (#707)
+
+- Saves: restoring a backup made before a reset no longer stops at "this backup is another user's save". Restore from a zip now puts it into the save you picked, the way Restore to another user does, and works with no automatic backup folder set: the save it replaces is kept next to the backup. Start the game once as that user first.
+- Saves: a failed restore or copy no longer shows under "Couldn't list saves".
+- Saves: Copy to › Another console, for PS5 saves and the Switch, PS2 and PS1 emulators' saves. Pick the console, then the user or folder there. The save there is backed up first and put back if anything fails, and it won't run while the game is running on either console. Not for PS4-format saves yet. (#709)
+- Sources: an FTP server's listing no longer hides files with a date the app couldn't read, such as a month in another language, and the log now says if a line still can't be read.
+- Remote Play pairing: a failed Pair now clears the PIN it asked the PS5 for, a PS5 that hangs up without answering gets tried again, and the app asks in the way other clients do before falling back to how it asked before. This may not be enough for everyone hitting "closed the connection". (#704)
+
+## 11.2.9
+
+- iPhone Duo: with the phone open and sideways, the stream now uses the whole height it can. Large system insets at the top and bottom cut the picture to a band across the middle, losing the top and bottom of the game. (#675)
+- iPhone Duo: when folded, the tabs move into the empty column under the system icons, which gives the page its height back. (#675)
+- iPhone and iPad app: during a stream the app asks iOS to send the controller's PS button to the console instead of opening the Games overlay. iOS only agrees if your controller's Home button setting lets the app decide. The menu in full screen also has a PS button now, which always works. (#675)
+
+## 11.2.8
+
+- Convert: a game whose executables are plain unsigned ELFs now gets them fake-signed in the package, image or game folder you make, because the console won't start a plain ELF. Your source isn't changed. A game folder sent as it is stays as it is.
+- Convert: more packages can be read. Patches and updates, and packages built with PSVIETHOA FPKG Builder, were refused when they used smaller blocks, byte shuffling (PFS v3) or a different layout mark.
+
+## 11.2.7
+
+- iPhone and iPad app: full screen no longer asks iOS for its own web full screen. That put Apple's X on top of L2, and opening the keyboard from the Touchpad made the screen jump. (#675)
+- Phones and tablets: the on-screen controller's parts no longer sit on each other. The Controller/Touchpad switch overlapped L2 and R2 on most phones, and on a folded iPhone Duo or a short screen the sticks ran into the D-pad and the face buttons. (#675)
+- iPhone Duo: dialogs and Notifications stay clear of the column of system icons, so their buttons can be reached. In full screen the picture stays centered and uses the full width, and with a controller connected it sits in the middle when held upright. (#675)
+- Convert: `.exfat` and `.ffpkg` names are kept short enough to mount. A long folder name used to build fine and then fail to mount.
+- Convert: an LZ4-packed game keeps its `ampr_emu.index` when made into a package or a plain image. Replacing it dropped the files inside the packs.
+- Convert: making a game folder from an image also replaces a stale `ampr_emu.index`, as images and packages already did.
+- Convert: an `.exfat` with a decomposed file name, usually from a Mac, is refused with a message instead of building a game that can't find its files.
+- Packages build and verify a little faster: the CRC check is about five times quicker.
+
+## 11.2.6
+
+- Dependency updates, including a much newer SMB client (0.39) and audio library (cpal 0.18). Browsing, reading, uploading, renaming and deleting on a network share were checked against a real Samba server.
+- DualSense haptics keep playing through a small audio glitch. The new audio library reports glitches as errors, and those no longer stop the rumble.
+- Thanks & Support: two more names on the list. Thank you!
+
 ## 11.2.5
 
 - Hardware: Read sensors works while a game runs. It used to wait 30 seconds and bring back only the temperatures, because the measured CPU clock doesn't answer during a game. Now the fan, GPU and core clocks come back in about 2 seconds, then almost at once, and only the measured clock waits until the game is closed.
