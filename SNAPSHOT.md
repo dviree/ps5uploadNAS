@@ -2,7 +2,7 @@
 
 A blueprint of the current architecture: what is upstream and what this fork adds. Update it
 when a task changes the shape of the code (new module, route, screen, workflow step).
-Last updated: 2026-11-09, upstream 12.4.1 merged.
+Last updated: 2026-11-10, upstream 12.4.2 merged.
 
 ## Upstream (phantomptr/ps5upload), in short
 

@@ -4,15 +4,16 @@ Found bugs, stubs and ideas. Update it when a task is done or something new turn
 
 ## >RESUME HERE
 
-- Last done (2026-11-09):
-  - Merged upstream 12.4.1, with conflicts resolved:
-    - `folder_build::build_packed` replaces the fork's `reopen: Option` change to upstream's
-      folder build.
-    - `fpkg_api.rs` keeps upstream's zstd, update and destination steps next to `ampr_lz4`.
-    - Phone upload now uses upstream's device pick.
-  - Engine, fpkg and core tests, vitest, tsc and the e2e tests listed in the commit pass.
-- The Docker build of the merge (run 43) is green: images `lz4`, `latest` and `lz4-2281602`.
-- Next: nothing pending. On "Uppdatera", merge the latest upstream and check the LZ4 original.
+- Last done (2026-11-10):
+  - Merged upstream 12.4.2 (helper rest detection, helper at boot, payload updates, the
+    Workshop output folder; Hearbridge removed upstream) and the CodeQL nonce fix, with no
+    conflicts.
+  - The LZ4 original has nothing new since 2026-10-28 (issues #4, #5 and #7 were already
+    reviewed).
+- Next: check that the Docker build of the merge is green, then tell the user to run the NAS
+  update script.
+- If the cloud sandbox's disk fills, delete `engine/target/debug/incremental` and
+  `output/playwright`.
 
 ## Open
 
