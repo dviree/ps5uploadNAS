@@ -10,8 +10,10 @@ Found bugs, stubs and ideas. Update it when a task is done or something new turn
     conflicts.
   - The LZ4 original has nothing new since 2026-10-28 (issues #4, #5 and #7 were already
     reviewed).
-- Next: check that the Docker build of the merge is green, then tell the user to run the NAS
-  update script.
+- The Docker build of the merge (run 44) is green.
+- Open question: the user asked to remove the LZ4 code from theghostonline, picked "only the
+  fork's ghostonline parts" (Compatibility reports, the Glacier gate, the lz4-upstream
+  workflows), then interrupted. Confirm before removing anything.
 - If the cloud sandbox's disk fills, delete `engine/target/debug/incremental` and
   `output/playwright`.
 
