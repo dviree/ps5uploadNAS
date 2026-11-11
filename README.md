@@ -1,3 +1,14 @@
+## NAS Zstd converter
+
+Convert Games opens the integrated Zstd converter (Forge 0.5.5, ampr-emu-ng 0.3.5).
+Packing uses Zstd level 5 by default and verifies the output against the source.
+LZ4 packing is disabled. Existing games are not converted automatically.
+
+Mount originals at `/ps5:ro`, outputs at `/zstd`, and retain the existing `/data` volume.
+The converter keeps its state in `/data/ps5lz4`; do not share it with another worker.
+The private converter is accessed through the engine's normal URL and IP allowlist,
+with no second published port. See `engine/compose.yaml` for mount examples.
+
 # ps5upload
 
 <p align="center">

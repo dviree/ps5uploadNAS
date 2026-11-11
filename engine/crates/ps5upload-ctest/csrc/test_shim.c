@@ -1873,6 +1873,41 @@ static int data_rpc(uint16_t method, const uint8_t *body, uint32_t body_len, uin
 
 /* The server with the real data hooks: uploads land under any absolute path. `port` 0 =
  * any (a restart passes the old one); `workers` nonzero fixes the apply pool's size. */
+/* #783, JF_READBACK as the engine sees it. `g_rb_cap` 0 makes the data server advertise no CAP_READBACK, as
+ * a helper from before the read-back (set before the server starts). The next `n` large-file read-backs find
+ * one byte of the part file changed on the drive (at `at`), after every byte was received and checked.
+ * `g_rb_last` is the last committing job's read-back setting (-1: none yet). The hook is this test's alone:
+ * the data server installs no other. */
+static int g_rb_cap = 1, g_rb_corrupt_n, g_rb_last = -1;
+static uint64_t g_rb_corrupt_at;
+static void rb_hook(ava1_job_t *j, int point, uint32_t id) {
+    (void)id;
+    if (point == AVA1_HOOK_COMMIT_VERIFIED || point == AVA1_HOOK_READBACK)
+        __atomic_store_n(&g_rb_last, j->readback, __ATOMIC_SEQ_CST);
+}
+/* AVA1 1.0.9 reads a large file back while it still arrives, so the byte is changed right before the read
+ * that covers it (live or at the commit), not once before the commit's pass: by then it may be checked. */
+static void rb_read_hook(ava1_job_t *j, uint32_t id, uint64_t off, uint64_t len, int fd, int live) {
+    uint64_t at = __atomic_load_n(&g_rb_corrupt_at, __ATOMIC_SEQ_CST);
+    uint8_t b;
+    (void)j, (void)id, (void)live;
+    if (at < off || at >= off + len || __atomic_load_n(&g_rb_corrupt_n, __ATOMIC_SEQ_CST) <= 0) return;
+    if (pread(fd, &b, 1, (off_t)at) == 1) {
+        b ^= 0xa5;
+        if (pwrite(fd, &b, 1, (off_t)at) == 1) __atomic_sub_fetch(&g_rb_corrupt_n, 1, __ATOMIC_SEQ_CST);
+    }
+}
+void ava1_test_readback_cap(int on) { __atomic_store_n(&g_rb_cap, on, __ATOMIC_SEQ_CST); }
+void ava1_test_readback_corrupt(int n, uint64_t at) {
+    __atomic_store_n(&g_rb_corrupt_at, at, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&g_rb_corrupt_n, n, __ATOMIC_SEQ_CST);
+    __atomic_store_n(&g_rb_last, -1, __ATOMIC_SEQ_CST);
+    ava1_apply_hook = rb_hook;
+    ava1_apply_rb_hook = rb_read_hook;
+}
+int ava1_test_readback_corrupt_left(void) { return __atomic_load_n(&g_rb_corrupt_n, __ATOMIC_SEQ_CST); }
+int ava1_test_readback_last(void) { return __atomic_load_n(&g_rb_last, __ATOMIC_SEQ_CST); }
+
 int ava1_test_server_start_data(const uint8_t secret[32], const char *peers_path, const char *jobs_dir,
                                 uint32_t ping_ms, uint32_t dead_ms, uint32_t handshake_ms, uint32_t fsync_delay_us,
                                 uint16_t port, uint8_t workers) {
@@ -1910,6 +1945,7 @@ int ava1_test_server_start_data(const uint8_t secret[32], const char *peers_path
     cfg.rpc = data_rpc; /* the data plane's methods, then node.info */
     cfg.data = ava1_data_hooks();
     cfg.caps = AVA1_CAP_DATA_PLANE | AVA1_CAP_SHARED_JOBS; /* what an embedder (ps5upload's ava1_glue.c) does */
+    if (__atomic_load_n(&g_rb_cap, __ATOMIC_SEQ_CST)) cfg.caps |= AVA1_CAP_READBACK; /* ... since #783 */
     rc = ava1_server_start(&cfg);
     if (rc != 0) {
         ava1_data_stop();

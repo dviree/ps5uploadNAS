@@ -6,6 +6,77 @@ What's new in ps5upload, written for humans.
 
 ## Unreleased
 
+Files:
+
+- Extracting a RAR archive on the PS5 no longer fails with "Declared dictionary size is not supported". Archives packed with a large dictionary (up to 4 GB, common for big games) now extract on the console. Tested on a PS5 Pro with a 4 GB-dictionary multi-part archive.
+
+Upload:
+
+- "Send it as one game image" now builds the image in Workshop's Output folder, and shows it with a Change button. Before, it always built it in your Downloads folder, with no way to pick another drive.
+
+## 12.4.7
+
+Play Together:
+
+- Fixed the picture stuttering for friends on your home network, mostly at higher quality (like the default 15 Mbit/s). 12.4.5 only got part of the way: the app still held the picture to about 8 Mbit/s on a fast network and dropped pictures whenever the game got busy. Friends on your home network now always get the full rate while the connection stays clean. Tested on a PS5 Pro at 15 Mbit/s: no dropped pictures.
+
+Files:
+
+- Extract can now put an archive's contents in any folder on the PS5, on any drive: from an external drive to the internal one, for example, and into a folder you name. The extract dialog has an "Extract to" choice (it still starts at the archive's own folder), shows the free space on the chosen drive, and offers to merge if that folder already exists. This works on the console's own file page too.
+
+## 12.4.6
+
+Phone app:
+
+- Fixed text squeezed into a column one letter wide in some menus on phones (Network Shares, Shared Folders and others). When a label and its buttons don't fit side by side, the buttons now move below the label.
+
+Network shares:
+
+- Fixed "Can't reach NFS: that program isn't available on this port" with many NFS servers (Linux, NAS, Windows). The app now finds the server's mount service over UDP as well as TCP, and when it still can't, the message says which service and port to check.
+
+## 12.4.5
+
+Play Together:
+
+- Fixed friends' picture lagging behind, even on a fast home network. On a quiet screen (a menu) the stream sends very little, and the app wrongly took that as a slow connection. When the game got busy again, it held the picture back while it caught up, so friends fell seconds behind. Friends on your home network now get the full rate all the time, and friends over the internet get it back as soon as their connection shows it can carry it.
+- After "Lower quality" restarts the stream, Play Together now reopens by itself instead of saying it couldn't start.
+- When the PS5 accepts a Remote Play start but never finishes it, the app now says so and what to check (the TV may be asking something, or a game started by another user may be holding it up), instead of only "The stream stopped".
+- The stream's status bar no longer shows 0.0 Mbit/s and a decode time of 0 ms when the system's media player shows the picture. The light bar's dot is now visible on the dark bar too.
+- A friend whose connection can't keep up with the stream no longer falls further and further behind. Their picture now skips ahead to a fresh one, so the delay stays short instead of growing to several seconds. You and other friends aren't affected. A very slow connection still shows a choppy picture; lowering the quality (offered in the Play Together panel) is the fix for that.
+
+Convert:
+
+- The image options now explain the asset packs (LZ4, zstd): why they aren't offered for a game, and that a packed game only plays when ShadowMount+ mounts it. A "Which image should I make?" note explains the image types and compression in plain words.
+
+Games:
+
+- Disk images that ShadowMount+ mounts under the game's name are now linked to their game, so they show its title and cover instead of "not linked to a game". Thanks to kh-mitya.
+- On a game's page, the Consoles card no longer squeezes a console's name into a column one letter wide. Thanks to kh-mitya.
+
+PS5 helper:
+
+- After PS5Upload updates its helper in a Payload Manager slot, Payload Manager now shows the right version, and no longer offers an older release as an "update". Thanks to kh-mitya.
+
+## 12.4.4
+
+Transfers:
+
+- The check that reads files back on the PS5 now runs while a large file is still arriving, so it adds almost no time: a 4 GiB file to a PS5 Pro took 60 s with the check, against 83 s in 12.4.3 and about 62 s with no check.
+- The check now reads from the drive itself, not from a copy still held in the console's memory, so it can catch a fault on the drive.
+
+## 12.4.3
+
+PS5 helper and rest mode:
+
+- Fixed a rare problem where a PS5 with Tailscale turned on could switch itself off while in rest mode. The helper's Tailscale now closes all its connections the moment the console starts going to rest, whatever starts it (PS5Upload, the console's menu, the console resting by itself, or a background download wake), and opens them again once the console is awake and settled. Each step is written to the console's power.log.
+
+Transfers:
+
+- Large files are now checked on the PS5 after they're written: the console reads each one back from its drive and compares it with what was sent, and a file that doesn't match is sent again. It can be turned off in Settings ("Check files on the PS5 after writing").
+- A resumed conversion checks its whole image, so a source file edited between runs can't leave old and new data mixed.
+
+## 12.4.2
+
 PS5 helper and rest mode:
 
 - The helper now notices a rest started from the console's own menu (or when the PS5 goes to rest by itself), not just one PS5Upload asks for. Before, such a rest could slip past it, so Tailscale stayed connected through rest and the helper's after-wake care never ran.

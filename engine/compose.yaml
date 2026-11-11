@@ -66,6 +66,9 @@ services:
       # browser opens here (see PS5UPLOAD_BROWSE_ROOTS above); read-only is
       # enough to install.
       - /srv/ps5/pkgs:/pkgs:ro
+      # NAS converter: originals are read-only; conversions go to separate folders.
+      - /srv/ps5/games:/ps5:ro
+      - /srv/ps5/zstd:/zstd
 
 volumes:
   ps5upload-data:

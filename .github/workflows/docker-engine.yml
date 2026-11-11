@@ -38,7 +38,7 @@ on:
     # NAS pulls this fork's build instead of compiling it.
     branches: [main]
   pull_request:
-    paths: ['engine/**', 'client/**', 'payload/**', 'scripts/docker-smoke.sh', '.github/workflows/docker-engine.yml']
+    paths: ['engine/**', 'client/**', 'vendor/**', 'scripts/**', '.github/workflows/docker-engine.yml']
   workflow_dispatch:
     inputs:
       tag:

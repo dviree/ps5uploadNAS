@@ -1,39 +1,18 @@
 # BACKLOG
 
-Found bugs, stubs and ideas. Update it when a task is done or something new turns up.
-
 ## >RESUME HERE
 
-- Last done (2026-11-10):
-  - Merged upstream 12.4.2 (helper rest detection, helper at boot, payload updates, the
-    Workshop output folder; Hearbridge removed upstream) and the CodeQL nonce fix, with no
-    conflicts.
-  - The LZ4 original has nothing new since 2026-10-28 (issues #4, #5 and #7 were already
-    reviewed).
-- The Docker build of the merge (run 44) is green.
-- Open question: the user asked to remove the LZ4 code from theghostonline, picked "only the
-  fork's ghostonline parts" (Compatibility reports, the Glacier gate, the lz4-upstream
-  workflows), then interrupted. Confirm before removing anything.
-- If the cloud sandbox's disk fills, delete `engine/target/debug/incremental` and
-  `output/playwright`.
+- 2026-11-11: merged upstream main 51660dbe (VERSION 12.4.7).
+- User will only use Zstd: removed LZ4 packing controls, rejected legacy packing requests,
+  integrated the current NAS converter with Forge 0.5.5 / NG v0.3.5, and updated the native
+  converter's tested runtime to v0.3.5 with the release digest.
+- Verify the combined Docker build before updating a NAS container. Add /ps5:ro and /zstd
+  bind mounts; use the existing /data volume for separate converter state.
+- A global Trail-code installation was rejected by automatic review. No workaround used.
+- Rust compilation and Docker integration need CI; these tools are absent locally.
 
 ## Open
 
-- Delete the stale remote branch `codex/files-iphone-upload` (Trail flagged it). Ask the user
-  first.
-- dviree/PS5-LZ4-NAS: Trail hooks are not automatic there (`trail init` was blocked here). The
-  user can run it in a Codespace.
-- An LZ4 game folder cannot be written to a saved server: `build_packed` writes locally only.
-  It could follow upstream's `server_out::write_folder` if wanted.
-- An optional amd64-only Docker build (faster) was offered and not decided.
-
-## Ideas
-
-- A `/saves` mount for save backups was suggested to the user. Not confirmed.
-- My games could show the zstd packs state (upstream 12.x) next to the LZ4 state.
-
-## Done (recent)
-
-- 12.4.1 merge: the fork's phone-upload button was dropped for upstream's identical feature.
-- PKG Installer with installed status and Install all.
-- Packages go to the pkg folder. The DLC folder is mounted under its own name.
+- Validate conversion and sending with a real game/console after the image builds.
+- The NAS gateway accepts normal small JSON actions; use the main Files screen for large
+  uploads (the converter gateway retains the engine's default request-body limit).

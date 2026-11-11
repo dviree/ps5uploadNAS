@@ -1,8 +1,8 @@
-# This fork (dviree/ps5uploadNAS)
+# This fork
 
-ps5upload (phantomptr/ps5upload) with LZ4: Convert Games has My games (which PS5 games in the
-library can be LZ4), the converter, and Compatibility (LZ4 reports and the .ffpfsc list). It
-runs as the Docker web UI on a NAS.
+The user works only with Zstd. Keep LZ4 packing controls unavailable; existing LZ4 readers
+may remain for opening archives and existing games. Do not convert or delete existing
+LZ4 game folders automatically. Preserve original games during every conversion.
 
 ## Memory files: read first, update when a task is done
 
@@ -29,14 +29,9 @@ pull request or schedule.
 Keep it that way:
 
 - Do not add push, tag, pull_request or schedule triggers to any workflow but
-  `docker-engine.yml` and `lz4-upstream-check.yml`, and do not add new workflows that build
+  `docker-engine.yml`, and do not add new workflows that build
   anything else.
-- `lz4-upstream-check.yml` runs daily and builds nothing: it checks the LZ4 Compression
-  project (theghostonline/PS5-LZ4-Compression on theghostonline.dev, which left GitHub on
-  2026-10-17) and opens an `lz4-upstream` issue listing new commits and releases to review and
-  port (packing rules in `ampr_pack`, game fixes; dviree/PS5-LZ4-NAS ports them too).
-- `lz4-upstream-diff.yml` (by hand, builds nothing) prints the LZ4 Compression project's
-  source diff between two release tags into its log, to review a new release from here.
+- Follow quer3q/ps5-dump-forge and quer3q/ampr-emu-ng for Zstd updates.
 - When merging upstream (`phantomptr/ps5upload` main), check every `on:` block in
   `.github/workflows/` afterwards: an upstream change there must not bring those triggers
   back. Resolve such conflicts by keeping this fork's `workflow_dispatch`-only blocks.
@@ -46,7 +41,7 @@ Keep it that way:
 ## Updating the NAS
 
 The user runs the image on a NAS as the container `ps5upload`, updated by a script on the NAS
-that pulls the image and recreates the container (it refuses while an LZ4 build is running).
+that pulls the image and recreates the container (it refuses while a conversion is running).
 Whenever a change is pushed to `main`, end the reply by telling the user to run that update
 script once the image build is done. Keep the user's network addresses, paths and ids out of
 this repository.

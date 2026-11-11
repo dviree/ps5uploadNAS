@@ -77,6 +77,7 @@ mod local_fs;
 mod log_dedup;
 mod log_levels;
 mod lz4_api;
+mod nas_zstd;
 mod lz4_compat;
 mod mcp;
 mod mesh_api;
@@ -228,6 +229,9 @@ fn module_case_renames(
 fn make_transfer_config(addr: &str) -> TransferConfig {
     let mut cfg = TransferConfig::new(addr);
     cfg.bandwidth_cap_bps = bandwidth_cap_from_env(&|k| std::env::var(k).ok(), process_warned());
+    // "Check files on the console after writing" (#783), from the app's shared settings, so
+    // every way an upload starts (the app, the queue, a script, an agent) honours it.
+    cfg.verify_writes = settings_api::flag("verify_writes");
     cfg
 }
 
@@ -1569,7 +1573,8 @@ fn attach_live_notes(cfg: &mut TransferConfig, job_id: Uuid) {
 }
 
 /// Adds a running job's live notes to its snapshot JSON: `phase` (`"skipping"` with
-/// `skip_done_bytes` / `skip_total_bytes`), `bottleneck` (AVA1's word) and `settling`. Fields
+/// `skip_done_bytes` / `skip_total_bytes`), `bottleneck` (AVA1's word), `settling` and
+/// `verifying` (the console reads its last large files back, #783). Fields
 /// that do not apply are absent, so the client shows nothing for them. A snapshot that is not
 /// `running` is returned as it is.
 pub(crate) fn merge_live_notes(
@@ -1639,6 +1644,10 @@ pub(crate) fn merge_live_notes(
         let peak = n.unswept_peak.load(Relaxed).max(left);
         o.insert("settle_files_left".into(), left.into());
         o.insert("settle_files_total".into(), peak.into());
+    }
+    // Every byte is on the console and it is reading the last large files back (#783).
+    if n.verifying.load(Relaxed) && !n.settling.load(Relaxed) {
+        o.insert("verifying".into(), true.into());
     }
     v
 }
@@ -12192,6 +12201,8 @@ fn build_app_and_mcp(
             get(inspect::inspect_files_handler),
         )
         .route("/api/fpkg/inspect", post(fpkg_api::fpkg_inspect_handler))
+        .route("/api/nas-zstd", get(nas_zstd::proxy).post(nas_zstd::proxy))
+        .route("/api/nas-zstd/{*path}", get(nas_zstd::proxy).post(nas_zstd::proxy))
         .route("/api/lz4/status", post(lz4_api::lz4_status_handler))
         .route("/api/lz4/ffpfsc", get(lz4_api::lz4_ffpfsc_handler))
         .route("/api/lz4/compat", get(lz4_compat::lz4_compat_handler))
@@ -14419,11 +14430,17 @@ mod helpers_tests {
             "settling stays absent until the receiver says so"
         );
         assert!(v.get("settle_files_left").is_none());
+        assert!(v.get("verifying").is_none());
+        // #783: the console reads the last large files back
+        n.verifying.store(true, Relaxed);
+        let v = merge_live_notes(Some(&n), running.clone());
+        assert_eq!(v["verifying"], true);
         n.settling.store(true, Relaxed);
         n.unswept.store(12, Relaxed);
         n.unswept_peak.store(50, Relaxed);
         let v = merge_live_notes(Some(&n), running);
         assert_eq!(v["settling"], true);
+        assert!(v.get("verifying").is_none(), "never both lines");
         assert_eq!(
             (
                 v["settle_files_left"].as_u64(),

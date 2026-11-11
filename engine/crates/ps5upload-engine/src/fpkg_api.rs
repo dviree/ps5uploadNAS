@@ -1577,6 +1577,10 @@ pub(crate) async fn exfat_build_handler(
     State(state): State<AppState>,
     Json(mut req): Json<ExfatBuildReq>,
 ) -> impl IntoResponse {
+    if req.ampr_lz4.is_some() {
+        return json_err(StatusCode::BAD_REQUEST, "Only Zstd packing is enabled; choose ampr_zstd").into_response();
+    }
+
     let source = resolve_engine_path(&req.source);
     // A game folder on this computer, on a saved server (`remote://`) or on a console
     // (`ps5://`, read through the helper as a package build reads it): the opener below
@@ -2482,6 +2486,10 @@ pub(crate) async fn folder_build_handler(
     State(state): State<AppState>,
     Json(mut req): Json<FolderBuildReq>,
 ) -> impl IntoResponse {
+    if req.ampr_lz4.is_some() {
+        return json_err(StatusCode::BAD_REQUEST, "Only Zstd packing is enabled; choose ampr_zstd").into_response();
+    }
+
     use crate::folder_build;
     let source = resolve_engine_path(&req.source);
     // Straight to a server: the folder there.

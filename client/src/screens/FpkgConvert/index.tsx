@@ -207,7 +207,7 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
   const [lz4On, setLz4On] = useState(false);
   const [lz4Profile, setLz4Profile] = useState<{ name: string; text: string } | null>(null);
   const [lz4InstallRuntime, setLz4InstallRuntime] = useState(false);
-  const [packKind, setPackKind] = useState<"lz4" | "zstd">("lz4");
+  const packKind = "zstd" as const;
   const [emuAddedTo, setEmuAddedTo] = useState<string | null>(null);
   const [zstdLevel, setZstdLevel] = useState(5);
   const build: ConvertBuild =
@@ -727,7 +727,7 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
         installRuntime: lz4InstallRuntime,
         onInstallRuntime: setLz4InstallRuntime,
         kind: packKind,
-        onKind: setPackKind,
+        onKind: () => {},
         zstdLevel,
         onZstdLevel: setZstdLevel,
       }
