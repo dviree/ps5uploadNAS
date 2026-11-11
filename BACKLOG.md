@@ -8,7 +8,7 @@
   converter's tested runtime to v0.3.5 with the release digest.
 - Verify the combined Docker build before updating a NAS container. Add /ps5:ro and /zstd
   bind mounts; use the existing /data volume for separate converter state.
-- A global Trail-code installation was rejected by automatic review. No workaround used.
+- Trail-code 0.29.0 installed after explicit user authorization. Rebuilt the code map and saved the Zstd-only policy in .trail/learnings; the earlier installation block is resolved.
 - Rust compilation and Docker integration need CI; these tools are absent locally.
 
 ## Open

@@ -50,7 +50,7 @@ this repository.
 
 The user wants Trail-code (`@trailhq/trail-code`, the `trail` command) used in every session.
 Install it if missing (`npm install -g @trailhq/trail-code`), build the code map (`trail build`;
-`graft/` is a local cache) and find code with `trail ask`, `trail grep`, `trail callers`,
+`.trail/cache/` is a local cache (Trail 0.29.0)) and find code with `trail ask`, `trail grep`, `trail callers`,
 `trail skeleton` and `trail map` before grepping or opening files. Read the learnings in
 `.trail/learnings/` first, check a change with `trail check`, and save what a session worked
 out with `trail note`, committed with the change it came from.

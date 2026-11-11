@@ -23,3 +23,6 @@ standalone converter worker. engine/compose.yaml documents the mounts.
 Docker is the only automatic build workflow. The old LZ4-only watcher has been removed.
 Local checks: TypeScript, Vite, Python codec/default/source-retention tests, UI script
 syntax. Rust and the combined Docker image require CI; no local Rust/Docker toolchain.
+
+Trail-code 0.29.0: refreshed local code map (3532 files), with current Zstd-only
+learnings in .trail/learnings. The generated map stays in ignored .trail/cache/.
