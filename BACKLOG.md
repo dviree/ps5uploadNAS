@@ -2,6 +2,10 @@
 
 ## >RESUME HERE
 
+- 2026-11-12: merged upstream 900feb68 and release version sync e4826074 / 12.4.12; ported the per-codec Zstd
+  queue/report fix from PS5-LZ4-NAS 48cd52ca. The previous combined Docker build
+  is green. Local TypeScript, 91 UI/queue tests and 5 NAS Zstd tests pass. Keep new packing restricted to Zstd; preserve original and old packed games.
+
 - 2026-11-11: merged upstream main 51660dbe (VERSION 12.4.7).
 - User will only use Zstd: removed LZ4 packing controls, rejected legacy packing requests,
   integrated the current NAS converter with Forge 0.5.5 / NG v0.3.5, and updated the native

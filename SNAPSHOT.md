@@ -1,6 +1,6 @@
 # SNAPSHOT
 
-Last updated: 2026-11-11. Upstream phantomptr/ps5upload main 51660dbe (VERSION 12.4.7).
+Last updated: 2026-11-12. Upstream phantomptr/ps5upload release v12.4.12 / e4826074 (main 900feb68).
 
 The Rust engine and React client retain this fork's PKG output folder and installer.
 Convert Games now opens the Zstd NAS converter; Workshop remains alongside it.
@@ -8,7 +8,7 @@ There are no LZ4 packing controls, and old ampr_lz4 build requests are rejected.
 Workshop defaults to Zstd packs; its tested runtime is ampr-emu-ng 0.3.5 (release
 SHA-256 verified). Existing LZ4 readers remain to support existing files and archives.
 
-The current PS5-LZ4-NAS backend is vendored at vendor/ps5-lz4-nas from 2454c640.
+The current PS5-LZ4-NAS backend is vendored at vendor/ps5-lz4-nas from 48cd52ca.
 Local patches restrict packing to Zstd, select level 5 by default and bind HTTP to loopback.
 The combined web UI image builds Forge 0.5.5 and ampr-emu-ng v0.3.5/a0dd88a,
 including corresponding runtime source and licenses. The engine proxies /api/nas-zstd
@@ -24,5 +24,13 @@ Docker is the only automatic build workflow. The old LZ4-only watcher has been r
 Local checks: TypeScript, Vite, Python codec/default/source-retention tests, UI script
 syntax. Rust and the combined Docker image require CI; no local Rust/Docker toolchain.
 
-Trail-code 0.29.0: refreshed local code map (3532 files), with current Zstd-only
+Trail-code 0.29.0: refreshed local code map (3555 files), with current Zstd-only
 learnings in .trail/learnings. The generated map stays in ignored .trail/cache/.
+
+2026-11-12: merged upstream 12.4.12 (streaming tar/Zstd upload, audit fixes, media
+playback and cross-user save restore fixes). Ported the per-codec NAS queue/report
+fix: an old LZ4 report cannot mark a new Zstd request done. The previous combined
+Docker build (104e2d41, run 43004788346) completed successfully.
+
+Validation for the update: TypeScript and 91 converter/queue UI tests passed;
+five NAS Zstd tests passed, including the cross-codec report regression.

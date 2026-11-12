@@ -1606,6 +1606,19 @@ pub(crate) fn merge_live_notes(
             n.skip_done_bytes.load(Relaxed).into(),
         );
     }
+    // A compressed tar is decoded once to list its files before any is sent: how much of the
+    // archive file has been read.
+    if n.phase.load(Relaxed) == ps5upload_core::transfer::LIVE_PHASE_LISTING {
+        o.insert("phase".into(), "listing".into());
+        o.insert(
+            "listing_done_bytes".into(),
+            n.skip_done_bytes.load(Relaxed).into(),
+        );
+        o.insert(
+            "listing_total_bytes".into(),
+            n.skip_total_bytes.load(Relaxed).into(),
+        );
+    }
     // What the console already held when the job first opened (a resume). `bytes_sent`
     // counts it, so a client takes it off for this run's speed and time left.
     let resumed = n.resumed_bytes.load(std::sync::atomic::Ordering::Acquire);
@@ -2257,6 +2270,27 @@ struct Transfer7zReq {
 /// `/api/7z/inspect[/stream]` request.
 #[derive(Deserialize)]
 struct SevenzInspectReq {
+    archive_path: String,
+}
+
+/// `/api/transfer/tar` request: a tar (`.tar`, `.tar.zst`/`.tzst`, `.tar.gz`/`.tgz`,
+/// `.tar.xz`/`.txz`, `.tar.bz2`/`.tbz2`/`.tbz`) or a lone `.zst`. The same fields as 7z.
+#[derive(Deserialize)]
+struct TransferTarReq {
+    #[serde(alias = "console", alias = "host")]
+    addr: Option<String>,
+    tx_id: Option<String>,
+    dest_root: String,
+    archive_path: String,
+    #[serde(default)]
+    excludes: Vec<String>,
+    #[serde(default)]
+    bandwidth_cap_mbps: Option<f64>,
+}
+
+/// `/api/tar/inspect[/stream]` request.
+#[derive(Deserialize)]
+struct TarInspectReq {
     archive_path: String,
 }
 
@@ -4288,6 +4322,57 @@ async fn ps5_save_open(Json(req): Json<SaveOpenReq>) -> impl IntoResponse {
             }
         }
         ps5upload_core::saves::save_open(&addr, &image)
+    })
+    .await
+    .map_err(anyhow::Error::from)
+    .and_then(|r| r);
+    match r {
+        Ok(v) => (StatusCode::OK, Json(v)).into_response(),
+        Err(e) => json_err(StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct SaveOwnerReq {
+    #[serde(alias = "console", alias = "host")]
+    addr: Option<String>,
+    /// "info", "set" or "forget".
+    #[serde(default)]
+    op: String,
+    /// A PS5 save image in a user's savedata_prospero folder.
+    #[serde(default)]
+    image: String,
+    /// With "info": also open the save for the param.sfo inside it and its usage.
+    #[serde(default)]
+    deep: bool,
+    /// With "set": another account (16 hex digits) than the folder's user's own.
+    #[serde(default)]
+    account: Option<String>,
+}
+
+/// POST /api/ps5/saves/owner `{addr, op, image, deep?, account?}` — whose save it is (#809).
+/// `info` says what the image, the folder's user and that user's save database hold; `set` makes
+/// the save belong to the user whose folder it is in (the account and user in the save, and its
+/// row in their save database); `forget` removes that row. A save's game must not be running.
+async fn ps5_save_owner(Json(req): Json<SaveOwnerReq>) -> impl IntoResponse {
+    let Some(addr) = required_console_addr(req.addr) else {
+        return missing_console_addr();
+    };
+    let (op, image, deep, account) = (req.op, req.image, req.deep, req.account);
+    if !matches!(op.as_str(), "info" | "set" | "forget") {
+        return json_err(StatusCode::BAD_REQUEST, "op is info, set or forget").into_response();
+    }
+    crate::log_info!("save_owner: addr={addr} op={op} image={image}");
+    let r = tokio::task::spawn_blocking(move || {
+        let _busy = helper_stop::enter(&addr);
+        if op != "info" || deep {
+            if let Some(title) = save_backup::title_of_save_image(&image) {
+                if save_backup::title_running(&addr, title).map_err(anyhow::Error::msg)? {
+                    anyhow::bail!("{title} is running on the PS5. Close the game first.");
+                }
+            }
+        }
+        ps5upload_core::saves::save_owner(&addr, &op, &image, deep, account.as_deref())
     })
     .await
     .map_err(anyhow::Error::from)
@@ -6793,6 +6878,45 @@ fn speed_test_dir() -> std::path::PathBuf {
         .join("speedtest")
 }
 
+/// Removes every file and folder in `dir` last changed before `cutoff`; how many went. For the
+/// engine's own scratch folders at its start, by age: what this engine or another on the same
+/// data folder made lately stays.
+pub(crate) fn sweep_older_than(dir: &std::path::Path, cutoff: std::time::SystemTime) -> usize {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return 0;
+    };
+    let mut removed = 0;
+    for e in entries.flatten() {
+        // The entry itself, never what a link points at.
+        let old = std::fs::symlink_metadata(e.path())
+            .and_then(|m| m.modified())
+            .is_ok_and(|t| t < cutoff);
+        if old && ps5upload_core::archive_extract::remove_path_retrying(&e.path()).is_ok() {
+            removed += 1;
+        }
+    }
+    removed
+}
+
+/// A speed test whose client never asked for the cleanup (a closed tab, a crash) has its files
+/// removed after this long: up to 2 GiB sent and 2 GiB back. Longer than the slowest test.
+const SPEED_TEST_KEEP: std::time::Duration = std::time::Duration::from_secs(2 * 60 * 60);
+
+/// Counts the speed tests prepared, so a timer removes only its own test's files.
+static SPEED_TEST_RUN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Removes the speed test's folder if `run` is still the latest test. Whether it did.
+fn expire_speed_test(
+    dir: &std::path::Path,
+    run: u64,
+    latest: &std::sync::atomic::AtomicU64,
+) -> bool {
+    if latest.load(std::sync::atomic::Ordering::SeqCst) != run {
+        return false;
+    }
+    ps5upload_core::archive_extract::remove_path_retrying(dir).is_ok()
+}
+
 /// Smallest and largest speed-test file, in MiB. Small enough to finish quickly on Wi-Fi,
 /// large enough at the top that a fast link is measured over seconds, not milliseconds.
 const SPEED_TEST_MIN_MIB: u64 = 16;
@@ -6848,6 +6972,16 @@ async fn speed_test_prepare_handler(Json(req): Json<SpeedTestPrepareReq>) -> imp
     let path = dir.join("ps5upload-speedtest.bin");
     let back = dir.join("back");
     let (p, b) = (path.clone(), back.clone());
+    let run = SPEED_TEST_RUN.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+    {
+        let dir = dir.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(SPEED_TEST_KEEP).await;
+            let _ =
+                tokio::task::spawn_blocking(move || expire_speed_test(&dir, run, &SPEED_TEST_RUN))
+                    .await;
+        });
+    }
     let r = tokio::task::spawn_blocking(move || {
         // A previous run's files, if it was interrupted.
         let _ = std::fs::remove_dir_all(&b);
@@ -9647,6 +9781,308 @@ async fn transfer_7z_handler(
         .into_response()
 }
 
+// ── tar / .zst handlers ── the 7z handlers' shape. A tar has no index: a plain `.tar` is
+//    listed by its headers (instant), a compressed one is decoded once to list it. That listing
+//    is cached (`tar_archive::cached_layout`), so the Upload card's inspect pays for it and the
+//    upload that follows starts at once. An upload whose archive nobody inspected lists it
+//    inside the job (phase "listing", cancellable) and the job's total and files appear then.
+
+/// POST /api/tar/inspect — counts, sizes, entry names and the game of a tar or `.zst`. A
+/// compressed tar is decoded to answer, so this can take as long as reading the archive; the
+/// `/stream` variant beats while it runs.
+async fn tar_inspect_handler(Json(req): Json<TarInspectReq>) -> impl IntoResponse {
+    let archive_path = req.archive_path;
+    crate::log_info!("tar_inspect: archive={archive_path}");
+    let started = std::time::Instant::now();
+    let result = tokio::task::spawn_blocking({
+        let p = archive_path.clone();
+        move || {
+            ps5upload_core::tar_archive::inspect_tar_with_progress(
+                std::path::Path::new(&p),
+                &|_| {},
+            )
+        }
+    })
+    .await;
+    let elapsed_ms = started.elapsed().as_millis();
+    match result {
+        Ok(Ok(inspect)) => {
+            crate::log_info!(
+                "tar_inspect ok: archive={archive_path} files={} unpacked={} elapsed_ms={elapsed_ms}",
+                inspect.file_count,
+                inspect.total_uncompressed,
+            );
+            (StatusCode::OK, Json(inspect)).into_response()
+        }
+        Ok(Err(e)) => {
+            crate::log_warn!(
+                "tar_inspect failed: archive={archive_path} elapsed_ms={elapsed_ms} err={e:#}"
+            );
+            json_err(StatusCode::BAD_REQUEST, format!("{e:#}")).into_response()
+        }
+        Err(e) => json_err(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// POST /api/tar/inspect/stream — SSE variant; the zip/7z stream's event shapes (progress with
+/// `entries_seen` / done / error, plus the heartbeat that keeps a long decode alive).
+async fn tar_inspect_stream_handler(Json(req): Json<TarInspectReq>) -> impl IntoResponse {
+    let archive_path = req.archive_path;
+    crate::log_info!("tar_inspect (stream): archive={archive_path}");
+    let started = std::time::Instant::now();
+    let (tx, rx) = mpsc::channel::<InspectStreamEvent>(64);
+    let path_for_worker = archive_path.clone();
+    tokio::task::spawn_blocking(move || {
+        let tx_progress = tx.clone();
+        let result = ps5upload_core::tar_archive::inspect_tar_with_progress(
+            std::path::Path::new(&path_for_worker),
+            &move |n| {
+                let _ = tx_progress.blocking_send(InspectStreamEvent::Progress(n));
+            },
+        );
+        let elapsed_ms = started.elapsed().as_millis();
+        let final_event = match result {
+            Ok(inspect) => {
+                crate::log_info!(
+                    "tar_inspect (stream) ok: archive={path_for_worker} files={} unpacked={} elapsed_ms={elapsed_ms}",
+                    inspect.file_count,
+                    inspect.total_uncompressed,
+                );
+                InspectStreamEvent::Done(Box::new(inspect))
+            }
+            Err(e) => {
+                let err = format!("{e:#}");
+                crate::log_warn!(
+                    "tar_inspect (stream) failed: archive={path_for_worker} elapsed_ms={elapsed_ms} err={err}"
+                );
+                InspectStreamEvent::Error(err)
+            }
+        };
+        let _ = tx.blocking_send(final_event);
+    });
+    let stream = ReceiverStream::new(rx).map(|event| {
+        let sse_event = match event {
+            InspectStreamEvent::Progress(n) => Event::default()
+                .event("progress")
+                .data(serde_json::json!({ "entries_seen": n }).to_string()),
+            InspectStreamEvent::Done(inspect) => Event::default()
+                .event("done")
+                .data(serde_json::to_string(&*inspect).unwrap_or_else(|_| "{}".to_string())),
+            InspectStreamEvent::Error(err) => Event::default()
+                .event("error")
+                .data(serde_json::json!({ "error": err }).to_string()),
+        };
+        Ok::<_, std::convert::Infallible>(sse_event)
+    });
+    Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(std::time::Duration::from_secs(1))
+            .text("heartbeat"),
+    )
+}
+
+/// POST /api/transfer/tar — upload a tar or `.zst`, unpacked. The plan comes from the cached
+/// listing when there is one; otherwise the job lists the archive first and fills in its total.
+async fn transfer_tar_handler(
+    State(state): State<AppState>,
+    Json(req): Json<TransferTarReq>,
+) -> impl IntoResponse {
+    let Some(addr) = required_console_addr(req.addr) else {
+        return missing_console_addr();
+    };
+    let caller_supplied_tx_id = req.tx_id.is_some();
+    let tx_id = match parse_or_random_tx_id(req.tx_id.as_deref()) {
+        Ok(id) => id,
+        Err(e) => return json_err(StatusCode::BAD_REQUEST, e.to_string()).into_response(),
+    };
+    let archive = std::path::PathBuf::from(&req.archive_path);
+    if ps5upload_core::tar_archive::stream_kind(&archive).is_none() {
+        return json_err(
+            StatusCode::BAD_REQUEST,
+            format!(
+                "not a tar or .zst archive (.tar, .tar.zst, .tzst, .tar.gz, .tgz, .tar.xz, .txz, \
+                 .tar.bz2, .tbz2, .tbz, .zst): {}",
+                req.archive_path
+            ),
+        )
+        .into_response();
+    }
+    // Off the reactor: the archive may sit on a slow share.
+    let planned = {
+        let archive = archive.clone();
+        let excludes = req.excludes.clone();
+        tokio::task::spawn_blocking(move || {
+            archive.is_file().then(|| {
+                ps5upload_core::tar_archive::cached_layout(&archive)
+                    .map(|l| ps5upload_core::tar_archive::tar_plan(&l, &excludes))
+                    .unwrap_or_default()
+            })
+        })
+        .await
+        .ok()
+        .flatten()
+    };
+    let Some((total_bytes, preview)) = planned else {
+        return json_err(
+            StatusCode::BAD_REQUEST,
+            format!("no such archive: {}", req.archive_path),
+        )
+        .into_response();
+    };
+    let listed = !preview.is_empty();
+    let files: Vec<PlannedFile> = preview
+        .into_iter()
+        .map(|(rel_path, size)| PlannedFile { rel_path, size })
+        .collect();
+    let files_sent_count = files.len() as u64;
+
+    let job_id = Uuid::new_v4();
+    telemetry::tag(job_id, "tar");
+    telemetry::set_drive(job_id, &req.dest_root);
+    mesh_api::note_job(job_id, &addr, "Upload", &req.dest_root);
+    let started_at_ms = now_ms();
+    crate::log_info!(
+        "transfer_tar: job={job_id} addr={addr} archive={} dest_root={} resume={} listed={listed} files={} bytes={total_bytes}",
+        req.archive_path,
+        req.dest_root,
+        caller_supplied_tx_id,
+        files_sent_count
+    );
+    let progress = Arc::new(AtomicU64::new(0));
+    let progress_files = Arc::new(AtomicU64::new(0));
+    let progress_files_finalized = Arc::new(AtomicU64::new(0));
+    let progress_bytes_finalized = Arc::new(AtomicU64::new(0));
+    // Filled in by the transfer once it has listed the archive (when the plan had no listing).
+    let listed_total = Arc::new(AtomicU64::new(total_bytes));
+    let ctx = TickerContext {
+        started_at_ms,
+        total_bytes,
+        dynamic_total_bytes: Some(Arc::clone(&listed_total)),
+        skipped_files: 0,
+        skipped_bytes: 0,
+    };
+    set_job(
+        &state.jobs,
+        &state.events_tx,
+        job_id,
+        JobState::Running {
+            stage: None,
+            started_at_ms,
+            bytes_sent: 0,
+            total_bytes,
+            files: files.into(),
+            skipped_files: 0,
+            skipped_bytes: 0,
+            files_processing: 0,
+            files_finalized: 0,
+            files_finalizing_total: 0,
+            bytes_finalized: 0,
+        },
+    );
+
+    let jobs = Arc::clone(&state.jobs);
+    let events_tx = state.events_tx.clone();
+    let stop_ticker = spawn_progress_ticker(
+        Arc::clone(&jobs),
+        events_tx.clone(),
+        job_id,
+        ctx,
+        Arc::clone(&progress),
+        Arc::clone(&progress_files),
+        Arc::clone(&progress_files_finalized),
+        Arc::clone(&progress_bytes_finalized),
+    );
+
+    // Registered before the task so a cancel that arrives before the transfer starts is kept.
+    let cancel = register_transfer_cancel(job_id);
+    tokio::task::spawn_blocking(move || {
+        // Marks the console busy for the job: a helper stop is refused meanwhile.
+        let _busy = helper_stop::enter(&addr);
+        let _stop_guard = TickerStopGuard::new(stop_ticker);
+        let mut fail_guard =
+            JobFailOnDropGuard::new(Arc::clone(&jobs), events_tx.clone(), job_id, started_at_ms);
+        if fail_job_unless_console_ready(&jobs, &events_tx, job_id, started_at_ms, &addr) {
+            fail_guard.mark_succeeded();
+            return;
+        }
+        let mut cfg = make_transfer_config(&addr);
+        cfg.cancel = Some(cancel);
+        cfg.excludes = req.excludes;
+        cfg.progress_total = Some(Arc::clone(&listed_total));
+        cfg.progress_bytes = Some(Arc::clone(&progress));
+        cfg.progress_files = Some(Arc::clone(&progress_files));
+        cfg.progress_files_finalized = Some(Arc::clone(&progress_files_finalized));
+        cfg.progress_bytes_finalized = Some(Arc::clone(&progress_bytes_finalized));
+        attach_live_notes(&mut cfg, job_id);
+        apply_per_request_bandwidth(&mut cfg, req.bandwidth_cap_mbps);
+        let mut planned_files = files_sent_count;
+        // Not listed yet: list it here (the "listing" phase), so the job's file list and total
+        // appear before the first byte is sent. The upload then reads the listing from the cache.
+        if !listed {
+            let listing = ps5upload_core::tar_archive::tar_layout_watched(
+                &archive,
+                ps5upload_core::tar_archive::TarWatch {
+                    cancel: cfg.cancel.as_deref(),
+                    live: cfg.progress_live.as_deref(),
+                    on_files: None,
+                },
+            );
+            match listing {
+                Ok(layout) => {
+                    let (total, plan) =
+                        ps5upload_core::tar_archive::tar_plan(&layout, &cfg.excludes);
+                    crate::log_info!(
+                        "transfer_tar listed: job={job_id} codec={} files={} bytes={total} links_left_out={} special_left_out={}",
+                        layout.codec.name(),
+                        plan.len(),
+                        layout.links,
+                        layout.special,
+                    );
+                    planned_files = plan.len() as u64;
+                    listed_total.store(total, Ordering::Release);
+                    let mut map = jobs.lock().unwrap_or_else(|p| p.into_inner());
+                    if let Some(JobState::Running {
+                        files, total_bytes, ..
+                    }) = map.get_mut(&job_id)
+                    {
+                        *files = Arc::new(
+                            plan.into_iter()
+                                .map(|(rel_path, size)| PlannedFile { rel_path, size })
+                                .collect(),
+                        );
+                        *total_bytes = total;
+                    }
+                }
+                Err(e) => {
+                    crate::log_warn!("transfer_tar listing failed: job={job_id} err={e:#}");
+                    let e = ps5upload_ava1::upload::tar_open_error(e, &archive);
+                    publish_transfer_end(&jobs, &events_tx, job_id, started_at_ms, Err(e), 0);
+                    fail_guard.mark_succeeded();
+                    return;
+                }
+            }
+        }
+        let result = ps5upload_ava1::upload::upload_tar(&cfg, tx_id, &req.dest_root, &archive);
+        publish_transfer_end(
+            &jobs,
+            &events_tx,
+            job_id,
+            started_at_ms,
+            result,
+            planned_files,
+        );
+        fail_guard.mark_succeeded();
+    });
+
+    (
+        StatusCode::ACCEPTED,
+        Json(JobCreated {
+            job_id: job_id.to_string(),
+        }),
+    )
+        .into_response()
+}
+
 /// POST /api/rar/inspect — desktop only. Counts + uncompressed size of a
 /// `.rar` (multi-volume opens from the first part; `password` for encrypted).
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -11989,6 +12425,14 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
     // Server copies an earlier run left behind (an extract that failed, then the app closed)
     // are removed here: nothing else knows them after a restart.
     tokio::task::spawn_blocking(remote::fetch::sweep_stale_copies);
+    // The same for a share's made files and a speed test's, by age: another engine may be
+    // running on this data folder, and what it made lately is in use.
+    tokio::task::spawn_blocking(|| {
+        share::sweep_left_shares();
+        if let Some(cutoff) = std::time::SystemTime::now().checked_sub(SPEED_TEST_KEEP) {
+            sweep_older_than(&speed_test_dir(), cutoff);
+        }
+    });
     tokio::task::spawn_blocking(settings_backup::seal_old_backups);
     // Graceful shutdown: when the parent-watcher fires (stdin EOF), the
     // SHUTDOWN Notify wakes this future, axum stops
@@ -12439,6 +12883,7 @@ fn build_app_and_mcp(
         )
         .route("/api/ps5/saves/open", post(ps5_save_open))
         .route("/api/ps5/saves/close", post(ps5_save_close))
+        .route("/api/ps5/saves/owner", post(ps5_save_owner))
         .route("/api/ps5/app/launch", post(ps5_app_launch))
         .route("/api/ps5/app/register", post(ps5_app_register))
         .route("/api/ps5/app/unregister", post(ps5_app_unregister))
@@ -12873,6 +13318,9 @@ fn build_app_and_mcp(
             "/api/7z/inspect/stream",
             post(sevenz_inspect_stream_handler),
         )
+        .route("/api/transfer/tar", post(transfer_tar_handler))
+        .route("/api/tar/inspect", post(tar_inspect_handler))
+        .route("/api/tar/inspect/stream", post(tar_inspect_stream_handler))
         .route("/api/transfer/rar", post(transfer_rar_handler))
         .route("/api/rar/inspect", post(rar_inspect_handler))
         .route("/api/rar/packages", post(rar_packages_handler))
@@ -14490,6 +14938,7 @@ mod helpers_tests {
             StatusCode::BAD_REQUEST
         );
         refused!(ps5_save_close, {});
+        refused!(ps5_save_owner, {"op": "info"});
         refused!(ps5_smp_checkout_finish, {});
         refused!(ps5_smp_image_rw_finish, {});
         refused!(user_create_handler, { "name": "x" });
@@ -15365,7 +15814,41 @@ mod archive_packages_tests {
 
 #[cfg(test)]
 mod speed_test_file_tests {
-    use super::{speed_test_size_mib, write_speed_test_file};
+    use super::{expire_speed_test, speed_test_size_mib, sweep_older_than, write_speed_test_file};
+
+    /// What an earlier run left goes at the start once it is old enough (a share's zip, a speed
+    /// test's 2 GiB); anything younger may be another engine's and stays.
+    #[test]
+    fn the_start_sweep_takes_what_was_there_before_and_nothing_newer() {
+        let dir = std::env::temp_dir().join(format!("ps5upload-sweep-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("old-share")).unwrap();
+        std::fs::write(dir.join("old-share").join("save.zip"), b"x").unwrap();
+        std::fs::write(dir.join("ps5upload-speedtest.bin"), b"x").unwrap();
+        let now = std::time::SystemTime::now();
+        // Younger than the age asked for: nothing goes.
+        let before = now - std::time::Duration::from_secs(3600);
+        assert_eq!(sweep_older_than(&dir, before), 0);
+        assert!(dir.join("old-share").join("save.zip").exists());
+        let after = now + std::time::Duration::from_secs(3600);
+        assert_eq!(sweep_older_than(&dir, after), 2);
+        assert_eq!(std::fs::read_dir(&dir).unwrap().count(), 0);
+        // A folder that is not there is nothing to sweep.
+        assert_eq!(sweep_older_than(&dir.join("none"), after), 0);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_forgotten_speed_test_is_removed_unless_a_newer_one_runs() {
+        let dir = std::env::temp_dir().join(format!("ps5upload-speedexp-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("back")).unwrap();
+        std::fs::write(dir.join("ps5upload-speedtest.bin"), b"x").unwrap();
+        let latest = std::sync::atomic::AtomicU64::new(2);
+        // The first test's timer, with a second test running: its files stay.
+        assert!(!expire_speed_test(&dir, 1, &latest));
+        assert!(dir.join("ps5upload-speedtest.bin").exists());
+        assert!(expire_speed_test(&dir, 2, &latest));
+        assert!(!dir.exists());
+    }
 
     #[test]
     fn the_size_is_kept_within_bounds() {

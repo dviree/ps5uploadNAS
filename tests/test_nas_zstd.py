@@ -1,6 +1,9 @@
 """Zstd-only integration: codec validation, defaults, and source retention."""
 import importlib.util
 import json
+import contextlib
+import io
+import tempfile
 from pathlib import Path
 import subprocess
 import sys
@@ -17,6 +20,35 @@ spec.loader.exec_module(app)
 
 
 class ZstdOnly(unittest.TestCase):
+    def test_lz4_report_does_not_skip_zstd_queue_or_worker(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            library, output, zstd, reports, logs = (root / name for name in
+                ('library', 'output', 'zstd', 'reports', 'logs'))
+            for path in (library, output, zstd, reports, logs):
+                path.mkdir()
+            source = library / 'PPSA01234'
+            source.mkdir()
+            (output / 'PPSA01234-lz4').mkdir()
+            (reports / 'PPSA01234.json').write_text(json.dumps({'pack_codec': 'lz4', 'saved_percent': 20}))
+            with patch.object(app, 'LIBRARY', library):
+                entry = app.Entry(source, 'folder')
+            opts = SimpleNamespace(codec='zstd', level=5, runtime='ng', no_restore_test=True,
+                require_vhash=False, force_image=False, no_profile=False,
+                all=True, resume=False, targets=[])
+            with patch.multiple(app, LIBRARY=library, OUTPUT=output, ZSTD_OUTPUT=zstd,
+                    REPORTS=reports, LOGS=logs, STATE=root,
+                    QUEUE_PATH=root / 'queue.json', LOCK_PATH=root / 'lock'), \
+                 patch.object(app, 'ensure_dirs'), patch.object(app, 'scan_library', return_value=[entry]), \
+                 patch.object(app.subprocess, 'Popen', return_value=SimpleNamespace(pid=42)), \
+                 contextlib.redirect_stdout(io.StringIO()):
+                app.cmd_start(opts)
+                self.assertEqual(app.read_json(app.QUEUE_PATH)['remaining'], ['PPSA01234'])
+                with patch.object(app, 'Job') as job:
+                    self.assertEqual(app.process_one(entry, opts), 'ok')
+                    job.assert_called_once()
+                    self.assertEqual(entry.output, zstd / 'PPSA01234-zstd')
+
     def test_forge_verifies_and_retains_source(self):
         cmd = app.forge_command(Path('/source'), Path('/output'), 'zstd', 5)
         self.assertIn('--zstd-pack', cmd)

@@ -1220,7 +1220,8 @@ def files_equal(a: Path, b: Path, size: int = 8 << 20) -> bool:
 
 def result_for(entry: Entry) -> dict:
     rep = read_json(REPORTS / f"{entry.id}.json")
-    if rep:
+    requested_codec = getattr(entry, "pack_codec", None)
+    if rep and (requested_codec is None or rep.get("pack_codec", "lz4") == requested_codec):
         return {"status": "done", "detail": f"saved {rep.get('saved_percent')}%"}
     skip = read_json(REPORTS / f"{entry.id}.skipped.json")
     if skip:
@@ -1237,6 +1238,7 @@ def result_for(entry: Entry) -> dict:
 
 def process_one(e: Entry, args) -> str:
     """Handle one library entry: 'ok', 'failed' or 'interrupted'."""
+    e.pack_codec = getattr(args, "codec", "zstd")
     res = result_for(e)
     if res["status"] == "done":
         print(f"[{now()}] {e.id}: already done ({res['detail']}), skipping", flush=True)
@@ -1346,6 +1348,8 @@ def cmd_run(args) -> int:
         ids = q.get("remaining", [])
         targets = [e for e in entries if e.id in ids]
     elif args.all:
+        for e in entries:
+            e.pack_codec = getattr(args, "codec", "zstd")
         targets = [e for e in entries if result_for(e)["status"] in ("pending", "partial", "failed")]
     else:
         if not args.targets:
@@ -1373,6 +1377,8 @@ def cmd_start(args) -> int:
             raise SystemExit("no unfinished queue to resume")
     else:
         if args.all:
+            for e in entries:
+                e.pack_codec = getattr(args, "codec", "zstd")
             targets = [e for e in entries if result_for(e)["status"] in ("pending", "partial", "failed")]
         else:
             if not args.targets:

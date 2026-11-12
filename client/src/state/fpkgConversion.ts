@@ -3,6 +3,7 @@
 // phase it is allowed from, so a stray click cannot act on the wrong package or reset a run.
 
 import { installErrorLink } from "../lib/installErrorDoc";
+import { isTarArchiveName, stripTarSuffix } from "../lib/tarNames";
 import { create } from "zustand";
 
 import { t as translate } from "../i18n";
@@ -138,6 +139,9 @@ export type Pipeline =
       /** A build found running after a reload, not started by this window: the queue takes its
        *  result rather than building the game again. */
       attached?: boolean;
+      /** The PS5 took the install but it could not be confirmed: what to check. The package
+       *  was kept. */
+      unverifiedNote?: string;
     }
   | {
       phase: "failed";
@@ -514,6 +518,18 @@ async function runReplace(packagePath: string, host: string, dump: string) {
     return;
   }
   const cur = running()!;
+  if (r.unconfirmed) {
+    // The result card does not offer to delete the dump: the swap stays in Convert's list of
+    // unfinished swaps, with all three choices.
+    installDone(
+      packagePath,
+      startedMs - cur.startedMs,
+      Date.now() - startedMs,
+      null,
+      r.message ?? trStatic("queue_install_unverified", "install accepted; verify on PS5 (package kept)"),
+    );
+    return;
+  }
   installDone(packagePath, startedMs - cur.startedMs, Date.now() - startedMs, r.journal ?? null);
   pushNotification("success", trStatic("fpkg_installed_on_ps5", "Installed on the PS5"), {
     body: trStatic("fpkg_dump_set_aside", "The old dump is set aside. Delete it or keep it on the Convert screen."),
@@ -546,6 +562,22 @@ async function runInstall(packagePath: string, host: string | null, method: Inst
   if (r.ok) {
     const cur = running()!;
     const convertMs = cur.mode === "install" ? 0 : startedMs - cur.startedMs;
+    if (r.unverified) {
+      // The PS5 took it but nobody could confirm it: the package stays, and the card and the
+      // bell say what to check instead of "Installed".
+      const note =
+        r.message ?? trStatic("queue_install_unverified", "install accepted; verify on PS5 (package kept)");
+      installDone(packagePath, convertMs, Date.now() - startedMs, null, note);
+      pushNotification(
+        "warning",
+        trStatic("pkg.check_the_ps5", "{label}: check the PS5").replace(
+          "{label}",
+          packagePath.slice(Math.max(packagePath.lastIndexOf("/"), packagePath.lastIndexOf("\\")) + 1),
+        ),
+        { body: note, link: "/workshop", jobOutcome: true },
+      );
+      return;
+    }
     installDone(packagePath, convertMs, Date.now() - startedMs);
     pushNotification("success", trStatic("fpkg_installed_on_ps5", "Installed on the PS5"), {
       body: packagePath,
@@ -562,6 +594,8 @@ function installDone(
   convertMs: number,
   installMs: number,
   swap: SwapJournal | null = null,
+  /** Set when the install could not be confirmed: the package is kept whatever was asked. */
+  unverifiedNote: string | null = null,
 ) {
   const p = running();
   if (!p) return;
@@ -582,8 +616,13 @@ function installDone(
       deleted: false,
       titleId: p.titleId,
       swap,
+      ...(unverifiedNote ? { unverifiedNote } : {}),
     },
   });
+  if (unverifiedNote) {
+    deleteAfterInstall = false;
+    return;
+  }
   if (deleteAfterInstall) {
     deleteAfterInstall = false;
     void fpkg
@@ -722,18 +761,22 @@ function beginRun(mode: PipelineMode, source: string, host: string | null, stage
   });
 }
 
-/** `.zip`, `.7z` or `.rar` (a multi-part set starts at its first `.partN.rar`). */
+/** `.zip`, `.7z` or `.rar` (a multi-part set starts at its first `.partN.rar`), or a tar /
+ *  `.zst` (lib/tarNames). */
 export function isArchiveSource(path: string): boolean {
-  return /\.(zip|7z|rar)$/i.test(path.trim());
+  return /\.(zip|7z|rar)$/i.test(path.trim()) || isTarArchiveName(path.trim());
 }
 
 /** What an image made from an archive is called: the archive's name without its extension
- *  or `.partN` (`Game.part1.rar` → `Game`). Its unpack folder's name means nothing. */
+ *  or `.partN` (`Game.part1.rar` → `Game`, `Game.tar.zst` → `Game`). Its unpack folder's name
+ *  means nothing. */
 export function archiveStem(path: string): string {
   const name = path.trim().split(/[\\/]/).pop() ?? "";
   // Trailing dots and spaces are not allowed at the end of a Windows file name, and the engine
   // would only refuse it after a long unpack.
-  return name.replace(/(\.part\d+)?\.(zip|7z|rar)$/i, "").replace(/[. ]+$/, "");
+  return stripTarSuffix(name)
+    .replace(/(\.part\d+)?\.(zip|7z|rar)$/i, "")
+    .replace(/[. ]+$/, "");
 }
 
 /** A game image (`.exfat`, `.ffpkg`/`.ufs2`, `.ffpfs`, `.ffpfsc`) or a package (`.pkg`): what

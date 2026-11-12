@@ -92,6 +92,7 @@
 #include "storage_cleanup.h"
 #include "mesh.h"
 #include "tailnet_node.h"
+#include "save_owner.h"
 #include "game_fps.h"
 #include "ava1_server.h"
 
@@ -370,6 +371,8 @@
 #define MGMT_FRAME_LOG_LEVEL_ACK 365u
 #define MGMT_FRAME_TAILNET 366u
 #define MGMT_FRAME_TAILNET_ACK 367u
+#define MGMT_FRAME_SAVE_OWNER 368u
+#define MGMT_FRAME_SAVE_OWNER_ACK 369u
 /* the running game's frame count, for the sampled frame rate (game_fps.c, #774) */
 #define MGMT_FRAME_HW_FPS 368u
 #define MGMT_FRAME_HW_FPS_ACK 369u
@@ -2425,9 +2428,38 @@ static void fs_mount_derive_name(const char *image_path, char *out, size_t cap) 
  * error-cleanup path of FS_MOUNT. Returns 0 on success, -1 on
  * failure (errno preserved). */
 #define FS_MOUNT_UNMOUNT_PASSES 4
+
+/* What is mounted exactly ON `path` right now: 1 with the entry in `*out`
+ * (when given), 0 when `path` is not a mount point or cannot be looked at.
+ * statfs answers for the filesystem HOLDING the path, so the path is a mount
+ * point only when that filesystem's own mount point is the path itself. */
+static int fs_mounted_on(const char *path, struct statfs *out) {
+    struct statfs sb;
+    if (!path || !path[0] || statfs(path, &sb) != 0) return 0;
+    if (strcmp(sb.f_mntonname, path) != 0) return 0;
+    if (out) *out = sb;
+    return 1;
+}
+
 static int fs_mount_try_unmount(const char *mount_point) {
     int last_errno = 0;
     for (int pass = 0; pass < FS_MOUNT_UNMOUNT_PASSES; pass++) {
+        /* The FIRST pass takes off the mount the caller vouched for. Every
+         * later pass is about whatever that exposed, and it must be looked at
+         * before it is touched: this used to go straight on and unmount the
+         * next thing at the path too, escalating to MNT_FORCE — the drive or
+         * system folder an image had been mounted over, or the sandbox mount
+         * under a library overlay. Only another image unit (an image stacked
+         * on an image at one path) is ours to continue with. Nothing mounted
+         * there any more, or something that is not ours: done. */
+        if (pass > 0) {
+            struct statfs under;
+            if (!fs_mounted_on(mount_point, &under) ||
+                !image_mount_from_is_unit(under.f_mntfromname)) {
+                errno = 0;
+                return 0;
+            }
+        }
         /* Plain unmount first. EINVAL / ENOENT ⇒ "already gone" —
          * treat as success on the first pass; on later passes it
          * means a previous pass cleared the last layer. */
@@ -3005,7 +3037,27 @@ static int fs_mount_validate_post_mount(const char *mp,
  *  10. Reply with ACK carrying {mount_point, dev_node, fstype,
  *      source_image, read_only}.
  */
-static int handle_fs_mount(runtime_state_t *state, const char *request_body,
+/* One fs.mount or fs.unmount at a time.
+ *
+ * Both handlers are check-then-act over the mount table (is this image
+ * mounted already? is this path a mount point? which unit backs it?) and
+ * every management call runs on its own thread, so two fs.mount calls for one
+ * image both found "not mounted", both attached a unit and both mounted — the
+ * second on top of the first, with one unit left attached for good; an
+ * unmount could likewise run between another call's look and its nmount.
+ *
+ * LOCK ORDER: this is the OUTERMOST lock of the two handlers and of nothing
+ * else. It is taken with no other lock held (the dispatcher calls MGMT_SONY
+ * handlers without one; both functions are static and have no other caller),
+ * and under it the handlers take, one at a time and never nested in each
+ * other: mntinfo_snapshot's own mutex, sony_api_lock (pop_notification) and
+ * state->state_mtx. None of those paths ever takes this lock, and
+ * kernel_rw_lock is not involved, so no cycle can form (sony_api_lock.h,
+ * kernel_rw_lock.h). A slow mount (an LVD node that is late to appear) makes
+ * the next mount wait, which is the point. */
+static pthread_mutex_t g_fs_mount_mtx = PTHREAD_MUTEX_INITIALIZER;
+
+static int fs_mount_request(runtime_state_t *state, const char *request_body,
                             uint64_t body_len) {
     char image_path[512] = {0};
     char mount_name[128] = {0};
@@ -3175,6 +3227,26 @@ static int handle_fs_mount(runtime_state_t *state, const char *request_body,
                      FS_MOUNT_BASE, mount_name);
         if (n < 0 || (size_t)n >= sizeof(mount_point)) {
             return mgmt_reply(MGMT_FRAME_ERROR, "fs_mount_name_too_long", 22);
+        }
+    }
+
+    /* Never mount ON TOP of a mount. Something is already mounted at this
+     * exact path — another image (the same image was answered by the reuse
+     * check above), or a drive or folder that is not ours at all (a
+     * caller-chosen mount_point may be /mnt/usb0). Mounting over it hides it,
+     * and FS_UNMOUNT of this path then works its way down the stack. Refuse
+     * before anything is attached. */
+    {
+        struct statfs there;
+        if (fs_mounted_on(mount_point, &there)) {
+            char errbuf[512];
+            int el = snprintf(errbuf, sizeof(errbuf),
+                              "fs_mount_point_in_use: %s is already mounted at %s; "
+                              "unmount it or choose another mount point",
+                              there.f_mntfromname, mount_point);
+            if (el < 0) el = 0;
+            if ((size_t)el >= sizeof(errbuf)) el = (int)sizeof(errbuf) - 1;
+            return mgmt_reply(MGMT_FRAME_ERROR, errbuf, (uint64_t)el);
         }
     }
 
@@ -3436,6 +3508,14 @@ static int handle_fs_mount(runtime_state_t *state, const char *request_body,
     return mgmt_reply(MGMT_FRAME_FS_MOUNT_ACK, resp, (uint64_t)n);
 }
 
+static int handle_fs_mount(runtime_state_t *state, const char *request_body,
+                            uint64_t body_len) {
+    pthread_mutex_lock(&g_fs_mount_mtx);
+    int rc = fs_mount_request(state, request_body, body_len);
+    pthread_mutex_unlock(&g_fs_mount_mtx);
+    return rc;
+}
+
 /* ── FS_UNMOUNT handler ─────────────────────────────────────────────────
  *
  * Only lets callers unmount things under /mnt/ps5upload/ so a malicious
@@ -3444,7 +3524,7 @@ static int handle_fs_mount(runtime_state_t *state, const char *request_body,
  * via getmntinfo
  * and dispatches to the matching detach helper — skipping that would
  * leak the attachment per mount/unmount cycle. */
-static int handle_fs_unmount(runtime_state_t *state, const char *request_body,
+static int fs_unmount_request(runtime_state_t *state, const char *request_body,
                               uint64_t body_len) {
     char mount_point[256] = {0};
     (void)body_len;
@@ -3567,6 +3647,15 @@ static int handle_fs_unmount(runtime_state_t *state, const char *request_body,
     }
 
     return mgmt_reply(MGMT_FRAME_FS_UNMOUNT_ACK, NULL, 0);
+}
+
+/* Under the same lock as fs.mount (g_fs_mount_mtx, where the order is set out). */
+static int handle_fs_unmount(runtime_state_t *state, const char *request_body,
+                              uint64_t body_len) {
+    pthread_mutex_lock(&g_fs_mount_mtx);
+    int rc = fs_unmount_request(state, request_body, body_len);
+    pthread_mutex_unlock(&g_fs_mount_mtx);
+    return rc;
 }
 
 /* ── APP_* handlers (thin wrappers over register.c) ─────────────────────
@@ -5106,7 +5195,12 @@ static int handle_user_create(runtime_state_t *state, const char *body) {
 static int handle_user_delete(runtime_state_t *state, const char *body) {
     if (!state) return -1;
     int uid = (int)extract_json_uint64_field(body, "uid");
-    int wipe_saves = (int)extract_json_uint64_field(body, "wipe_saves");
+    /* The engine sends a JSON bool (users.rs: json!({"uid", "wipe_saves": bool})). Read as a
+     * number it was always 0 ("true" is not a digit), so the option was never honoured. A bool
+     * first; a number (an older caller's 0/1) still counts. */
+    int wipe_saves = 0;
+    if (extract_json_bool_field(body, "wipe_saves", &wipe_saves) != 0)
+        wipe_saves = extract_json_uint64_field(body, "wipe_saves") != 0;
     int rc = -1;
     const char *err_msg = "";
     if (uid > 0) {
@@ -5646,7 +5740,12 @@ static int handle_sdk_scan(runtime_state_t *state) {
         return mgmt_reply(MGMT_FRAME_SDK_SCAN_ACK, e, strlen(e));
     }
     size_t written = 0;
-    sdk_changer_scan(buf, SDK_JSON_BUF_SZ, &written);
+    if (sdk_changer_scan(buf, SDK_JSON_BUF_SZ, &written) != 0) {
+        /* Never an empty body: the engine parses this reply as JSON. */
+        const char *e = "{\"titles\":[],\"error\":\"sdk_scan_failed\"}";
+        free(buf);
+        return mgmt_reply(MGMT_FRAME_SDK_SCAN_ACK, e, strlen(e));
+    }
     cheat_inc_cmd_count(state);
     int rc = mgmt_reply(MGMT_FRAME_SDK_SCAN_ACK, buf, (uint64_t)written);
     free(buf);
@@ -7611,8 +7710,12 @@ static int save_do_unmount(int *written_back, char *kept, size_t kept_sz) {
          * copy's mtime (FW 9.60, #770: "Nothing changed" and the edit was lost). When neither the
          * copy nor the real image looks touched, compare the bytes: the copy started as the
          * image, so any difference is an edit. (Not when the image moved: the game saved, and
-         * that is handled below.) */
-        if (!changed && !image_moved && file_contents_differ(g_save_copy, g_save_image) == 1)
+         * that is handled below.)
+         * ANY non-zero answer counts as changed: -1 means one of the two could not be read, and
+         * "could not compare" must never be taken for "nothing changed" — that branch deletes the
+         * copy, which may hold the only edits. Changed goes on to the write-back, which keeps the
+         * copy when it fails. */
+        if (!changed && !image_moved && file_contents_differ(g_save_copy, g_save_image) != 0)
             changed = 1;
         if (!changed) {
             unlink(g_save_copy);
@@ -7650,6 +7753,63 @@ static int save_do_unmount(int *written_back, char *kept, size_t kept_sz) {
     return 0;
 }
 
+/* Is something mounted on the save mount point? Told two ways, either is enough: the mount
+ * table names this path, or the folder is on another device than the folder holding it. */
+static int save_mount_point_busy(void) {
+    struct stat mp_st, par_st;
+    if (fs_mounted_on(SAVE_MOUNT_POINT, NULL)) return 1;
+    return stat(SAVE_MOUNT_POINT, &mp_st) == 0 && stat("/data/ps5upload", &par_st) == 0 &&
+           mp_st.st_dev != par_st.st_dev;
+}
+
+/* A save this helper did not open is mounted: the helper that opened it was replaced (a resend,
+ * an app update) or died, and which image it was is gone with it. Close it here, so the person
+ * is not told to restart the console: unmount it, and keep every copy it left in SAVE_COPY_DIR
+ * as `<name>.unsaved` (the same name a failed write-back keeps its edits under), since any of
+ * them may hold edits and the next open of that save would truncate it. Nothing is written back:
+ * the image it belongs to is not known. A sealed key left beside the copies is removed.
+ * 0: the mount point is free; -1: still mounted, nothing was touched. */
+static int save_release_orphan(void) {
+    SceFsUmountSaveDataOpt uopt;
+    memset(&uopt, 0, sizeof uopt);
+    sceFsInitUmountSaveDataOpt(&uopt);
+    errno = 0;
+    int rc = sceFsUmountSaveData(&uopt, SAVE_MOUNT_POINT, 0, 0);
+    int ue = errno; /* read before sync() can overwrite it */
+    sync();
+    if ((rc < 0 && ue != EINVAL && ue != ENOENT) || save_mount_point_busy()) {
+        fprintf(stderr, "[payload2] save: a save left open by an earlier helper could not be closed "
+                        "(rc=%d errno=%d)\n", rc, ue);
+        return -1;
+    }
+    int kept = 0;
+    DIR *d = opendir(SAVE_COPY_DIR);
+    if (d) {
+        struct dirent *de;
+        while ((de = readdir(d)) != NULL) {
+            const char *n = de->d_name;
+            size_t nl = strlen(n);
+            if (strcmp(n, ".") == 0 || strcmp(n, "..") == 0) continue;
+            if (nl > 8 && strcmp(n + nl - 8, ".unsaved") == 0) continue;
+            char path[1024], to[1024 + 16];
+            struct stat st;
+            if (snprintf(path, sizeof path, SAVE_COPY_DIR "/%s", n) >= (int)sizeof path) continue;
+            if (lstat(path, &st) != 0 || !S_ISREG(st.st_mode)) continue;
+            if (nl > 4 && strcmp(n + nl - 4, ".bin") == 0 && st.st_size <= 4096) {
+                unlink(path); /* the sealed key of the save that was open */
+                continue;
+            }
+            snprintf(to, sizeof to, "%s.unsaved", path);
+            if (rename(path, to) == 0) kept++; /* same folder: one device */
+        }
+        closedir(d);
+    }
+    sync();
+    fprintf(stderr, "[payload2] save: closed a save left open by an earlier helper; %d copy(ies) kept "
+                    "as .unsaved in " SAVE_COPY_DIR "\n", kept);
+    return 0;
+}
+
 static int save_do_mount(const char *image, char *err, size_t err_sz, int *is_ps4_out) {
     const char *bname = strrchr(image, '/');
     bname = bname ? bname + 1 : image;
@@ -7677,6 +7837,21 @@ static int save_do_mount(const char *image, char *err, size_t err_sz, int *is_ps
         return -1;
     }
     *is_ps4_out = is_ps4;
+    /* A save can still be mounted here that THIS helper knows nothing about:
+     * what is open lives only in the g_save_* variables, and a helper that was
+     * replaced (a resend, an update) leaves its save mounted with its copy in
+     * SAVE_COPY_DIR as the backing file. Opening the same save again would
+     * copy the image over that file with O_TRUNC while the kernel has it
+     * mounted. So nothing is copied and nothing is mounted while the mount
+     * point is in use. Told two ways, either is enough: the mount table names
+     * this path, or the folder is on another device than the folder holding it. */
+    if (save_mount_point_busy() && save_release_orphan() != 0) {
+        snprintf(err, err_sz,
+                 "save_mount_point_busy: a save opened before the helper was last restarted is "
+                 "still mounted and could not be closed, so another cannot be opened; restart the "
+                 "console to close it (its edits are in " SAVE_COPY_DIR ")");
+        return -1;
+    }
     mkdir("/data/ps5upload", 0777);
     mkdir(SAVE_COPY_DIR, 0777);
     mkdir(SAVE_MOUNT_POINT, 0777);
@@ -8536,6 +8711,320 @@ static int handle_log_level(runtime_state_t *state, const char *body, uint64_t b
     if (n < 0) return mgmt_reply(MGMT_FRAME_ERROR, "internal", 8);
     return mgmt_reply(MGMT_FRAME_LOG_LEVEL_ACK, out, (uint64_t)n);
 }
+
+/* ── save.owner: whose save it is (#809; save_owner.h) ───────────────────
+ * {op:"info", image, deep?}: what the image says (the protected block, and with deep:"1" the
+ * param.sfo inside it and its usage, which opens and closes the save), the folder's user and
+ * account, and the rows the user's savedata.db has for the title.
+ * {op:"set", image}: makes the save belong to the user whose folder it is in: the account and
+ * user id in the param.sfo (the file inside the save when it is a real one, and the protected
+ * block when the image has one), then the row in that user's savedata.db. `account` (16 hex)
+ * names another account than the user's own: for tests, and for a user this PS5 has no account for.
+ * {op:"forget", image}: removes the save's row from that user's savedata.db (the image is named
+ * sdimg_<folder name>); what undoes a row "set" added for a save that is then taken away. */
+#define SAVE_OWNER_OUT_MAX (20u * 1024u)
+#define SAVE_SFO_IN_MOUNT SAVE_MOUNT_POINT "/sce_sys/param.sfo"
+
+/* /user/home/<8 hex>/savedata_prospero/<TITLE>/sdimg_<name>: the user id, or 0. */
+static uint32_t save_owner_folder_user(const char *image) {
+    if (strncmp(image, "/user/home/", 11) != 0 || strstr(image, "/../") != NULL) return 0;
+    const char *p = image + 11;
+    uint32_t uid = 0;
+    for (int i = 0; i < 8; i++) {
+        char c = p[i];
+        uint32_t d;
+        if (c >= '0' && c <= '9') d = (uint32_t)(c - '0');
+        else if (c >= 'a' && c <= 'f') d = (uint32_t)(c - 'a') + 10u;
+        else return 0;
+        uid = (uid << 4) | d;
+    }
+    if (strncmp(p + 8, "/savedata_prospero/", 19) != 0) return 0;
+    const char *title = p + 27;
+    const char *slash = strchr(title, '/');
+    if (!slash || slash == title || strncmp(slash + 1, "sdimg_", 6) != 0 || strchr(slash + 1, '/')) return 0;
+    return uid;
+}
+
+/* The whole param.sfo file of the open save. Its size; 0 when it is the all-zero placeholder a
+ * save with a protected block keeps there; -1 when it is missing or not a param.sfo. */
+static int save_owner_read_file_sfo(uint8_t *buf, size_t cap) {
+    int fd = open(SAVE_SFO_IN_MOUNT, O_RDONLY);
+    if (fd < 0) return -1;
+    ssize_t n = read(fd, buf, cap);
+    close(fd);
+    if (n <= 0) return -1;
+    if (save_sfo_valid(buf, (size_t)n)) return (int)n;
+    for (ssize_t i = 0; i < n; i++)
+        if (buf[i]) return -1;
+    return 0;
+}
+
+static int save_owner_write_file_sfo(const uint8_t *buf, size_t n) {
+    int fd = open(SAVE_SFO_IN_MOUNT, O_WRONLY);
+    if (fd < 0) return -1;
+    ssize_t w = pwrite(fd, buf, n, 0);
+    int ok = w == (ssize_t)n && fsync(fd) == 0;
+    if (close(fd) != 0) ok = 0;
+    return ok ? 0 : -1;
+}
+
+/* What the console keeps in a save's database row, as seen on FW 13.60: `blocks` is the save's
+ * capacity and `free_blocks` what is unused, both in the save filesystem's own blocks (64 KiB),
+ * and `size_kib` is the size of the image file. */
+static void save_owner_usage(const save_sfo_info_t *info, uint64_t image_bytes, save_usage_t *u) {
+    struct statfs sf;
+    memset(u, 0, sizeof *u);
+    u->blocks = info->blocks;
+    u->size_kib = (image_bytes + 1023u) / 1024u;
+    if (statfs(SAVE_MOUNT_POINT, &sf) == 0 && sf.f_bsize > 0 && sf.f_blocks > 0) {
+        if (!u->blocks) u->blocks = (uint64_t)sf.f_blocks;
+        u->free_blocks = (uint64_t)sf.f_bfree <= u->blocks ? (uint64_t)sf.f_bfree : 0;
+    }
+}
+
+static int save_owner_info_json_raw(char *out, size_t cap, const char *what, const uint8_t *sfo, int n) {
+    save_sfo_info_t in;
+    if (n <= 0 || save_sfo_info(sfo, (size_t)n, &in) != 0)
+        return snprintf(out, cap, ",\"%s\":%s", what, n == 0 ? "\"none\"" : "null");
+    char keys[1200], kesc[1300], tesc[300], desc[100];
+    save_sfo_keys(sfo, (size_t)n, keys, sizeof keys);
+    json_escape_into(keys, kesc, sizeof kesc);
+    json_escape_into(in.main_title, tesc, sizeof tesc);
+    json_escape_into(in.dir_name, desc, sizeof desc);
+    return snprintf(out, cap,
+                    ",\"%s\":{\"size\":%d,\"title_id\":\"%.15s\",\"dir_name\":\"%s\",\"main_title\":\"%s\","
+                    "\"account_id\":\"%016llx\",\"user_id\":%u,\"has_account\":%s,\"has_user\":%s,"
+                    "\"blocks\":%llu,\"system_blocks\":%llu,\"list_param\":%u,\"fields\":\"%s\"}",
+                    what, n, in.title_id, desc, tesc, (unsigned long long)in.account_id, in.user_id,
+                    in.has_account ? "true" : "false", in.has_user ? "true" : "false",
+                    (unsigned long long)in.blocks, (unsigned long long)in.system_blocks, in.list_param, kesc);
+}
+
+/* As above, but 0 (and nothing written) when it does not fit. */
+static int save_owner_info_json(char *out, size_t cap, const char *what, const uint8_t *sfo, int n) {
+    int w = save_owner_info_json_raw(out, cap, what, sfo, n);
+    if (w < 0 || (size_t)w >= cap) {
+        if (cap) out[0] = 0;
+        return 0;
+    }
+    return w;
+}
+
+#define SO_ADD(...)                                                              \
+    do {                                                                         \
+        int so_n = snprintf(out + at, SAVE_OWNER_OUT_MAX - at, __VA_ARGS__);     \
+        if (so_n > 0 && (size_t)so_n < SAVE_OWNER_OUT_MAX - at) at += (size_t)so_n; \
+    } while (0)
+
+static int handle_save_owner(runtime_state_t *state, const char *body, uint64_t body_len) {
+    if (!state || body_len > 4096u) return mgmt_reply(MGMT_FRAME_ERROR, "bad_request", 11);
+    char op[16] = {0}, image[1024] = {0}, deep[8] = {0}, account_hex[24] = {0};
+    (void)parse_json_string_field_local(body, body_len, "account", account_hex, sizeof account_hex);
+    (void)parse_json_string_field_local(body, body_len, "op", op, sizeof op);
+    (void)parse_json_string_field_local(body, body_len, "image", image, sizeof image);
+    (void)parse_json_string_field_local(body, body_len, "deep", deep, sizeof deep);
+    int set = strcmp(op, "set") == 0;
+    uint32_t uid = save_owner_folder_user(image);
+    char *out = malloc(SAVE_OWNER_OUT_MAX);
+    uint8_t *blob_sfo = malloc(SAVE_SFO_MAX);
+    uint8_t *file_sfo = malloc(SAVE_SFO_MAX);
+    size_t at = 0;
+    if (!out || !blob_sfo || !file_sfo) {
+        free(out);
+        free(blob_sfo);
+        free(file_sfo);
+        return mgmt_reply(MGMT_FRAME_ERROR, "out_of_memory", 13);
+    }
+    const char *fail = NULL; /* a refusal: "code: text" */
+    char failbuf[700] = {0};
+    /* The folder's user's account: registry reads, under the Sony lock and before the save lock
+     * (never one inside the other). */
+    uint64_t account = 0;
+    int arc = -1;
+    if (uid != 0) {
+        pthread_mutex_lock(&sony_api_lock);
+        arc = save_owner_account(uid, &account);
+        pthread_mutex_unlock(&sony_api_lock);
+    }
+    pthread_mutex_lock(&g_save_mtx);
+    do {
+        struct stat st;
+        int forget = strcmp(op, "forget") == 0;
+        if ((!set && !forget && strcmp(op, "info") != 0) || uid == 0) {
+            fail = "save_owner_bad_request: op is info, set or forget, and image is a PS5 save image "
+                   "in a user's savedata_prospero folder";
+            break;
+        }
+        if (forget) {
+            char title[16] = {0};
+            const char *t = image + 11 + 8 + 19;
+            const char *sl = strchr(t, '/');
+            size_t tl = (size_t)(sl - t);
+            if (tl < sizeof title) memcpy(title, t, tl);
+            int n = save_db_forget(uid, title, sl + 1 + 6);
+            if (n < 0) {
+                fail = "save_owner_database: the user's save database could not be changed";
+                break;
+            }
+            SO_ADD("{\"ok\":true,\"err\":null,\"rows_removed\":%d}", n);
+            break;
+        }
+        if (stat(image, &st) != 0 || !S_ISREG(st.st_mode)) {
+            fail = "save_image_missing: there is no such save image";
+            break;
+        }
+        if (account_hex[0]) {
+            char *end = NULL;
+            errno = 0;
+            unsigned long long given = strtoull(account_hex, &end, 16);
+            if (errno != 0 || strlen(account_hex) != 16 || !end || *end != 0) {
+                fail = "save_owner_bad_request: account is 16 hex digits";
+                break;
+            }
+            account = (uint64_t)given;
+            arc = 0;
+        }
+        if (set && arc != 0) {
+            snprintf(failbuf, sizeof failbuf,
+                     "save_owner_no_account: user %08x has no account on this PS5 to own the save (%d)",
+                     (unsigned)uid, arc);
+            fail = failbuf;
+            break;
+        }
+        int want_mount = set || deep[0] == '1';
+        if (want_mount && g_save_mounted) {
+            fail = "save_open: a save is open; close it first";
+            break;
+        }
+        char how[400] = {0};
+        int blob_n = save_param_read(image, blob_sfo, SAVE_SFO_MAX, how, sizeof how);
+        char hesc[500];
+        json_escape_into(how, hesc, sizeof hesc);
+        SO_ADD("{\"ok\":true,\"err\":null,\"user_id\":%u,\"account_id\":\"%016llx\",\"account\":%s,"
+               "\"block_call\":\"%s\",\"block_result\":%d",
+               uid, (unsigned long long)account, arc == 0 ? "true" : "false", hesc, blob_n);
+        at += (size_t)save_owner_info_json(out + at, SAVE_OWNER_OUT_MAX - at, "block", blob_sfo, blob_n);
+        int file_n = -1;
+        save_usage_t usage;
+        memset(&usage, 0, sizeof usage);
+        save_sfo_info_t real;
+        memset(&real, 0, sizeof real);
+        if (want_mount) {
+            char err[512] = {0};
+            int is_ps4 = 0;
+            if (save_do_mount(image, err, sizeof err, &is_ps4) != 0) {
+                snprintf(failbuf, sizeof failbuf, "%s", err);
+                fail = failbuf;
+                break;
+            }
+            file_n = is_ps4 ? -1 : save_owner_read_file_sfo(file_sfo, SAVE_SFO_MAX);
+            at += (size_t)save_owner_info_json(out + at, SAVE_OWNER_OUT_MAX - at, "file", file_sfo, file_n);
+            /* The save's real param.sfo: the protected block when the image has one. */
+            const uint8_t *real_sfo = blob_n > 0 ? blob_sfo : file_sfo;
+            int real_n = blob_n > 0 ? blob_n : file_n;
+            int have_real = !is_ps4 && real_n > 0 && save_sfo_info(real_sfo, (size_t)real_n, &real) == 0;
+            if (have_real) save_owner_usage(&real, (uint64_t)st.st_size, &usage);
+            SO_ADD(",\"usage\":{\"blocks\":%llu,\"free_blocks\":%llu,\"size_kib\":%llu}",
+                   (unsigned long long)usage.blocks, (unsigned long long)usage.free_blocks,
+                   (unsigned long long)usage.size_kib);
+            const char *why = NULL;
+            if (set) {
+                if (is_ps4) why = "save_owner_ps4: a PS4 save's owner can't be changed this way";
+                else if (!have_real || !real.has_account || !real.has_user)
+                    why = "save_owner_no_fields: the save's param.sfo has no account and user fields";
+                else if (file_n > 0) {
+                    int prc = save_sfo_set_owner(file_sfo, (size_t)file_n, account, uid);
+                    if (prc == 0 && save_owner_write_file_sfo(file_sfo, (size_t)file_n) != 0)
+                        why = "save_owner_write_failed: the param.sfo inside the save could not be written";
+                    /* prc != 0: this copy lacks the fields; the block carries them (checked above). */
+                }
+            }
+            int wb = 0;
+            char kept[1100];
+            int urc = save_do_unmount(&wb, kept, sizeof kept);
+            if (urc != 0) {
+                snprintf(failbuf, sizeof failbuf,
+                         "save_unmount_failed: the save could not be closed and written back (%d); close "
+                         "it again before anything else", urc);
+                fail = failbuf;
+                break;
+            }
+            if (why) {
+                fail = why;
+                break;
+            }
+            if (set) {
+                if (blob_n > 0) {
+                    char whow[400] = {0};
+                    int wrc = save_sfo_set_owner(blob_sfo, (size_t)blob_n, account, uid) == 0
+                                  ? save_param_write(image, blob_sfo, (uint32_t)blob_n, whow, sizeof whow)
+                                  : -EINVAL;
+                    if (wrc != 0) {
+                        snprintf(failbuf, sizeof failbuf,
+                                 "save_owner_block_failed: the save's protected param.sfo could not be "
+                                 "written (%d: %.300s)", wrc, whow);
+                        fail = failbuf;
+                        break;
+                    }
+                }
+                real.account_id = account;
+                real.user_id = uid;
+                char derr[300] = {0};
+                int drc = save_db_upsert(uid, &real, &usage, derr, sizeof derr);
+                fprintf(stderr, "[payload2] save: %s now belongs to user %08x (account %016llx); database %s\n",
+                        image, (unsigned)uid, (unsigned long long)account,
+                        drc == 1 ? "row added" : drc == 2 ? "row updated" : derr);
+                if (drc < 0) {
+                    /* Theirs inside, but the console does not list it: not a save they can load. */
+                    snprintf(failbuf, sizeof failbuf,
+                             "save_owner_database: the save was made this user's but could not be added "
+                             "to their saved data (%.300s)", derr);
+                    fail = failbuf;
+                    break;
+                }
+                SO_ADD(",\"owner_set\":true,\"written_back\":%s,\"database\":\"%s\"",
+                       wb ? "true" : "false", drc == 1 ? "added" : "updated");
+            }
+        }
+        /* The rows the user's database has for the title (the title is the image's folder). */
+        {
+            char title[16] = {0};
+            const char *t = image + 11 + 8 + 19;
+            size_t tl = (size_t)(strchr(t, '/') - t);
+            if (tl < sizeof title) memcpy(title, t, tl);
+            size_t room = SAVE_OWNER_OUT_MAX - at;
+            if (room > 64) {
+                int n = snprintf(out + at, room, ",\"rows\":");
+                int rn = save_db_rows_json(uid, title, out + at + n, room - (size_t)n - 2);
+                if (rn >= 0) at += (size_t)n + (size_t)rn;
+                else out[at] = 0;
+            }
+        }
+        {
+            char schema[1500], sesc[1700];
+            if (save_db_schema(uid, schema, sizeof schema) > 0) {
+                json_escape_into(schema, sesc, sizeof sesc);
+                SO_ADD(",\"table\":\"%s\"", sesc);
+            }
+        }
+        SO_ADD("}");
+    } while (0);
+    pthread_mutex_unlock(&g_save_mtx);
+    if (fail) {
+        char fesc[900];
+        json_escape_into(fail, fesc, sizeof fesc);
+        at = (size_t)snprintf(out, SAVE_OWNER_OUT_MAX, "{\"ok\":false,\"err\":\"%s\"}", fesc);
+    }
+    int rc = mgmt_reply(MGMT_FRAME_SAVE_OWNER_ACK, out, (uint64_t)at);
+    free(out);
+    free(blob_sfo);
+    free(file_sfo);
+    pthread_mutex_lock(&state->state_mtx);
+    state->command_count += 1;
+    pthread_mutex_unlock(&state->state_mtx);
+    return rc;
+}
+#undef SO_ADD
 
 /* tailnet: "Put this PS5 on Tailscale" (tailnet_node.c). An empty body reads the status. */
 #define TAILNET_OUT_MAX (24u * 1024u)
@@ -9442,7 +9931,10 @@ static void profile_sync_online_json_firstname(uint32_t uid, const char *name) {
         return;
     }
     char *vstart = p + strlen(key);
-    char *vend = strchr(vstart, '"');
+    /* The value's CLOSING quote, past any escaped one: the first `"` is not it when the name
+     * already there holds a quote (written as \", by this very function the last time), and
+     * cutting at that one left the rest of the old name in the file as broken JSON. */
+    const char *vend = json_string_end(vstart, NULL);
     if (!vend) {
         free(buf);
         return;

@@ -71,6 +71,7 @@ import {
   fsChmod,
   fsPathPresent,
   fsMount,
+  imagePacked,
   fsUnmount,
   appLaunch,
   appRegister,
@@ -159,6 +160,18 @@ import { formatDuration } from "../../lib/formatDate";
 const metaLimit = createLimiter(4);
 
 // formatBytes moved to lib/format.ts — kept consistent across screens.
+
+/** The longest the Mount button waits to learn whether an image is packed before it mounts. */
+const PACKED_CHECK_MS = 20_000;
+
+/** What the packed check said, or null when it failed or took longer than `ms`: the mount then
+ *  goes ahead as it did before the check existed. */
+export function packedWithin<T>(check: Promise<T | null>, ms: number): Promise<T | null> {
+  return Promise.race([
+    check.catch(() => null),
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), ms)),
+  ]);
+}
 
 /** Whether ShadowMount+ is running on `host` right now. Gates a row's "Edit files" (checking
  *  an image out only means anything when SMP is the one holding it) and how Mount behaves.
@@ -466,6 +479,14 @@ function LibraryRowImpl({
     downloading && dl ? { bytesReceived: dl.sent, totalBytes: dl.total } : null;
   // When this row appeared: a download that was already running then is older than the
   // row's own timer.
+  /** A confirmed delete / chmod is running: set before the first await, so a second press
+   *  in the same frame (before `busy` has rendered) is dropped too. */
+  const confirmRunning = useRef(false);
+  // Another operation began (a Move, a download, a mount) with the "Yes, delete" row still
+  // open: it goes, so it cannot be pressed mid-operation or once that one has ended.
+  useEffect(() => {
+    if (confirmClosesFor(busy)) setConfirm(null);
+  }, [busy]);
   const [rowShownAtMs] = useState(() => Date.now());
   const [error, setError] = useState<string | null>(null);
   // After a failed download: the folder it was going to, so Resume can carry on there.
@@ -662,6 +683,9 @@ function LibraryRowImpl({
   };
 
   const runDelete = async () => {
+    // "Yes, delete" pressed twice, or while a Move of this row runs: one operation at a time.
+    if (!confirmRunAllowed(busy, confirmRunning.current)) return;
+    confirmRunning.current = true;
     setBusy("delete");
     setError(null);
     // Library row Delete shows up in the global ActivityBar so the
@@ -702,11 +726,14 @@ function LibraryRowImpl({
         .finish(activityId, okOutcome ? "done" : "failed", {
           error: errMsg ?? undefined,
         });
+      confirmRunning.current = false;
       setBusy(null);
       setConfirm(null);
     }
   };
   const runChmod = async () => {
+    if (!confirmRunAllowed(busy, confirmRunning.current)) return;
+    confirmRunning.current = true;
     setBusy("chmod");
     setError(null);
     // Recursive chmod on a 100k-file game folder takes seconds-to-
@@ -751,6 +778,7 @@ function LibraryRowImpl({
         .finish(activityId, okOutcome ? "done" : "failed", {
           error: errMsg ?? undefined,
         });
+      confirmRunning.current = false;
       setBusy(null);
       setConfirm(null);
     }
@@ -791,6 +819,28 @@ function LibraryRowImpl({
     setError(null);
     setMountNote(null);
     const addr = consoleAddr(host);
+    // Our own mount is about to run (ShadowMount+ isn't there to take the image). A game packed
+    // with LZ4 or zstd mounts fine and then doesn't start, with nothing to say why: ask first.
+    // Best effort: an engine that can't tell (an older one, a read that fails or takes too long)
+    // mounts as before.
+    if (!smpRunning) {
+      const packed = await packedWithin(imagePacked(addr, entry.path), PACKED_CHECK_MS);
+      if (packed) {
+        const go = await confirmDialog({
+          title: tr("library_mount_packed_title", { name: entry.name }, 'Mount "{name}" without ShadowMount+?'),
+          message: tr(
+            "library_mount_packed_body",
+            undefined,
+            "This image holds a packed game. A packed game only plays when ShadowMount+ mounts it, and ShadowMount+ isn't running on this PS5. PS5Upload can still mount the image so you can reach its files, but the game won't start from it. Start ShadowMount+ (Payloads) and press Mount again to play it.",
+          ),
+          confirmLabel: tr("library_mount_packed_confirm", undefined, "Mount anyway"),
+        });
+        if (!go) {
+          setBusy(null);
+          return;
+        }
+      }
+    }
     // Mount is usually fast (~1-2s for the lvd attach + nmount) but
     // a misbehaving image can hang for the FS_MOUNT timeout (30 s).
     // Tracking it gives the user a global "still running" signal
@@ -2643,6 +2693,7 @@ function LibraryRowImpl({
         <ConfirmRow
           confirm={confirm}
           tied={tiedToConsole}
+          busy={busy !== null}
           onCancel={() => setConfirm(null)}
           onRun={confirm.kind === "delete" ? runDelete : runChmod}
         />
@@ -3667,15 +3718,29 @@ function LibraryThumb({
   );
 }
 
-function ConfirmRow({
+/** Whether a confirmed delete / chmod may start: nothing else runs on the row, and it is not
+ *  already under way (`running` covers a second press before `busy` has rendered). */
+export function confirmRunAllowed(busy: string | null, running: boolean): boolean {
+  return busy === null && !running;
+}
+
+/** An operation other than the confirm row's own began: the row closes. */
+export function confirmClosesFor(busy: string | null): boolean {
+  return busy !== null && busy !== "delete" && busy !== "chmod";
+}
+
+export function ConfirmRow({
   confirm,
   tied,
+  busy,
   onCancel,
   onRun,
 }: {
   confirm: PendingConfirm;
   /** The row is registered or mounted on the console: a delete takes it off first. */
   tied: boolean;
+  /** Something runs on this row: the action waits (no second delete, none during a Move). */
+  busy: boolean;
   onCancel: () => void;
   onRun: () => void;
 }) {
@@ -3701,8 +3766,8 @@ function ConfirmRow({
       ? tr("library_confirm_delete_yes", undefined, "Yes, delete")
       : tr("library_confirm_chmod_yes", undefined, "Yes, set Permission 777");
   return (
-    <div className="flex items-center justify-between gap-3 rounded-2xl border border-[var(--glass-edge)] bg-[var(--color-surface)] px-3 py-2 text-xs">
-      <span className="flex-1">{message}</span>
+    <div className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-[var(--glass-edge)] bg-[var(--color-surface)] px-3 py-2 text-xs">
+      <span className="flex-1 basis-[12rem]">{message}</span>
       <div className="flex shrink-0 items-center gap-1">
         <Button variant="ghost" size="sm" onClick={onCancel}>
           {tr("cancel", undefined, "Cancel")}
@@ -3711,6 +3776,7 @@ function ConfirmRow({
           variant={kind === "delete" ? "danger" : "primary"}
           size="sm"
           onClick={onRun}
+          disabled={busy}
         >
           {runLabel}
         </Button>
