@@ -117,6 +117,7 @@ pub(crate) fn settings() -> store::Settings {
     store::dir()
         .map(|d| store::load_settings_at(&d))
         .unwrap_or_default()
+        .with_extra_roots(&std::env::var("PS5UPLOAD_COLLECTION_ROOTS").unwrap_or_default())
 }
 
 /// Marks a scan as running in `st`, unless one already is. `false` = one was running: the

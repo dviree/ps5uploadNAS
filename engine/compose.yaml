@@ -8,7 +8,7 @@
 
 services:
   ps5upload:
-    # This fork's build, with Convert Games' My games and Compatibility (LZ4).
+    # This fork's build, with the integrated Zstd converter.
     image: ghcr.io/dviree/ps5upload-engine-webui:lz4
     # Engine only, no web UI (for the desktop app):
     # image: ghcr.io/dviree/ps5upload-engine:lz4
@@ -42,7 +42,9 @@ services:
       # Where the web UI's file browser opens. Without this it starts at the
       # engine's home directory (/data), not at your packages below.
       # Comma-separate the value to offer more than one root.
-      PS5UPLOAD_BROWSE_ROOTS: "/pkgs"
+      PS5UPLOAD_BROWSE_ROOTS: "/pkgs,/ps5,/zstd"
+      # Add the mounted packed games to Collection, preserving saved library folders.
+      PS5UPLOAD_COLLECTION_ROOTS: "/zstd"
       # Only needed without host networking: this server's LAN IP, and the port
       # you publish if it is not 19113 (`ports: ["8080:19113"]`).
       # PS5UPLOAD_PKG_HOST_IP: "192.168.1.10"
@@ -68,7 +70,8 @@ services:
       - /srv/ps5/pkgs:/pkgs:ro
       # NAS converter: originals are read-only; conversions go to separate folders.
       - /srv/ps5/games:/ps5:ro
-      - /srv/ps5/zstd:/zstd
+      # Set PS5UPLOAD_ZSTD_PATH to the existing Zstd folder on the host.
+      - ${PS5UPLOAD_ZSTD_PATH:-/srv/ps5/zstd}:/zstd
 
 volumes:
   ps5upload-data:

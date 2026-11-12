@@ -43,6 +43,21 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// Deployment-provided local folders join the saved library without replacing it.
+    /// A missing mount is ignored, and no setting or game file is written here.
+    pub fn with_extra_roots(mut self, roots: &str) -> Self {
+        for root in roots.split(',').map(str::trim).filter(|r| !r.is_empty()) {
+            let duplicate = self
+                .roots
+                .iter()
+                .any(|r| r.trim_end_matches('/') == root.trim_end_matches('/'));
+            if Path::new(root).is_dir() && !duplicate {
+                self.roots.push(root.to_string());
+            }
+        }
+        self
+    }
+
     /// Checks and tidies settings a client sent: roots trimmed and de-duplicated, a refresh
     /// interval from the offered list.
     pub fn validated(mut self) -> Result<Self, String> {
@@ -376,6 +391,28 @@ mod tests {
         }
         .validated()
         .is_ok());
+    }
+
+    #[test]
+    fn mounted_roots_preserve_saved_library_and_settings() {
+        let root = std::env::temp_dir().join(format!("collection-zstd-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).unwrap();
+        let root_s = root.to_string_lossy().to_string();
+        let missing = root.join("unmounted");
+        let settings = Settings {
+            roots: vec!["/existing-library".into()],
+            refresh_secs: None,
+            sweep_sidecars: false,
+            allow_permanent_delete: false,
+        };
+        let extra = format!(" {root_s}, {root_s}/, {}, ", missing.display());
+        let settings = settings.with_extra_roots(&extra);
+        assert_eq!(settings.roots, vec!["/existing-library".to_string(), root_s]);
+        assert_eq!(settings.refresh_secs, None);
+        assert!(!settings.sweep_sidecars);
+        assert!(!settings.allow_permanent_delete);
+        assert!(!missing.exists());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -34,3 +34,11 @@ Docker build (104e2d41, run 43004788346) completed successfully.
 
 Validation for the update: TypeScript and 91 converter/queue UI tests passed;
 five NAS Zstd tests passed, including the cross-codec report regression.
+
+Mounted Zstd library discovery: nas-supervisor.py includes the configured Zstd output
+in PS5UPLOAD_BROWSE_ROOTS and PS5UPLOAD_COLLECTION_ROOTS when it exists, retaining
+older docker-run deployments' other roots. Collection merges these extra local roots
+with saved roots on read, ignoring missing folders and duplicates. Preferences and
+game files are not rewritten. Compose accepts PS5UPLOAD_ZSTD_PATH for its /zstd bind.
+configure-zstd-folder.py adds that bind to a named docker-run NAS updater once,
+without executing it or replacing an existing different /zstd mapping.

@@ -5,11 +5,26 @@ import signal
 import subprocess
 import sys
 import time
+from pathlib import Path
+
+
+def configure_library_roots(environ):
+    """Expose the mounted Zstd folder to Files and Collection on every upgrade."""
+    zstd = environ.get('PS5LZ4_ZSTD_OUTPUT', '/zstd')
+    if not Path(zstd).is_dir():
+        return
+    for key, default in (('PS5UPLOAD_BROWSE_ROOTS', '/pkgs,/ps5'),
+                         ('PS5UPLOAD_COLLECTION_ROOTS', '')):
+        roots = [r.strip() for r in environ.get(key, default).split(',') if r.strip()]
+        if zstd.rstrip('/') not in [r.rstrip('/') for r in roots]:
+            roots.append(zstd)
+        environ[key] = ','.join(roots)
 
 
 def main():
     if any(a in sys.argv[1:] for a in ('--healthcheck', '--version', '--help', '-h', '-V')):
         os.execv('/ps5upload-engine', ['/ps5upload-engine', *sys.argv[1:]])
+    configure_library_roots(os.environ)
     children = []
 
     def stop(*_):

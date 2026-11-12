@@ -2,6 +2,11 @@
 
 ## >RESUME HERE
 
+- 2026-11-12: added mounted Zstd output to Files and Collection automatically,
+  retaining saved roots/settings. Compose accepts PS5UPLOAD_ZSTD_PATH; the new
+  configure-zstd-folder.py can add /zstd to existing docker-run update scripts.
+  The NAS must recreate the container with the existing host folder mounted.
+
 - 2026-11-12: merged upstream 900feb68 and release version sync e4826074 / 12.4.12; ported the per-codec Zstd
   queue/report fix from PS5-LZ4-NAS 48cd52ca. The previous combined Docker build
   is green. Local TypeScript, 91 UI/queue tests and 5 NAS Zstd tests pass. Keep new packing restricted to Zstd; preserve original and old packed games.

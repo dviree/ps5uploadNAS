@@ -9,6 +9,21 @@ The converter keeps its state in `/data/ps5lz4`; do not share it with another wo
 The private converter is accessed through the engine's normal URL and IP allowlist,
 with no second published port. See `engine/compose.yaml` for mount examples.
 
+The mounted Zstd folder is included automatically in Files and Collection. Saved
+library folders and refresh/delete preferences are preserved. Only existing mounted
+folders are added. `PS5UPLOAD_COLLECTION_ROOTS` can add other local library folders.
+
+For Compose, set `PS5UPLOAD_ZSTD_PATH` to the existing host folder before recreating
+the container. For a NAS using a `docker run` update script, add the mount once with:
+
+```sh
+python3 scripts/configure-zstd-folder.py /path/to/ps5upload-update.sh /path/to/games/ps5zstd
+```
+
+The helper preserves the updater's existing options and mounts, saves its original
+as `.before-zstd`, and refuses to replace a different `/zstd` mount. It does not
+restart containers; run the usual updater after the new image builds.
+
 # ps5upload
 
 <p align="center">
