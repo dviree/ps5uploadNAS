@@ -2,6 +2,12 @@
 
 ## >RESUME HERE
 
+- 2026-11-13: full PS5-LZ4-NAS 6e580691 source import, runtime 0a5670a,
+  Zstd-only compression dialog and screenshot-led NAS README. Keep the combined
+  web UI's packing restricted to Zstd; imported receiver source is not a new
+  payload deployment. Docker CI gates the web UI on NAS regression checks.
+  Verify the Docker build, then run the existing NAS updater. Console tests pending.
+
 - 2026-11-13: updated to upstream stable v12.4.14 (1761a866), retaining Zstd-only
   conversion and mounted folder discovery. Verify the new Docker image build
   before running the existing NAS updater. No game files are changed by this update.

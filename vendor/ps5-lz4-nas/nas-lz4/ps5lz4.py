@@ -6308,7 +6308,7 @@ def dashboard_data() -> dict:
             "send_after": list(read_json(SEND_AFTER, {}) or {}),
             "images": images_data(),
             "pkgs": (pkgs := scan_pkgs()), "pkg_folders": pkg_folders(pkgs),
-            "level": int(os.environ.get("PS5LZ4_LEVEL", "9")), "runtime": NG_NAME,
+            "level": int(os.environ.get("PS5LZ4_LEVEL", "5")), "runtime": NG_NAME,
             "compat_updated": None,
             "requests": {"pending": pending, "pending_list": pending_list, "recent": done_req[::-1],
                          "agent_age": agent_age}, "version": VERSION,

@@ -8,9 +8,9 @@ There are no LZ4 packing controls, and old ampr_lz4 build requests are rejected.
 Workshop defaults to Zstd packs; its tested runtime is ampr-emu-ng 0.3.5 (release
 SHA-256 verified). Existing LZ4 readers remain to support existing files and archives.
 
-The current PS5-LZ4-NAS backend is vendored at vendor/ps5-lz4-nas from 48cd52ca.
+The current PS5-LZ4-NAS backend is vendored at vendor/ps5-lz4-nas from 6e580691 (full tracked source tree).
 Local patches restrict packing to Zstd, select level 5 by default and bind HTTP to loopback.
-The combined web UI image builds Forge 0.5.5 and ampr-emu-ng v0.3.5/a0dd88a,
+The combined web UI image builds Forge 0.5.5 and ampr-emu-ng 0a5670a (main after v0.3.5),
 including corresponding runtime source and licenses. The engine proxies /api/nas-zstd
 and its subpaths to private port 19114 under its existing access guard. Binary downloads
 stream through a bounded channel; HTML API/store links retain reverse-proxy prefixes.
@@ -52,3 +52,17 @@ this session used local source inspection and checks instead.
 Validation: TypeScript and Vite production build passed; 53 focused Share/API/queue
 tests and 11 Python NAS tests passed. Workflow triggers remain Docker-only.
 Rust and full Docker verification run in GitHub Actions.
+
+2026-11-13: imported all tracked PS5-LZ4-NAS source at 6e580691, including
+installer scripts, receiver overlay, tests, tools, notices and reference workflows.
+Updated the combined runtime build to 0a5670a (merged read-priority/KCD2 fix),
+matching the standalone image. Vendored workflows remain inactive below vendor/.
+Removed the remaining LZ4 card from the compression dialog; invalid choices leave
+Zstd selected. API and CLI continue to reject LZ4 packing. Dashboard default is 5.
+README now presents the NAS fork with bundled upstream example screenshots,
+installation/mount instructions and credits; the full upstream guide is retained
+as UPSTREAM_README.md. Screenshots are labelled upstream previews, not live NAS data.
+Docker CI checks Python and UI policy regressions before publishing the web UI.
+Validation: 11 integration tests + 15 imported Python tests passed (7 binary/tool
+integration tests skipped), plus both imported Node UI suites and shell/JS/Python
+syntax checks. Full runtime compilation and image validation run in Docker CI.

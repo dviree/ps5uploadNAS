@@ -1,0 +1,63 @@
+# Builds the NAS container image from nas-build and publishes it to
+# ghcr.io/<owner>/ps5-lz4 (:latest and :sha-<commit>), so Watchtower on the
+# NAS can update it. Runs after every push to nas-build; a commit that is
+# already published is not rebuilt.
+name: Build NAS image
+
+on:
+  push:
+    branches: [nas-build]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency: build-image
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: nas-build
+          fetch-depth: 2
+
+      - name: Check the pages' scripts and the Python
+        run: |
+          set -euo pipefail
+          python3 -m py_compile nas-lz4/ps5lz4.py
+          for f in nas-lz4/ui.html nas-lz4/store.html; do
+            python3 - "$f" > "$RUNNER_TEMP/page.js" <<'PY'
+          import re, sys
+          print("\n".join(re.findall(r"<script>(.*?)</script>", open(sys.argv[1]).read(), re.S)))
+          PY
+            node --check "$RUNNER_TEMP/page.js" || { echo "::error file=$f::script does not parse"; exit 1; }
+          done
+
+      - name: Log in to ghcr.io
+        run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u "${{ github.actor }}" --password-stdin
+
+      - name: Build and push unless this commit is already published
+        run: |
+          set -euo pipefail
+          image="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/ps5-lz4"
+          tag="sha-$(git rev-parse --short=12 HEAD)"
+          if docker manifest inspect "$image:$tag" >/dev/null 2>&1; then
+            echo "$image:$tag is already published"
+            exit 0
+          fi
+          # An upstream merge that only updates the game reports needs no new
+          # image: the web page fetches the reports live. (Rebuilding would make
+          # Watchtower restart the containers after every report.)
+          if [ "$(git rev-list --parents -n 1 HEAD | wc -w)" -gt 2 ]; then
+            changed=$(git diff --name-only HEAD^1 HEAD)
+            if [ -n "$changed" ] && ! printf '%s\n' "$changed" | grep -qv '^compat/compat.json$'; then
+              echo "only compat/compat.json changed; not rebuilding"
+              exit 0
+            fi
+          fi
+          docker build -f nas-lz4/Dockerfile -t "$image:$tag" -t "$image:latest" .
+          docker push "$image:$tag"
+          docker push "$image:latest"

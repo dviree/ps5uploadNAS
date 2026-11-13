@@ -9,7 +9,7 @@
 services:
   ps5upload:
     # This fork's build, with the integrated Zstd converter.
-    image: ghcr.io/dviree/ps5upload-engine-webui:lz4
+    image: ghcr.io/dviree/ps5upload-engine-webui:latest
     # Engine only, no web UI (for the desktop app):
     # image: ghcr.io/dviree/ps5upload-engine:lz4
     container_name: ps5upload

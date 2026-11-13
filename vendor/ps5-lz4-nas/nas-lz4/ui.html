@@ -993,11 +993,11 @@ function render() {
   const an = document.getElementById('act-n'), n = (d.job ? 1 : 0) + (tf ? 1 : 0) + nq;
   an.hidden = !n; an.textContent = n;
   fab(d, tf, tq, pqs, nameOf);
-  document.getElementById('sub').textContent = `LZ4 NG and Zstd · PS5 Dump Forge · ${d.runtime}`;
+  document.getElementById('sub').textContent = `Zstd · PS5 Dump Forge · ${d.runtime}`;
   document.getElementById('b-resume').hidden = !d.interrupted;
   const t = d.totals, saved = t.source - t.output;
   document.getElementById('kpis').innerHTML = [
-    [t.lz4, 'games LZ4 packed'],
+    [t.lz4, 'games packed'],
     [gb(saved), t.source ? `saved (${(100 * saved / t.source).toFixed(1)} %)` : 'saved'],
     [d.running ? d.queue.length : 0, d.running ? 'queued' : 'no job running'],
     [gb(d.free_bytes), 'free for output'],
@@ -1269,8 +1269,7 @@ function packControls() {
       style="width:70px;min-width:0" onchange="packLevel = Number(this.value)"></label>
     <span class="mut">ampr-emu-ng: disable fakelib updates in ShadowMountPlus.</span></div>`;
 }
-// The Compress dialog: LZ4 and Zstd side by side with sizes estimated from a
-// sample of the game, pack time from earlier packs here, and the runtime each needs.
+// The Zstd dialog estimates size from a sample and time from earlier packs.
 let packSkip = false;
 try { packSkip = localStorage.getItem('packSkip') === '1'; } catch (e) {}
 let pk = null;
@@ -1312,9 +1311,6 @@ function renderPack() {
   box.innerHTML = `<h2 style="margin:0">Compress ${esc(g.name)}</h2>
     <div class="mut">${esc(g.title_id || '')} · ${esc(KIND_EN[g.kind] || g.kind || '')}${src ? ' · ' + gb(src) : ''}${est ? ' · estimated from ' + esc(est.method) : ''}</div>
     <div class="pkcards">
-      ${card('lz4', '⚡ LZ4', lzMode === 'legacy' ? 'APR-EMU 0.4.2.1' : 'ampr-emu-ng (LZ4 NG)', lz4b, '#8b5cf6',
-        [['Loading', 'fastest'], ['Pack time', pkTime(src && speed[lzMode] ? src / speed[lzMode] : null)],
-         ['Runtime', lzMode === 'legacy' ? 'APR-EMU' : 'ampr-emu-ng']], recBadge('lz4'), rt)}
       ${card('zstd', '🗜 Zstd', 'ampr-emu-ng', zb, '#38bdf8',
         [['Loading', 'a little slower'], ['Pack time', pkTime(src && speed.zstd ? src / speed.zstd : null)],
          ['Runtime', 'ampr-emu-ng']], recBadge('zstd'))}
@@ -1328,16 +1324,16 @@ function renderPack() {
     <div class="why">Estimates come from a sample of the game's files; the real size shows after packing.</div>`;
 }
 function pkPick(key) {
-  if (!pk) return;
+  if (!pk || key !== 'zstd') return;
   const before = pk.mode;
-  pk.mode = key === 'zstd' ? 'zstd' : key === 'lz4' || key === 'legacy' ? 'ng' : key;
+  pk.mode = 'zstd';
   if ((before === 'zstd') !== (pk.mode === 'zstd')) pk.level = pk.mode === 'zstd' ? 5 : 9;
   renderPack();
 }
 function pkGo(send) {
   if (!pk) return;
   const {id, mode, level, profile, remember} = pk;
-  const opts = {codec: mode === 'zstd' ? 'zstd' : 'lz4', runtime: mode === 'legacy' ? 'legacy' : 'ng', level, profile};
+  const opts = {codec: 'zstd', runtime: 'ng', level, profile};
   if (remember) {
     packMode = mode; packLevel = level; packProfile = profile; packSkip = true;
     savePackPrefs(); try { localStorage.setItem('packSkip', '1'); } catch (e) {}

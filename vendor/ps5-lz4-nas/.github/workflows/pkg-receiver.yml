@@ -1,0 +1,92 @@
+name: Build pkg-receiver (Glass)
+
+# pkg-receiver from Loopayeh/pkg-sender (MIT) with this project's Glass theme
+# on its page (pkg-receiver/glass.py). Published as the release
+# pkg-receiver-glass, which the NAS page installs on the PS5.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'pkg-receiver/**'
+      - '.github/workflows/pkg-receiver.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    env:
+      PKG_SENDER_REF: 73804c41c079b1d32c60bf3fd555f90fba1af2e4
+      SDK_SHA256: a9cc9929f21b2b2c5d5b309f3bab4997067c45281c0622cf4838b1aecba66fcb
+      LLVM_CONFIG: /usr/bin/llvm-config-18
+      TAG: pkg-receiver-glass
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-18 lld-18 llvm-18-dev make python3 unzip curl binutils file nodejs
+
+      - name: Download PS5 payload SDK v0.43
+        run: |
+          curl --fail --location --retry 3 \
+            --output "$RUNNER_TEMP/ps5-payload-sdk.zip" \
+            https://github.com/ps5-payload-dev/sdk/releases/download/v0.43/ps5-payload-sdk.zip
+          echo "$SDK_SHA256  $RUNNER_TEMP/ps5-payload-sdk.zip" | sha256sum --check
+          unzip -q "$RUNNER_TEMP/ps5-payload-sdk.zip" -d "$RUNNER_TEMP/sdk"
+          echo "PS5_PAYLOAD_SDK=$RUNNER_TEMP/sdk/ps5-payload-sdk" >> "$GITHUB_ENV"
+
+      - name: Get pkg-sender
+        run: |
+          git init -q "$RUNNER_TEMP/pkg-sender"
+          cd "$RUNNER_TEMP/pkg-sender"
+          git fetch -q --depth 1 https://github.com/Loopayeh/pkg-sender "$PKG_SENDER_REF"
+          git checkout -q FETCH_HEAD
+
+      - name: Build with the Glass theme
+        run: |
+          cd "$RUNNER_TEMP/pkg-sender/payload"
+          rm -f pkg-receiver.elf
+          python3 "$GITHUB_WORKSPACE/pkg-receiver/glass.py" main.c
+          make
+          file pkg-receiver.elf
+          readelf -h pkg-receiver.elf | grep -Eq 'Machine:[[:space:]]+Advanced Micro Devices X86-64'
+          grep -aq '{"build":"[^"]*-glass[^"]*"}' pkg-receiver.elf
+          # The page's script must parse.
+          python3 - <<'PY'
+          d = open("pkg-receiver.elf", "rb").read()
+          i = d.index(b"<!DOCTYPE html><html><head><meta charset=utf-8><meta name=viewport")
+          h = d[i:d.index(b"\0", i)].decode()
+          open("page.js", "w").write(h[h.index("<script>") + 8:h.rindex("</script>")])
+          PY
+          node --check page.js
+          mkdir -p "$GITHUB_WORKSPACE/out"
+          cp pkg-receiver.elf "$GITHUB_WORKSPACE/out/"
+          cp ../LICENSE "$GITHUB_WORKSPACE/out/LICENSE-pkg-sender"
+          cd "$GITHUB_WORKSPACE/out" && sha256sum pkg-receiver.elf > SHA256SUMS
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pkg-receiver-glass-${{ github.sha }}
+          path: out/*
+
+      - name: Publish release
+        if: github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          cd out
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" pkg-receiver.elf SHA256SUMS LICENSE-pkg-sender --clobber
+          else
+            gh release create "$TAG" pkg-receiver.elf SHA256SUMS LICENSE-pkg-sender --target "$GITHUB_SHA" \
+              --latest=false --title "pkg-receiver (Glass theme)" \
+              --notes "pkg-receiver from [Loopayeh/pkg-sender](https://github.com/Loopayeh/pkg-sender) ($PKG_SENDER_REF, MIT) with the PS5-LZ4 Glass theme on its page. Built by pkg-receiver.yml; the NAS page installs it on the PS5."
+          fi

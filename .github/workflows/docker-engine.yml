@@ -60,6 +60,21 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  verify-nas:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
+        with:
+          node-version: 22
+      - name: Check Zstd integration and imported NAS tools
+        run: |
+          python3 -m unittest discover -s tests -p 'test_nas*.py' -v
+          python3 -m unittest discover -s vendor/ps5-lz4-nas/tests/nas -v
+          node vendor/ps5-lz4-nas/tests/nas/test_pkg_groups.cjs
+          node vendor/ps5-lz4-nas/tests/nas/test_pack_format.cjs
+
   # ── PR gate: build amd64, no push ──────────────────────────────────────────
   verify:
     if: github.event_name == 'pull_request'
@@ -104,6 +119,7 @@ jobs:
 
   # ── PR gate for the webui image: same idea, root context + Dockerfile.webui ─
   verify-webui:
+    needs: verify-nas
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     # A full engine (and, for the web UI, client) build: ~7-10 min on a good
@@ -434,7 +450,7 @@ jobs:
   # so a webui-only failure doesn't need `fail-fast: false` gymnastics to
   # keep the plain engine image publishing on time.
   build-webui:
-    needs: [resolve, build-payload]
+    needs: [resolve, build-payload, verify-nas]
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
