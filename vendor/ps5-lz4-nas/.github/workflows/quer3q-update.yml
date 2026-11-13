@@ -1,11 +1,10 @@
-# Follows quer3q/ampr-emu-ng (main), quer3q/ps5-dump-forge (releases) and
-# James St-Pierre's ampr-emu-ng branches (reported, not pinned):
+# Follows quer3q/ampr-emu-ng (main) and quer3q/ps5-dump-forge (releases) only:
 # when either has something new, tools/quer3q_update.py moves the pins
 # (checking upstream's SHA256SUMS), Trail-Code reports
 # the blast radius of upstream's change, the NAS tests and the image build
 # (runtime tests and PRX verifier) run, and a pull request to main is opened.
 # Nothing reaches main or the NAS image until someone merges it.
-name: Follow quer3q and James
+name: Follow quer3q
 
 on:
   schedule:
@@ -68,19 +67,19 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git checkout -q -b "$BRANCH"
-          git add -A tools/james-branches.json nas-lz4 THIRD_PARTY_NOTICES.md
-          git commit -q -m "Updates from quer3q / James St-Pierre" -m "$(head -c 60000 "$RUNNER_TEMP/report.md")"
+          git add -A nas-lz4 THIRD_PARTY_NOTICES.md
+          git commit -q -m "Updates from quer3q" -m "$(head -c 60000 "$RUNNER_TEMP/report.md")"
           git push -q origin "$BRANCH"
-          { echo "Found and checked by the Follow quer3q and James workflow."
+          { echo "Found and checked by the Follow quer3q workflow."
             echo
             if [ "${{ steps.up.outputs.pins }}" = true ]; then
               echo "NAS tests and the image build (ampr-emu-ng host tests, PRX verifier) passed."
             else
-              echo "No pin moved: this records the James branches seen (tools/james-branches.json). Their code is not taken in."
+              echo "No pin moved."
             fi
             echo "Review before merging: merging rebuilds the NAS image. Not tested on a PS5."
             echo
             cat "$RUNNER_TEMP/report.md"; } > "$RUNNER_TEMP/body.md"
-          gh pr create --base main --head "$BRANCH" --title "Updates from quer3q / James (ampr-emu-ng, PS5 Dump Forge)" \
+          gh pr create --base main --head "$BRANCH" --title "Updates from quer3q (ampr-emu-ng, PS5 Dump Forge)" \
             --body-file "$RUNNER_TEMP/body.md" \
             || echo "::warning::could not open the pull request (allow Actions to create pull requests in Settings > Actions); the branch $BRANCH has the changes"

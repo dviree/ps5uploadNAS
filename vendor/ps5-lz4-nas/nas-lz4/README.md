@@ -520,25 +520,18 @@ a packed game's sheet:
 Making an exFAT image of the original first changes nothing: the NAS unpacks
 it again before LZ4 packing. Originals are never converted.
 
-## Following quer3q's ampr-emu-ng and PS5 Dump Forge, and James's branches
+## Following quer3q's ampr-emu-ng and PS5 Dump Forge
 
-The **Follow quer3q and James** workflow (every 3 hours, or by hand under Actions) runs
+The **Follow quer3q** workflow (every 3 hours, or by hand under Actions) runs
 `tools/quer3q_update.py`. When quer3q/ampr-emu-ng has a new `main` commit or
 quer3q/ps5-dump-forge a new release, it moves the pins in `nas-lz4/Dockerfile`
-and `nas-lz4/install-forge.py`: the kernel-AIO patch must still apply with no
-fuzz, and Forge's archives and vendored runtime must match upstream's own
-SHA256SUMS. Trail-Code adds the blast radius of upstream's change
-(`trail blast`) to the report, the NAS tests and the image build (runtime host
-tests and PRX verifier) run, and a pull request to `main` is opened. Nothing
-reaches the NAS image until it is merged. `python3 tools/quer3q_update.py`
-alone only says what is new.
-
-It also follows James St-Pierre's branches (jamesst20/ampr-emu-ng). They are
-work in progress that quer3q merges by pull request, so they are reported,
-not taken in: each new or moved branch with its commits that are not in
-quer3q's `main` yet and Trail-Code's blast radius against it. The heads seen
-are kept in `tools/james-branches.json`. Kernel AIO on packed files is in
-quer3q's own code since v0.3.3, so no patch is applied on top of `main`.
+and `nas-lz4/install-forge.py` (Forge's archives and vendored runtime must match
+upstream's own SHA256SUMS). Trail-Code adds the blast radius of upstream's
+change (`trail blast`) to the report, the NAS tests and the image build (runtime
+host tests and PRX verifier) run, and a pull request to `main` is opened.
+Nothing reaches the NAS image until it is merged. `python3 tools/quer3q_update.py`
+alone only says what is new. Only quer3q's repositories are followed; other
+people's forks and branches are not.
 
 ## Your own TOML profiles
 
@@ -874,9 +867,10 @@ Mark the result on the web page and share it with the community.
 ## Runtime fixes and Docker update
 
 NG outputs now use ampr-emu-ng `main` at
-`0a5670a5d629c78572c61b66353a04e56f1b53d2` from https://github.com/quer3q/ampr-emu-ng
-(main after v0.3.5: save fixes, fd read thread priority and core affinity from
-PR #51 for PPSA21704, on-demand index reads and exact-size pack reads).
+`920e9172b6bf99bd9210361b545e2953659d1e9b` from https://github.com/quer3q/ampr-emu-ng
+(v0.4.0: FPKG (pkg) games, writable /app0 and split reads for LZ4 and pkg packs,
+on top of v0.3.5's save fixes, the fd read thread priority from PR #51 for
+PPSA21704, on-demand index reads and exact-size pack reads).
 This includes reserved low descriptors, read-only indexed-directory opens, and
 packed fds kept out of the 50-fd budget with stale fd mappings guarded.
 The Docker build runs the runtime's host tests and PS5 PRX verifier, records the

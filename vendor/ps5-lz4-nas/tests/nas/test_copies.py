@@ -92,8 +92,9 @@ class CopyRuntimeTests(unittest.TestCase):
             for c in (out / "G-lz4", zout / "G-zstd"):
                 (c / "fakelib" / "libSceAmpr.sprx").write_bytes(b"runtime")
             with patch.object(app, "OUTPUT", out), patch.object(app, "ZSTD_OUTPUT", zout), \
-                    patch.object(app, "REPORTS", reports), patch.object(app, "HOST_OUTPUT", str(out)):
-                # the last pack was the Zstd copy (ampr-emu-ng)
+                    patch.object(app, "REPORTS", reports), patch.object(app, "HOST_OUTPUT", str(out)), \
+                    patch.object(app, "RUNTIME_SHA256", __import__("hashlib").sha256(b"runtime").hexdigest()):
+                # the last pack was the Zstd copy (ampr-emu-ng); the LZ4 copy carries APR-EMU
                 (reports / "G.json").write_text(json.dumps({"pack_codec": "zstd", "pack_runtime": "ng",
                                                             "output": app.host_output_path(zout / "G-zstd")}))
                 self.assertTrue(app.requires_ng(zout / "G-zstd"))
@@ -101,9 +102,6 @@ class CopyRuntimeTests(unittest.TestCase):
                 (reports / "G.json").write_text(json.dumps({"pack_runtime": "ng", "output": app.host_output_path(out / "G-lz4")}))
                 self.assertTrue(app.requires_ng(out / "G-lz4"))
 
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class ActionLogTests(unittest.TestCase):
@@ -145,3 +143,7 @@ class RemoveKeepsOtherReportTests(unittest.TestCase):
                 self.assertIn('/host/zout', said.getvalue())
                 app.cmd_remove(SimpleNamespace(game='G-lz4'))
                 self.assertFalse((reports / 'G.json').exists())
+
+
+if __name__ == "__main__":
+    unittest.main()

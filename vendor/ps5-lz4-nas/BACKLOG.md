@@ -5,6 +5,11 @@ ends (see `CLAUDE.md`). No real game names (Title IDs only), no personal data.
 
 ## >RESUME HERE
 
+Done 2026-11-13: Remote page can copy the checksum-verified quer3q Forge
+v0.5.5 PS5 ELF to Payload Manager and start it there (ELF loader fallback),
+then link to the console's port 8095 Pack page. Console runs Forge's bundled
+runtime, not the newer NAS runtime. Needs a hardware test on the PS5.
+
 Done 2026-11-12: ampr-emu-ng pinned to upstream `0a5670a` (after v0.3.5),
 including PR #51 for PPSA21704 / issue #37. One console tested the PR's debug
 build; the newer pinned build still needs a PS5 play test. Forge stays v0.5.5.
@@ -34,7 +39,7 @@ actions; PS5: ShadowMount *Hide* renames to `.name`). Last finished
 ## Needs the owner
 
 - Enable *Allow GitHub Actions to create and approve pull requests* (Settings ›
-  Actions › General); until then the quer3q/James follower pushes a branch only.
+  Actions › General); until then the quer3q follower pushes a branch only.
 - Test on the NAS/PS5 (the session can't reach the NAS): Compress dialog and
   estimates, TOML chooser, sub-tabs, LZ4 NG with theghostonline's packer +
   ampr-emu-ng `cbdafd8`, Start check (ShadowMountPlus fields `runtime_path`,
@@ -47,6 +52,8 @@ actions; PS5: ShadowMount *Hide* renames to `.name`). Last finished
 - Without the old loose rules Forge packs `cache_ps5/pgc_*_dummy_file`,
   `playgo.pgm` and the PPSA26344 boot files (seen in a local Zstd pack). quer3q
   says ampr-emu-ng serves such reads; check PPSA26344 and PPSA34547 on the PS5.
+- Check on the NAS that Send to GitHub opens the issue (labels from a
+  non-collaborator are dropped by GitHub; the body still parses back).
 - Old git tags still point to history before the personal-data rewrite (owner
   has the retag commands).
 - PR #2 (Trail-Code + Claude Code in Codespaces) is open, not merged.
@@ -71,6 +78,29 @@ actions; PS5: ShadowMount *Hide* renames to `.name`). Last finished
 
 ## Done recently (newest first)
 
+- Zstd only (owner): LZ4 NG removed from the format bar, the Compress dialog,
+  the queue, run_request and the CLI (`--codec zstd`, default level 5 or
+  PS5LZ4_ZSTD_LEVEL). Existing LZ4 copies stay and still get runtime upgrades.
+- PS5 game packages (.pkg, fake PKG, base game only) in the library are games:
+  Forge packs them straight to LZ4 NG or Zstd (no unpacking); updates, DLC, apps
+  and PS4 packages stay on the PKG tabs. Encrypted store PKGs can't be read.
+- `lz4-ps5.sh update` now runs `apr --fix`: every LZ4 NG and Zstd copy with an
+  older ampr-emu-ng build gets the image's build (cache key includes the image's
+  runtime; any non-APR-EMU runtime counts as NG). PS5LZ4_SKIP_RUNTIME_UPGRADE=1 skips.
+- ampr-emu-ng → `920e917` (v0.4.0: FPKG games, writable /app0, split reads for
+  LZ4 and pkg packs; quer3q says LZ4 with split reads is not run on a console yet).
+- Game reports can be sent from the page as an issue on quer3q/ampr-emu-ng
+  (classic token with public_repo saved on the Remote tab, state/github-token
+  0600) or opened on GitHub filled in; same result per game not sent twice a day.
+- Packing uses every CPU core (owner), still at nice 19 (PS5LZ4_WORKERS overrides).
+- Page stays responsive while packing: /api/dashboard answers from the last
+  result and rebuilds in the background; runtime SHA-256 cached; packing runs
+  at nice 19 and ionice idle (PS5LZ4_IONICE=besteffort for the old class).
+- .exfat sources are packed in place: Forge reads the image (blake3 per file),
+  no MkPFS extraction or work copy. The old "does not use AMPR" skip on .exfat
+  is gone (it stopped PPSA21704); stale APR-era skip reports no longer hide a game.
+- Stopped following James St-Pierre's branches: follower, workflow and docs
+  cover quer3q only; `tools/james-branches.json` removed.
 - Updated ampr-emu-ng to upstream v0.3.5 (`a0dd88a`), including the smaller
   PRX memory pool and load-based thread retirement. Forge remains v0.5.5.
   NAS/PS5 hardware validation remains open.

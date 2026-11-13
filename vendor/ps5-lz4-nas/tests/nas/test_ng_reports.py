@@ -47,9 +47,6 @@ class NgReportTests(unittest.TestCase):
         self.assertTrue(all(v in form for v in app.NG_FORM_RESULT.values()))
 
 
-if __name__ == '__main__':
-    unittest.main()
-
 
 class NgListReportTests(unittest.TestCase):
     def test_a_report_listing_several_games_counts_for_each(self):
@@ -64,3 +61,66 @@ class NgListReportTests(unittest.TestCase):
         self.assertEqual(sorted(games), ['PPSA00001', 'PPSA00002', 'PPSA00003'])
         self.assertEqual((games['PPSA00002']['name'], games['PPSA00002']['zstd']['works']), ('Example Two', 1))
         self.assertEqual(games['PPSA00003']['zstd']['works'], 1)  # no Result answer: the "works" label counts
+
+
+class NgSubmitTests(unittest.TestCase):
+    def setUp(self):
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        self.tmp = tempfile.TemporaryDirectory(); self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        (root / 'reports').mkdir()
+        self.p = [patch.object(app, k, v) for k, v in {'STATE': root, 'REPORTS': root / 'reports',
+                  'GITHUB_TOKEN_PATH': root / 'github-token', 'NG_SUBMITTED': root / 'ng-submitted.json'}.items()]
+        for x in self.p: x.start(); self.addCleanup(x.stop)
+        app.write_json(root / 'reports' / 'G1.json', {'title_id': 'PPSA00001', 'title_name': 'Example One',
+                                                       'pack_codec': 'zstd', 'pack_runtime': 'ng', 'codec': 'Zstd level 5'})
+        self.fields = {'result': 'Hangs (loading screen or black screen)', 'firmware': '13.40', 'loader': 'SMP',
+                       'install': 'folder', 'storage': 'USB exFAT', 'what': 'Black screen after the logo, every time.'}
+
+    def test_issue_body_matches_the_form_and_parses_back(self):
+        issue = app.ng_report_issue('G1', self.fields)
+        self.assertEqual(issue['title'], '[PPSA00001] Example One: Hangs')
+        f = app.ng_form_sections(issue['body'])
+        self.assertEqual(f['packs'], 'zstd')
+        self.assertTrue(f['result'].startswith('Hangs'))
+        self.assertIn('Firmware: 13.40', f['setup'])
+        g = app.ng_reports_aggregate([{'number': 9, 'title': issue['title'], 'body': issue['body'], 'state': 'open',
+                                       'labels': [{'name': 'test report'}], 'created_at': '2026-11-13T00:00:00Z'}])
+        self.assertEqual(g['games']['PPSA00001']['zstd']['hang'], 1)
+        with self.assertRaises(ValueError):
+            app.ng_report_issue('G1', {**self.fields, 'what': 'short'})
+        with self.assertRaises(ValueError):
+            app.ng_report_issue('missing', self.fields)
+
+    def test_submit_needs_a_token_posts_once_and_keeps_it_private(self):
+        import io, json
+        from unittest.mock import patch
+        with self.assertRaisesRegex(ValueError, 'token'):
+            app.ng_report_submit('G1', self.fields)
+        with self.assertRaises(ValueError):
+            app.set_github_token('not-a-token')
+        self.assertEqual(app.set_github_token('ghp_' + 'a' * 36), {'github_token': 'set'})
+        self.assertEqual(oct(app.GITHUB_TOKEN_PATH.stat().st_mode & 0o777), '0o600')
+        sent = []
+        class R(io.BytesIO):
+            def __enter__(self): return self
+            def __exit__(self, *a): pass
+        def fake(req, timeout=0):
+            sent.append(req)
+            return R(json.dumps({'number': 77, 'html_url': 'https://github.com/quer3q/ampr-emu-ng/issues/77'}).encode())
+        with patch('urllib.request.urlopen', fake):
+            res = app.ng_report_submit('G1', self.fields)
+            self.assertEqual(res['number'], 77)
+            self.assertEqual(sent[0].full_url, 'https://api.github.com/repos/quer3q/ampr-emu-ng/issues')
+            self.assertEqual(sent[0].get_header('Authorization'), 'Bearer ghp_' + 'a' * 36)
+            self.assertEqual(json.loads(sent[0].data)['labels'], ['test report'])
+            with self.assertRaisesRegex(ValueError, 'already sent'):
+                app.ng_report_submit('G1', self.fields)
+        self.assertEqual(app.set_github_token(''), {'github_token': ''})
+        self.assertFalse(app.GITHUB_TOKEN_PATH.exists())
+
+
+if __name__ == '__main__':
+    unittest.main()

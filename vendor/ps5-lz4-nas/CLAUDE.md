@@ -20,18 +20,22 @@
   `DELETE_ORIGINALS=yes`. Keep temporary data after a failed run.
 - Don't change other Docker containers or NAS settings.
 - Tell "verified on the NAS" apart from "playable on the PS5".
-- Packs are always made from the original: folder/exFAT → LZ4 or folder/exFAT →
-  Zstd, never LZ4 → Zstd.
-- New packs are LZ4 NG or Zstd only, both packed by PS5 Dump Forge for
-  ampr-emu-ng (owner, 2026-11-10; replaces "LZ4 always with theghostonline's
-  packer"). LZ4 with APR-EMU is no longer packed; existing copies stay.
+- Packs are always made from the original (folder, .exfat or PS5 game .pkg) →
+  Zstd, never from a packed copy.
+- New packs are Zstd only, packed by PS5 Dump Forge for ampr-emu-ng (owner,
+  2026-11-13; replaces "LZ4 NG or Zstd"). No LZ4 or LZ4 NG option anywhere;
+  existing LZ4 copies stay, are listed and get runtime upgrades.
 - Nothing from theghostonline in the repo or image (owner, 2026-11-10): no
   engine, PS5 app, `ampr_pack`, APR-EMU file, profiles or loose-file rules, sync. Only
   quer3q's Forge and ampr-emu-ng. Don't bring any of it back.
-- Third-party code (quer3q, James St-Pierre) only after review and the owner's OK. Don't route around proxy 403s.
+- Follow only quer3q's repos (ampr-emu-ng main, ps5-dump-forge releases), not
+  James St-Pierre's or other forks (owner, 2026-11-13); fixes come in when quer3q
+  merges them. quer3q's code only after review and the owner's OK. Don't route around proxy 403s.
 - After a feature, give the update command:
   `cd /volume2/docker/ps5-lz4 && ./lz4-ps5.sh update --force`
   (after the `Build NAS image` run on `nas-build` is green).
+- `update` also upgrades ampr-emu-ng in existing LZ4 NG/Zstd copies (`apr --fix`);
+  APR-EMU copies and originals are not touched.
 - Older NAS installs must first replace their local `lz4-ps5.sh` with this repo's
   wrapper; its update migrates the Zstd mount and exports `COMPOSE_FILE`.
 - A report for one codec must not make a fresh pack of the other codec count
@@ -40,12 +44,16 @@
   links). Game reports come from and go to quer3q/ampr-emu-ng (Zstd, LZ4 NG).
 - No TOML profiles (owner, 2026-11-10): no chooser, editor, upload or switch;
   Forge's own packing rules decide every pack.
+- Packing uses every CPU core, at nice 19; all game data
+  (library, work, copies) stays on volume1, the app and state on volume2.
 - Show mockups/screenshots before building larger UI changes when asked.
 
 ## Current upstream integration
 
-- ampr-emu-ng is pinned to upstream main `0a5670a` (after v0.3.5), including
-  the fd read priority fix merged in PR #51 for issue #37. Forge is v0.5.5.
+- ampr-emu-ng is pinned to upstream `920e917` (v0.4.0: pkg mode, writable /app0,
+  split reads for LZ4), including the fd read priority fix from PR #51 (issue #37). Forge is v0.5.5.
+- The Remote tab can install/start the checksum-verified Forge PS5 ELF; its
+  bundled runtime is separate from the newer runtime installed by NAS packing.
 
 ## Mandatory Trail-Code workflow
 

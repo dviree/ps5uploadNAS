@@ -88,7 +88,15 @@ YAML
     (cd "$DIR" && docker-compose -p ps5-lz4 up -d)
   fi
   sleep 5
-  exec docker exec -u "$PUID:$PGID" "$CONTAINER" ps5lz4 --version
+  docker exec -u "$PUID:$PGID" "$CONTAINER" ps5lz4 --version
+  # Put the image's ampr-emu-ng build into every LZ4 NG and Zstd copy that has an
+  # older one (only the runtime file and its index record change; originals and
+  # APR-EMU copies are not touched). PS5LZ4_SKIP_RUNTIME_UPGRADE=1 skips it.
+  if [ "${PS5LZ4_SKIP_RUNTIME_UPGRADE:-}" != 1 ]; then
+    echo "updating ampr-emu-ng in the packed copies…"
+    docker exec -u "$PUID:$PGID" "$CONTAINER" ps5lz4 apr --fix | grep -E 'FIXED|upgrade|WRONG|MISSING|NEEDS|need repair|no packed|unchanged' || echo "all copies already had the newest runtime"
+  fi
+  exit 0
 fi
 
 # The PS5 transfer needs a network, which only the web page container has.

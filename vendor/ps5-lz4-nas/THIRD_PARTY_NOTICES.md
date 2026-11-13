@@ -33,15 +33,15 @@ which the NAS build replaces after packing with its pinned upstream build.
 The image includes Forge's license and dependency notices, NG's attribution, and
 NG's corresponding source archive under `/opt/ps5lz4/licenses/ps5-dump-forge`.
 
-### James St-Pierre runtime fixes
+### ampr-emu-ng runtime build
 
 NG packing and repair use ampr-emu-ng commit
-`0a5670a5d629c78572c61b66353a04e56f1b53d2` (main after v0.3.5, including
-save fixes, fd read thread priority, exact-size pack reads, and James St-Pierre's
+`920e9172b6bf99bd9210361b545e2953659d1e9b` (v0.4.0, including FPKG
+games, writable /app0, split reads, save fixes, fd read thread priority, exact-size pack reads, and James St-Pierre's
 low-descriptor, packed-fd slot, synthetic fd range and event ring fixes merged) from https://github.com/quer3q/ampr-emu-ng
 (GPL-3.0-or-later). The build checks out exactly that commit; a source archive made
 from it and the upstream LICENSE are included in the image under
-`/opt/ps5lz4/licenses/ampr-emu-ng-0a5670a/`.
+`/opt/ps5lz4/licenses/ampr-emu-ng-920e917/`.
 The binary is built from this source, not downloaded as an unpinned branch asset.
 
 Kernel AIO on packed files is part of that upstream commit; no patch is applied.

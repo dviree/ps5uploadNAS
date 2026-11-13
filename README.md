@@ -15,7 +15,7 @@ Upload and install packages, browse your console, manage your game collection an
 | Area | What you can do |
 | --- | --- |
 | Upload & Install | Send games, folders, archives and packages; resume interrupted transfers and follow the queue. |
-| Zstd conversion | Convert original game folders or supported images with PS5 Dump Forge, verify the output and keep the original. |
+| Zstd conversion | Convert original game folders, PS5 game PKGs or supported images with PS5 Dump Forge, verify the output and keep the original. |
 | Files and Collection | Browse mounted folders and include existing Zstd games automatically when `/zstd` is mounted. |
 | Packages | Browse packages by game, including base, update and DLC; install individual packages or the remaining set. |
 | Console tools | Browse files, manage saves, use cheats, send payloads and use the upstream Remote Play tools. |
@@ -25,7 +25,7 @@ Upload and install packages, browse your console, manage your game collection an
 
 New packing jobs use **Zstd with ampr-emu-ng**, at **level 5 by default** (levels 1–22). LZ4 packing is disabled in the interface, API and CLI. Existing packed files can still be inspected or decoded. Existing games are not automatically converted, deleted or overwritten.
 
-The NAS converter uses **PS5 Dump Forge 0.5.5** and ampr-emu-ng commit [`0a5670a`](https://github.com/quer3q/ampr-emu-ng/commit/0a5670a5d629c78572c61b66353a04e56f1b53d2), including the merged packed-read priority fix associated with Kingdom Come: Deliverance II. Build and host verification do not guarantee that every game works on a console.
+The NAS converter uses **PS5 Dump Forge 0.5.5** and **ampr-emu-ng 0.4.0**, pinned to commit [`920e917`](https://github.com/quer3q/ampr-emu-ng/commit/920e9172b6bf99bd9210361b545e2953659d1e9b). This includes PKG mode, writable `/app0` and split reads, alongside earlier packed-read fixes. The converter can prepare and submit game reports with the detected title ID and version. Build and host verification do not guarantee that every game works on a console.
 
 For packed games, use ShadowMountPlus and turn off its fakelib updates so it retains the runtime installed with the converted game.
 

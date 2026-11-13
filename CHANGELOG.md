@@ -24,6 +24,36 @@ Files:
 
 Play Together:
 
+- Internet invites now connect over IPv6 too. If your internet provider shares one IPv4 address between many homes (CGNAT), so ports can't be forwarded, a friend can still join directly when both of you have IPv6, as most mobile networks and many home providers do. The friend's row shows "Internet direct · IPv6" when it is used. Share links between two computers use IPv6 the same way. Tested on this computer only so far, not across two real homes.
+- When a friend can't connect from their network, the panel now says Tailscale always gets through.
+
+Files:
+
+- Search can stay in the folder you have open instead of every drive: pick "This folder" next to the search, or "Search this folder" in the ⋯ menu. The search box then says "Search this folder" (#819).
+
+## 12.4.16
+
+Uploads:
+
+- The check that reads large files back on the PS5 now also checks a part of a file that had to be sent twice, once its second copy reaches the drive, so a fault in that second write is caught (AVA1 1.0.10).
+
+Security:
+
+- The console shell (the Shell page) can no longer read, change, move or delete the folders where the helper keeps this console's identity key and your saved network-share passwords. Every other file tool already refused them.
+
+Share:
+
+- The "Expires in" time on a share link counted down twice as fast as it should, so a link with hours left could look as if it was about to expire.
+- On Windows, a shared file or folder named like a Windows device (such as `NUL.pkg` or `CON`) is now saved under a safe name instead of failing to arrive.
+
+Games:
+
+- When the grid reuses a tile for another game while its cover is still loading, the old game's cover no longer appears on the new one.
+
+## 12.4.15
+
+Play Together:
+
 - "Block PS & Create for friends" now does what it says: a friend gets one press of PS to pick a user on the TV, and once they pick one (PS, then ✕), PS and Create are off for them. Before, both kept working for the first minute after joining, and again for a minute whenever their controller was set up again, such as after the stream restarted. A friend who closes the user picker without choosing is also no longer locked out, and Create is off while they pick. (#720)
 
 Share:

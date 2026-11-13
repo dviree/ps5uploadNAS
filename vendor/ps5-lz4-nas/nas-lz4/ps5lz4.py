@@ -225,11 +225,15 @@ def safe_name(name: str) -> str:
 
 
 def nice_prefix() -> list[str]:
+    """Packing runs at the lowest CPU priority and, by default, in the idle disk
+    class, so the web page and the NAS's own work keep answering while a game
+    packs (PS5LZ4_IONICE=besteffort for the old best-effort class 7)."""
     prefix = []
     if shutil.which("nice"):
-        prefix += ["nice", "-n", "10"]
+        prefix += ["nice", "-n", "19"]
     if shutil.which("ionice"):
-        prefix += ["ionice", "-c2", "-n7"]
+        idle = os.environ.get("PS5LZ4_IONICE", "idle") != "besteffort"
+        prefix += ["ionice", "-c3"] if idle else ["ionice", "-c2", "-n7"]
     return prefix
 
 
@@ -237,9 +241,9 @@ def workers() -> int:
     env = os.environ.get("PS5LZ4_WORKERS")
     if env:
         return max(1, int(env))
-    n = os.cpu_count() or 4
-    # Same rule as the PS5 engine: leave one core, 2..8 workers.
-    return max(2, min(8, n - 1))
+    # Every core (owner's choice): packing runs at nice 19, so the web page and
+    # the NAS still get the CPU whenever they need it.
+    return max(1, os.cpu_count() or 4)
 
 
 # --------------------------------------------------------------------------
@@ -562,8 +566,9 @@ def estimate_game(game_id: str) -> dict:
                     break
             return out[:spot]
     else:
-        raise ValueError("no estimate for a .ffpfsc or .ffpfs: it is compressed or packed already; "
-                         "the result is shown after packing")
+        what = "a .pkg (its files are compressed inside)" if entry.kind == "pkg" else \
+            "a .ffpfsc or .ffpfs: it is compressed or packed already"
+        raise ValueError(f"no estimate for {what}; the result is shown after packing")
     total = sum(n for _, n in files)
     if not total:
         raise ValueError("the game has no data to sample")
@@ -612,7 +617,7 @@ def estimate_game(game_id: str) -> dict:
 class Entry:
     def __init__(self, path: Path, kind: str):
         self.path = path
-        self.kind = kind  # folder | exfat | ffpfs | ffpfsc
+        self.kind = kind  # folder | exfat | ffpfs | ffpfsc | pkg
         self.rel = str(path.relative_to(LIBRARY))
         stem = path.name if kind == "folder" else path.name[: -len(path.suffix)]
         self.id = safe_name(stem)
@@ -670,6 +675,15 @@ def scan_library() -> list[Entry]:
                         entries.append(e)
                     elif depth < 3:
                         walk(p, depth + 1)
+                elif p.is_file() and p.suffix.lower() == ".pkg":
+                    # A PS5 game package (fake PKG): Forge packs it straight to LZ4 NG
+                    # or Zstd. Updates, DLC, apps and PS4 packages stay on the PKG tabs.
+                    info = pkg_info(p)
+                    if pkg_is_ps5_game(info):
+                        e = Entry(p, "pkg")
+                        e.title_id = info["title_id"].upper()
+                        e.name = info.get("name") or ""
+                        entries.append(e)
                 elif p.is_file() and p.suffix.lower() in IMAGE_EXTS:
                     e = Entry(p, IMAGE_EXTS[p.suffix.lower()])
                     if not e.title_id:
@@ -757,14 +771,14 @@ def resolve_targets(args_targets: list[str], entries: list[Entry]) -> list[Entry
 
 class Job:
     def __init__(self, entry: Entry, level: int, restore_test: bool,
-                 require_vhash: bool, codec: str = "lz4", runtime: str = "ng",
+                 require_vhash: bool, codec: str = "zstd", runtime: str = "ng",
                  use_profile: bool = True):
         if codec not in ("lz4", "zstd") or runtime not in ("legacy", "ng"):
             raise JobError("invalid codec or runtime")
-        if runtime != "ng":
-            # Owner's decision (2026-11-10): new packs are LZ4 NG or Zstd, both packed by
-            # PS5 Dump Forge for ampr-emu-ng. Existing APR-EMU copies stay as they are.
-            raise JobError("LZ4 with APR-EMU is no longer packed; choose LZ4 NG or Zstd (ampr-emu-ng)")
+        if runtime != "ng" or codec != "zstd":
+            # Owner's decisions (2026-11-10, 2026-11-13): new packs are Zstd only, packed by
+            # PS5 Dump Forge for ampr-emu-ng. Existing LZ4 and APR-EMU copies stay as they are.
+            raise JobError("only Zstd is packed now (LZ4 and LZ4 NG are no longer made)")
         if not 1 <= level <= (22 if codec == "zstd" else 12):
             raise JobError("compression level out of range")
         self.codec, self.runtime = codec, runtime
@@ -849,11 +863,36 @@ class Job:
             return root
         if self.done("source"):
             root = Path(self.state["source_root"])
-            if root.is_dir():
-                self.log(f"resume: extracted game already verified at {root}")
+            if root.is_dir() or (root == e.path and root.is_file()):
+                self.log(f"resume: source already checked at {root}")
                 return root
         self.set_step("source")
         image = e.path
+        if e.kind == "exfat":
+            # PS5 Dump Forge reads an .exfat in place and checks every file it packs
+            # against it (blake3): nothing is unpacked or mounted on the NAS.
+            meta = exfat_inspect(image)
+            self.state["precheck"] = {k: meta[k] for k in ("title_id", "name", "status", "reason")}
+            if meta["status"] == "packed":
+                raise Skip(meta["reason"])
+            if not any(k.lower() == "eboot.bin" for k in meta["listing"]):
+                raise Skip("no eboot.bin in the image")
+            self.mark("source", source_root=str(image), image_bytes=image.stat().st_size,
+                      extraction="none (PS5 Dump Forge reads the .exfat directly)",
+                      source_files=meta["files"], source_bytes=meta["logical_bytes"])
+            self.log(f"source: {image.name}, {meta['files']} files, {human(meta['logical_bytes'])}, read in place by Forge")
+            return image
+        if e.kind == "pkg":
+            info = pkg_info(image)
+            self.state["precheck"] = {"title_id": info.get("title_id", ""), "name": info.get("name", ""),
+                                      "status": "compatible", "reason": "PS5 game package"}
+            if not pkg_is_ps5_game(info):
+                raise Skip(info.get("error") or f"not a PS5 game package ({info.get('category') or 'unknown type'})")
+            self.mark("source", source_root=str(image), image_bytes=info["size"],
+                      extraction="none (PS5 Dump Forge reads the .pkg directly)",
+                      source_files=0, source_bytes=info["size"])
+            self.log(f"source: {image.name}, {human(info['size'])} package, read in place by Forge")
+            return image
         extract = self.work / "extract"
         partial = self.work / "extract.partial"
         outer = self.work / "outer.partial"
@@ -959,6 +998,12 @@ class Job:
         return f"all {count} blocks match {sidecar.name}"
 
     def step_check(self, root: Path) -> None:
+        if root.is_file():  # an .exfat or .pkg Forge reads directly; step_source checked it
+            pre = self.state.get("precheck") or {}
+            self.state.update(title_id=pre.get("title_id") or self.e.title_id, title_name=pre.get("name") or "")
+            if not self.done("check"):
+                self.mark("check", ampr=NG_NAME, profile_path=None, profile="Forge's own packing rules")
+            return
         status, reason = ampr_status_folder(root)
         tid, name = "", ""
         pj = root / "sce_sys" / "param.json"
@@ -987,7 +1032,7 @@ class Job:
             return pack
         self.set_step("pack")
         remove_work_path(pack)
-        _files, total = tree_bytes(root)
+        total = self.source_size(root)[1]
         self.need_space(total, f"{self.codec.upper()} packs")
         # Forge packs both formats: codec, runtime injection, indexes and full read-back
         # verification. Our own ampr-emu-ng build then replaces the one Forge ships.
@@ -1013,10 +1058,21 @@ class Job:
                   runtime_sha256=NG_SHA256)
         self.log("verified: Forge read every output file back against the source; runtime SHA-256 matches")
 
+    def source_size(self, root: Path) -> tuple[int, int]:
+        """(files, bytes) of the game: the folder, or the .exfat's listing."""
+        if root.is_file():
+            return int(self.state.get("source_files") or 0), int(self.state.get("source_bytes") or root.stat().st_size)
+        return tree_bytes(root)
+
     def step_restore(self, root: Path, pack: Path) -> None:
         if self.done("restore") or not self.restore_test:
             if not self.restore_test:
                 self.state["restore_test"] = "skipped (--no-restore-test)"
+            return
+        if root.is_file():
+            why = f"not needed: Forge compared every packed file with the {root.suffix} (blake3) while packing"
+            self.mark("restore", restore_test=why)
+            self.log(f"restore test {why}")
             return
         _files, total = tree_bytes(root)
         # Verify already decoded every packed file and compared it byte for byte
@@ -1096,7 +1152,7 @@ class Job:
         programs = ps5_permissions(pack)
         os.rename(pack, e.output)
         out_files, out_bytes = tree_bytes(e.output)
-        src_files, src_bytes = tree_bytes(root)
+        src_files, src_bytes = self.source_size(root)
         st = self.state
         report = {
             "id": e.id,
@@ -1251,7 +1307,7 @@ def process_one(e: Entry, args) -> str:
               "(use --force-image to pack the image)", flush=True)
         return "ok"
     job = Job(e, args.level, not args.no_restore_test, args.require_vhash,
-              getattr(args, "codec", "lz4"), getattr(args, "runtime", "ng"),
+              getattr(args, "codec", "zstd"), getattr(args, "runtime", "ng"),
               not getattr(args, "no_profile", False))
     try:
         job.run()
@@ -1386,7 +1442,7 @@ def cmd_start(args) -> int:
             targets = resolve_targets(args.targets, entries)
         q = {"created": now(), "remaining": [e.id for e in targets], "finished": [], "failed": [],
              "current": None, "options": {"level": args.level,
-                                          "codec": getattr(args, "codec", "lz4"),
+                                          "codec": getattr(args, "codec", "zstd"),
                                           "runtime": getattr(args, "runtime", "ng"),
                                           "no_restore_test": args.no_restore_test,
                                           "require_vhash": args.require_vhash,
@@ -1403,7 +1459,7 @@ def cmd_start(args) -> int:
     opts = q.get("options", {})
     log = LOGS / f"queue-{_dt.datetime.now().strftime('%Y%m%d-%H%M%S')}.log"
     argv = ["nohup", sys.executable, os.path.abspath(__file__), "run", "--from-queue",
-            "--level", str(opts.get("level", 9)), "--codec", opts.get("codec", "lz4"),
+            "--level", str(opts.get("level", 9)), "--codec", opts.get("codec", "zstd"),
             "--runtime", opts.get("runtime", "ng")]
     for flag in ("no_restore_test", "require_vhash", "force_image", "no_profile"):
         if opts.get(flag):
@@ -1482,9 +1538,25 @@ def is_packed(game: Path) -> bool:
     return packed_index(game).is_file()
 
 
+_rt_sha: dict = {}
+
+
 def runtime_sha(game: Path) -> str:
+    """SHA-256 of a copy's runtime, cached by path, size and time: the page asks
+    for it every few seconds for every copy."""
     rt = find_runtime(game)
-    return hashlib.sha256(rt.read_bytes()).hexdigest() if rt else ""
+    if not rt:
+        return ""
+    try:
+        st = rt.stat()
+    except OSError:
+        return ""
+    key = (str(rt), st.st_size, st.st_mtime_ns)
+    if key not in _rt_sha:
+        if len(_rt_sha) > 2000:
+            _rt_sha.clear()
+        _rt_sha[key] = hashlib.sha256(rt.read_bytes()).hexdigest()
+    return _rt_sha[key]
 
 
 def runtime_name(sha: str) -> str:
@@ -1498,7 +1570,12 @@ def requires_ng(game: Path) -> bool:
         mine = rep.get("output") in (None, host_output_path(game))
     except ValueError:  # a pack still in the work folder: no report describes it yet
         mine = False
-    return packed_codec(game) == "zstd" or (mine and rep.get("pack_runtime") == "ng") or runtime_sha(game) in (NG_SHA256, NG_UPSTREAM_SHA256)
+    if packed_codec(game) == "zstd" or (mine and rep.get("pack_runtime") == "ng"):
+        return True
+    # Any runtime but the pinned APR-EMU build is an ampr-emu-ng build, older ones
+    # included: those copies get the image's newer build on repair.
+    sha = runtime_sha(game)
+    return bool(sha) and sha != RUNTIME_SHA256
 
 
 def runtime_ok(game: Path, sha: str) -> bool:
@@ -1561,13 +1638,13 @@ def compare_game_files(source: Path, decoded: Path) -> list[str]:
 
 
 def forge_command(source: Path, output: Path, codec: str, level: int, unpack: bool = False) -> list[str]:
-    if codec != "zstd" and not unpack:
-        raise JobError("only Zstd packing is enabled in ps5uploadNAS")
     if codec not in ("lz4", "zstd") or not 1 <= level <= (22 if codec == "zstd" else 12):
         raise JobError("invalid compression codec or level")
     argv = [FORGE, "convert", str(source), "--to", "folder", "-o", str(output), "--full-verify", "--threads", str(workers())]
     if unpack:
         return argv + ["--zstd-unpack" if codec == "zstd" else "--lz4-unpack"]
+    if codec != "zstd":
+        raise JobError("only Zstd packing is supported")
     if codec == "zstd":
         return argv + ["--zstd-pack", "--zstd-level", str(level)]
     return argv + ["--lz4-pack", "--lz4-runtime", "ng", "--lz4-level", str(level if level >= 5 else 0)]
@@ -1660,6 +1737,12 @@ def file_sig(*paths: Path) -> str:
     return "|".join(parts)
 
 
+def stale_skip(reason: str) -> bool:
+    """A skip from the APR-EMU days (no libSceAmpr import, or a Glacier title):
+    Forge injects ampr-emu-ng into any game, so it no longer stops a pack."""
+    return "libSceAmpr" in (reason or "") or "APR-EMU would never load" in (reason or "") or "Glacier" in (reason or "")
+
+
 def classify(e: "Entry", res: dict, cache: dict | None = None) -> tuple[str, str, bool]:
     """(verdict, why, can_queue) for one library entry. verdict is one of
     LZ4 / can be LZ4 / not LZ4 / error. AMPR checks of unpacked games are
@@ -1669,7 +1752,7 @@ def classify(e: "Entry", res: dict, cache: dict | None = None) -> tuple[str, str
     if st == "done":
         problem = lz4_format_problem(e.output) if e.output.is_dir() else "output folder missing"
         return ("LZ4", res["detail"], False) if not problem else ("error", problem, False)
-    if st == "skipped":
+    if st == "skipped" and not stale_skip(res["detail"]):
         return "not LZ4", res["detail"], False
     if st == "exists":
         return "error", res["detail"], False
@@ -1690,6 +1773,8 @@ def classify(e: "Entry", res: dict, cache: dict | None = None) -> tuple[str, str
             elif e.kind == "exfat":
                 meta = exfat_inspect(e.path)
                 ok, why = meta["status"], meta["reason"]
+            elif e.kind == "pkg":
+                ok, why = "compatible", "PS5 game package: Forge packs it directly"
             else:
                 ok, why = "compatible", "checked after extraction"
         except Exception as err:
@@ -1718,7 +1803,7 @@ def cmd_lz4(args) -> int:
     compressed: list[Entry] = []  # .ffpfsc: already PFSC-compressed, little or nothing to gain
     games = ng_reports()
     counts = {"LZ4": 0, "can be LZ4": 0, "not LZ4": 0, "error": 0}
-    codec, runtime = getattr(args, "codec", "lz4"), getattr(args, "runtime", "ng")
+    codec, runtime = getattr(args, "codec", "zstd"), getattr(args, "runtime", "ng")
     packable: list[Entry] = []  # AMPR games (LZ4 copy or not): what Zstd and LZ4 NG are made from
     # Saved results for unchanged sources; --full scans every one again and
     # stores the new results.
@@ -1927,13 +2012,125 @@ def ng_report_url(tid: str, name: str, result: str, packs: str, game_ver: str = 
     answer = NG_FORM_RESULT[result]
     setup = (f"Firmware: {firmware}\nLoader (e.g. ShadowMountPlus x.y), fakelib updates off: yes/no\n"
              f"Packer (e.g. ps5-dump-forge x.y): "
-             + (f"ps5-dump-forge {forge_pin_version()}" if packs == "zstd" else "theghostonline ampr_pack (LZ4)")
+             + f"ps5-dump-forge {forge_pin_version()}"
              + f" via ps5lz4zstd NAS {VERSION}\nInstall: folder / ffpkg / pkg\n"
                "Storage: internal SSD / extended M.2 / USB exFAT")
     q = {"template": "game-report.yml", "title": f"[{tid}] {name}: {answer.split(' (')[0]}",
          "game": ", ".join(x for x in (name, tid, game_ver) if x), "version": f"v{ver}" if ver else "",
          "build": "release (libSceAmpr.sprx)", "packs": packs, "result": answer, "setup": setup}
     return f"{NG_REPORT_WEB}/issues/new?" + urlencode(q)
+
+
+# Submitting a game report from the page: a GitHub token the owner adds on the
+# Remote tab (a classic token with the public_repo scope), kept in state with
+# mode 0600 and never sent back to the page. Only the web page container posts.
+GITHUB_TOKEN_PATH = STATE / "github-token"
+NG_SUBMITTED = STATE / "ng-submitted.json"  # game id -> issues opened from here
+NG_INSTALLS = ("folder", "ffpkg", "pkg")
+NG_STORAGE = ("internal SSD", "extended M.2", "USB exFAT")
+
+
+def github_token() -> str:
+    env = os.environ.get("PS5LZ4_GITHUB_TOKEN", "").strip()
+    if env:
+        return env
+    try:
+        return GITHUB_TOKEN_PATH.read_text().strip()
+    except OSError:
+        return ""
+
+
+def set_github_token(token: str) -> dict:
+    token = (token or "").strip()
+    if not token:
+        GITHUB_TOKEN_PATH.unlink(missing_ok=True)
+        return {"github_token": ""}
+    if not re.fullmatch(r"(ghp_|github_pat_)[A-Za-z0-9_]{20,250}", token):
+        raise ValueError("that does not look like a GitHub token (ghp_… or github_pat_…)")
+    STATE.mkdir(parents=True, exist_ok=True)
+    tmp = GITHUB_TOKEN_PATH.with_suffix(".tmp")
+    tmp.write_text(token + "\n")
+    os.chmod(tmp, 0o600)
+    os.replace(tmp, GITHUB_TOKEN_PATH)
+    return {"github_token": "set"}
+
+
+def ng_report_issue(game_id: str, fields: dict) -> dict:
+    """Title and body of a game report in quer3q's game-report.yml layout
+    ("### Label" sections, the same the page reads back), for one packed copy."""
+    rep = read_json(REPORTS / f"{safe_name(game_id)}.json") or {}
+    if not rep:
+        raise ValueError("this game has no packed copy made here")
+    packs = str(fields.get("packs") or ("zstd" if rep.get("pack_codec") == "zstd" else "lz4"))
+    if packs not in ("zstd", "lz4"):
+        raise ValueError("packs must be zstd or lz4")
+    result = str(fields.get("result") or "")
+    if result not in NG_FORM_RESULT and result not in [full for _s, _k, full in NG_RESULTS] + ["Other"]:
+        raise ValueError("choose a result")
+    answer = NG_FORM_RESULT.get(result, result)
+    what = str(fields.get("what") or "").strip()
+    if len(what) < 10:
+        raise ValueError("say in a sentence or two what happened")
+    tid = (rep.get("title_id") or "").upper() or "PPSA?????"
+    name = re.sub(r"\s+", " ", str(rep.get("title_name") or game_id))[:60]
+    clean = lambda v, n=200: re.sub(r"[\r\n]+", " ", str(v or "")).strip()[:n]
+    install = clean(fields.get("install")) if fields.get("install") in NG_INSTALLS else "folder"
+    storage = clean(fields.get("storage")) if fields.get("storage") in NG_STORAGE else ""
+    game_ver = clean(fields.get("game_version"), 20) or str((rep.get("version") or ""))
+    ver = (re.search(r"\(v([\d.]+)\)", NG_NAME) or [None, ""])[1]
+    setup = "\n".join([f"Firmware: {clean(fields.get('firmware'), 20)}",
+                       f"Loader: {clean(fields.get('loader')) or '-'}",
+                       f"Packer: ps5-dump-forge {forge_pin_version()} via ps5lz4zstd NAS {VERSION}"
+                       + (f" ({rep['codec']})" if rep.get("codec") else ""),
+                       f"Install: {install}", f"Storage: {storage or '-'}"])
+    sections = [("Game, title ID and game version", ", ".join(x for x in (name, tid, game_ver) if x)),
+                ("ampr-emu-ng version", f"v{ver}" if ver else NG_NAME),
+                ("Build", "release (libSceAmpr.sprx)"), ("Packs", packs), ("Result", answer),
+                ("Setup", setup), ("What happened", what[:6000]),
+                ("Logs", "_No response_")]
+    body = "\n\n".join(f"### {k}\n\n{v or '_No response_'}" for k, v in sections)
+    body += "\n\n<sub>Sent from ps5lz4zstd on the owner's NAS.</sub>"
+    return {"title": f"[{tid}] {name}: {answer.split(' (')[0]}", "body": body, "packs": packs, "result": answer}
+
+
+def ng_report_submit(game_id: str, fields: dict, dry: bool = False) -> dict:
+    """Open the game report as an issue on quer3q/ampr-emu-ng with the owner's token.
+    The same result for the same game is not sent twice within a day."""
+    import urllib.error
+    import urllib.request
+    issue = ng_report_issue(game_id, fields)
+    if dry:
+        return {**issue, "dry": True}
+    token = github_token()
+    if not token:
+        raise ValueError("add a GitHub token on the Remote tab first (or use Open on GitHub)")
+    sent = read_json(NG_SUBMITTED, {}) or {}
+    for old in sent.get(game_id, []):
+        if old.get("result") == issue["result"] and old.get("packs") == issue["packs"] \
+                and time.time() - old.get("ts", 0) < 86400 and not fields.get("again"):
+            raise ValueError(f"already sent today: {old.get('url')}")
+    req = urllib.request.Request(
+        f"https://api.github.com/repos/{NG_REPORT_REPO}/issues", method="POST",
+        data=json.dumps({"title": issue["title"], "body": issue["body"], "labels": ["test report"]}).encode(),
+        headers={"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
+                 "X-GitHub-Api-Version": "2022-11-28", "User-Agent": f"ps5-lz4/{VERSION}",
+                 "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            j = json.load(r)
+    except urllib.error.HTTPError as err:
+        why = {401: "the GitHub token is wrong or expired", 403: "the token may not open issues (it needs the public_repo scope)",
+               404: "the token may not open issues (it needs the public_repo scope)", 410: "issues are turned off on that repository",
+               422: "GitHub refused the report"}.get(err.code, f"GitHub answered HTTP {err.code}")
+        raise ValueError(why)
+    except OSError as err:
+        raise ValueError(f"GitHub could not be reached: {err}")
+    entry = {"number": j.get("number"), "url": j.get("html_url"), "result": issue["result"],
+             "packs": issue["packs"], "at": now(), "ts": time.time()}
+    sent.setdefault(game_id, []).append(entry)
+    write_json(NG_SUBMITTED, sent)
+    print(f"[{now()}] game report #{entry['number']} opened for {game_id}", flush=True)
+    return entry
 
 
 def forge_pin_version() -> str:
@@ -2293,7 +2490,8 @@ def boot_files(root: Path, repair: bool) -> dict:
 def lz4_game_sig(g: Path) -> str:
     """Changes when the packs, the runtime or the top level of the folder change."""
     rt = find_runtime(g)
-    return file_sig(g, packed_index(g), g / "ampr_assets.index.crc", rt or g / RUNTIME_REL)
+    # The image's runtime is part of it: a new ampr-emu-ng build re-checks every copy.
+    return NG_SHA256[:12] + ":" + file_sig(g, packed_index(g), g / "ampr_assets.index.crc", rt or g / RUNTIME_REL)
 
 
 def cmd_apr(args) -> int:
@@ -4733,6 +4931,12 @@ def parse_sfo(data: bytes) -> dict:
     return out
 
 
+def pkg_is_ps5_game(info: dict) -> bool:
+    """A PS5 base game package, readable (not an update, DLC, app or PS4 title)."""
+    return (info.get("platform") == "PS5" and info.get("category") == "Game" and not info.get("error")
+            and str(info.get("title_id", "")).upper().startswith("PPSA"))
+
+
 def pkg_info(path: Path) -> dict:
     """Title, title ID, content ID, type and version of a .pkg (cached by size and time)."""
     st = path.stat()
@@ -4967,6 +5171,77 @@ def receiver_start() -> dict:
     if receiver_status()["running"]:
         return {"started": "already running"}
     return receiver_launch(ENGINE_DIR / "pkg-receiver.elf")
+
+
+# Match the reviewed Forge release used by the NAS packer. A console payload
+# has its own bundled runtime; it is not the newer NAS runtime in this image.
+FORGE_PS5_VERSION = "0.5.5"
+FORGE_PS5_SHA256 = "858b8ae2954341a3389e4a9f998c6a57d01bc4e4fb8f01a71c41719001c30be7"
+FORGE_PS5_PATH = "/data/pldmgr/payloads/ps5-dump-forge/ps5-dump-forge.elf"
+
+
+def forge_ps5_elf() -> Path:
+    """Cache the official, checksum-verified PS5 release in NAS state."""
+    import hashlib
+    import urllib.request
+    elf = ENGINE_DIR / f"ps5-dump-forge-{FORGE_PS5_VERSION}-ps5.elf"
+    if elf.is_file():
+        with elf.open("rb") as cached:
+            if hashlib.file_digest(cached, "sha256").hexdigest() == FORGE_PS5_SHA256:
+                return elf
+    url = ("https://github.com/quer3q/ps5-dump-forge/releases/download/"
+           f"v{FORGE_PS5_VERSION}/{elf.name}")
+    req = urllib.request.Request(url, headers={"User-Agent": "ps5-lz4"})
+    with urllib.request.urlopen(req, timeout=120) as response:
+        data = response.read(64 * 1024 * 1024 + 1)
+    if len(data) > 64 * 1024 * 1024 or data[:4] != b"\x7fELF":
+        raise ValueError("the downloaded PS5 Dump Forge payload is not a valid ELF")
+    if hashlib.sha256(data).hexdigest() != FORGE_PS5_SHA256:
+        raise ValueError("the PS5 Dump Forge payload failed its SHA-256 check")
+    ENGINE_DIR.mkdir(parents=True, exist_ok=True)
+    temporary = elf.with_suffix(".tmp")
+    temporary.write_bytes(data)
+    temporary.replace(elf)
+    return elf
+
+
+def forge_ps5_install() -> dict:
+    """Copy Forge into Payload Manager when FTP works; start via PM or elfldr."""
+    import io
+    import ftplib
+    import socket
+    host = (get_settings().get("ps5_ftp") or "").partition(":")[0]
+    if not host:
+        raise ValueError("set the PS5 address under Remote first")
+    elf = forge_ps5_elf()
+    installed = None
+    try:
+        f = ps5_ftp_connect()
+        try:
+            installed = pm_path(FORGE_PS5_PATH, f)
+            ps5_ftp_mkdirs(f, installed.rsplit("/", 1)[0])
+            f.storbinary(f"STOR {installed}", io.BytesIO(elf.read_bytes()), blocksize=1 << 20)
+        finally:
+            try:
+                f.quit()
+            except Exception:
+                pass
+        answer = pm_load(host, installed)
+        if "Invalid payload name" not in answer:
+            return {"installed": installed, "started": f"Payload Manager ({PLDMGR_PORT})",
+                    "url": f"http://{host}:8095/", "version": FORGE_PS5_VERSION}
+    except (OSError, ValueError, *ftplib.all_errors):
+        pass  # A PS5 with an ELF loader does not need FTP or Payload Manager.
+    for port in ELFLDR_PORTS:
+        try:
+            with socket.create_connection((host, port), timeout=10) as sk, elf.open("rb") as source:
+                while chunk := source.read(1 << 20):
+                    sk.sendall(chunk)
+            return {"installed": installed, "started": f"ELF loader ({port})",
+                    "url": f"http://{host}:8095/", "version": FORGE_PS5_VERSION}
+        except OSError:
+            continue
+    raise ValueError("could not start Forge: run Payload Manager or an ELF loader on the PS5 (port 9021)")
 
 
 RECV_AUTO = ENGINE_DIR / "receiver-auto.json"  # {"on": bool}: start pkg-receiver when the PS5 is on
@@ -5221,6 +5496,21 @@ def image_meta(path: Path) -> dict:
     stem = re.sub(r"\s*\[[^\]]*\]|\s*\([^)]*\)|\s*_[A-Z]{4}\d{5}_\s*", " ", stem).strip()
     info = {"title": stem or path.stem,
             "title_id": m.group(0).upper() if m else "", "icon": None}
+    if path.suffix.lower() == ".pkg":
+        pi = pkg_info(path)
+        info.update(title=pi.get("name") or info["title"], title_id=(pi.get("title_id") or info["title_id"]).upper(),
+                    version=pi.get("version") or "")
+        try:
+            with open(path, "rb") as fh:
+                ent = pkg_icon_entry(pkg_entries(fh))
+                if ent and ent[1] < 8 << 20:
+                    fh.seek(ent[0])
+                    data = fh.read(ent[1])
+                    info["icon"] = data if data[:8] == b"\x89PNG\r\n\x1a\n" else None
+        except (OSError, ValueError):
+            pass
+        _img_meta[key] = info
+        return info
     if path.suffix.lower() in (".exfat", ".ffpfsc", ".ffpfs"):
         fh = None
         try:
@@ -6308,12 +6598,13 @@ def dashboard_data() -> dict:
             "send_after": list(read_json(SEND_AFTER, {}) or {}),
             "images": images_data(),
             "pkgs": (pkgs := scan_pkgs()), "pkg_folders": pkg_folders(pkgs),
-            "level": int(os.environ.get("PS5LZ4_LEVEL", "5")), "runtime": NG_NAME,
+            "level": int(os.environ.get("PS5LZ4_ZSTD_LEVEL", "5")), "runtime": NG_NAME,
             "compat_updated": None,
             "requests": {"pending": pending, "pending_list": pending_list, "recent": done_req[::-1],
                          "agent_age": agent_age}, "version": VERSION,
             "settings": {**get_settings(), "ps5_wake_key": "set" if get_settings()["ps5_wake_key"] else "",
-                         "paired": {k: (read_json(SETTINGS_PATH, {}) or {}).get(k) for k in ("ps5_nickname", "ps5_paired")}},
+                         "paired": {k: (read_json(SETTINGS_PATH, {}) or {}).get(k) for k in ("ps5_nickname", "ps5_paired")},
+            "github_token": "set" if github_token() else ""},
             "transfer": transfer_running(),
             "transfers": {f.stem: read_json(f, {}) for f in transfer_files()},
             "transfer_queue": transfer_queue()}
@@ -6425,7 +6716,8 @@ def game_detail(game_id: str) -> dict:
     version = game_version(*(x for x in (out, src.path if src and src.kind == "folder" else None) if x),
                            name=(src.rel if src else "") or (out.name if out else game_id))
     return {"id": game_id, "report": rep or None, "folder": folder, "work": work, "skipped": skipped,
-            "title_id": tid, "ng_reports": ng_reports().get(tid), "ng_reports_web": NG_REPORT_WEB,
+            "title_id": tid, "ng_submitted": (read_json(NG_SUBMITTED, {}) or {}).get(game_id) or [],
+            "ng_reports": ng_reports().get(tid), "ng_reports_web": NG_REPORT_WEB,
             "ng_reports_at": (read_json(NG_REPORTS, {}) or {}).get("updated") if NG_REPORTS_ON else None,
             "apr": apr,
             "unity": UNITY_WHY if (out and out.is_dir() and unity_folder(out)) or
@@ -6459,9 +6751,9 @@ def run_request(req: dict) -> dict:
         argv.append(game)
     if action == "start" or (action == "fix" and "codec" in req):  # Compress all without a format: as before
         codec, runtime = req.get("codec", "zstd"), req.get("runtime", "ng")
-        level = req.get("level", 5 if codec == "zstd" else 9)
+        level = req.get("level", 5)
         if codec != "zstd" or runtime != "ng":
-            return {"ok": False, "output": "invalid compression mode"}
+            return {"ok": False, "output": "only Zstd is packed now"}
         if type(level) is not int or not 1 <= level <= (22 if codec == "zstd" else 12):
             return {"ok": False, "output": "invalid compression level"}
         argv += ["--codec", codec, "--runtime", runtime, "--level", str(level)]
@@ -6688,6 +6980,21 @@ def cmd_ui(args) -> int:
     REQUESTS.mkdir(exist_ok=True)
     cache = {"at": 0.0, "body": b""}
     lock = __import__("threading").Lock()
+
+    def refresh_dashboard() -> None:
+        """Rebuild the page's data; one rebuild at a time, the others return."""
+        if not lock.acquire(blocking=not cache["body"]):
+            return
+        try:
+            if cache["body"] and time.time() - cache["at"] <= 4:
+                return
+            try:
+                cache["body"] = json.dumps(dashboard_data(), ensure_ascii=False).encode()
+            except Exception as err:
+                cache["body"] = json.dumps({"error": str(err)}).encode()
+            cache["at"] = time.time()
+        finally:
+            lock.release()
 
     class H(http.server.BaseHTTPRequestHandler):
         def log_message(self, *a):
@@ -6939,14 +7246,13 @@ def cmd_ui(args) -> int:
                                                   "games": saved.get("games") or {}, "refresh_error": err},
                                                  ensure_ascii=False).encode())
             if self.path == "/api/dashboard":
-                with lock:
-                    if time.time() - cache["at"] > 4:
-                        try:
-                            cache["body"] = json.dumps(dashboard_data(), ensure_ascii=False).encode()
-                        except Exception as err:
-                            cache["body"] = json.dumps({"error": str(err)}).encode()
-                        cache["at"] = time.time()
-                    return self.send(200, cache["body"])
+                # Served from the last result at once; a stale one is rebuilt in the
+                # background, so a slow disk (a game packing) never stalls the page.
+                if not cache["body"]:
+                    refresh_dashboard()
+                elif time.time() - cache["at"] > 4:
+                    __import__("threading").Thread(target=refresh_dashboard, daemon=True).start()
+                return self.send(200, cache["body"])
             self.send(404, b'{"error":"not found"}')
 
         def do_HEAD(self):
@@ -7015,6 +7321,11 @@ def cmd_ui(args) -> int:
             if req.get("action") == "receiver_install":
                 try:
                     return self.send(200, json.dumps(receiver_install()).encode())
+                except Exception as err:
+                    return self.send(400, json.dumps({"error": str(err)}).encode())
+            if req.get("action") == "forge_ps5_install":
+                try:
+                    return self.send(200, json.dumps(forge_ps5_install()).encode())
                 except Exception as err:
                     return self.send(400, json.dumps({"error": str(err)}).encode())
             if req.get("action") == "pkg_install":
@@ -7137,6 +7448,19 @@ def cmd_ui(args) -> int:
                 before = ps5_status(host)
                 ps5_wake(host, cfg["ps5_wake_key"])
                 return self.send(200, json.dumps({"sent": True, "before": before}).encode())
+            if req.get("action") == "github_token":
+                try:
+                    res = set_github_token(str(req.get("token") or ""))
+                except (ValueError, OSError) as err:
+                    return self.send(400, json.dumps({"error": str(err)}).encode())
+                cache["at"] = 0
+                return self.send(200, json.dumps(res).encode())
+            if req.get("action") == "ng_report":
+                try:
+                    res = ng_report_submit(str(req.get("game") or ""), req.get("fields") or {}, bool(req.get("dry")))
+                except (ValueError, OSError) as err:
+                    return self.send(400, json.dumps({"error": str(err)}).encode())
+                return self.send(200, json.dumps(res).encode())
             if req.get("action") == "settings":
                 if req.get("ps5_wake_key") == "set":
                     req.pop("ps5_wake_key")  # unchanged (the page only sees that one is stored)
@@ -7312,16 +7636,16 @@ UI_HTML = (Path(__file__).with_name("ui.html").read_text()
 
 
 def main() -> int:
-    p = argparse.ArgumentParser(prog="ps5lz4", description="LZ4 HC packing of PS5 games for APR-EMU, on the NAS.")
+    p = argparse.ArgumentParser(prog="ps5lz4", description="Zstd packing of PS5 games for ampr-emu-ng (PS5 Dump Forge), on the NAS.")
     p.add_argument("--version", action="version", version=VERSION)
     sub = p.add_subparsers(dest="cmd", required=True)
 
     def job_opts(sp):
-        sp.add_argument("--codec", choices=("zstd",), default="zstd")
+        sp.add_argument("--codec", choices=("zstd",), default="zstd", help="only Zstd is packed")
         sp.add_argument("--runtime", choices=("ng",), default="ng",
                         help="ng installs ampr-emu-ng; required for zstd")
-        sp.add_argument("--level", type=int, default=int(os.environ.get("PS5LZ4_LEVEL", "5")),
-                        help="LZ4: 1-4 fast, 5-12 HC; zstd: 1-22 (suggested 5)")
+        sp.add_argument("--level", type=int, default=int(os.environ.get("PS5LZ4_ZSTD_LEVEL", "5")),
+                        help="zstd level 1-22 (default 5)")
         sp.add_argument("--no-restore-test", action="store_true",
                         help="skip the full unpack-and-compare step (not recommended)")
         sp.add_argument("--require-vhash", action="store_true",

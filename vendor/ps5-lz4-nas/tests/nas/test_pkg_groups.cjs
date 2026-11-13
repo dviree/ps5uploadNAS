@@ -41,8 +41,7 @@ document.getElementById('pkg-k').value = '';
 vm.runInContext("renderPkgTab(data, 'pkg')", context);
 assert.ok(!document.getElementById('pkg-list').innerHTML.includes('<script>'));
 console.log('PASS: UI syntax, game grouping, category order, independent unknowns, collapse persistence, filters, install IDs, platform separation and escaping');
-// Compression controls send the chosen codec/runtime/level, including for a
-// source rejected by the legacy AMPR compatibility check.
+// Compression controls always send Zstd for ampr-emu-ng, for any game.
 vm.runInContext(html.slice(html.indexOf("let packMode = 'zstd'"), html.indexOf("// quer3q's game reports")), context);
 context.data = {games: [{id:'test', name:'Test', can_queue:false}], settings:{}};
 context.confirm = () => true;
@@ -50,26 +49,17 @@ const notices = [], requests = [];
 context.alert = text => notices.push(text);
 context.act = (action, confirmation, extra) => requests.push({action, ...extra});
 (async () => {
-  vm.runInContext("selectPackMode('zstd')", context);
   assert.equal(vm.runInContext('packOptions().level', context), 5);
-  assert.ok(vm.runInContext('packControls()', context).includes('max="22"'));
+  assert.ok(vm.runInContext('packControls()', context).includes('max="22"') && !vm.runInContext('packControls()', context).includes('LZ4'));
   await vm.runInContext("compress('test', false, false)", context);
   assert.equal(requests[0].codec, 'zstd');
   assert.equal(requests[0].runtime, 'ng');
-  vm.runInContext("selectPackMode('ng')", context);
-  await vm.runInContext("compress('test', false, false)", context);
+  await vm.runInContext("convertGame('test', 'lz4')", context);   // old callers still get Zstd
   assert.equal(requests[1].codec, 'zstd');
-  assert.equal(requests[1].runtime, 'ng');
-  await vm.runInContext("convertGame('test', 'zstd')", context);
-  assert.equal(requests[2].codec, 'zstd');
-  assert.equal(requests[2].runtime, 'ng');
-  assert.equal(requests[2].level, 5);
-  await vm.runInContext("convertGame('test', 'lz4')", context);
-  assert.equal(requests.length, 3);
-  assert.ok(notices.some(x => x.includes('Only Zstd')));
+  assert.equal(requests[1].level, 5);
   vm.runInContext('packLevel = 99', context);
   await vm.runInContext("compress('test', false, false)", context);
-  assert.equal(requests.length, 3);
+  assert.equal(requests.length, 2);
   assert.ok(notices.length);
-  console.log('PASS: Zstd/NG controls, defaults, request payload and level validation');
+  console.log('PASS: Zstd-only controls, defaults, request payload and level validation');
 })().catch(e => { console.error(e); process.exitCode = 1; });

@@ -2,6 +2,17 @@
 
 ## >RESUME HERE
 
+- 2026-11-13: merged PS5Upload v12.4.17 (583cb971; includes v12.4.16 audit fixes,
+  IPv6 Play Together and search scoped to the open folder). Refreshed the full NAS
+  tools source from afbf5c38: ampr-emu-ng v0.4.0 (920e917), PS5 game PKG input,
+  on-console Forge delivery and prefilled GitHub game reports. The combined image
+  retains loopback-only converter HTTP, Zstd-only packing, level 5 and mounted
+  library discovery. Synced version files to 12.4.17. Validation: 6406 frontend
+  tests, TypeScript and production build; 11 NAS integration tests and 31 imported
+  NAS tests pass, including real Forge folder/PKG round trips with the verified
+  NG 0.4.0 release (two optional codec/MkPFS checks skipped). Rust and Docker builds
+  need CI; real-console verification remains pending.
+
 - 2026-11-13: merged upstream v12.4.15 (aba0ca38: Play Together PS block, Share fixes,
   dependency updates). README keeps the fork's NAS text; Share takes upstream's layout.
   Fixed the MCP route list order for /api/nas-zstd and regenerated api/openapi.json with

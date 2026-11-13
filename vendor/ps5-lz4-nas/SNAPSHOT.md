@@ -9,7 +9,7 @@ callers/skeleton`); line numbers below drift, names don't.
 |---|---|---|
 | `nas-lz4/` | **The NAS app** (Docker): packing agent + web page. | Python, HTML/JS |
 | `pkg-receiver/` | Glass theme + extras for pkg-receiver (PS5 package installer payload) | C, JS, Py |
-| `tools/` | `quer3q_update.py` (follow quer3q/James) | Python |
+| `tools/` | `quer3q_update.py` (follow quer3q only) | Python |
 | `tests/nas/` | `python3 -m unittest discover -s tests/nas`, `node tests/nas/*.cjs` | Py, JS |
 | `.github/workflows/` | `build-image.yml` (NAS image on `nas-build`), `quer3q-update.yml`, `pkg-receiver.yml` | YAML |
 
@@ -36,12 +36,12 @@ removed on 2026-11-10. Its PS5 engine/app code is pruned from `ps5lz4.py` and th
 
 ### Packing pipeline (class `Job`)
 
-`step_source` (folder as is; `.exfat/.ffpfs/.ffpfsc` unpacked to a work folder)
+`step_source` (folder as is; `.exfat` and PS5 game `.pkg` read in place by Forge; `.ffpfs/.ffpfsc` unpacked to a work folder)
 → `step_check` (unpacked, has eboot.bin) → `step_pack` (Forge) →
 `step_verify` → `step_restore` (full unpack + byte compare, games ≤ 25 GB) →
 `step_publish` (boot files, permissions, report in `state/reports/<id>.json`).
 
-- **LZ4 NG** and **Zstd**: PS5 Dump Forge (`forge_command`), then our ampr-emu-ng
+- **Zstd only** (LZ4 NG no longer packed): PS5 Dump Forge (`forge_command`), then our ampr-emu-ng
   build (`install_ng_runtime`); no profile: Forge's own rules. APR-EMU LZ4 is no longer packed (`Job` refuses runtime legacy).
   Zstd output in the Zstd output folder (`zstd_output`).
 - On older NAS installs, `lz4-ps5.sh update` creates a Zstd Compose override,
@@ -64,11 +64,15 @@ removed on 2026-11-10. Its PS5 engine/app code is pruned from `ps5lz4.py` and th
 - Page data: `dashboard_data` (`/api/dashboard`: `games` rows for originals,
   `copies` one per packed folder, `pkgs`, …), `game_detail`.
 - PS5 side: FTP (`ps5_ftp_*`), pkg-receiver (`receiver_*`, port 12800),
+  Forge console ELF (`forge_ps5_elf`/`forge_ps5_install`: verified v0.5.5,
+  Payload Manager or elfldr, console UI on port 8095),
   ShadowMountPlus via receiver (`smp`, `launch_check`), packages
   (`scan_pkgs`, `pkg_install*`, `ps5_installed`, `pkg_on_ps5`).
 - Community reports (`compat_*`, `report_url`): off unless `PS5LZ4_COMMUNITY=yes`.
 - quer3q's reports: `ng_reports_refresh/aggregate` (state `ng-reports.json`, every
-  3 h), `ng_report_url` (form link), shown by `ngReportsHtml` in ui.html.
+  3 h), `ng_report_url` (form link), shown by `ngReportsHtml` in ui.html;
+  sending: `ng_report_issue/ng_report_submit` (token `github_token`, state
+  `github-token`, `ng-submitted.json`), form `ngReportFormHtml`.
 
 ### State on the NAS (`/volume2/docker/ps5-lz4/state`)
 
@@ -76,9 +80,8 @@ removed on 2026-11-10. Its PS5 engine/app code is pruned from `ps5lz4.py` and th
 
 ## Upstreams and pins
 
-- quer3q/ampr-emu-ng main (pin `NG_COMMIT` in Dockerfile, `0a5670a` after v0.3.5,
+- quer3q/ampr-emu-ng main (pin `NG_COMMIT` in Dockerfile, `920e917` v0.4.0,
   including PR #51 fd read priority for issue #37, on-demand index reads and
   exact-size pack reads; kernel AIO built in).
 - quer3q/ps5-dump-forge releases (pin in `install-forge.py`).
-- `tools/quer3q_update.py` moves pins (checks SHA256SUMS), reports James's
-  branches (`tools/james-branches.json`).
+- `tools/quer3q_update.py` moves pins (checks SHA256SUMS); quer3q only.

@@ -3,6 +3,8 @@ import contextlib
 import io
 import json
 import os
+import subprocess
+import shutil
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
@@ -53,6 +55,21 @@ class ForgeOptionsTests(unittest.TestCase):
             with self.assertRaises(app.JobError):
                 app.forge_command(Path('/src'), Path('/out'), codec, level)
 
+    def test_packing_uses_every_core(self):
+        with patch.object(app.os, 'cpu_count', return_value=4), patch.dict(os.environ, {}, clear=False):
+            os.environ.pop('PS5LZ4_WORKERS', None)
+            self.assertEqual(app.workers(), 4)
+            cmd = app.forge_command(Path('/src'), Path('/out'), 'zstd', 5)
+            self.assertEqual(cmd[cmd.index('--threads') + 1], '4')
+
+    def test_packing_yields_cpu_and_disk_to_the_web_page(self):
+        with patch.object(app.shutil, 'which', return_value='/usr/bin/x'):
+            p = app.nice_prefix()
+            self.assertEqual(p[:3], ['nice', '-n', '19'])
+            self.assertEqual(p[3:], ['ionice', '-c3'])
+            with patch.dict(os.environ, {'PS5LZ4_IONICE': 'besteffort'}):
+                self.assertEqual(app.nice_prefix()[3:], ['ionice', '-c2', '-n7'])
+
     def test_request_queue_retains_options(self):
         req = app.queued_request({'action': 'start', 'game': 'test', 'codec': 'zstd', 'runtime': 'ng', 'level': 5, 'unexpected': 'x'})
         self.assertNotIn('unexpected', req)
@@ -66,15 +83,18 @@ class ForgeOptionsTests(unittest.TestCase):
             self.assertFalse(app.run_request({**req, 'level': 23})['ok'])
             run.assert_not_called()
 
-    def test_a_request_without_options_is_zstd_ng(self):
+    def test_only_zstd_is_packed(self):
         with patch.object(app.subprocess, 'run', return_value=SimpleNamespace(returncode=0, stdout='', stderr='')) as run:
             app.run_request(app.queued_request({'action': 'start', 'game': 'test'}))
             cmd = run.call_args.args[0]
-            self.assertEqual(cmd[cmd.index('--runtime') + 1], 'ng')
             self.assertEqual(cmd[cmd.index('--codec') + 1], 'zstd')
             self.assertEqual(cmd[cmd.index('--level') + 1], '5')
-        with self.assertRaisesRegex(app.JobError, 'no longer packed'):
-            app.Job(None, 9, True, False, 'lz4', 'legacy')
+        with patch.object(app.subprocess, 'run') as run:
+            self.assertFalse(app.run_request({'action': 'start', 'game': 'test', 'codec': 'lz4', 'runtime': 'ng', 'level': 9})['ok'])
+            run.assert_not_called()
+        for codec, runtime in (('lz4', 'ng'), ('lz4', 'legacy')):
+            with self.assertRaisesRegex(app.JobError, 'only Zstd'):
+                app.Job(None, 9, True, False, codec, runtime)
 
 
 @unittest.skipUnless(os.environ.get('FORGE_TEST_BINARY'), 'set FORGE_TEST_BINARY for real binary round trips')
@@ -103,14 +123,73 @@ class ForgeIntegrationTests(unittest.TestCase):
         (self.src/'data/empty').touch()
         self.before = {p.relative_to(self.src):p.read_bytes() for p in self.src.rglob('*') if p.is_file()}
 
+    def lz4_copy(self):
+        """An LZ4 NG copy as older versions made them (LZ4 is no longer packed)."""
+        out = app.OUTPUT/'PPSA01234-lz4'
+        with contextlib.redirect_stdout(io.StringIO()):
+            subprocess.run([app.FORGE, 'convert', str(self.src), '--to', 'folder', '-o', str(out),
+                            '--full-verify', '--lz4-pack', '--lz4-runtime', 'ng', '--lz4-level', '9'],
+                           check=True, capture_output=True)
+        app.install_ng_runtime(out)
+        app.write_json(app.REPORTS/'PPSA01234.json', {'id': 'PPSA01234', 'pack_codec': 'lz4', 'pack_runtime': 'ng',
+                                                    'output': app.host_output_path(out)})
+        return out
+
     def pack(self, codec):
         job = app.Job(app.Entry(self.src, 'folder'), 5, True, False, codec, 'ng')
         with contextlib.redirect_stdout(io.StringIO()): report = job.run()
         return job.e.output, report
 
+    @unittest.skipUnless(shutil.which('mkpfs'), 'needs MkPFS to build an .exfat fixture')
+    def test_exfat_is_packed_in_place_without_libsceampr(self):
+        # Forge reads the .exfat directly: nothing is unpacked, and a game that
+        # doesn't import libSceAmpr is packed too (ampr-emu-ng is injected).
+        (self.src/'eboot.bin').write_bytes(b'\x7fELF fixture without the import')
+        image = app.LIBRARY/'Game [PPSA01234].exfat'
+        subprocess.run(['mkpfs', 'pack', 'exfat', str(self.src), str(image)], check=True, capture_output=True)
+        shutil.rmtree(self.src)
+        before = image.read_bytes()
+        for codec in ('zstd',):
+            entry = app.Entry(image, 'exfat')
+            job = app.Job(entry, 5, True, False, codec, 'ng')
+            with patch.object(app, 'MKPFS', '/nonexistent/mkpfs'), contextlib.redirect_stdout(io.StringIO()):
+                report = job.run()   # MkPFS is never run: no extraction
+            out = job.e.output
+            self.assertTrue(app.is_packed(out))
+            self.assertEqual(app.packed_codec(out), codec)
+            self.assertEqual(report['verification']['extraction'], 'none (PS5 Dump Forge reads the .exfat directly)')
+            self.assertGreater(report['source_bytes'], 0)
+            self.assertFalse(job.work.exists())
+            self.assertEqual(image.read_bytes(), before)  # the original is never changed
+
+    def test_ps5_game_pkg_is_listed_and_packed_in_place(self):
+        # A PS5 game package (fake PKG) is a library game: Forge packs it directly.
+        pj = self.src/'sce_sys/param.json'
+        pj.write_text(json.dumps({'titleId': 'PPSA01234', 'contentId': 'UP0000-PPSA01234_00-TESTTESTTESTTEST',
+                                  'applicationCategoryType': 0, 'contentVersion': '01.000.000',
+                                  'localizedParameters': {'defaultLanguage': 'en-US', 'en-US': {'titleName': 'Example'}}}))
+        pkg = app.LIBRARY/'Example [PPSA01234].pkg'
+        out = subprocess.run([app.FORGE, 'convert', str(self.src), '--to', 'pkg', '-o', str(pkg)], capture_output=True, text=True)
+        self.assertEqual(out.returncode, 0, out.stderr[-500:])
+        shutil.rmtree(self.src)
+        before = pkg.read_bytes()
+        entries = app.scan_library()
+        self.assertEqual([(e.kind, e.title_id) for e in entries], [('pkg', 'PPSA01234')])
+        for codec in ('zstd',):
+            entry = next(e for e in app.scan_library() if e.kind == 'pkg')
+            job = app.Job(entry, 5, True, False, codec, 'ng')
+            with patch.object(app, 'MKPFS', '/nonexistent/mkpfs'), contextlib.redirect_stdout(io.StringIO()):
+                report = job.run()
+            self.assertEqual(app.packed_codec(job.e.output), codec)
+            self.assertEqual(report['verification']['extraction'], 'none (PS5 Dump Forge reads the .pkg directly)')
+            self.assertEqual(report['title_id'], 'PPSA01234')
+        self.assertEqual(pkg.read_bytes(), before)  # the package is never changed
+        # updates and DLC are not library games
+        self.assertFalse(app.pkg_is_ps5_game({'platform': 'PS5', 'category': 'Update', 'title_id': 'PPSA01234'}))
+
     def test_zstd_is_made_from_the_original_even_with_an_lz4_copy(self):
         # Always folder/exFAT -> LZ4 or folder/exFAT -> Zstd, never LZ4 -> Zstd.
-        lz4_out, _ = self.pack('lz4')
+        lz4_out = self.lz4_copy()
         zstd_out, report = self.pack('zstd')
         self.assertNotEqual(lz4_out, zstd_out)
         self.assertTrue(lz4_out.is_dir() and zstd_out.is_dir())
@@ -144,9 +223,26 @@ class ForgeIntegrationTests(unittest.TestCase):
             lz4=app.Entry(app.LIBRARY/'other','folder')
             self.assertEqual(lz4.output.parent,app.OUTPUT)
 
+    def test_repair_upgrades_an_older_ng_build_in_every_copy(self):
+        # After an image update, copies made with an older ampr-emu-ng build get the
+        # new one (even without their report), and the cached check does not hide it.
+        outs = [self.lz4_copy(), self.pack('zstd')[0]]
+        ng = self.root/'ng.sprx'; ng.write_bytes((outs[0]/app.RUNTIME_REL).read_bytes())
+        for out in outs:
+            old = out/app.RUNTIME_REL
+            old.write_bytes(b'older ampr-emu-ng build ' + os.urandom(64))
+            app.update_runtime_index(out, old)
+        for r in app.REPORTS.glob('*.json'):
+            r.unlink()
+        with patch.object(app, 'NG_FILE', ng), patch.object(app, 'ensure_dirs'), contextlib.redirect_stdout(io.StringIO()):
+            app.cmd_apr(SimpleNamespace(fix=False, full=False))   # caches "wrong runtime"
+            app.cmd_apr(SimpleNamespace(fix=True, full=False))
+        for out in outs:
+            self.assertEqual(app.runtime_sha(out), app.NG_SHA256)
+            self.assertIsNone(app.lz4_format_problem(out))
+
     def test_lz4_ng_repair_never_downgrades(self):
-        out, report = self.pack('lz4')
-        self.assertEqual(report['pack_runtime'], 'ng')
+        out = self.lz4_copy()
         self.assertTrue(app.runtime_ok(out, app.NG_SHA256))
         self.assertFalse(app.runtime_ok(out, app.RUNTIME_SHA256))
         # Repair must restore NG even when its original file is missing.

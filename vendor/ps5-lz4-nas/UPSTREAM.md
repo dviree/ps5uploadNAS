@@ -1,13 +1,13 @@
 # PS5-LZ4-NAS integration
 
 Complete tracked source imported from [dviree/PS5-LZ4-NAS](https://github.com/dviree/PS5-LZ4-NAS)
-at `6e58069198d4fe997a1f531ddc2f33541ed8888d` (`nas-build`), 2026-11-13.
+at `afbf5c3838f895f2f08acd136dadc118ec1d3a60` (`nas-build`), 2026-11-13.
 Includes the NAS application, installer/update scripts, Glass receiver sources,
 upstream test suite, update tooling, documentation, licenses and original workflow definitions.
 The workflows in this directory are reference source, not root Actions workflows.
 
-Forge 0.5.5; ampr-emu-ng commit `0a5670a5d629c78572c61b66353a04e56f1b53d2`
-(main after v0.3.5, including the merged packed-read priority fix / #51).
+Forge 0.5.5; ampr-emu-ng v0.4.0 commit `920e9172b6bf99bd9210361b545e2953659d1e9b`.
+Includes PKG conversion, game report submission and packed-copy runtime upgrades.
 The combined image builds this exact runtime and includes its corresponding source and license.
 The build runs the runtime's workspace tests and `make verify`.
 

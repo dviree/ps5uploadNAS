@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Zstd</title>
+<title>ps5lz4zstd</title>
 <style>
 :root{--btn1:#9b7bf7;--btn2:#5b5cf0;--btnglow:rgba(99,82,240,.3);--pri:linear-gradient(135deg,#b06cf7,#7c3aed 45%,#4f6cf5);--ghost:linear-gradient(135deg,#a39cc4,#7b739f);--hero:linear-gradient(135deg,#8b5cf6,#6366f1 55%,#3b82f6);--bg:#f3f1fb;--bgimg:radial-gradient(900px 520px at 0% -8%,rgba(167,139,250,.22),transparent 60%),radial-gradient(800px 520px at 100% 0%,rgba(96,165,250,.16),transparent 60%);--card:#ffffff;--line:#ebe7f7;--txt:#1f1937;--mut:#6f6890;--ok:#16794c;--okbg:#e2f5eb;--acc:#6d4ff0;--acc2:#3b82f6;--accbg:#efeaff;--warn:#9a6200;--warnbg:#fdf2d8;--bad:#c5340d;--badbg:#fdebe5;--chip:#f1edfc;--nd:rgba(99,82,240,.22);--nl:transparent;--shadow:0 12px 32px -14px rgba(91,60,200,.28),0 2px 6px rgba(60,40,140,.06);--inset:inset 0 0 0 1px #e3ddf6;--hdr:rgba(243,241,251,.85);--solid:#ffffff;--cardline:transparent;--blur:none}
 :root[data-theme="dark"]{--btn1:#a78bfa;--btn2:#7c3aed;--btnglow:rgba(124,58,237,.32);--pri:linear-gradient(135deg,#c084fc,#9333ea 50%,#6d28d9);--ghost:linear-gradient(135deg,#6d5a9e,#4c3d7a);--hero:linear-gradient(135deg,#6d28d9,#9333ea 55%,#a78bfa);--bgimg:none;--shadow:7px 7px 16px var(--nd),-7px -7px 16px var(--nl);--inset:inset 3px 3px 7px var(--nd),inset -3px -3px 7px var(--nl);--bg:#211a38;--card:#211a38;--line:#30275080;--txt:#ece8fa;--mut:#a097c2;--ok:#43c08f;--okbg:#1d3a31;--acc:#a78bfa;--acc2:#c084fc;--accbg:#33285a;--warn:#e7ad46;--warnbg:#3b3120;--bad:#f2807a;--badbg:#42262c;--chip:#211a38;--nd:rgba(8,5,20,.65);--nl:rgba(70,58,115,.38);--hdr:rgba(33,26,56,.88);--solid:#241c3e;--cardline:transparent;--blur:none}
@@ -229,13 +229,13 @@ button.two small{font-size:11px;font-weight:500;opacity:.88;line-height:1.25;whi
 <body>
 <header>
   <div class="themes" id="themes" title="Theme"><button data-t="glass" onclick="setTheme(this.dataset.t)">✨ Glass</button><button data-t="light" onclick="setTheme(this.dataset.t)">☀️ Light</button><button data-t="dark" onclick="setTheme(this.dataset.t)">🌙 Dark</button></div>
-  <div class="brand"><div class="logo">ZST</div><div><h1>Zstd</h1><span class="sub" id="sub"></span></div></div>
+  <div class="brand"><div class="logo">LZ4</div><div><h1>ps5lz4zstd</h1><span class="sub" id="sub"></span></div></div>
   <a class="storelink" href="/store" title="Open the store view, made for the PS5 browser and a controller">🛒 Store</a><span class="sp"></span>
   <div class="hacts">
   <button class="two" id="b-resume" hidden onclick="act('resume')">Continue queue<small>resume interrupted packing</small></button>
   <button class="two" id="b-elf" onclick="rcvHeader()"><span id="b-elf-t">Start ELF on PS5</span><small id="b-elf-st">pkg-receiver: installs .pkg from this NAS</small></button>
   <button class="two" onclick="act('check')">Check all<small>check every game, read-only; unchanged ones from the saved results</small></button>
-  <button class="two ghost" onclick="act('check_full', 'Check every game again, ignoring earlier results?\n\nThis reads every packed game in full and can take a while.')">Full re-check<small>check every game again from scratch</small></button>
+  <button class="two ghost" onclick="act('check_full', 'Check every game again, ignoring earlier results?\n\nThis reads every LZ4 game in full and can take a while.')">Full re-check<small>check every game again from scratch</small></button>
   </div>
 </header>
 <nav class="tabs">
@@ -261,7 +261,7 @@ button.two small{font-size:11px;font-weight:500;opacity:.88;line-height:1.25;whi
       <div><h4>Check all <span class="tag">read-only</span></h4>
         <p>Looks at every game and changes nothing. It runs two checks and shows the result under <i>Recent actions</i> on the Activity tab:</p>
         <ul>
-          <li><b>Every packed game</b> in the Zstd folder:
+          <li><b>Every LZ4 game</b> in the LZ4 folder:
             the pack format (<code>AMPRPAK4</code> index, <code>AMPRDAT3</code> volumes, CRC and <code>ampr_emu.index</code> sidecars);
             that <code>fakelib/libSceAmpr.sprx</code> is a known runtime (SHA-256): ampr-emu-ng for LZ4 NG and Zstd copies (older APR-EMU copies are only recognised, not repaired);
             that the files the PS5 opens straight from disk (PlayGo markers, empty placeholders, some boot files) are next to the packs and not only inside them;
@@ -273,7 +273,7 @@ button.two small{font-size:11px;font-weight:500;opacity:.88;line-height:1.25;whi
         <p>Results are saved with each game's file sizes and dates. A game whose files haven't changed is not read again;
           new or changed games are. If something is wrong, the result says what.</p></div>
       <div><h4>Full re-check <span class="tag">read-only</span></h4>
-        <p>The same checks as <b>Check all</b>, but every packed game and every original is read again, ignoring the saved results,
+        <p>The same checks as <b>Check all</b>, but every LZ4 game and every original is read again, ignoring the saved results,
           and the saved results are replaced. Use it after changing files by hand, copying games in some other way,
           or when a result looks wrong. It takes longer: every eboot and every image is read.</p>
         <p>Neither check decodes the packs again; that happened byte for byte when each game was packed (see Compress).</p></div>
@@ -283,12 +283,12 @@ button.two small{font-size:11px;font-weight:500;opacity:.88;line-height:1.25;whi
           <li><b>Source</b>: a game folder is used as it is; an <code>.exfat</code>, <code>.ffpfs</code> or <code>.ffpfsc</code> image is
             unpacked to a work folder on the NAS and every file is checked against the image (and its <code>.vhash</code> if there is one).</li>
           <li><b>Check</b>: the source must be an unpacked game with an <code>eboot.bin</code>; the packing rules are put together.</li>
-          <li><b>Pack</b>: PS5 Dump Forge packs Zstd at the chosen level and reads every file back; this NAS's ampr-emu-ng build goes in.</li>
+          <li><b>Pack</b>: PS5 Dump Forge packs LZ4 or Zstd at the chosen level and reads every file back; this NAS's ampr-emu-ng build goes in.</li>
           <li><b>Verify</b>: every chunk is decoded and compared with the original.</li>
           <li><b>Restore test</b>: the whole game is unpacked again and every file compared byte for byte.</li>
-          <li><b>Publish</b>: the boot files are fixed and the result moves to the Zstd folder.</li>
+          <li><b>Publish</b>: the boot files are fixed and the result moves to the LZ4 folder.</li>
         </ol>
-        <p>Originals are read-only and never changed; an existing packed game is never overwritten. If a job is already running,
+        <p>Originals are read-only and never changed; an existing LZ4 game is never overwritten. If a job is already running,
           this waits for it. A failed game keeps its work folder for troubleshooting.</p></div>
       <div><h4>Continue queue</h4>
         <p>Only shown when packing was interrupted (the container restarted, the NAS rebooted, or Stop was pressed).
@@ -298,7 +298,7 @@ button.two small{font-size:11px;font-weight:500;opacity:.88;line-height:1.25;whi
   </details>
   <div class="card" id="dupcard" hidden><h2>Duplicates on the NAS</h2>
     <div class="mut">The same game (Title ID) is in the library more than once, as other versions or as a folder and an image.
-    The newest is marked; deleting an older one frees its space (needs DELETE_ORIGINALS=yes). Its Zstd copy, if any, stays.</div>
+    The newest is marked; deleting an older one frees its space (needs DELETE_ORIGINALS=yes). Its LZ4 copy, if any, stays.</div>
     <div id="dups"></div></div>
   <div class="card"><h2>Library</h2><div class="subtabs" id="libtabs" role="tablist"></div><div id="fmtbar"></div><div id="unread"></div><div class="scroll" id="games-wrap"><table id="games"></table></div><div id="copies" hidden></div></div>
 </main>
@@ -362,6 +362,17 @@ button.two small{font-size:11px;font-weight:500;opacity:.88;line-height:1.25;whi
       <a class="sm" id="rcv-open" target="_blank" rel="noopener" style="align-self:center">Open its page</a></div>
     <div class="why" id="rcv-msg"></div>
   </div>
+  <div class="card"><h2>PS5 Dump Forge on the PS5</h2>
+    <div class="mut">Pack a game directly on your jailbroken PS5 using
+      <a href="https://github.com/quer3q/ps5-dump-forge" target="_blank" rel="noopener">quer3q's PS5 Dump Forge</a>.
+      Start the PS5's ELF loader or Payload Manager first, then use the Pack tab in Forge's own page.
+      This downloads the verified v0.5.5 PS5 ELF to the NAS, copies it to Payload Manager when FTP is available,
+      and starts it. Relaunch the payload after a console restart. Forge v0.5.5 bundles its own ampr-emu-ng runtime;
+      packs made on the PS5 do not automatically use this NAS image's newer runtime.</div>
+    <div class="filters"><button class="pri" id="forge-ps5-button" onclick="forgePs5Install()">Install and start Forge on PS5</button>
+      <a class="sm" id="forge-ps5-open" target="_blank" rel="noopener" hidden>Open Forge on PS5</a></div>
+    <div class="why" id="forge-ps5-msg"></div>
+  </div>
   <div class="card"><h2>Notifications</h2>
     <div class="mut">A push notification when packing, a check, a transfer to the PS5 or a download by the PS5 finishes or fails.
     Use an <a href="https://ntfy.sh" target="_blank" rel="noopener">ntfy</a> topic (<code>https://ntfy.sh/your-secret-topic</code>, then
@@ -423,6 +434,20 @@ button.two small{font-size:11px;font-weight:500;opacity:.88;line-height:1.25;whi
       <input id="s-key" placeholder="Remote Play key (rp_regist_key)" autocomplete="off">
       <button onclick="saveSettings()">Save</button>
     </div>
+  </div>
+  <div class="card"><h2>GitHub game reports</h2>
+    <div class="mut">To send a game report from this page as an issue on
+    <a href="https://github.com/quer3q/ampr-emu-ng/issues" target="_blank" rel="noopener">quer3q/ampr-emu-ng</a>,
+    save a GitHub token here: a <b>classic</b> personal access token with the <code>public_repo</code> scope
+    (GitHub › Settings › Developer settings › Personal access tokens). It is kept on the NAS (state, mode 600) and never shown
+    again; reports are opened under your GitHub account. Without one, the game sheet's <b>Open on GitHub</b> opens the same
+    report filled in, to submit yourself.</div>
+    <div class="filters">
+      <input id="s-gh" type="password" placeholder="GitHub token (ghp_…)" autocomplete="off" spellcheck="false">
+      <button onclick="saveGithubToken()">Save</button>
+      <button class="ghost" onclick="saveGithubToken(true)">Remove</button>
+    </div>
+    <div class="why" id="gh-msg"></div>
   </div>
 </main>
 <main id="p-ftp" hidden>
@@ -531,8 +556,8 @@ button.two small{font-size:11px;font-weight:500;opacity:.88;line-height:1.25;whi
 <script>
 const STEP_EN = {source: 'Source', check: 'Check', pack: 'Pack', verify: 'Verify', restore: 'Restore test', publish: 'Publish'};
 const PS5_EN = {works: 'works', issues: 'with issues', nostart: "won't start", crash: 'crashes'};
-const KIND_EN = {folder: 'game folder', exfat: 'exFAT image', ffpfsc: '.ffpfsc image (PFSC compressed)', ffpfs: '.ffpfs image', lz4: 'Zstd folder'};
-const ACT_EN = {verify_lz4: 'Verify LZ4', extract: 'Extract to exFAT', delete_rars: 'Delete RAR files', check: 'Check all', check_full: 'Full re-check', fix: 'Compress all', apr: 'Repair', stop: 'Stop', resume: 'Continue queue', start: 'Compress', community: 'PS5 result', remove: 'Delete Zstd copy', delete_original: 'Delete original'};
+const KIND_EN = {folder: 'game folder', pkg: 'PS5 game package (.pkg)', exfat: 'exFAT image', ffpfsc: '.ffpfsc image (PFSC compressed)', ffpfs: '.ffpfs image', lz4: 'LZ4 folder'};
+const ACT_EN = {verify_lz4: 'Verify LZ4', extract: 'Extract to exFAT', delete_rars: 'Delete RAR files', check: 'Check all', check_full: 'Full re-check', fix: 'Compress all', apr: 'Repair', stop: 'Stop', resume: 'Continue queue', start: 'Compress', community: 'PS5 result', remove: 'Delete LZ4 copy', delete_original: 'Delete original'};
 let data = null;
 
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
@@ -577,7 +602,7 @@ function renderImages(d) {
   if (card.hidden) return;
   const rows = list.map(([k, j]) => {
     const pct = j.total ? Math.min(100, 100 * j.done / j.total) : 0;
-    return `<div style="margin-bottom:10px"><b>${esc(k)}</b> <span class="mut">Zstd copy → .exfat</span>
+    return `<div style="margin-bottom:10px"><b>${esc(k)}</b> <span class="mut">LZ4 copy → .exfat</span>
       ${j.state === 'running' ? `<div class="bar"><i style="width:${pct}%"></i></div><div class="mut">${esc(j.phase || '')}: ${gb(j.done)} / ${gb(j.total)} (${pct.toFixed(0)} %)</div>`
         : `<div class="why bad">${esc(j.state)}: ${esc(j.error || '')}</div>`}</div>`;
   });
@@ -781,6 +806,17 @@ async function act(action, confirmText, extra = {}) {
   setTimeout(load, 800);
 }
 
+async function saveGithubToken(remove) {
+  const el = document.getElementById('s-gh'), msg = document.getElementById('gh-msg');
+  if (remove && !confirm('Remove the GitHub token from the NAS?')) return;
+  const r = await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action: 'github_token', token: remove ? '' : el.value})});
+  const j = await r.json().catch(() => ({}));
+  el.value = '';
+  msg.className = 'why ' + (r.ok ? 'good' : 'bad');
+  msg.textContent = !r.ok ? 'Not saved: ' + (j.error || r.status) : j.github_token ? 'Saved: reports can be sent from the game sheet.' : 'Removed.';
+  settingsFilled = false; load();
+}
 async function saveNotify() {
   const r = await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({action: 'settings', notify_url: document.getElementById('s-notify').value.trim()})});
@@ -891,7 +927,7 @@ async function pushSrc(gid) {
       ? `Resume sending ${g.name}? It continues where it stopped.`
       : `Send ${g.name} to the PS5 as it is (${what}, ${gb(g.source_size || g.source_bytes)})?\n\nTo: ${s.ps5_dest}/${key}`) +
     (g.kind !== 'folder' ? '\n\nShadowMountPlus mounts the image from there.' : '') +
-    (g.verdict === 'can be LZ4' ? '\n\nThis game can be LZ4-packed first to save space on the PS5.' : ''), {game: 'src:' + g.id});
+    (g.verdict === 'can be LZ4' ? '\n\nThis game can be Zstd-packed first to save space on the PS5.' : ''), {game: 'src:' + g.id});
 }
 async function push(id, name) {
   const s = data.settings || {};
@@ -930,6 +966,7 @@ function render() {
     const kf = document.getElementById('s-key');
     kf.value = '';
     kf.placeholder = d.settings.ps5_wake_key ? 'Remote Play key saved (leave empty to keep it)' : 'Remote Play key (rp_regist_key)';
+    document.getElementById('s-gh').placeholder = d.settings.github_token ? 'GitHub token saved (enter a new one to replace it)' : 'GitHub token (ghp_…)';
     const pd = d.settings.paired || {};
     document.getElementById('paired').innerHTML = pd.ps5_paired
       ? `<span class="good">Paired with ${esc(pd.ps5_nickname || 'PS5')} (${esc(pd.ps5_paired)}).</span>` :
@@ -997,7 +1034,7 @@ function render() {
   document.getElementById('b-resume').hidden = !d.interrupted;
   const t = d.totals, saved = t.source - t.output;
   document.getElementById('kpis').innerHTML = [
-    [t.lz4, 'games packed'],
+    [t.lz4, 'games LZ4 packed'],
     [gb(saved), t.source ? `saved (${(100 * saved / t.source).toFixed(1)} %)` : 'saved'],
     [d.running ? d.queue.length : 0, d.running ? 'queued' : 'no job running'],
     [gb(d.free_bytes), 'free for output'],
@@ -1030,8 +1067,8 @@ function render() {
     originalGames(d).map(g => {
       const v = g.running ? ['p-run', 'packing'] : g.queued ? ['p-run', 'queued'] :
         g.verdict === 'LZ4' ? ['p-no', 'Original'] : canPack(g) && !g.output ? ['p-can', 'can be ' + PACK_FMT[packMode].name] :
-        g.verdict === 'can be LZ4' ? ['p-can', 'can be LZ4'] :
-        g.verdict === 'error' ? ['p-err', 'error'] : ['p-no', 'not LZ4'];
+        g.verdict === 'can be LZ4' ? ['p-can', 'can be Zstd'] :
+        g.verdict === 'error' ? ['p-err', 'error'] : ['p-no', 'not packable'];
       const lz4 = g.verdict === 'LZ4' && g.output_bytes;
       const ps5 = !g.output_only && g.rel ? `<select onclick="event.stopPropagation()" data-game="${esc(g.id)}" onchange="this.blur();if(this.value)act('community',null,{game:this.dataset.game,result:this.value})">
           <option value="">${g.ps5 ? esc(PS5_EN[g.ps5]) : 'not tested'}</option>
@@ -1039,11 +1076,11 @@ function render() {
       const waiting = pendingFor(g.id), sendNext = (d.send_after || []).includes(g.id);
       const txr = g.output ? (data.transfers || {})[g.output.split('/').pop()] : null;
       const fmt = PACK_FMT[packMode], send = !!(data.settings || {}).ps5_ftp;
-      const other = !canPack(g) && !g.output_only && !g.running && !g.queued && ['zstd', 'ng'].some(m => m !== packMode && canPack(g, m));
+      const other = false;
       const toml = '';
       const action = waiting ? `<span class="pill p-run" title="${esc(waitWhy())}">waiting</span>` : canPack(g)
         ? `<div class="rowbtns"><button class="sm pri" data-game="${esc(g.id)}" onclick="event.stopPropagation();packDialog(this.dataset.game, ${send})" title="Compress with ${esc(fmt.name)}${send ? ', then send it to the PS5 by itself' : ''}">${fmt.icon} ${esc(fmt.name)}${send ? ' &amp; send' : ''}</button>${toml}</div>`
-        : other ? `<div class="rowbtns"><span class="mut" style="font-size:12px">${packMode === 'legacy' ? 'needs Zstd or LZ4 NG' : 'already packed this way'}</span>${toml}</div>`
+        : other ? `<div class="rowbtns"><span class="mut" style="font-size:12px">already packed as Zstd</span>${toml}</div>`
         : txr && txr.state === 'failed' && !d.transfer
         ? `<button class="sm pri" data-id="${esc(g.output.split('/').pop())}" data-name="${esc(g.name)}" onclick="event.stopPropagation();push(this.dataset.id, this.dataset.name)">▶ Resume transfer</button>` : '';
       const why = g.verdict !== 'LZ4' && !g.running ? `<div class="why">${esc(g.why)}</div>` : '';
@@ -1140,7 +1177,7 @@ function dupRows(grp) {
   return grp.items.map(i => {
     const gg = (d.games || []).find(x => x.id === i.id) || {}, size = i.size || gg.source_size || gg.source_bytes;
     return `<div class="dl-row"><span class="chip ${i.newest ? 'ok' : ''}">${i.newest ? '✓ newest' : i.version ? 'older' : 'version?'}</span>
-      <span class="dl-name">v${esc(i.version || '?')}</span><span class="mut">${esc(i.kind)}${size ? ' · ' + gb(size) : ''}${i.lz4 ? ' · has an Zstd copy' : ''} · ${esc(i.rel)}</span><span class="sp"></span>
+      <span class="dl-name">v${esc(i.version || '?')}</span><span class="mut">${esc(i.kind)}${size ? ' · ' + gb(size) : ''}${i.lz4 ? ' · has an LZ4 copy' : ''} · ${esc(i.rel)}</span><span class="sp"></span>
       ${i.used && !many ? '<span class="chip ok">in use</span>' : `<button class="sm pri" data-t="${esc(grp.title_id)}" data-r="${esc(i.rel)}" onclick="dupUse(this.dataset.t, this.dataset.r)">${many ? 'Use only this one' : 'Use this one'}</button>`}
       ${i.used ? '' : d.delete_originals ? `<button class="sm danger" data-g="${esc(i.id)}" data-r="${esc(i.rel)}" onclick="deleteCopy(this.dataset.g, this.dataset.r)">🗑 Delete</button>` : ''}</div>`;
   }).join('');
@@ -1162,7 +1199,7 @@ function pendingFor(id) {
   return data && (data.requests.pending_list || []).some(r => r.action === 'start' && r.game === id);
 }
 async function makeImage(on, name) {
-  if (!confirm(`Make an exFAT image of the packed game ${name}?\n\nIt becomes one file, ${on}.exfat, next to the Zstd folder (about as large as the Zstd copy), and every file in it is compared byte for byte with the Zstd folder. The Zstd folder stays.`)) return;
+  if (!confirm(`Make an exFAT image of the LZ4 game ${name}?\n\nIt becomes one file, ${on}.exfat, next to the LZ4 folder (about as large as the LZ4 copy), and every file in it is compared byte for byte with the LZ4 folder. The LZ4 folder stays.`)) return;
   act('make_exfat', null, {game: on});
 }
 function pushImage(file, name) {
@@ -1171,15 +1208,14 @@ function pushImage(file, name) {
   act('push', `Send the exFAT image of ${name} to ${s.ps5_ftp}${s.ps5_dest}?\n\n${file}\n\nShadowMount+ mounts it from there.`, {game: 'img:' + file});
 }
 function removeImage(on, name) {
-  act('remove_exfat', `Delete the exFAT image of ${name} on the NAS?\n\n${on}.exfat\n\nThe Zstd folder stays.`, {game: on});
+  act('remove_exfat', `Delete the exFAT image of ${name} on the NAS?\n\n${on}.exfat\n\nThe LZ4 folder stays.`, {game: on});
 }
 function imageStop() {
-  act('image_stop', 'Stop making the exFAT image? The half-made image is thrown away; the Zstd folder is not touched.');
+  act('image_stop', 'Stop making the exFAT image? The half-made image is thrown away; the LZ4 folder is not touched.');
 }
 // The format the Compress buttons in My games use (and the game sheet's controls).
 const PACK_FMT = {
-  zstd: {icon: '🗜', name: 'Zstd', sub: 'smallest · ampr-emu-ng'},
-  ng: {icon: '⚡', name: 'LZ4 NG', sub: 'loads fastest · ampr-emu-ng'}};
+  zstd: {icon: '🗜', name: 'Zstd', sub: 'ampr-emu-ng · PS5 Dump Forge'}};  // only Zstd is packed now
 function savePackPrefs() {
   try { localStorage.setItem('pack', JSON.stringify({mode: packMode, level: packLevel, profile: packProfile})); } catch (e) {}
 }
@@ -1188,17 +1224,15 @@ function renderFmtBar() {
   const el = document.getElementById('fmtbar');
   if (!el) return;
   el.innerHTML = `<div class="fmtbar"><span class="mut">Compress with</span>
-    <div class="seg" role="group" aria-label="Compression format">${Object.entries(PACK_FMT).filter(([k]) => k === 'zstd').map(([k, f]) =>
-      `<button class="${packMode === k ? 'on' : ''}" aria-pressed="${packMode === k}" onclick="setPackMode('${k}')">${f.icon} ${f.name}<small>${f.sub}</small></button>`).join('')}</div>
-    <label class="mut">Level <input type="number" min="1" max="${packMode === 'zstd' ? 22 : 12}" value="${packLevel}" style="width:64px;min-width:0"
+    <b>🗜 Zstd</b><small class="mut">ampr-emu-ng · PS5 Dump Forge</small>
+    <label class="mut">Level <input type="number" min="1" max="22" value="${packLevel}" style="width:64px;min-width:0"
       onchange="packLevel = Number(this.value); savePackPrefs()"></label>
     ${typeof packSkip !== 'undefined' && packSkip ? '<button class="sm ghost" onclick="askEachTime()" title="Show the Compress dialog again">Ask each time</button>' : ''}
-    <span class="mut">${packMode === 'legacy' ? 'The Compress buttons below use this.'
-      : 'The Compress buttons below use this. Turn off fakelib updates in ShadowMountPlus so it keeps ampr-emu-ng.'}</span></div>`;
+    <span class="mut">Turn off fakelib updates in ShadowMountPlus so it keeps ampr-emu-ng.</span></div>`;
 }
 // My games' sub-tabs: the originals (folder/exFAT), and the LZ4 and Zstd copies made from them.
 let libTab = 'orig';
-try { libTab = localStorage.getItem('libTab') === 'zstd' ? 'zstd' : 'orig'; } catch (e) {}
+try { libTab = localStorage.getItem('libTab') || 'orig'; } catch (e) {}
 function setLibTab(t) { libTab = t; try { localStorage.setItem('libTab', t); } catch (e) {} if (data) renderLibTabs(data); }
 function originalGames(d) { return (d.games || []).filter(g => !g.output_only && !g.source_codec); }
 function renderLibTabs(d) {
@@ -1206,7 +1240,7 @@ function renderLibTabs(d) {
   if (!el) return;
   const copies = d.copies || [], n = {orig: originalGames(d).length + (d.archives || []).length,
     lz4: copies.filter(c => c.codec !== 'zstd').length, zstd: copies.filter(c => c.codec === 'zstd').length};
-  const tabs = [['orig', '📁 Folder / exFAT'], ['zstd', '🗜 Zstd']];
+  const tabs = [['orig', '📁 Folder / exFAT'], ['lz4', '⚡ LZ4'], ['zstd', '🗜 Zstd']];
   el.innerHTML = tabs.map(([k, label]) => `<button role="tab" aria-selected="${libTab === k}" class="${libTab === k ? 'on' : ''}" onclick="setLibTab('${k}')">${label} <span class="n">${n[k]}</span></button>`).join('');
   const orig = libTab === 'orig';
   document.getElementById('fmtbar').hidden = !orig;
@@ -1237,39 +1271,33 @@ function copiesHtml(d, kind) {
   }).join('');
 }
 // Whether a game can be compressed in the chosen format now.
-function canPack(g, mode = packMode) {
-  if (g.output_only || g.source_codec || g.running || g.queued) return false;
-  if (mode === 'zstd') return !(g.pack_codec === 'zstd' && g.output);
-  if (mode === 'ng') return !g.output;
-  return !!g.can_queue;
+function canPack(g, mode = 'zstd') {
+  // Only Zstd is packed: any original without a Zstd copy can be (an LZ4 copy doesn't count).
+  if (mode !== 'zstd' || g.output_only || g.source_codec || g.running || g.queued) return false;
+  return !(g.pack_codec === 'zstd' && g.output);
 }
-let packMode = 'zstd', packLevel = 5, packProfile = true;  // APR-EMU LZ4 is no longer packed
+let packMode = 'zstd', packLevel = 5, packProfile = true;  // only Zstd is packed now
 try {
   const p = JSON.parse(localStorage.getItem('pack') || 'null');
-  if (p && p.mode === 'zstd') {
-    packMode = p.mode === 'legacy' ? 'ng' : p.mode; packLevel = Number(p.level) || (p.mode === 'zstd' ? 5 : 9); packProfile = p.profile !== false;
-  }
+  if (p && p.mode === 'zstd' && Number(p.level) >= 1 && Number(p.level) <= 22) packLevel = Number(p.level);
 } catch (e) {}
 function packOptions() {
-  return {codec: packMode === 'zstd' ? 'zstd' : 'lz4', runtime: packMode === 'legacy' ? 'legacy' : 'ng', level: packLevel,
-    profile: packProfile};
+  return {codec: 'zstd', runtime: 'ng', level: packLevel, profile: packProfile};
 }
-function selectPackMode(mode) {
+function selectPackMode() {
   packMode = 'zstd';
-  packLevel = 5;
   const input = document.getElementById('pack-level');
-  if (input) { input.max = mode === 'zstd' ? 22 : 12; input.value = packLevel; }
+  if (input) { input.max = 22; input.value = packLevel; }
 }
 function packControls() {
   return `<div style="flex-basis:100%;display:flex;flex-wrap:wrap;gap:8px;align-items:center">
-    <label>Compression <select id="pack-mode" onchange="selectPackMode(this.value)">
-      <option value="zstd" ${packMode === 'zstd' ? 'selected' : ''}>Zstd · ampr-emu-ng</option>
-    </select></label>
-    <label>Level <input id="pack-level" type="number" min="1" max="${packMode === 'zstd' ? 22 : 12}" value="${packLevel}"
+    <span>Compression: <b>Zstd · ampr-emu-ng</b></span>
+    <label>Level <input id="pack-level" type="number" min="1" max="22" value="${packLevel}"
       style="width:70px;min-width:0" onchange="packLevel = Number(this.value)"></label>
     <span class="mut">ampr-emu-ng: disable fakelib updates in ShadowMountPlus.</span></div>`;
 }
-// The Zstd dialog estimates size from a sample and time from earlier packs.
+// The Compress dialog: LZ4 and Zstd side by side with sizes estimated from a
+// sample of the game, pack time from earlier packs here, and the runtime each needs.
 let packSkip = false;
 try { packSkip = localStorage.getItem('packSkip') === '1'; } catch (e) {}
 let pk = null;
@@ -1277,8 +1305,7 @@ function packDialog(id, send) {
   const g = (data.games || []).find(x => x.id === id);
   if (!g) return;
   if (packSkip) return compress(id, send && !!(data.settings || {}).ps5_ftp, false, packOptions(), true);
-  pk = {id, g, est: null, err: '', mode: packMode, level: packLevel, profile: packProfile, remember: false};
-  if (pk.mode === 'legacy') pk.mode = 'ng';
+  pk = {id, g, est: null, err: '', mode: 'zstd', level: packLevel, profile: packProfile, remember: false};
   document.body.insertAdjacentHTML('beforeend', '<div class="pkdlg" id="pkdlg" onclick="if(event.target===this)closePack()"><div class="pkbox" id="pkbox"></div></div>');
   renderPack();
   fetch('/api/estimate?id=' + encodeURIComponent(id), {cache: 'no-store'}).then(r => r.json().then(j => [r.ok, j]))
@@ -1302,12 +1329,11 @@ function renderPack() {
       <div class="pkbar"><i style="width:${bytes && src ? Math.max(2, 100 * bytes / src) : 0}%;background:${colour}"></i></div>
       ${rows.map(([k, v]) => `<div class="row"><span>${k}</span><b>${v}</b></div>`).join('')}</div>`;
   };
-  const lz4b = est && est.lz4.bytes, zb = est && est.zstd.bytes, lzMode = 'ng';
-  const extraSave = lz4b && zb ? lz4b - zb : 0, rec = extraSave > Math.max(1 << 30, 0.05 * src) ? 'zstd' : lz4b ? 'lz4' : '';
+  const zb = est && est.zstd.bytes, rec = '', extraSave = 0;
   const c = g.community || {}, reports = c.reports ? `<span class="good">✅ ${c.works || 0} works</span> of ${c.reports}` : '<span class="mut">no reports yet</span>';
   const recBadge = k => rec === k ? `<span class="pkrec">RECOMMENDED${k === 'zstd' ? ' · saves ' + gb(extraSave) + ' more' : ''}</span>` : '';
   const rt = '';
-  const max = pk.mode === 'zstd' ? 22 : 12, ng = pk.mode !== 'legacy', send = !!(data.settings || {}).ps5_ftp;
+  const max = 22, ng = true, send = !!(data.settings || {}).ps5_ftp;
   box.innerHTML = `<h2 style="margin:0">Compress ${esc(g.name)}</h2>
     <div class="mut">${esc(g.title_id || '')} · ${esc(KIND_EN[g.kind] || g.kind || '')}${src ? ' · ' + gb(src) : ''}${est ? ' · estimated from ' + esc(est.method) : ''}</div>
     <div class="pkcards">
@@ -1324,10 +1350,9 @@ function renderPack() {
     <div class="why">Estimates come from a sample of the game's files; the real size shows after packing.</div>`;
 }
 function pkPick(key) {
-  if (!pk || key !== 'zstd') return;
+  if (!pk) return;
   const before = pk.mode;
   pk.mode = 'zstd';
-  if ((before === 'zstd') !== (pk.mode === 'zstd')) pk.level = pk.mode === 'zstd' ? 5 : 9;
   renderPack();
 }
 function pkGo(send) {
@@ -1344,12 +1369,11 @@ function pkGo(send) {
 }
 function askEachTime() { packSkip = false; try { localStorage.removeItem('packSkip'); } catch (e) {} renderFmtBar(); }
 function convertGame(id, codec) {
-  return compress(id, false, false, {codec, runtime: 'ng', level: codec === 'zstd' ? 5 : 9});
+  return compress(id, false, false, {codec: 'zstd', runtime: 'ng', level: 5});
 }
 async function compress(id, send, image, options = packOptions(), ask = true) {
   const g = (data.games || []).find(x => x.id === id) || {name: id};
   const s = data.settings || {}, opts = options;
-  if (opts.codec !== "zstd") { alert("Only Zstd packing is enabled."); return; }
   if (!Number.isInteger(opts.level) || opts.level < 1 || opts.level > (opts.codec === 'zstd' ? 22 : 12)) {
     alert('Choose a valid compression level.'); return;
   }
@@ -1401,7 +1425,68 @@ function ngReportsHtml(g, det) {
     <div class="acts">${all}</div></div>`;
 }
 function communityHtml(g, det) {
-  return ngReportsHtml(g, det);
+  return ngReportsHtml(g, det) + ngReportFormHtml(g, det);
+}
+// Send a game report to quer3q/ampr-emu-ng: as an issue with the saved token, or
+// opened on GitHub filled in.
+const NG_FORM = {works: 'Works (played past the first level load)', nostart: 'Fails at launch ("Something went wrong" or similar)',
+  crash: 'Crashes later', hang: 'Hangs (loading screen or black screen)', issues: 'Runs, but slow or stutters', other: 'Other'};
+function ngReportFormHtml(g, det) {
+  if (!det || !det.report) return '';
+  const rep = det.report, packs = rep.pack_codec === 'zstd' ? 'zstd' : 'lz4';
+  if (rep.pack_codec !== 'zstd' && rep.pack_runtime !== 'ng') return '';
+  let fw = ''; try { fw = (localStorage.getItem('fw') || '').trim(); } catch (e) {}
+  const sent = (det.ng_submitted || []).map(x => `<a href="${esc(x.url)}" target="_blank" rel="noopener">#${esc(x.number)}</a> ${esc(x.result.split(' (')[0])} (${esc(x.packs)}, ${esc(x.at)})`).join(' · ');
+  const tok = !!((data && data.settings) || {}).github_token;
+  const opt = (o, v) => Object.entries(o).map(([k, t]) => `<option value="${esc(k)}" ${k === v ? 'selected' : ''}>${esc(t)}</option>`).join('');
+  return `<div class="csec" id="ngr"><h4>Report this copy to quer3q</h4>
+    ${sent ? `<div class="why">Sent from here: ${sent}</div>` : ''}
+    <style>#ngr label{display:grid;gap:4px}#ngr select,#ngr input,#ngr textarea{width:100%;max-width:100%;min-width:0;box-sizing:border-box}</style>
+    <div style="display:grid;gap:8px;margin-top:6px">
+      <label class="mut">Result <select id="ngr-result">${opt(NG_FORM, '')}</select></label>
+      <label class="mut">Packs <select id="ngr-packs">${opt({zstd: 'zstd', lz4: 'lz4'}, packs)}</select></label>
+      <label class="mut">Firmware <input id="ngr-fw" value="${esc(fw)}" placeholder="e.g. 13.40"></label>
+      <label class="mut">Loader <input id="ngr-loader" placeholder="e.g. ShadowMountPlus 1.7, fakelib updates off"></label>
+      <label class="mut">Install <select id="ngr-install">${opt({folder: 'folder', ffpkg: 'ffpkg', pkg: 'pkg'}, 'folder')}</select></label>
+      <label class="mut">Storage <select id="ngr-storage">${opt({'internal SSD': 'internal SSD', 'extended M.2': 'extended M.2', 'USB exFAT': 'USB exFAT'}, 'USB exFAT')}</select></label>
+      <label class="mut">What happened <textarea id="ngr-what" rows="4" style="width:100%;box-sizing:border-box" placeholder="What you did and saw; where it fails, any error code"></textarea></label>
+    </div>
+    <div class="acts" style="margin-top:8px">
+      <button class="pri" data-g="${esc(g.id)}" onclick="ngReportSend(this.dataset.g)" ${tok ? '' : 'disabled title="Save a GitHub token on the Remote tab first"'}>Send to GitHub</button>
+      <button class="ghost" data-g="${esc(g.id)}" onclick="ngReportOpen(this.dataset.g)">Open on GitHub</button>
+    </div>
+    <div class="why" id="ngr-msg">${tok ? '' : 'Sending needs a GitHub token (Remote tab). Open on GitHub works without one.'}</div></div>`;
+}
+function ngReportFields() {
+  const v = id => (document.getElementById(id) || {}).value || '';
+  const fw = v('ngr-fw').trim(); try { if (fw) localStorage.setItem('fw', fw); } catch (e) {}
+  return {result: NG_FORM[v('ngr-result')] || v('ngr-result'), packs: v('ngr-packs'), firmware: fw, loader: v('ngr-loader'),
+    install: v('ngr-install'), storage: v('ngr-storage'), what: v('ngr-what')};
+}
+async function ngReportCall(game, dry) {
+  const r = await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({action: 'ng_report', game, dry, fields: ngReportFields()})});
+  const j = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(j.error || r.status);
+  return j;
+}
+async function ngReportOpen(game) {
+  const msg = document.getElementById('ngr-msg');
+  try {
+    const j = await ngReportCall(game, true);
+    window.open('https://github.com/quer3q/ampr-emu-ng/issues/new?' + new URLSearchParams({title: j.title, body: j.body}), '_blank', 'noopener');
+  } catch (e) { msg.className = 'why bad'; msg.textContent = String(e.message || e); }
+}
+async function ngReportSend(game) {
+  const msg = document.getElementById('ngr-msg');
+  try {
+    const p = await ngReportCall(game, true);
+    if (!confirm(`Open this issue on quer3q/ampr-emu-ng under your GitHub account?\n\n${p.title}\n\n${p.body.slice(0, 900)}`)) return;
+    msg.className = 'why'; msg.textContent = 'Sending…';
+    const j = await ngReportCall(game, false);
+    msg.className = 'why good';
+    msg.innerHTML = `Sent: <a href="${esc(j.url)}" target="_blank" rel="noopener">#${esc(j.number)}</a>`;
+  } catch (e) { msg.className = 'why bad'; msg.textContent = 'Not sent: ' + (e.message || e); }
 }
 let openId = null;
 function closeGame() { openId = null; document.getElementById('modal').hidden = true; document.body.classList.remove('locked'); }
@@ -1443,7 +1528,7 @@ function gameHtml(g, det) {
     ['Title ID', esc(g.title_id || '–')],
     ['Version', det && det.version && det.version.version ? esc(det.version.version) + (det.version.master ? `<div class="why">master ${esc(det.version.master)}</div>` : '') + (det.version.firmware ? `<div class="why">needs firmware ${esc(det.version.firmware)} or newer</div>` : '') : (det ? '–' : '…')],
     ['Source', g.output_only ? 'not in the library' : `${esc(KIND_EN[g.kind] || g.kind)}${g.source_size ? ' · ' + gb(g.source_size) : ''}<div class="why">On the NAS: ${esc(g.source_path || g.rel || '')}</div>` +
-      (g.verdict === 'can be LZ4' && g.kind !== 'folder' ? '<div class="why">Unpacked to a work folder on the NAS before LZ4 packing; the original is not changed.</div>' : '')],
+      (g.verdict === 'can be LZ4' && g.kind !== 'folder' ? '<div class="why">Packed from the image by PS5 Dump Forge; the original is not changed.</div>' : '')],
     ['Original', gb(g.source_bytes)],
     ['LZ4', gb(g.output_bytes)],
     ['Saved', g.saved_percent != null ? `${gb(g.source_bytes - g.output_bytes)} (${Math.round(g.saved_percent)} %)` : '–'],
@@ -1461,8 +1546,8 @@ function gameHtml(g, det) {
     (vv.state !== 'passed' && vv.output ? `<pre class="log" style="max-height:160px;overflow:auto">${esc(vv.output.split('\n').slice(-8).join('\n'))}</pre>` : '')]);
   const pp = ps5Place(g);
   if (pp || g.title_id) rows.push(['On the PS5', `${pp ? esc(pp.path) : ''}<div class="why" id="ps5-here">${pp && pp.sent ? '<span class="good">sent by this page</span>' : 'checking the PS5…'}</div>` +
-    (g.title_id ? `<button class="sm" style="margin-top:6px" data-t="${esc(g.title_id)}" onclick="launchCheck(this.dataset.t, this.nextElementSibling)" title="Checks on the PS5 what would stop the packed game from starting: fakelib off in ShadowMountPlus, APR-EMU missing, fakelib2, eboot.bin, a backport with its own AMPR library">🚦 Start check</button><div></div>` : '')]);
-  if (f) rows.push(['Zstd folder', `${esc(f.path)}<div class="why">${f.files} files · ${f.paks} Zstd volumes · ${gb(f.bytes)}${f.problem ? ' · <span class="bad">' + esc(f.problem) + '</span>' : ' · format ok'}</div>`]);
+    (g.title_id ? `<button class="sm" style="margin-top:6px" data-t="${esc(g.title_id)}" onclick="launchCheck(this.dataset.t, this.nextElementSibling)" title="Checks on the PS5 what would stop the LZ4 game from starting: fakelib off in ShadowMountPlus, APR-EMU missing, fakelib2, eboot.bin, a backport with its own AMPR library">🚦 Start check</button><div></div>` : '')]);
+  if (f) rows.push(['LZ4 folder', `${esc(f.path)}<div class="why">${f.files} files · ${f.paks} LZ4 volumes · ${gb(f.bytes)}${f.problem ? ' · <span class="bad">' + esc(f.problem) + '</span>' : ' · format ok'}</div>`]);
   if (r) {
     rows.push(['Compression', `${esc(r.codec || '')}${r.profile ? `<div class="why">${esc(r.profile)}</div>` : ''}`]);
     if (r.pack) rows.push(['Pack', `${r.pack.packed} files packed, ${r.pack.loose} loose · ${r.pack.lz4} LZ4 blocks`]);
@@ -1484,15 +1569,16 @@ function gameHtml(g, det) {
   if (!g.output && !g.output_only && !g.source_codec && !g.running && !g.queued && !pendingFor(g.id)) {
     acts.push(packControls());
     acts.push(`<button class="pri" data-game="${esc(g.id)}" onclick="convertGame(this.dataset.game, 'zstd')" title="Zstd level 5 with ampr-emu-ng; keeps the original">Convert to Zstd</button>`,
+      `<button data-game="${esc(g.id)}" onclick="convertGame(this.dataset.game, 'lz4')" title="LZ4 level 9 with ampr-emu-ng; keeps the original">Convert to LZ4 (ampr-emu-ng)</button>`,
       `<button class="ghost" data-game="${esc(g.id)}" onclick="compress(this.dataset.game, false)">Compress selected format</button>`);
   }
   if (g.queued) acts.push(`<button class="danger" data-g="${esc(g.id)}" onclick="closeGame();queueRemove({game: this.dataset.g})">✕ Remove from queue</button>`);
   if (pendingFor(g.id)) acts.push(`<button class="danger" data-g="${esc(g.id)}" onclick="closeGame();queueRemove({file: ((data.requests.pending_list || []).find(r => r.action === 'start' && r.game === this.dataset.g) || {}).file})">✕ Cancel</button>`);
   if (pendingFor(g.id)) acts.push(`<span class="pill p-run">waiting to start</span><div class="why" style="flex-basis:100%">${esc(waitWhy())}</div>`);
   else if (g.can_queue && !g.running && !g.queued)
-    acts.push(`<button class="pri" data-game="${esc(g.id)}" onclick="compress(this.dataset.game, true)" title="Compress with Zstd, check it, then send it to the PS5 by itself">⚡ Compress &amp; send to PS5</button>`,
+    acts.push(`<button class="pri" data-game="${esc(g.id)}" onclick="compress(this.dataset.game, true)" title="Compress with LZ4, check it, then send it to the PS5 by itself">⚡ Compress &amp; send to PS5</button>`,
       `<button class="ghost" data-game="${esc(g.id)}" onclick="compress(this.dataset.game)">Compress only</button>`,
-      `<button class="ghost" data-game="${esc(g.id)}" onclick="compress(this.dataset.game, true, true)" title="Zstd, then an exFAT image of the Zstd game, then the image to the PS5">Compress, exFAT &amp; send</button>`);
+      `<button class="ghost" data-game="${esc(g.id)}" onclick="compress(this.dataset.game, true, true)" title="LZ4, then an exFAT image of the LZ4 game, then the image to the PS5">Compress, exFAT &amp; send</button>`);
   if (!g.output_only && g.rel)
     acts.push(`<select data-game="${esc(g.id)}" onchange="this.blur();if(this.value)act('community',null,{game:this.dataset.game,result:this.value})">
       <option value="">PS5 result: ${g.ps5 ? esc(PS5_EN[g.ps5]) : 'not tested'}</option>
@@ -1503,11 +1589,11 @@ function gameHtml(g, det) {
     acts.push(`<button data-p="${esc(pp.path)}" onclick="closeGame();tab('ftp');ftpGo(this.dataset.p)">Open on PS5</button>`);
     acts.push(`<button data-p="${esc(pp.path)}" onclick="aprCheck(this.dataset.p, document.getElementById('apr-ps5'))">Check runtime on PS5</button>`);
   }
-  // Deleting: the PS5 copy and the NAS Zstd copy separately; never the original.
+  // Deleting: the PS5 copy and the NAS LZ4 copy separately; never the original.
   const dels = [];
   if (pp && pp.sent) dels.push(`<button class="danger" data-p="${esc(pp.path)}" data-n="${esc(g.name)}" onclick="deleteFromPs5(this.dataset.p, this.dataset.n)">🗑 Delete from PS5</button>`);
   if (!g.output_only && !g.source_codec && g.rel && !g.running) dels.push(data.delete_originals
-    ? `<button class="danger" data-g="${esc(g.id)}" onclick="deleteOriginal(this.dataset.g)">🗑 Delete original on NAS${g.verdict === 'LZ4' && (g.ps5 === 'works' || g.ps5 === 'issues') ? ' <small>(the Zstd copy works on the PS5)</small>' : ''}</button>`
+    ? `<button class="danger" data-g="${esc(g.id)}" onclick="deleteOriginal(this.dataset.g)">🗑 Delete original on NAS${g.verdict === 'LZ4' && (g.ps5 === 'works' || g.ps5 === 'issues') ? ' <small>(the LZ4 copy works on the PS5)</small>' : ''}</button>`
     : `<button class="ghost" onclick="alert(ORIG_OFF)">🗑 Delete original…</button>`);
   if (g.output && (g.verdict === 'LZ4' || g.output_only) && !g.running)
     dels.push(`<button class="danger" data-g="${esc(g.id)}" data-n="${esc(g.name)}" onclick="deleteLz4(this.dataset.g, this.dataset.n)">🗑 Delete packed copy on NAS</button>`);
@@ -1520,15 +1606,15 @@ function gameHtml(g, det) {
     const on = g.output.split('/').pop(), v = (data.verifies || {})[on] || {};
     acts.push(v.state === 'running' ? '<button class="ghost" disabled>🔍 Verifying LZ4…</button>'
       : `<button class="${v.state === 'passed' ? 'send-on' : v.state === 'failed' ? 'send-off' : ''}" data-g="${esc(on)}" data-n="${esc(g.name)}"
-          onclick="act('verify_lz4', 'Verify the Zstd copy of ' + this.dataset.n + '?\\n\\nEvery LZ4 block is decoded and its CRC checked, the file list and APR-EMU too. It reads the whole copy on the NAS (a few minutes per 100 GB) and changes nothing.', {game: this.dataset.g})"
-          title="${v.state ? esc((v.state === 'passed' ? 'Passed ' : 'Failed ') + (v.finished || '')) : 'Check the Zstd copy before sending it'}">🔍 ${v.state === 'passed' ? 'LZ4 verified ✓' : v.state === 'failed' ? 'LZ4 verify failed ✗' : 'Verify LZ4'}</button>`);
+          onclick="act('verify_lz4', 'Verify the LZ4 copy of ' + this.dataset.n + '?\\n\\nEvery LZ4 block is decoded and its CRC checked, the file list and APR-EMU too. It reads the whole copy on the NAS (a few minutes per 100 GB) and changes nothing.', {game: this.dataset.g})"
+          title="${v.state ? esc((v.state === 'passed' ? 'Passed ' : 'Failed ') + (v.finished || '')) : 'Check the LZ4 copy before sending it'}">🔍 ${v.state === 'passed' ? 'LZ4 verified ✓' : v.state === 'failed' ? 'LZ4 verify failed ✗' : 'Verify LZ4'}</button>`);
   }
   if (g.verdict === 'LZ4' && g.output) {
     const busy = data.transfer && data.transfer.state === 'running';
     acts.push(`<button class="pri" ${busy ? 'title="another game is being sent: this one is queued after it"' : ''} data-id="${esc(g.output.split('/').pop())}" data-name="${esc(g.name)}"
       onclick="push(this.dataset.id, this.dataset.name)">${tr && tr.state === 'done' ? 'Send again' : busy ? 'Send to PS5 (queue)' : 'Send to PS5'}</button>`);
   }
-  // exFAT image of the Zstd copy (some games only start from an image).
+  // exFAT image of the LZ4 copy (some games only start from an image).
   if (g.verdict === 'LZ4' && g.output && !g.running) {
     const on = g.output.split('/').pop(), im = data.images || {}, job = (im.jobs || {})[on], ready = (im.ready || {})[on];
     if (job && job.state === 'running') {
@@ -1538,7 +1624,7 @@ function gameHtml(g, det) {
       acts.push(`<button class="pri" data-f="${esc(on + '.exfat')}" data-n="${esc(g.name)}" onclick="pushImage(this.dataset.f, this.dataset.n)">Send exFAT image to PS5</button>`);
       dels.push(`<button class="danger" data-g="${esc(on)}" data-n="${esc(g.name)}" onclick="removeImage(this.dataset.g, this.dataset.n)">🗑 Delete exFAT image</button>`);
     } else {
-      acts.push(`<button data-g="${esc(on)}" data-n="${esc(g.name)}" onclick="makeImage(this.dataset.g, this.dataset.n)" title="One .exfat file of the packed game, checked byte for byte">Make exFAT image</button>`,
+      acts.push(`<button data-g="${esc(on)}" data-n="${esc(g.name)}" onclick="makeImage(this.dataset.g, this.dataset.n)" title="One .exfat file of the LZ4 game, checked byte for byte">Make exFAT image</button>`,
         `<button data-g="${esc(g.id)}" onclick="compress(this.dataset.g, true, true)">Make exFAT and send to PS5</button>`);
     }
   }
@@ -1595,7 +1681,7 @@ async function ftpDelete(path, dir) {
   else alert(`Deleted ${name}` + (dir ? ` (${j.files} files, ${j.folders} folders).` : '.'));
   ftpGo(ftpPath);
 }
-// Where a game's Zstd folder is (NAS) and where it is or will be on the PS5.
+// Where a game's LZ4 folder is (NAS) and where it is or will be on the PS5.
 function ps5Place(g) {
   if (!g.output) return null;
   const name = g.output.split('/').pop(), t = (data.transfers || {})[name];
@@ -1609,7 +1695,7 @@ function placeHtml(g) {
   const t = (data.transfers || {})[g.output.split('/').pop()];
   const drive = pp && pp.sent ? (pp.path.match(/^\/mnt\/([^/]+)/) || [, 'internal'])[1] : '';
   const bigger = g.kind !== 'folder' && g.source_size && g.output_bytes && g.output_bytes > g.source_size
-    ? `<span class="chip bad" title="The ${esc(KIND_EN[g.kind] || g.kind)} is ${gb(g.source_size)}; the Zstd copy is ${gb(g.output_bytes)}">Zstd copy ${gb(g.output_bytes - g.source_size)} larger than the image</span>` : '';
+    ? `<span class="chip bad" title="The ${esc(KIND_EN[g.kind] || g.kind)} is ${gb(g.source_size)}; the LZ4 copy is ${gb(g.output_bytes)}">LZ4 copy ${gb(g.output_bytes - g.source_size)} larger than the image</span>` : '';
   return `<div class="chips"><span class="chip" title="${esc(g.output)}">🗄 On NAS</span>${bigger}` +
     (pp && pp.sent ? `<span class="chip ok" title="${esc(pp.path)}">🎮 On PS5 · ${esc(drive)}${t && t.finished ? ' · ' + esc(t.finished.slice(5, 16)) : ''}</span>` : '') + '</div>';
 }
@@ -2092,7 +2178,7 @@ async function measureAll() {
 async function deletePg(path, name) {
   const sending = data && data.transfer && data.transfer.dest && ('/' + data.transfer.dest.split('/').slice(1).join('/') + '/').startsWith(path + '/');
   if (!confirm(`Delete ${name} from the PS5?\n\n${path}\n\n` + (sending ? 'It is being sent right now: that transfer is stopped first.\n\n' : '') +
-      "Everything in the folder is deleted. This can't be undone" + (pgData.games.find(g => g.path === path && g.on_nas && g.on_nas.length) ? ' (the Zstd copy on the NAS stays; you can send it again).' : '.'))) return;
+      "Everything in the folder is deleted. This can't be undone" + (pgData.games.find(g => g.path === path && g.on_nas && g.on_nas.length) ? ' (the LZ4 copy on the NAS stays; you can send it again).' : '.'))) return;
   const card = [...document.querySelectorAll('.pg')].find(c => c.querySelector(`[data-p="${CSS.escape(path)}"]`));
   if (card) card.classList.add('busy-del');
   const r = await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'},
@@ -2107,7 +2193,7 @@ async function deletePg(path, name) {
 async function deleteFromPs5(path, name) {
   const sending = data && data.transfer && data.transfer.dest && ('/' + data.transfer.dest.split('/').slice(1).join('/') + '/').startsWith(path + '/');
   if (!confirm(`Delete ${name} from the PS5?\n\n${path}\n\n` + (sending ? 'It is being sent right now: that transfer is stopped first.\n\n' : '') +
-      "The Zstd copy on the NAS stays, so you can send it again.")) return;
+      "The LZ4 copy on the NAS stays, so you can send it again.")) return;
   const r = await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'ftp_delete', path})});
   const j = await r.json().catch(() => ({}));
   alert(r.ok ? `Deleted ${name} from the PS5 (${j.files} files).` + (j.home_screen ? ` Home screen tile: ${j.home_screen}.` : '') : 'Not deleted: ' + (j.error || r.status));
@@ -2120,17 +2206,17 @@ function deleteOriginal(gid) {
   if (!g) return;
   const lz4 = g.verdict === 'LZ4' && g.output;
   if (lz4 && g.ps5 !== 'works' && g.ps5 !== 'issues')
-    return alert(`Test the Zstd copy of ${g.name} on the PS5 first.\n\nWhen it starts and plays, set its PS5 result to "works"; then the original can be deleted.`);
+    return alert(`Test the LZ4 copy of ${g.name} on the PS5 first.\n\nWhen it starts and plays, set its PS5 result to "works"; then the original can be deleted.`);
   closeGame();
   act('delete_original', `Delete the ORIGINAL of ${g.name} from the NAS?\n\n${g.source_path}\n${gb(g.source_size || g.source_bytes)}\n\n` +
-    (lz4 ? 'The Zstd copy stays and still works on the PS5.' : 'There is no Zstd copy: after this the game is gone from the NAS.') +
+    (lz4 ? 'The LZ4 copy stays and still works on the PS5.' : 'There is no LZ4 copy: after this the game is gone from the NAS.') +
     "\n\nThis can't be undone.", {game: gid});
 }
 function deleteLz4(id, name) {
   // The exact folder is named and sent, so only that copy can go (never "the other format").
   const g = (data.games || []).find(x => x.id === id) || {};
   const folder = (g.output || '').split('/').pop();
-  if (!folder) { alert('Use the Zstd sub-tab and press Delete copy on the copy you mean.'); return; }
+  if (!folder) { alert('Use the LZ4 or Zstd sub-tab and press Delete copy on the copy you mean.'); return; }
   closeGame();
   act('remove', `Delete the packed copy ${folder} of ${name} on the NAS?\n\nIt frees its space. The original game is never touched, and a copy on the PS5 stays.`, {game: folder});
 }
@@ -2321,6 +2407,26 @@ async function rcvInstall(fromHeader) {
   if (fromHeader) alert(text);
   setTimeout(rcvCheck, 4000);
 }
+async function forgePs5Install() {
+  const button = document.getElementById('forge-ps5-button');
+  const msg = document.getElementById('forge-ps5-msg');
+  const link = document.getElementById('forge-ps5-open');
+  button.disabled = true;
+  msg.className = 'why'; msg.textContent = 'Downloading and starting PS5 Dump Forge…';
+  try {
+    const response = await fetch('/api/action', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'forge_ps5_install'})});
+    const result = await response.json().catch(() => ({}));
+    if (!response.ok || !result.started) throw new Error(result.error || 'The PS5 did not start Forge');
+    link.href = result.url;
+    link.hidden = false;
+    msg.className = 'why good';
+    msg.textContent = `Forge v${result.version} started via ${result.started}.${result.installed ? ' Saved in Payload Manager.' : ''} Open its page to pack on the PS5.`;
+  } catch (error) {
+    msg.className = 'why bad'; msg.textContent = `Forge could not start: ${error.message}`;
+  } finally {
+    button.disabled = false;
+  }
+}
 // Wake and watch: the PS5 answers the same discovery port in rest mode
 // ("standby"), so the result says whether the wake-up got there.
 async function wakeNow() {
@@ -2383,7 +2489,7 @@ try {
   if (['zstd', 'comm', 'ps5', 'ftp', 'act', 'pg', 'pkg', 'ps4'].includes(saved)) tab(saved);
 } catch (e) {}
 </script>
-<footer class="mut" style="text-align:center;padding:16px;font-size:12px">Zstd ·
+<footer class="mut" style="text-align:center;padding:16px;font-size:12px">ps5lz4zstd ·
   <a href="https://github.com/dviree/PS5-LZ4-NAS" target="_blank" rel="noopener">source code</a> (GPL-3.0; Remote Play pairing
   is ported from <a href="https://github.com/streetpea/chiaki-ng" target="_blank" rel="noopener">chiaki-ng</a>, AGPL-3.0)</footer>
 </body>
