@@ -1,6 +1,6 @@
 # SNAPSHOT
 
-Last updated: 2026-11-13. Upstream phantomptr/ps5upload release v12.4.14 / 1761a866.
+Last updated: 2026-11-13. Upstream phantomptr/ps5upload release v12.4.15 / aba0ca38.
 
 The Rust engine and React client retain this fork's PKG output folder and installer.
 Convert Games now opens the Zstd NAS converter; Workshop remains alongside it.
@@ -22,7 +22,7 @@ standalone converter worker. engine/compose.yaml documents the mounts.
 
 Docker is the only automatic build workflow. The old LZ4-only watcher has been removed.
 Local checks: TypeScript, Vite, Python codec/default/source-retention tests, UI script
-syntax. Rust and the combined Docker image require CI; no local Rust/Docker toolchain.
+syntax. The cloud sandbox can run the Rust tests: BearSSL from the crates.io bearssl-sys crate (lib/BearSSL) copied into third_party/bearssl, never committed. Fork routes sit sorted in mcp/catalog_routes.rs; api/openapi.json comes from ps5upload-apidoc.
 
 Trail-code 0.29.0: refreshed local code map (3555 files), with current Zstd-only
 learnings in .trail/learnings. The generated map stays in ignored .trail/cache/.
