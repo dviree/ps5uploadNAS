@@ -4,6 +4,22 @@ What's new in ps5upload, written for humans.
 
 ---
 
+## 12.4.14
+
+Share:
+
+- The Share page now lines up with the rest of the app. The box for opening a friend's link sits on the left like the other pages, and beside it are three short steps on how sharing works, with a button to choose a game to share from, and your past shares (now always shown, even when there are none yet).
+
+## 12.4.13
+
+Cheats:
+
+- Cheats that write to many places, like a game's "Master Code", now apply. A cheat could hold 32 places and about 8 KB of text, and anything bigger was refused with "cheat has more locations than the engine can hold". It can now hold up to 4096. The Master Code for The Blood of Dawnwalker has 37, and the game's other cheats need it switched on first. For #811.
+
+Files:
+
+- Files downloaded from the PS5, such as video clips and screenshots, now keep their date and time from the PS5. Before, they showed the time of the download. Zip downloads keep the dates too. For #812.
+
 ## 12.4.12
 
 Save Data:

@@ -2,6 +2,10 @@
 
 ## >RESUME HERE
 
+- 2026-11-13: updated to upstream stable v12.4.14 (1761a866), retaining Zstd-only
+  conversion and mounted folder discovery. Verify the new Docker image build
+  before running the existing NAS updater. No game files are changed by this update.
+
 - 2026-11-12: added mounted Zstd output to Files and Collection automatically,
   retaining saved roots/settings. Compose accepts PS5UPLOAD_ZSTD_PATH; the new
   configure-zstd-folder.py can add /zstd to existing docker-run update scripts.

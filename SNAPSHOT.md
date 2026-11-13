@@ -1,6 +1,6 @@
 # SNAPSHOT
 
-Last updated: 2026-11-12. Upstream phantomptr/ps5upload release v12.4.12 / e4826074 (main 900feb68).
+Last updated: 2026-11-13. Upstream phantomptr/ps5upload release v12.4.14 / 1761a866.
 
 The Rust engine and React client retain this fork's PKG output folder and installer.
 Convert Games now opens the Zstd NAS converter; Workshop remains alongside it.
@@ -42,3 +42,13 @@ with saved roots on read, ignoring missing folders and duplicates. Preferences a
 game files are not rewritten. Compose accepts PS5UPLOAD_ZSTD_PATH for its /zstd bind.
 configure-zstd-folder.py adds that bind to a named docker-run NAS updater once,
 without executing it or replacing an existing different /zstd mapping.
+
+2026-11-13: applied the upstream v12.4.12..v12.4.14 delta, preserving the fork
+Zstd converter, mounted library roots and Docker-only automatic workflow policy.
+Includes larger cheats, download timestamp preservation and the revised Share page.
+Trail build/ask was attempted but automatic review blocked its external telemetry;
+this session used local source inspection and checks instead.
+
+Validation: TypeScript and Vite production build passed; 53 focused Share/API/queue
+tests and 11 Python NAS tests passed. Workflow triggers remain Docker-only.
+Rust and full Docker verification run in GitHub Actions.
