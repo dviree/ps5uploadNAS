@@ -7,8 +7,8 @@
   Fixed the MCP route list order for /api/nas-zstd and regenerated api/openapi.json with
   ps5upload-apidoc. Engine, fpkg and core tests pass (three timing tests only fail under
   load), as do 6399 vitest tests, tsc, i18n and 33 NAS Python tests. The Zstd upstreams
-  have nothing new (Forge v0.5.5, ampr-emu-ng 0a5670a). Next: verify the Docker build, then
-  run the NAS updater.
+  have nothing new (Forge v0.5.5, ampr-emu-ng 0a5670a). The Docker build (run 50) is green;
+  next is the user running the NAS updater.
 
 - 2026-11-13: full PS5-LZ4-NAS 6e580691 source import, runtime 0a5670a,
   Zstd-only compression dialog and screenshot-led NAS README. Keep the combined
