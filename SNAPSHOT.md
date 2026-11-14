@@ -1,6 +1,6 @@
 # SNAPSHOT
 
-Last updated: 2026-11-13. Upstream phantomptr/ps5upload release v12.4.15 / aba0ca38.
+Last updated: 2026-11-14. Upstream phantomptr/ps5upload release v12.4.18 / c037a6ee.
 
 The Rust engine and React client retain this fork's PKG output folder and installer.
 Convert Games now opens the Zstd NAS converter; Workshop remains alongside it.
@@ -66,3 +66,9 @@ Docker CI checks Python and UI policy regressions before publishing the web UI.
 Validation: 11 integration tests + 15 imported Python tests passed (7 binary/tool
 integration tests skipped), plus both imported Node UI suites and shell/JS/Python
 syntax checks. Full runtime compilation and image validation run in Docker CI.
+
+2026-11-14: merged v12.4.18: fixed-port router diagnostics for Play Together and
+persistent Tailscale pause when the console is offline. Version files synced to
+12.4.18. Fixed the estimate test fixture (kind is required for packed inputs),
+which blocked verify-nas and therefore web UI publication in run 43482308835.
+Current combined runtime is ampr-emu-ng 0.4.0 (920e917), Forge 0.5.5.

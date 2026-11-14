@@ -19,7 +19,7 @@ class EstimateTests(unittest.TestCase):
             words = [bytes(random.choice(b"abcdefgh") for _ in range(6)) for _ in range(300)]
             (game / "data" / "text.bin").write_bytes(b" ".join(random.choice(words) for _ in range(400000)))
             (game / "data" / "noise.bin").write_bytes(os.urandom(1_500_000))
-            entry = type("E", (), {"id": "g", "path": game})()
+            entry = type("E", (), {"id": "g", "path": game, "kind": "folder"})()
             with patch.object(app, "game_entry", lambda gid: entry), patch.object(app, "_estimates", {}):
                 r = app.estimate_game("g")
             src = r["source_bytes"]
@@ -30,8 +30,23 @@ class EstimateTests(unittest.TestCase):
             image = Path(tmp) / "x.ffpfsc"
             image.touch()
             entry.path = image
+            entry.kind = "zstd"
             with patch.object(app, "game_entry", lambda gid: entry), self.assertRaises(ValueError):
                 app.estimate_game("g")
+
+
+class PackedEstimateTests(unittest.TestCase):
+    def test_packed_inputs_explain_why_no_estimate_is_available(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for kind, suffix, message in (("pkg", ".pkg", "compressed inside"),
+                                          ("zstd", ".ffpfsc", "packed already")):
+                with self.subTest(kind=kind):
+                    image = Path(tmp) / ("sample" + suffix)
+                    image.touch()
+                    entry = type("E", (), {"id": "g", "path": image, "kind": kind})()
+                    with patch.object(app, "game_entry", lambda gid: entry), patch.object(app, "_estimates", {}):
+                        with self.assertRaisesRegex(ValueError, message):
+                            app.estimate_game("g")
 
 
 if __name__ == "__main__":

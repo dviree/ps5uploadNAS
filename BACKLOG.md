@@ -2,6 +2,16 @@
 
 ## >RESUME HERE
 
+- 2026-11-14: updated to PS5Upload 12.4.18 (c037a6ee): router diagnostics, fixed
+  Play Together UDP port and persistent offline Tailscale pause. Corrected the
+  estimate fixture that broke verify-nas and added codec-independent rejection
+  coverage for PKG and packed inputs. Keep Zstd-only level 5, original retention
+  and mounted library discovery. Verify Docker CI before the existing NAS updater;
+  console and NAS deployment verification remain pending. Local checks: 308 focused
+  frontend tests, TypeScript, Vite, 21-language coverage, 11 NAS tests and 24
+  imported NAS tests passed (10 tool/binary-dependent checks skipped); both
+  imported Node policy suites passed. Rust/Docker verification runs in CI.
+
 - 2026-11-13: merged PS5Upload v12.4.17 (583cb971; includes v12.4.16 audit fixes,
   IPv6 Play Together and search scoped to the open folder). Refreshed the full NAS
   tools source from afbf5c38: ampr-emu-ng v0.4.0 (920e917), PS5 game PKG input,
