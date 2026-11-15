@@ -20,8 +20,10 @@
   `DELETE_ORIGINALS=yes`. Keep temporary data after a failed run.
 - Don't change other Docker containers or NAS settings.
 - Tell "verified on the NAS" apart from "playable on the PS5".
-- Packs are always made from the original (folder, .exfat or PS5 game .pkg) →
-  Zstd, never from a packed copy.
+- Packs are made from the original (folder, .exfat or PS5 game .pkg, from the
+  PS5 library or the package folder) → Zstd. An
+  LZ4 copy may be the source only when its original is not in the library
+  (owner, 2026-11-13): Forge unpacks it in memory; the LZ4 copy stays.
 - New packs are Zstd only, packed by PS5 Dump Forge for ampr-emu-ng (owner,
   2026-11-13; replaces "LZ4 NG or Zstd"). No LZ4 or LZ4 NG option anywhere;
   existing LZ4 copies stay, are listed and get runtime upgrades.

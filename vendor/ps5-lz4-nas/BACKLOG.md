@@ -78,6 +78,14 @@ actions; PS5: ShadowMount *Hide* renames to `.name`). Last finished
 
 ## Done recently (newest first)
 
+- Game sheet shows the version, master version and required firmware of a .pkg
+  (and an .exfat) from its own param.json; status reads "can be Zstd".
+- PS5 game .pkg files are found in the PS5 library and in the package folder
+  (`/library-pkgs`, now also mounted read-only in the packing container by
+  `update`/`install.sh`); the originals tab is "Folder / exFAT / PKG".
+- "Convert to Zstd" on LZ4 copies: from the original when it is in the library,
+  else from the LZ4 copy (`lz4_copy_entries`, kind `lz4copy`; Forge unpacks the
+  LZ4 packs in memory). LZ4 folders in the library can be packed to Zstd too.
 - Zstd only (owner): LZ4 NG removed from the format bar, the Compress dialog,
   the queue, run_request and the CLI (`--codec zstd`, default level 5 or
   PS5LZ4_ZSTD_LEVEL). Existing LZ4 copies stay and still get runtime upgrades.
