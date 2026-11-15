@@ -60,6 +60,16 @@ YAML
     echo "package folder $PKG_LIBRARY added to the page (read-only)"
     pkg_added=1
   fi
+  # The packing container reads PS5 game packages from the package folder too.
+  if [ -d "$PKG_LIBRARY" ] && [ "$(grep -c ':/library-pkgs:ro"' "$DIR/docker-compose.yml")" -lt 2 ]; then
+    sed -i "s|^\(      - \".*:/output\"\)\$|      - \"$PKG_LIBRARY:/library-pkgs:ro\"\n\1|" "$DIR/docker-compose.yml"
+    if [ "$(grep -c '^      PS5LZ4_HOST_PKG_LIBRARY: ' "$DIR/docker-compose.yml")" -lt 2 ]; then
+      # the packing service comes first in the file
+      sed -i "0,/^      PS5LZ4_HOST_PS4_LIBRARY: .*/s||&\n      PS5LZ4_HOST_PKG_LIBRARY: \"$PKG_LIBRARY\"|" "$DIR/docker-compose.yml"
+    fi
+    echo "package folder $PKG_LIBRARY added to the packing container (read-only)"
+    pkg_added=1
+  fi
   running=1
   for c in "$CONTAINER" "$CONTAINER-ui"; do
     [ "$(docker inspect -f '{{.State.Running}}' "$c" 2>/dev/null)" = true ] || running=0

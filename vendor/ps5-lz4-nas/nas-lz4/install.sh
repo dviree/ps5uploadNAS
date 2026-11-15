@@ -219,6 +219,7 @@ services:
       PS5LZ4_HOST_ZSTD_OUTPUT: "$ZSTD_OUTPUT"
       PS5LZ4_HOST_STATE: "$BASE/state"
       PS5LZ4_HOST_PS4_LIBRARY: "$PS4_LIBRARY"
+      PS5LZ4_HOST_PKG_LIBRARY: "$PKG_LIBRARY"
       PS5LZ4_LEVEL: "$LEVEL"
       PS5LZ4_FREE_MARGIN_GB: "$FREE_MARGIN_GB"
       PS5LZ4_DELETE_ORIGINALS: "$DELETE_ORIGINALS"
@@ -227,6 +228,7 @@ services:
       - "$LIBRARY:/library$LIB_MODE"
       - "$LIBRARY/_extracted:/library/_extracted"
       - "$OUTPUT:/output"
+$PKG_MOUNT
       - "$ZSTD_OUTPUT:/output-zstd"
       - "$BASE/state:/state"
       - "$BASE/logs:/state/logs"
@@ -304,6 +306,7 @@ else
     -e PS5LZ4_HOST_LIBRARY="$LIBRARY" -e PS5LZ4_HOST_OUTPUT="$OUTPUT" -e PS5LZ4_ZSTD_OUTPUT=/output-zstd -e PS5LZ4_HOST_ZSTD_OUTPUT="$ZSTD_OUTPUT" \
     -e PS5LZ4_LEVEL="$LEVEL" -e PS5LZ4_FREE_MARGIN_GB="$FREE_MARGIN_GB" -e TZ="$TZ_NAME" \
     -v "$LIBRARY:/library:ro" -v "$LIBRARY/_extracted:/library/_extracted" -v "$OUTPUT:/output" -v "$ZSTD_OUTPUT:/output-zstd" -v "$BASE/state:/state" \
+    ${PKG_RUN[@]+"${PKG_RUN[@]}"} \
     -v "$BASE/logs:/state/logs" -v "$BASE/reports:/state/reports" \
     "$IMAGE" >/dev/null
   docker run -d --name "$CONTAINER-ui" --restart unless-stopped --init --user "$PUID:$PGID" \

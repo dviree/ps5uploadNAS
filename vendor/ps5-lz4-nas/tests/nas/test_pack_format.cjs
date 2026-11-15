@@ -50,7 +50,7 @@ ctx3.d = {copies: [{id: 'G-lz4', game: 'G', codec: 'lz4', runtime: 'legacy', nam
 const lz4 = vm.runInContext("copiesHtml(d, 'lz4')", ctx3), zs = vm.runInContext("copiesHtml(d, 'zstd')", ctx3);
 assert.equal(vm.runInContext('originalGames(d).map(g => g.id).join()', ctx3), 'G');
 vm.runInContext('renderLibTabs(d)', ctx3);
-assert.ok(document.getElementById('libtabs').innerHTML.includes('Folder / exFAT <span class="n">1'));
+assert.ok(document.getElementById('libtabs').innerHTML.includes('Folder / exFAT / PKG <span class="n">1'));
 assert.ok(document.getElementById('libtabs').innerHTML.includes('⚡ LZ4 <span class="n">2'));
 assert.ok(lz4.includes('exFAT image') && lz4.includes('data-id="I" onclick="pushSrc(this.dataset.id)"'));
 assert.ok(!lz4.slice(lz4.indexOf('Imported')).includes('Delete copy'));

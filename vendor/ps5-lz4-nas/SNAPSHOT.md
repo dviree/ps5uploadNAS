@@ -36,7 +36,7 @@ removed on 2026-11-10. Its PS5 engine/app code is pruned from `ps5lz4.py` and th
 
 ### Packing pipeline (class `Job`)
 
-`step_source` (folder as is; `.exfat` and PS5 game `.pkg` read in place by Forge; `.ffpfs/.ffpfsc` unpacked to a work folder)
+`step_source` (folder as is; `.exfat`, PS5 game `.pkg` (library and package folder, `Entry.host_path`) and orphaned LZ4 copies (`pack_sources`) read in place by Forge; `.ffpfs/.ffpfsc` unpacked to a work folder)
 → `step_check` (unpacked, has eboot.bin) → `step_pack` (Forge) →
 `step_verify` → `step_restore` (full unpack + byte compare, games ≤ 25 GB) →
 `step_publish` (boot files, permissions, report in `state/reports/<id>.json`).

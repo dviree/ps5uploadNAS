@@ -1240,7 +1240,7 @@ function renderLibTabs(d) {
   if (!el) return;
   const copies = d.copies || [], n = {orig: originalGames(d).length + (d.archives || []).length,
     lz4: copies.filter(c => c.codec !== 'zstd').length, zstd: copies.filter(c => c.codec === 'zstd').length};
-  const tabs = [['orig', '📁 Folder / exFAT'], ['lz4', '⚡ LZ4'], ['zstd', '🗜 Zstd']];
+  const tabs = [['orig', '📁 Folder / exFAT / PKG'], ['lz4', '⚡ LZ4'], ['zstd', '🗜 Zstd']];
   el.innerHTML = tabs.map(([k, label]) => `<button role="tab" aria-selected="${libTab === k}" class="${libTab === k ? 'on' : ''}" onclick="setLibTab('${k}')">${label} <span class="n">${n[k]}</span></button>`).join('');
   const orig = libTab === 'orig';
   document.getElementById('fmtbar').hidden = !orig;
@@ -1251,7 +1251,7 @@ function renderLibTabs(d) {
 }
 function copiesHtml(d, kind) {
   const list = (d.copies || []).filter(c => (c.codec === 'zstd') === (kind === 'zstd'));
-  const head = `<div class="mut" style="margin-bottom:6px">${kind === 'zstd' ? 'Zstd' : 'LZ4'} copies. Pack originals in Folder / exFAT.</div>`;
+  const head = `<div class="mut" style="margin-bottom:6px">${kind === 'zstd' ? 'Zstd' : 'LZ4'} copies. Pack originals in Folder / exFAT / PKG.</div>`;
   if (!list.length) return head + `<div class="mut">No ${kind === 'zstd' ? 'Zstd' : 'LZ4'} copies yet.</div>`;
   return head + list.map(c => {
     const v = (d.verifies || {})[c.id] || {}, tx = (d.transfers || {})[c.transfer_name || c.id];
@@ -1264,11 +1264,21 @@ function copiesHtml(d, kind) {
       <div class="num"><b>${gb(c.bytes)}</b><div class="why">${c.source_bytes ? `of ${gb(c.source_bytes)} · saved ${c.saved_percent} %` : c.kind ? 'in the library' : 'original not in the library'}</div></div>
       <div>${busy || ps5}</div>
       <div class="act">${c.busy ? '' : c.kind ? `<button class="sm pri" data-id="${esc(c.game)}" onclick="pushSrc(this.dataset.id)">⬆️ Send to PS5</button>` : `<button class="sm pri" data-id="${esc(c.id)}" data-n="${esc(c.name)}" onclick="push(this.dataset.id, this.dataset.n)">⬆️ Send to PS5</button>
+        ${c.zstd_to && !c.busy ? `<button class="sm pri" data-g="${esc(c.zstd_to)}" data-n="${esc(c.name)}" data-f="${esc(c.zstd_from)}" onclick="toZstd(this.dataset.g, this.dataset.n, this.dataset.f)">🗜 Convert to Zstd</button>` : ''}
         <button class="sm" data-id="${esc(c.id)}" data-n="${esc(c.name)}" onclick="makeImage(this.dataset.id, this.dataset.n)">💿 Make .exfat</button>
         ${c.title_id ? `<button class="sm ghost" data-t="${esc(c.title_id)}" onclick="launchCheck(this.dataset.t, this.closest('.cp').querySelector('.lc'))">🚦 Start check</button>` : ''}
         <button class="sm ghost" ${v.state === 'running' ? 'disabled' : ''} data-id="${esc(c.id)}" data-n="${esc(c.name)}" onclick="act('verify_lz4', 'Verify ' + this.dataset.id + '?\\n\\nEvery block is decoded and checked; nothing is changed.', {game: this.dataset.id})">${v.state === 'running' ? 'Verifying…' : v.state === 'passed' ? '✓ Verified' : v.state === 'failed' ? '✗ Verify again' : '✓ Verify'}</button>
         <button class="sm danger" data-id="${esc(c.id)}" data-n="${esc(c.name)}" onclick="act('remove', 'Delete the copy ' + this.dataset.id + ' on the NAS?\\n\\nThe original is not touched. This cannot be undone.', {game: this.dataset.id})">🗑 Delete copy</button>`}</div></div>`;
   }).join('');
+}
+// An LZ4 copy to Zstd: packed from the original when it is in the library,
+// else from the LZ4 copy itself (Forge unpacks it in memory). The LZ4 copy stays.
+function toZstd(game, name, from) {
+  const o = packOptions();
+  act('start', `Make a Zstd copy of ${name} (level ${o.level})?\n\n` + (from === 'original'
+    ? 'It is packed from the original in the library.' : 'The original is not in the library, so it is packed from this LZ4 copy.') +
+    ' The LZ4 copy stays; delete it afterwards if you want the space back.\n\nIf a job is running, this starts when it is done.',
+    {game, ...o});
 }
 // Whether a game can be compressed in the chosen format now.
 function canPack(g, mode = 'zstd') {
@@ -1522,15 +1532,15 @@ async function openGame(id) {
 }
 function gameHtml(g, det) {
   const r = det && det.report, f = det && det.folder, w = det && det.work;
-  const v = g.running ? 'packing now' : g.queued ? 'queued' : g.verdict;
+  const v = g.running ? 'packing now' : g.queued ? 'queued' : ({'can be LZ4': 'can be Zstd', 'not LZ4': 'not packable'}[g.verdict] || g.verdict);
   const rows = [
     ['Status', esc(v) + (g.why && g.verdict !== 'LZ4' ? `<div class="why">${esc(g.why)}</div>` : '')],
     ['Title ID', esc(g.title_id || '–')],
     ['Version', det && det.version && det.version.version ? esc(det.version.version) + (det.version.master ? `<div class="why">master ${esc(det.version.master)}</div>` : '') + (det.version.firmware ? `<div class="why">needs firmware ${esc(det.version.firmware)} or newer</div>` : '') : (det ? '–' : '…')],
     ['Source', g.output_only ? 'not in the library' : `${esc(KIND_EN[g.kind] || g.kind)}${g.source_size ? ' · ' + gb(g.source_size) : ''}<div class="why">On the NAS: ${esc(g.source_path || g.rel || '')}</div>` +
       (g.verdict === 'can be LZ4' && g.kind !== 'folder' ? '<div class="why">Packed from the image by PS5 Dump Forge; the original is not changed.</div>' : '')],
-    ['Original', gb(g.source_bytes)],
-    ['LZ4', gb(g.output_bytes)],
+    ['Original', gb(g.source_bytes || g.source_size)],
+    ['Packed', g.output_bytes ? gb(g.output_bytes) + (g.pack_codec ? ` <span class="mut">(${esc(g.pack_codec === 'zstd' ? 'Zstd' : 'LZ4')})</span>` : '') : '–'],
     ['Saved', g.saved_percent != null ? `${gb(g.source_bytes - g.output_bytes)} (${Math.round(g.saved_percent)} %)` : '–'],
   ];
   const grp = (data.duplicates || []).find(x => x.title_id === (g.title_id || '').toUpperCase());

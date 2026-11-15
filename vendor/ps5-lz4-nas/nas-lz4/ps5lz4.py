@@ -615,10 +615,12 @@ def estimate_game(game_id: str) -> dict:
 # library
 
 class Entry:
-    def __init__(self, path: Path, kind: str):
+    def __init__(self, path: Path, kind: str, root: Path | None = None, host_root: str | None = None):
         self.path = path
-        self.kind = kind  # folder | exfat | ffpfs | ffpfsc | pkg
-        self.rel = str(path.relative_to(LIBRARY))
+        self.kind = kind  # folder | exfat | ffpfs | ffpfsc | pkg | lz4copy (an LZ4 copy, original gone)
+        # rel: relative to the library, or "pkgs/..." for a game package in the package folder
+        self.rel = str(path.relative_to(LIBRARY)) if root is None else "pkgs/" + str(path.relative_to(root))
+        self.host = None if root is None else str(Path(host_root or root) / path.relative_to(root))
         stem = path.name if kind == "folder" else path.name[: -len(path.suffix)]
         self.id = safe_name(stem)
         self.title_id = ""
@@ -627,6 +629,11 @@ class Entry:
         m = TITLE_RE.search(path.name)
         if m:
             self.title_id = m.group(0).upper()
+
+    @property
+    def host_path(self) -> str:
+        """Where this source is on the NAS, as shown on the page and in reports."""
+        return getattr(self, "host", None) or str(Path(HOST_LIBRARY) / self.rel)
 
     @property
     def output(self) -> Path:
@@ -648,6 +655,40 @@ class Entry:
 
 
 UNREADABLE: set = set()  # library folders this container may not read (shown on the page)
+
+
+def lz4_copy_entries(library: list[Entry] | None = None) -> list[Entry]:
+    """LZ4 copies whose original is no longer in the library, as packable sources:
+    PS5 Dump Forge reads an LZ4 copy, unpacks it in memory and packs it as Zstd
+    (owner, 2026-11-13). A copy whose original is still there is packed from the
+    original instead, so it gets no entry here."""
+    library = scan_library() if library is None else library
+    taken = {str(e.output) for e in library} | {str(output_item(f"{e.id}-lz4")) for e in library}
+    out = []
+    for p in output_items("*-lz4"):
+        try:
+            if not p.is_dir() or str(p) in taken or not is_packed(p) or packed_codec(p) != "lz4":
+                continue
+        except OSError:
+            continue
+        e = Entry.__new__(Entry)
+        e.path, e.kind, e.rel, e.id = p, "lz4copy", p.name, safe_name(p.name[:-len("-lz4")])
+        e.host = host_output_path(p)
+        e.title_id, e.name, e.duplicate_of = "", "", None
+        pj = p / "sce_sys" / "param.json"
+        if pj.is_file():
+            e.title_id, e.name = (x for x in _safe(lambda: parse_param_json(pj.read_bytes()), ("", "")))
+            e.title_id = (e.title_id or "").upper()
+        m = TITLE_RE.search(p.name)
+        e.title_id = e.title_id or (m.group(0).upper() if m else "")
+        out.append(e)
+    return out
+
+
+def pack_sources() -> list[Entry]:
+    """Everything a pack can start from: the library, then orphaned LZ4 copies."""
+    lib = scan_library()
+    return lib + lz4_copy_entries(lib)
 
 
 def scan_library() -> list[Entry]:
@@ -699,6 +740,30 @@ def scan_library() -> list[Entry]:
                       file=sys.stderr)
 
     walk(LIBRARY, 0)
+    # PS5 game packages in the package folder (updates, DLC and backports live there
+    # too, and stay on the PKG installer tab): packable like the library's own.
+    if PKG_LIBRARY.is_dir():
+        def walk_pkgs(d: Path, depth: int):
+            try:
+                kids = sorted(d.iterdir(), key=lambda p: p.name.lower())
+            except OSError:
+                return
+            for p in kids:
+                if p.name.startswith("."):
+                    continue
+                try:
+                    if p.is_dir() and depth < 3:
+                        walk_pkgs(p, depth + 1)
+                    elif p.is_file() and p.suffix.lower() == ".pkg":
+                        info = pkg_info(p)
+                        if pkg_is_ps5_game(info):
+                            e = Entry(p, "pkg", PKG_LIBRARY, pkg_host("pkgs"))
+                            e.title_id = info["title_id"].upper()
+                            e.name = info.get("name") or ""
+                            entries.append(e)
+                except OSError:
+                    continue
+        walk_pkgs(PKG_LIBRARY, 0)
     # An unpacked folder wins over an image of the same game.
     folders = {e.title_id: e for e in entries if e.kind == "folder" and e.title_id and not is_packed(e.path)}
     for e in entries:
@@ -861,6 +926,8 @@ class Job:
             root = e.path
             self.mark("source", source_root=str(root), extraction="none (folder used as is)")
             return root
+        if e.kind == "lz4copy" and self.done("source") and e.path.is_dir():
+            return e.path
         if self.done("source"):
             root = Path(self.state["source_root"])
             if root.is_dir() or (root == e.path and root.is_file()):
@@ -881,6 +948,16 @@ class Job:
                       extraction="none (PS5 Dump Forge reads the .exfat directly)",
                       source_files=meta["files"], source_bytes=meta["logical_bytes"])
             self.log(f"source: {image.name}, {meta['files']} files, {human(meta['logical_bytes'])}, read in place by Forge")
+            return image
+        if e.kind == "lz4copy":
+            # Forge reads the LZ4 copy and unpacks its packs in memory while it packs
+            # Zstd, checking every file: nothing is written but the new copy.
+            if not is_packed(image) or packed_codec(image) != "lz4" or not (image / "eboot.bin").is_file():
+                raise Skip("not an LZ4 copy with eboot.bin")
+            files, total = tree_bytes(image)
+            self.mark("source", source_root=str(image), extraction="none (PS5 Dump Forge reads the LZ4 copy and unpacks it in memory)",
+                      source_files=files, source_bytes=total)
+            self.log(f"source: LZ4 copy {image.name}, {files} files, {human(total)}; the original is not in the library")
             return image
         if e.kind == "pkg":
             info = pkg_info(image)
@@ -1011,8 +1088,8 @@ class Job:
             tid, name = parse_param_json(pj.read_bytes())
         self.state.update(title_id=tid or self.e.title_id, title_name=name)
         if self.runtime == "ng":
-            if is_packed(root):
-                raise Skip("source is already packed; unpack it before making a new copy")
+            if is_packed(root) and packed_codec(root) != "lz4":
+                raise Skip("source is already Zstd packed")
             if not (root / "eboot.bin").is_file():
                 raise Skip("no eboot.bin in source")
             if self.done("check"):
@@ -1069,8 +1146,9 @@ class Job:
             if not self.restore_test:
                 self.state["restore_test"] = "skipped (--no-restore-test)"
             return
-        if root.is_file():
-            why = f"not needed: Forge compared every packed file with the {root.suffix} (blake3) while packing"
+        if root.is_file() or (is_packed(root) and packed_codec(root) == "lz4"):
+            what = f"the {root.suffix}" if root.is_file() else "the LZ4 copy's files"
+            why = f"not needed: Forge compared every packed file with {what} (blake3) while packing"
             self.mark("restore", restore_test=why)
             self.log(f"restore test {why}")
             return
@@ -1156,7 +1234,7 @@ class Job:
         st = self.state
         report = {
             "id": e.id,
-            "source": str(Path(HOST_LIBRARY) / e.rel),
+            "source": e.host_path,
             "source_kind": e.kind,
             "title_id": st.get("title_id"),
             "title_name": st.get("title_name"),
@@ -1398,7 +1476,7 @@ def on_signal(signum, _frame):
 
 def cmd_run(args) -> int:
     ensure_dirs()
-    entries = scan_library()
+    entries = pack_sources()
     if args.from_queue:
         q = read_json(QUEUE_PATH, {}) or {}
         ids = q.get("remaining", [])
@@ -1426,7 +1504,7 @@ def cmd_run(args) -> int:
 def cmd_start(args) -> int:
     """Queue games and run them in the background with nohup."""
     ensure_dirs()
-    entries = scan_library()
+    entries = pack_sources()
     if args.resume:
         q = read_json(QUEUE_PATH, {}) or {}
         if not q.get("remaining"):
@@ -4469,7 +4547,7 @@ def library_duplicates() -> list[dict]:
                 size = e.path.stat().st_size
             items.append({"id": e.id, "rel": e.rel, "kind": e.kind, "version": ver, "size": size,
                           "used": not e.duplicate_of,
-                          "path": str(Path(HOST_LIBRARY) / e.rel),
+                          "path": e.host_path,
                           "lz4": e.output.is_dir() and is_packed(e.output)})
         newest = max(items, key=lambda i: (_ver_key(i["version"]), i["kind"] == "folder"))
         for i in items:
@@ -4966,7 +5044,11 @@ def pkg_info(path: Path) -> dict:
                     j = json.loads(raw.decode("utf-8-sig", "replace"))
                 except ValueError:
                     j = {}
-                info.update(name=name, title_id=tid, version=str(j.get("contentVersion") or ""), platform="PS5")
+                info.update(name=name, title_id=tid, version=str(j.get("contentVersion") or ""), platform="PS5",
+                            master=str(j.get("masterVersion") or ""))
+                fw = j.get("requiredSystemSoftwareVersion")
+                if isinstance(fw, str) and fw.startswith("0x") and len(fw) >= 6:
+                    info["firmware"] = f"{int(fw[2:4], 16):x}.{fw[4:6]}"
                 low = "\n".join((name, info["content_id"], path.name)).lower()
                 if any(e in ents for e in (0x0407, 0x0408, 0x1008)) or j.get("targetContentVersion"):
                     info["category"] = "Update"
@@ -6476,7 +6558,7 @@ def dashboard_data() -> dict:
             src_size = None
         rep = read_json(REPORTS / f"{e.id}.json") or {}
         g = games.get((e.title_id or "").upper()) or {}
-        row = {"id": e.id, "rel": e.rel, "source_path": str(Path(HOST_LIBRARY) / e.rel), "kind": e.kind,
+        row = {"id": e.id, "rel": e.rel, "source_path": e.host_path, "kind": e.kind,
                "source_codec": source_codec,
                "not_in_use": bool(e.duplicate_of),
                "source_size": src_size, "title_id": e.title_id,
@@ -6495,6 +6577,8 @@ def dashboard_data() -> dict:
                 if sha:
                     runtime = "ng" if sha in (NG_SHA256, NG_UPSTREAM_SHA256) else "legacy"
             source_copies.append({"id": f"src:{e.id}", "game": e.id, "codec": source_codec,
+                                  "zstd_to": e.id if source_codec == "lz4" and not output_item(f"{e.id}-zstd").is_dir() else None,
+                                  "zstd_from": "copy",
                                   "runtime": runtime, "name": row["name"], "title_id": e.title_id,
                                   "path": row["source_path"], "bytes": src_size, "ps5": row["ps5"],
                                   "kind": e.kind, "transfer_name": e.path.name,
@@ -6546,7 +6630,11 @@ def dashboard_data() -> dict:
         rep = read_json(REPORTS / f"{gid}.json") or {}
         same = rep.get("pack_codec", "lz4") == codec and rep.get("output") == info["path"]
         src = rep.get("source_bytes") if same else sizes.get(e.id) if e else None
-        copies.append({"id": out.name, "game": e.id if e else None, "codec": codec,
+        # An LZ4 copy can become Zstd: from its original when that is in the library,
+        # else from the copy itself (Forge unpacks it in memory).
+        zstd_to = (e.id if e else safe_name(gid)) if codec == "lz4" and not output_item(f"{gid}-zstd").is_dir() else None
+        copies.append({"id": out.name, "game": e.id if e else None, "codec": codec, "zstd_to": zstd_to,
+                       "zstd_from": ("original" if e else "copy") if zstd_to else None,
                        "runtime": "ng" if runtime_sha(out) == NG_SHA256 else "legacy",
                        "name": (rep.get("title_name") if same else None) or info.get("name") or (e.name if e else out.name),
                        "title_id": (info.get("title_id") or (e.title_id if e else "") or "").upper(),
@@ -6715,6 +6803,12 @@ def game_detail(game_id: str) -> dict:
         tid = src.title_id.upper()  # an original with no pack yet: its own param.json
     version = game_version(*(x for x in (out, src.path if src and src.kind == "folder" else None) if x),
                            name=(src.rel if src else "") or (out.name if out else game_id))
+    if not version.get("version") and src and src.kind == "pkg":
+        pi = pkg_info(src.path)  # the package's own param.json
+        version = {k: pi[k] for k in ("version", "master", "firmware") if pi.get(k)}
+    elif not version.get("version") and src and src.kind in ("exfat", "ffpfs", "ffpfsc"):
+        v = _safe(lambda: image_meta(src.path).get("version"), "")
+        version = {"version": v} if v else version
     return {"id": game_id, "report": rep or None, "folder": folder, "work": work, "skipped": skipped,
             "title_id": tid, "ng_submitted": (read_json(NG_SUBMITTED, {}) or {}).get(game_id) or [],
             "ng_reports": ng_reports().get(tid), "ng_reports_web": NG_REPORT_WEB,
