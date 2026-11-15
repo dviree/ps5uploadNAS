@@ -4,6 +4,31 @@ What's new in ps5upload, written for humans.
 
 ---
 
+## 12.4.21
+
+- **Remove PS5Upload from a PS5:** a new button in Settings › This PS5 takes PS5Upload off a console you are done with. The PS5Upload Minion tile, PS5Upload's own files on the PS5 and the copies of the helper your loaders start at boot all go, and icons it hid are shown again. Games, saves and other payloads stay, and you can keep the save backups made on the PS5. The copy of your account kept from Play's offline sign-in (to undo it) always stays. Sending the helper again afterwards connects straight away. A folder of PS5Upload's that the PS5 still has in use (like the Minion tile's) is left in place rather than deleted. Before this, a deleted Minion tile came back whenever the helper started again.
+- **Play setup:** the rest-mode step (Stay Connected to the Internet, Turning On PS5 from Network) is now marked optional. It is only needed to start Play while the PS5 is in rest mode; if you turn the console on yourself, you can skip it.
+- **Payload Manager:** keeping the stored helper up to date could write the helper over PS5Upload's own copy of elfldr in Payload Manager (`ps5upload-elfldr.elf`). That file is no longer touched.
+
+## 12.4.20
+
+- **Payloads:** add a whole list of payloads at once with **Payload sources**: paste the address of a list in Payload Manager's format and its payloads show up in the catalogue. A payload is only shown when the list gives its checksum, and a download that doesn't match is refused (#829).
+- **Extract on the PS5:** extracting archives, RAR sets most of all, is much faster: the extractor now writes to the drive in large pieces instead of many small ones, and the RAR decoder works faster. Not yet timed on a console (#826).
+
+## 12.4.19
+
+- **Cheats:** switching a cheat on or off could fail with "location 1: bad offset" and garbled text, even with a correct cheat file. Fixed (#824).
+- **Cheats:** the cheat list counts switched-on cheats correctly for games with more than one cheat file.
+- **Cheats:** a cheat file with an extra section after its cheat list no longer shows a phantom cheat, and a `}` in a cheat's name no longer cuts it short.
+- **Cheats:** a cheat that was switched but couldn't be saved now says so, instead of "could not switch".
+- **Cheats:** a very large cheat file can no longer use up the helper's memory.
+- **Minion › Saves:** switching user while saves are still loading no longer shows the other user's backups, and an old error goes away once saves load.
+- **Minion › Files:** big reads and downloads are no longer cut off on a slow drive or weak Wi-Fi. Running out of memory now says so instead of "not allowed".
+- **Minion › Home:** the "USB drive plugged in" card is spaced properly in the PS5 browser.
+- Writing a file onto a folder's name is refused cleanly, and a full drive is reported as full.
+
+None of these were tried on a console yet.
+
 ## 12.4.14
 
 Share:
