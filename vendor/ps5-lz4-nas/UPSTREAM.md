@@ -1,7 +1,7 @@
 # PS5-LZ4-NAS integration
 
 Complete tracked source imported from [dviree/PS5-LZ4-NAS](https://github.com/dviree/PS5-LZ4-NAS)
-at `afbf5c3838f895f2f08acd136dadc118ec1d3a60` (`nas-build`), 2026-11-13.
+at `e0dfa551ffd854e226ba3591f607c5584fba9704` (`nas-build`), 2026-11-14.
 Includes the NAS application, installer/update scripts, Glass receiver sources,
 upstream test suite, update tooling, documentation, licenses and original workflow definitions.
 The workflows in this directory are reference source, not root Actions workflows.
@@ -27,3 +27,8 @@ The root `tests/test_nas_zstd.py` additionally verifies API/CLI rejection of LZ4
 source retention and the per-codec queue regression. LZ4 copy readers remain covered.
 The compression dialog's leftover LZ4 card is removed; invalid choices cannot change
 its Zstd selection. Runtime and source defaults use level 5 consistently.
+
+2026-11-15 sync: PS5 game PKGs in the read-only package directory,
+conversion from orphaned LZ4 copies to new Zstd copies without deleting the source,
+and version/master/firmware metadata for PKG and image inputs.
+New packing still enforces Zstd-only (level 5 by default).

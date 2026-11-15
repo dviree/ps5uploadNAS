@@ -1,6 +1,6 @@
 # SNAPSHOT
 
-Last updated: 2026-11-14. Upstream phantomptr/ps5upload release v12.4.18 / c037a6ee.
+Last updated: 2026-11-15. Upstream phantomptr/ps5upload release v12.4.21 / 6b0e72e.
 
 The Rust engine and React client retain this fork's PKG output folder and installer.
 Convert Games now opens the Zstd NAS converter; Workshop remains alongside it.
@@ -72,3 +72,8 @@ persistent Tailscale pause when the console is offline. Version files synced to
 12.4.18. Fixed the estimate test fixture (kind is required for packed inputs),
 which blocked verify-nas and therefore web UI publication in run 43482308835.
 Current combined runtime is ampr-emu-ng 0.4.0 (920e917), Forge 0.5.5.
+
+2026-11-15: synchronized PS5Upload v12.4.21 (helper removal and elfldr
+protection) and NAS tools e0dfa551 (read-only PKG inputs, orphaned LZ4 copy
+conversion to Zstd, version metadata). Local Zstd-only level 5 rules and source
+retention preserved. CI and PS5/NAS hardware verification pending.

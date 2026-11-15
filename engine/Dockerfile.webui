@@ -200,5 +200,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD ["/ps5upload-engine", "--healthcheck"]
 COPY scripts/nas-supervisor.py /opt/ps5lz4/nas-supervisor.py
 ENV PS5LZ4_LIBRARY=/ps5 PS5LZ4_OUTPUT=/zstd PS5LZ4_ZSTD_OUTPUT=/zstd PS5LZ4_STATE=/data/ps5lz4 PS5LZ4_UI_BIND=127.0.0.1
+# Read existing PS5 game PKGs from the same read-only share as the engine.
+ENV PS5LZ4_PKG_LIBRARY=/pkgs PS5LZ4_HOST_PKG_LIBRARY=/pkgs
 ENTRYPOINT ["python3", "/opt/ps5lz4/nas-supervisor.py"]
 CMD []

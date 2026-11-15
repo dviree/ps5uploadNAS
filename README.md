@@ -12,6 +12,13 @@ Upload and install packages, browse your console, manage your game collection an
 
 ## Features
 
+Synced with upstream PS5Upload **v12.4.21** (15 November 2026).
+PS5 game PKGs in `/pkgs` can be used as read-only conversion sources, and an
+orphaned LZ4 copy can be converted to a new Zstd copy if its original is missing.
+Existing originals and LZ4 copies are retained; new packing remains Zstd-only
+(level 5 by default).
+
+
 | Area | What you can do |
 | --- | --- |
 | Upload & Install | Send games, folders, archives and packages; resume interrupted transfers and follow the queue. |

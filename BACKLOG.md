@@ -2,6 +2,12 @@
 
 ## >RESUME HERE
 
+- 2026-11-15: staged PS5Upload v12.4.21 and full PS5-LZ4-NAS e0dfa551
+  sync. Includes protected helper removal, read-only PKG sources, orphaned
+  LZ4 copy → Zstd conversion, PKG metadata and tests. Zstd-only level 5
+  and original retention preserved. Verify CI, then deploy to NAS separately;
+  no PS5/NAS hardware test yet.
+
 - 2026-11-14: updated to PS5Upload 12.4.18 (c037a6ee): router diagnostics, fixed
   Play Together UDP port and persistent offline Tailscale pause. Corrected the
   estimate fixture that broke verify-nas and added codec-independent rejection
