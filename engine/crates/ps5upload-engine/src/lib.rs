@@ -4643,6 +4643,79 @@ async fn ps5_helper_stop(
     }
 }
 
+#[derive(Debug, serde::Deserialize)]
+struct HelperUninstallReq {
+    #[serde(alias = "console", alias = "host")]
+    addr: Option<String>,
+    /// Keep the save backups made on the console (/data/ps5upload/backups). Default: kept.
+    #[serde(default = "default_true")]
+    keep_backups: bool,
+    /// Only ask whether the helper would go ahead (nothing mounted in its folders); nothing
+    /// changes and the helper keeps running. Answers `state: "ready"`.
+    #[serde(default)]
+    check: bool,
+}
+
+/// POST /api/ps5/helper/uninstall — Body: `{ addr, keep_backups, check }`. "Remove PS5Upload from this
+/// PS5": the helper turns Minion off and removes its tile, shows the icons it hid, exits and
+/// deletes its own folders on the console (`node.uninstall`). Refused (409) while this engine
+/// has a job running against the console (`reason: busy`) or while something is mounted in
+/// those folders (`reason: in_use`, `paths`); an older helper answers `reason: old_helper` (501).
+/// Copies of the helper stored in loaders are not touched here: the app removes them first.
+/// After a removal the key pinned for the console is forgotten (`key_forgotten`): its identity
+/// went with the folders.
+async fn ps5_helper_uninstall(
+    installs: pkg_install::PkgInstallStateHandle,
+    req: HelperUninstallReq,
+) -> axum::response::Response {
+    let Some(addr) = required_console_addr(req.addr) else {
+        return missing_console_addr();
+    };
+    let busy = helper_stop::is_busy(&addr) || installs.jobs.active_for(&addr);
+    let (keep, check) = (req.keep_backups, req.check);
+    let console = addr.clone();
+    let r =
+        tokio::task::spawn_blocking(move || helper_stop::uninstall(&addr, busy, keep, check)).await;
+    match r {
+        Ok(Ok(mut v)) => {
+            v["state"] = if check { "ready" } else { "removed" }.into();
+            if !check {
+                // The helper deleted its identity with its folders: the next one sent there is
+                // a new key, which the pin would refuse as "a different device". Forget it, as
+                // for a fresh console (the helper sent next is stamped with this engine's key).
+                v["key_forgotten"] = ps5upload_ava1::pool()
+                    .forget_console_key(&console)
+                    .await
+                    .into();
+            }
+            Json(v).into_response()
+        }
+        Ok(Err(e)) => {
+            let code = match e {
+                helper_stop::UninstallError::Busy | helper_stop::UninstallError::InUse(_) => {
+                    StatusCode::CONFLICT
+                }
+                helper_stop::UninstallError::OldHelper => StatusCode::NOT_IMPLEMENTED,
+                _ => StatusCode::BAD_GATEWAY,
+            };
+            let paths = match &e {
+                helper_stop::UninstallError::InUse(p) => p.clone(),
+                _ => Vec::new(),
+            };
+            (
+                code,
+                Json(serde_json::json!({
+                    "error": e.message(),
+                    "reason": e.reason(),
+                    "paths": paths,
+                })),
+            )
+                .into_response()
+        }
+        Err(e) => json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("{e}")).into_response(),
+    }
+}
+
 // ── Power control + telemetry ───────────────────────────────────────────
 
 #[derive(Debug, serde::Deserialize)]
@@ -12518,6 +12591,7 @@ fn build_app_and_mcp(
     let activity_installs = pkg_state.clone();
     let jobs_installs = pkg_state.clone();
     let helper_stop_installs = pkg_state.clone();
+    let helper_uninstall_installs = pkg_state.clone();
     let eject_installs = pkg_state.clone();
     let browser_payload_installs = pkg_state.clone();
     let health_fix_installs = pkg_state.clone();
@@ -13039,6 +13113,12 @@ fn build_app_and_mcp(
             "/api/ps5/helper/stop",
             post(move |Json(req): Json<HelperStopReq>| {
                 ps5_helper_stop(helper_stop_installs.clone(), req)
+            }),
+        )
+        .route(
+            "/api/ps5/helper/uninstall",
+            post(move |Json(req): Json<HelperUninstallReq>| {
+                ps5_helper_uninstall(helper_uninstall_installs.clone(), req)
             }),
         )
         .route("/api/ps5/power/telemetry", get(ps5_power_telemetry))
