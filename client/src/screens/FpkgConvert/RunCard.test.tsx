@@ -11,10 +11,20 @@ vi.mock("../../state/lang", () => ({
 }));
 
 import type { Pipeline } from "../../state/fpkgConversion";
-import { ImageChoice, PacksNote, ZstdOption, folderPackOptions, folderPacks, packOptions } from "./ImageOptions";
+import {
+  ImageChoice,
+  UnpackOption,
+  ZstdOption,
+  Lz4Option,
+  folderLz4Options,
+  folderPackOptions,
+  folderPacks,
+  packOptions,
+} from "./ImageOptions";
 import {
   RunCard,
   deleteLabel,
+  usedPacks,
   lz4Active,
   type Lz4Choice,
   type OutputChoiceProps,
@@ -276,6 +286,35 @@ describe("RunCard", () => {
       expect(out).toContain("nas1 › games/G.exfat");
       expect(button(out, "Upload to PS5")).toBeNull();
       expect(button(out, "Show in folder")).toBeNull();
+    });
+
+    it("says what became of a source the run was asked to move to the Trash", () => {
+      const image = {
+        phase: "done" as const,
+        mode: "image" as const,
+        source: "/games/PPSA1-app",
+        host: null,
+        packagePath: "/out/PPSA1-app.ffpkg",
+        packageBytes: 9,
+        convertMs: 1,
+        installMs: 0,
+        stageMs: {},
+        deleted: false,
+        titleId: null,
+      };
+      // Not asked: nothing is said.
+      expect(html(image)).not.toContain("source-note");
+      const gone = html({
+        ...image,
+        sourceNote: { removed: true, note: "source moved to the Trash: /games/PPSA1-app" },
+      });
+      expect(gone).toContain("The source was moved to the Trash: /games/PPSA1-app");
+      const kept = html({
+        ...image,
+        sourceNote: { removed: false, note: "source kept: /games/PPSA1-app changed while it was being converted" },
+      });
+      expect(kept).toContain("The source was not moved to the Trash");
+      expect(kept).toContain("changed while it was being converted");
     });
 
     it("says a finished image is on the PS5, with nothing to upload", () => {
@@ -573,44 +612,174 @@ describe("RunCard", () => {
     expect(deleteLabel(true)).toBe("Confirm delete");
   });
 
-  describe("Zstd-only asset packs", () => {
-    const choice = (over: Partial<Lz4Choice> = {}): Lz4Choice => ({
-      readiness: { runtime_version: null, refusal: null, kind: "runtime" },
-      on: true, onToggle: noop, profileName: null, onProfile: noop,
-      installRuntime: false, onInstallRuntime: noop, kind: "zstd", onKind: noop,
-      zstdLevel: 5, onZstdLevel: noop, ...over,
+  describe("AMPR LZ4 asset packs", () => {
+    const lz4 = (over: Partial<Lz4Choice> = {}): Lz4Choice => ({
+      readiness: { runtime_version: "0.4.2.1", refusal: null },
+      on: false,
+      onToggle: noop,
+      profileName: null,
+      onProfile: noop,
+      installRuntime: false,
+      onInstallRuntime: noop,
+      kind: "lz4",
+      onKind: noop,
+      zstdLevel: 5,
+      onZstdLevel: noop,
+      ...over,
     });
-    const idle = (format: "exfat" | "ffpkg", c = choice()) =>
-      renderToStaticMarkup(<ImageChoice format={format} compress={false} onChoice={noop} lz4={c} />);
+    // The image's options live under ③ (ImageChoice); the run card only runs.
+    const idle = (format: "exfat" | "ffpkg", lz4Choice: Lz4Choice | undefined, compress = false) =>
+      renderToStaticMarkup(<ImageChoice format={format} compress={compress} onChoice={noop} lz4={lz4Choice} />);
+    /** The checkbox in the label whose text contains `text`. */
+    const checkbox = (out: string, text: string) => {
+      const re = /<label[^>]*>([\s\S]*?)<\/label>/g;
+      for (let m = re.exec(out); m; m = re.exec(out)) {
+        if (m[1].replace(/<[^>]+>/g, "").includes(text)) {
+          const input = /<input([^>]*)>/.exec(m[1])?.[1] ?? "";
+          return { checked: /\schecked=""/.test(input), disabled: /\sdisabled=""/.test(input) };
+        }
+      }
+      return null;
+    };
 
-    it("offers only Zstd packing, including for exFAT", () => {
+    it("offers no LZ4 packs in this fork, only zstd, for an AMPR game's image in every format", () => {
       for (const format of ["exfat", "ffpkg"] as const) {
-        const out = idle(format);
-        expect(out).toContain('data-testid="zstd-option"');
+        expect(idle(format, lz4())).not.toContain("AMPR LZ4 asset packs");
+        expect(idle(format, lz4())).toContain('data-testid="zstd-option"');
+      }
+      expect(idle("exfat", undefined)).not.toContain("AMPR LZ4 asset packs");
+    });
+
+    it("never turns LZ4 packs on in this fork, even when an old choice says LZ4", () => {
+      const on = idle("ffpkg", lz4({ on: true }), true);
+      expect(checkbox(on, "Compress it into a .ffpfsc")).toEqual({ checked: true, disabled: false });
+      expect(checkbox(on, "AMPR LZ4 asset packs")).toBeNull();
+      expect(lz4Active(lz4({ on: true }))).toBe(false);
+      expect(packOptions(lz4({ on: true }))).toBeUndefined();
+    });
+
+    it("offers zstd on any image, needing no emulator of the game's own", () => {
+      const noEmulator = { runtime_version: null, refusal: "no emulator", kind: "runtime" as const };
+      const zstd = lz4({ on: true, kind: "zstd", readiness: noEmulator });
+      expect(lz4Active(zstd)).toBe(true);
+      // LZ4 for that game waits on the runtime checkbox.
+      expect(lz4Active(lz4({ on: true, readiness: noEmulator }))).toBe(false);
+      expect(checkbox(idle("ffpkg", zstd), "zstd asset packs")).not.toBeNull();
+      expect(checkbox(idle("ffpkg", zstd), "AMPR LZ4 asset packs")).toBeNull();
+      // Inside a .ffpfsc too.
+      expect(checkbox(idle("ffpkg", zstd, true), "Compress it into a .ffpfsc")).toEqual({
+        checked: true,
+        disabled: false,
+      });
+      expect(checkbox(idle("exfat", zstd), "AMPR LZ4 asset packs")).toBeNull();
+      expect(checkbox(idle("exfat", zstd), "zstd asset packs")?.checked).toBe(true);
+      // A game that doesn't read through AMPR is packed too (ampr-emu-ng goes in all the same),
+      // marked as untested whether the box is ticked or not.
+      const untested = "zstd packs for such games are new and not tested on every game";
+      const notAmpr = lz4({ kind: "zstd", on: true, readiness: { refusal: "no", kind: "no_ampr" } });
+      expect(lz4Active(notAmpr)).toBe(true);
+      expect(checkbox(idle("ffpkg", notAmpr), "zstd asset packs")?.checked).toBe(true);
+      expect(idle("ffpkg", notAmpr)).toContain(untested);
+      expect(idle("ffpkg", { ...notAmpr, on: false })).toContain(untested);
+      expect(idle("ffpkg", zstd)).not.toContain(untested);
+      // A PS4 game gets no packs: ampr-emu-ng is a PS5 library.
+      const ps4 = { ...notAmpr, ps4: true };
+      expect(lz4Active(ps4)).toBe(false);
+      // The resume note also names zstd asset packs, so look for the option itself.
+      expect(checkbox(idle("ffpkg", ps4), "zstd asset packs")).toBeNull();
+      // The runtime choice goes with it: the newest release unless the tested one is chosen.
+      expect(packOptions(zstd)).toEqual({ zstdLevel: 5, zstdRuntime: "latest" });
+      // A profile picked for zstd packs goes with them: it decides what stays loose.
+      expect(packOptions(zstd, "t")).toEqual({ zstdLevel: 5, zstdRuntime: "latest", profileToml: "t" });
+      expect(idle("ffpkg", zstd)).toContain("Use a profile (.toml)");
+      expect(packOptions(lz4())).toBeUndefined();
+      // This fork: an old LZ4 choice sends nothing.
+      expect(packOptions(lz4({ on: true }), "t")).toBeUndefined();
+      expect(idle("ffpkg", zstd)).toContain("Newest release (default)");
+      expect(idle("ffpkg", zstd)).toContain("Tested 0.4.1");
+    });
+
+    it("packs a folder in zstd only, with the runtime chosen", () => {
+      const zstd = lz4({ on: true, kind: "zstd" });
+      expect(folderPacks(zstd)).toBe(true);
+      expect(folderPackOptions(zstd)).toEqual({ level: 5, runtime: "latest" });
+      expect(folderLz4Options(zstd)).toBeUndefined();
+      // This fork: no LZ4 packs for a folder either.
+      expect(folderPacks(lz4({ on: true }))).toBe(false);
+      expect(folderLz4Options(lz4({ on: true }), "t")).toBeUndefined();
+      expect(renderToStaticMarkup(<Lz4Option lz4={lz4({ on: true })} folder />)).toBe("");
+      const notAmpr = lz4({ kind: "zstd", on: true, readiness: { refusal: "no", kind: "no_ampr" } });
+      expect(folderPacks(notAmpr)).toBe(true);
+      expect(folderPacks({ ...notAmpr, ps4: true })).toBe(false);
+      expect(folderPackOptions(zstd, "t")).toEqual({ level: 5, runtime: "latest", profileToml: "t" });
+      const html = renderToStaticMarkup(<ZstdOption lz4={zstd} folder />);
+      expect(html).toContain('data-testid="zstd-runtime"');
+    });
+
+    it("offers to write a packed game as plain files again", () => {
+      const html = renderToStaticMarkup(<UnpackOption unpack={{ kind: "zstd", on: true, onToggle: () => {} }} />);
+      expect(html).toContain("Unpack the asset packs (plain files again)");
+      expect(html).toContain("This game is in zstd asset packs");
+      expect(checkbox(html, "Unpack the asset packs")?.checked).toBe(true);
+      expect(
+        renderToStaticMarkup(<UnpackOption unpack={{ kind: "lz4", on: false, onToggle: () => {} }} />),
+      ).toContain("This game is in LZ4 asset packs");
+    });
+
+    it("says why packs aren't offered, and shows only zstd for an AMPR game", () => {
+      const notAmpr = lz4({ readiness: { refusal: "no", kind: "no_ampr" } });
+      for (const format of ["exfat", "ffpkg"] as const) {
+        const out = idle(format, notAmpr);
         expect(out).not.toContain('data-testid="lz4-option"');
-        expect(out).not.toContain("AMPR LZ4 asset packs");
-        expect(out).toContain("Tested 0.3.5");
-        expect(lz4Active(format, choice())).toBe(true);
-        expect(packOptions(format, choice())).toEqual({ zstdLevel: 5, zstdRuntime: "latest" });
+        expect(out).toContain('data-testid="zstd-option"');
+      }
+      const ps4 = { ...notAmpr, ps4: true };
+      for (const format of ["exfat", "ffpkg"] as const) {
+        const out = idle(format, ps4);
+        expect(out).toContain("Asset packs: not offered, this game doesn&#x27;t read its files through AMPR.");
+        expect(out).not.toContain('data-testid="zstd-option"');
+      }
+      for (const format of ["exfat", "ffpkg"] as const) {
+        const out = idle(format, lz4());
+        expect(out).not.toContain('data-testid="lz4-option"');
+        expect(out).toContain('data-testid="zstd-option"');
       }
     });
-    it("does not reintroduce an LZ4 control for an old queued choice", () => {
-      expect(idle("exfat", choice({ kind: "lz4" }))).not.toContain('data-testid="lz4-option"');
+
+    it("warns that a packed game needs ShadowMount+ while zstd packs are on", () => {
+      const warning = "A packed game only plays when ShadowMount+ mounts it.";
+      expect(idle("exfat", lz4())).not.toContain(warning);
+      expect(idle("ffpkg", lz4({ on: true, kind: "zstd" }))).toContain(warning);
+      expect(renderToStaticMarkup(<ZstdOption lz4={lz4({ on: true, kind: "zstd" })} folder />)).toContain(warning);
     });
-    it("packs folders with Zstd and refuses unsupported AMPR games", () => {
-      expect(folderPacks(choice())).toBe(true);
-      expect(folderPackOptions(choice())).toEqual({ level: 5, runtime: "latest" });
-      const refused = choice({ readiness: { kind: "no_ampr", refusal: "unsupported" } });
-      expect(folderPacks(refused)).toBe(false);
-      expect(folderPackOptions(refused)).toBeUndefined();
-      expect(lz4Active("exfat", refused)).toBe(false);
+
+    it("explains which image to make, in a disclosure anyone can open", () => {
+      const out = idle("ffpkg", undefined);
+      expect(out).toMatch(/<details[^>]*data-testid="which-image"[^>]*><summary[^>]*>[\s\S]*Which image should I make\?/);
+      for (const name of [".ffpkg (UFS2)", ".exfat", ".ffpfs (PFS)", ".ffpfsc", "Asset packs (LZ4: AMPR games only)"]) {
+        expect(out).toContain(name);
+      }
+      expect(out).toContain("so a packed game must be mounted by ShadowMount+.");
     });
-    it("explains requirements before inspection and when packing is enabled", () => {
-      const pending = renderToStaticMarkup(<ImageChoice format="ffpkg" compress={false} onChoice={noop} packsNote />);
-      expect(pending).toContain("Zstd asset packs appear here");
-      expect(idle("ffpkg")).toContain("A packed game only plays when ShadowMount+ mounts it.");
-      expect(renderToStaticMarkup(<ZstdOption lz4={choice()} folder />)).toContain('data-testid="zstd-runtime"');
-      expect(renderToStaticMarkup(<PacksNote lz4={choice()} folder />)).toBe("");
+
+    it("tells a finished packed build to mount it with ShadowMount+", () => {
+      const note = "Mount this image with ShadowMount+";
+      const image = { ...done, mode: "image" as const, packagePath: "/out/a.exfat" };
+      expect(html({ ...image, stageMs: { pack: 10, write: 20 } })).toContain(note);
+      expect(html({ ...image, stageMs: { write: 20 } })).not.toContain(note);
+      expect(
+        html({ ...done, mode: "folder" as const, packagePath: "/out/g", stageMs: { pack: 10 } }),
+      ).toContain("Mount this folder with ShadowMount+");
+      expect(usedPacks({ mode: "convert", stageMs: { pack: 1 } })).toBe(false);
+    });
+
+    it("never offers LZ4 for a game whose ampr_emu cannot serve packs", () => {
+      const refused = lz4({
+        on: true,
+        readiness: { runtime_version: null, refusal: "the game's ampr_emu does not serve asset packs" },
+      });
+      expect(checkbox(idle("exfat", refused), "AMPR LZ4 asset packs")).toBeNull();
+      expect(lz4Active(refused)).toBe(false);
     });
   });
 });

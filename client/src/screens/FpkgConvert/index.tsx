@@ -32,6 +32,7 @@ import {
   imageFormatOf,
   isArchiveSource,
   isFolderableSource,
+  isInPlaceArchive,
   makesFolder,
   useFpkgConversion,
 } from "../../state/fpkgConversion";
@@ -51,7 +52,9 @@ import { useConnectionsStore } from "../../state/connections";
 import { MakeCard } from "./MakeCard";
 import { mergeRole, Ps4MergePicker } from "./Ps4Merge";
 import { OptionsCard } from "./OptionsCard";
-import { folderPackOptions, folderPacks, packOptions } from "./ImageOptions";
+import { folderLz4Options, folderPackOptions, folderPacks, packOptions, type UnpackChoice } from "./ImageOptions";
+import { DeleteSourceOption, RemoveBackportOption, backportRefusal, deleteSourceRefusal } from "./SourceOptions";
+import { useConfirm } from "../../components/ConfirmDialog";
 import {
   OutputChoice,
   RunCard,
@@ -68,6 +71,7 @@ import { SwapJournals } from "./SwapJournals";
 import { nameOf, QueueCard } from "./QueueCard";
 import { isRarLaterVolume } from "../../lib/rarVolumes";
 import { AmprEmuTool, amprEmuOffered } from "./AmprEmuTool";
+import { ZstdRuntimeTool, zstdRuntimeOffered } from "./ZstdRuntimeTool";
 import { AmprIndexTool, amprIndexPlan } from "./AmprIndexTool";
 import {
   imageBuildWith,
@@ -201,14 +205,17 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
   /** Where `src`'s output goes, as Options has it set; a package always goes to the pkg folder. */
   const outFor = (src: string) =>
     toPkgDir ? outputFor(src, "folder", pkgDir) : outputFor(src, outputPlace, outputDir);
-  // AMPR LZ4 asset packs for this game's .exfat image, and the profile it packs with. Per game
+  // Asset packs (LZ4 or zstd) for this game's image or folder, and the profile it packs with. Per game
   // (they depend on the game's own ampr_emu), so only the game checked here carries them into
   // the queue.
   const [lz4On, setLz4On] = useState(false);
-  const [lz4Profile, setLz4Profile] = useState<{ name: string; text: string } | null>(null);
+  const [lz4Profile, setLz4Profile] = useState<{ name: string; text: string; measured?: boolean } | null>(null);
+  // A game in asset packs written as plain files again; the game's own, off for the next one.
+  const [unpackPacks, setUnpackPacks] = useState(false);
   const [lz4InstallRuntime, setLz4InstallRuntime] = useState(false);
   const packKind = "zstd" as const;
   const [emuAddedTo, setEmuAddedTo] = useState<string | null>(null);
+  const [zstdUpdatedTo, setZstdUpdatedTo] = useState<string | null>(null);
   const [zstdLevel, setZstdLevel] = useState(5);
   const build: ConvertBuild =
     make === "image"
@@ -218,19 +225,27 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
         : { kind: "pkg" };
   const then = thenFor(build.kind, thenChoice, canInstall);
   /** A skip says which build the source cannot become: an image needs a game folder, image,
-   *  package or archive (unpacked first); a folder needs an image or package, or a game folder
-   *  when it is made in zstd packs (`zstd`, this game's own choice). */
+   *  package or archive; a folder needs an image, package or `.zip`/`.7z`/`.rar`, or a game
+   *  folder when it is made in packs (`zstd`, or for a folder `lz4`: this game's own choice). */
   const queueAdd = (
     src: string,
     isFolder: boolean,
     lz4?: AmprLz4Options,
     zstd?: ZstdPacks,
+    /** Write this game's asset packs out as plain files (the game under ①, when ticked). */
+    unpack?: boolean,
   ): boolean | QueueSkip => {
     // A later part of a multi-part archive is read through its first part.
     if (isRarLaterVolume(src)) return "later-part";
     if (build.kind === "image" && !isFolder && !isFolderableSource(src) && !isArchiveSource(src))
       return "not-image";
-    if (build.kind === "folder" && !isFolderableSource(src) && !(isFolder && zstd)) return "not-folder";
+    if (
+      build.kind === "folder" &&
+      !isFolderableSource(src) &&
+      !(!isFolder && isInPlaceArchive(src)) &&
+      !(isFolder && (zstd || lz4 || unpack))
+    )
+      return "not-folder";
     const u = useUploadStore.getState();
     const out = outFor(src);
     const prefs = useConvertPrefs.getState();
@@ -246,10 +261,14 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
       compression,
       build:
         build.kind === "image"
-          ? imageBuildWith(build, lz4)
+          ? { ...imageBuildWith(build, lz4), ...(unpack && !lz4 ? { unpackPacks: true } : {}) }
           : build.kind === "folder" && zstd
             ? { ...build, zstd }
-            : build,
+            : build.kind === "folder" && lz4
+              ? { ...build, lz4 }
+              : build.kind === "folder" && unpack
+              ? { ...build, unpackPacks: true }
+              : build,
       imageDest:
         build.kind === "image"
           ? { volume: u.destinationVolume, subpath: u.destinationSubpath || DEFAULT_IMAGE_SUBPATH }
@@ -259,13 +278,15 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
       host: then !== "keep" ? host : null,
       deleteAfterInstall: then !== "keep" && deleteAfter,
       fullVerify: prefs.fullVerify,
-      imageLevel: build.kind === "image" && build.compress && !lz4 ? prefs.imageLevel : undefined,
+      imageLevel: build.kind === "image" && build.compress ? prefs.imageLevel : undefined,
       // The AMPR emulator choice as it is now: changing it later is for games added later.
       addAmprEmu: prefs.addAmprEmu,
       amprEmuBuild: prefs.amprEmuBuild,
       // Save to: a server, as chosen now (an image or a game folder only).
       toServer:
         (build.kind === "image" || build.kind === "folder") && savesToServer(runChoice) ? serverFolder : undefined,
+      // Only the game it was ticked for under ③, never the others added with it.
+      removeBackport: (removesBackport && src === source.trim()) || undefined,
     });
   };
   /** Queue what was picked or found, then say what was left out. */
@@ -348,6 +369,13 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
   const [checking, setChecking] = useState(false);
   // A .rar's password: held for this source only, never stored.
   const [password, setPassword] = useState("");
+  // "Remove backport libraries": ticked for this source only (the one it names), so another
+  // game starts with it off.
+  const [removeBackportFor, setRemoveBackportFor] = useState<string | null>(null);
+  // "Move the source to the Trash once the output is verified": the one source it was
+  // confirmed for, in this window's memory only, and cleared when that conversion starts.
+  const [deleteSourceFor, setDeleteSourceFor] = useState<string | null>(null);
+  const { confirm, dialog: confirmDialog } = useConfirm();
   const [error, setError] = useState<string | null>(null);
   const [deleteArmed, setDeleteArmed] = useState(false);
   const disarm = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -417,6 +445,7 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
       setLz4On(false);
       setLz4Profile(null);
       setLz4InstallRuntime(false);
+      setUnpackPacks(false);
       void check(path);
     },
     [check, reset, setSource, setPassword],
@@ -479,7 +508,9 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
 
   // The inspection of a restored result's source, so its title id is there for Launch.
   useEffect(() => {
-    if (!inspection && source && !checking && pipeline.phase !== "idle") void check(source);
+    // Not a source the run moved to the Trash: there is nothing left to inspect.
+    const gone = pipeline.phase === "done" && pipeline.sourceNote?.removed;
+    if (!inspection && source && !checking && pipeline.phase !== "idle" && !gone) void check(source);
     // Only on mount: later checks come from explicit source changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
@@ -566,10 +597,18 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
       // Save to: a server writes it there; nothing is kept here.
       const toServer = savesToServer(runChoice) ? serverFolder : undefined;
       void buildFolder(game, out.outputDir, out.keepBoth, {
-        zstd: folderPackOptions(lz4Choice),
+        zstd: folderPackOptions(lz4Choice, packProfile),
+        lz4: folderLz4Options(lz4Choice, packProfile),
         update,
         ...(toServer ? { toServer } : {}),
+        ...(removesBackport ? { removeBackport: true } : {}),
+        ...(deletesSource ? { deleteSource: true } : {}),
+        ...(unpackOn ? { unpackPacks: true } : {}),
+        // A .rar read in place needs its password as an image build does.
+        ...(password ? { password } : {}),
       });
+      // Asked for this one conversion: off again for whatever comes next.
+      setDeleteSourceFor(null);
       return;
     }
     if (build.kind === "image") {
@@ -587,20 +626,24 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
       void buildImage(
         game,
         out.outputDir,
-        build.compress && !lz4Active(build.format, lz4Choice),
+        build.compress,
         build.format,
         !direct && !toServer && then === "upload" ? plan : undefined,
-        packOptions(build.format, lz4Choice, lz4Profile?.text),
+        packOptions(lz4Choice, packProfile),
         password || undefined,
         out.keepBoth,
-        direct || toServer || update
+        direct || toServer || update || removesBackport || deletesSource || unpackOn
           ? {
               ...(direct ? { toConsole: plan } : {}),
               ...(toServer ? { toServer } : {}),
               ...(update ? { update } : {}),
+              ...(removesBackport ? { removeBackport: true } : {}),
+              ...(deletesSource ? { deleteSource: true } : {}),
+              ...(unpackOn ? { unpackPacks: true } : {}),
             }
           : undefined,
       );
+      setDeleteSourceFor(null);
       return;
     }
     const install = then !== "keep";
@@ -659,6 +702,7 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
     setLz4On(false);
     setLz4Profile(null);
     setLz4InstallRuntime(false);
+    setUnpackPacks(false);
     setInspection(null);
     setEstimates(null);
     setChecking(false);
@@ -707,6 +751,7 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
             : {
                 name: tr("trace_profile_name", { n: p.profile.sessions }, "measured from {n} play sessions"),
                 text: p.toml,
+                measured: true,
               },
         );
       })
@@ -723,6 +768,7 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
         on: lz4On,
         onToggle: setLz4On,
         profileName: lz4Profile?.name ?? null,
+        profileMeasured: !!lz4Profile?.measured,
         onProfile: setLz4Profile,
         installRuntime: lz4InstallRuntime,
         onInstallRuntime: setLz4InstallRuntime,
@@ -730,13 +776,43 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
         onKind: () => {},
         zstdLevel,
         onZstdLevel: setZstdLevel,
+        ps4: !!inspection?.ps4_game,
       }
     : undefined;
-  // A folder in zstd packs can be made of a game folder too.
+  // The profile the packs are made with. A profile measured from play is written for LZ4 packs
+  // (what it keeps loose suits drakmor's ampr_emu), so zstd packs take only one picked by hand.
+  const packProfile = packKind === "zstd" && lz4Profile?.measured ? undefined : lz4Profile?.text;
+  // A folder in packs (LZ4 or zstd) can be made of a game folder too.
   const packsFolder = folderPacks(lz4Choice);
-  // A game folder with an update merged in is a new folder too.
-  const canFolder = unpackable || (isLocalFolder && (packsFolder || mergeReady));
-  const isFolderSource = src !== "" && !unpackable && !isArchiveSource(src) && !packsFolder && !mergeReady;
+  // A game in asset packs can be written as plain files again, as an image or a folder, while
+  // no pack option is on (packing it again decodes the old packs anyway).
+  const packsOn = build.kind === "image" ? lz4Active(lz4Choice) : packsFolder;
+  const unpackChoice: UnpackChoice | undefined =
+    inspection?.packs && (build.kind === "image" || build.kind === "folder") && !packsOn
+      ? { kind: inspection.packs, on: unpackPacks, onToggle: setUnpackPacks }
+      : undefined;
+  const unpackOn = !!unpackChoice?.on;
+  // "Remove backport libraries" is for an image or folder of the one game checked, when its
+  // fakelib holds any; not with an update merged in (the merged game is another source).
+  const backport =
+    !mergeReady && (build.kind === "image" || build.kind === "folder") ? (inspection?.backport ?? null) : null;
+  // New zstd packs unpack a packed game on the way, and so does unpacking it to plain files:
+  // either is what lets its backport go.
+  const backportUnpacks =
+    unpackOn ||
+    ((build.kind === "folder" || build.kind === "image") && lz4Active(lz4Choice) && lz4Choice?.kind === "zstd");
+  const removesBackport =
+    backport !== null && removeBackportFor === src && !backportRefusal(backport, backportUnpacks);
+  // A game folder with an update merged in is a new folder too, and so is a packed one once
+  // "Unpack the asset packs" is ticked (that checkbox is under "A game folder"; until it is, the
+  // folder would be the same one and the engine refuses it).
+  // A .zip, .7z or .rar becomes a folder too: its game read straight out of it.
+  const canFolder =
+    unpackable ||
+    (src !== "" && isInPlaceArchive(src)) ||
+    (isLocalFolder && (packsFolder || mergeReady || unpackOn));
+  const isFolderSource =
+    src !== "" && !unpackable && !isArchiveSource(src) && !packsFolder && !mergeReady && !unpackOn;
 
   /** Check the picked pair: the merged game, or why the two don't go together. */
   const checkMerge = async (pair = mergePair) => {
@@ -837,6 +913,8 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
   const indexable = !inside && amprIndexPlan(source, inspection) !== "hidden";
   // Kept on screen after adding it, when the check no longer offers it: it says what it did.
   const emulatable = !inside && (amprEmuOffered(source, inspection) || emuAddedTo === source);
+  // A zstd-packed game with an old or missing runtime (ASTRO BOT hung on ampr-emu-ng before 0.3.4).
+  const zstdUpdatable = !inside && (zstdRuntimeOffered(source, inspection) || zstdUpdatedTo === source);
   /** A .ffpfsc's index is renewed by making a fresh .ffpfsc of it. */
   const convertAgain = () => {
     if (!src || locked) return;
@@ -848,7 +926,7 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
     setTimeout(showRun, 50);
   };
   const tools =
-    lookable || mountable || folderable || indexable || emulatable ? (
+    lookable || mountable || folderable || indexable || emulatable || zstdUpdatable ? (
       <div className="flex flex-wrap gap-2 border-t border-[var(--color-border)] pt-2.5">
         {lookable && !inside && (
           <Button size="sm" variant="secondary" leftIcon={<FolderSearch size={14} />} onClick={() => setInside(true)}>
@@ -888,6 +966,17 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
             locked={locked}
             onAdded={() => {
               setEmuAddedTo(source);
+              void recheckQuietly(source);
+            }}
+          />
+        )}
+        {zstdUpdatable && (
+          <ZstdRuntimeTool
+            source={source}
+            inspection={inspection}
+            locked={locked}
+            onUpdated={() => {
+              setZstdUpdatedTo(source);
               void recheckQuietly(source);
             }}
           />
@@ -978,9 +1067,9 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
           compact
           title={tr("workshop_title", undefined, "Workshop")}
           description={tr(
-            "workshop_inside_description",
+            "workshop_inside_description_v2",
             undefined,
-            "Look inside a game image or package: save files to this computer, or change files and write an edited copy. The image you opened is never changed.",
+            "Look inside a game image or package: save files to this computer, or change files and write an edited copy. The image you opened changes only if you choose Apply in place.",
           )}
         />
         {gameCard}
@@ -995,25 +1084,22 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
   }
 
   const idle = pipeline.phase === "idle";
-  // Straight to the PS5 (first version): a plain .exfat, .ffpkg or .ffpfs, or .exfat with zstd packs.
-  const ps5Packs = build.kind === "image" ? packOptions(build.format, lz4Choice) : undefined;
+  // Straight to the PS5: an .exfat, .ffpkg or .ffpfs, with or without asset packs; a .ffpfsc is
+  // not streamed yet, packed or not.
   const ps5Refusal =
-    build.kind === "image" &&
-    ((build.compress && !lz4Active(build.format, lz4Choice)) ||
-      (ps5Packs && !ps5Packs.zstdLevel) ||
-      (ps5Packs?.zstdLevel && build.format !== "exfat"))
+    build.kind === "image" && build.compress
       ? tr(
-          "fpkg.save_to_ps5_unsupported",
+          "fpkg.save_to_ps5_unsupported_v2",
           undefined,
-          "Straight to the PS5 works for a plain .exfat, .ffpkg or .ffpfs image, or an .exfat with zstd packs. Save this one to this computer, or change the image above.",
+          "Straight to the PS5 works for an .exfat, .ffpkg or .ffpfs image, with or without asset packs, but not yet for a .ffpfsc. Save this one to this computer, or turn off compression above.",
         )
       : null;
   // Straight to a server: the same images as straight to the PS5.
   const serverRefusal = ps5Refusal
     ? tr(
-        "fpkg.save_to_server_unsupported",
+        "fpkg.save_to_server_unsupported_v2",
         undefined,
-        "Straight to a server works for a plain .exfat, .ffpkg or .ffpfs image, or an .exfat with zstd packs. Save this one to this computer, or change the image above.",
+        "Straight to a server works for an .exfat, .ffpkg or .ffpfs image, with or without asset packs, but not yet for a .ffpfsc. Save this one to this computer, or turn off compression above.",
       )
     : null;
   const runChoice: RunCardProps["choice"] = {
@@ -1043,6 +1129,35 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
     serverFolder,
     onServerFolder: setServerFolder,
     serverRefusal,
+  };
+  // "Move the source to the Trash" is for an image or folder made of the game checked; a
+  // package is left alone (it has its own steps after the build).
+  const deleteSourceOffered = inspection !== null && src !== "" && (build.kind === "image" || build.kind === "folder");
+  const deleteSourceBlocked = deleteSourceRefusal({
+    engineReason: inspection?.delete_source_refusal,
+    archive: isArchiveSource(src),
+    merge: mergePair !== null,
+    elsewhere: (build.kind === "image" && savesToPs5(runChoice)) || savesToServer(runChoice),
+  });
+  const deletesSource = deleteSourceOffered && deleteSourceFor === src && !deleteSourceBlocked;
+  /** Ticking it asks first, naming what would go; unticking needs no question. */
+  const askDeleteSource = async (on: boolean) => {
+    if (!on) {
+      setDeleteSourceFor(null);
+      return;
+    }
+    const ok = await confirm({
+      title: tr("fpkg.delete_source.confirm_title", undefined, "Move the source to the Trash afterwards?"),
+      message: tr(
+        "fpkg.delete_source.confirm_body",
+        { path: src },
+        "Once the output is written and every byte of it has been read back and checked, this is moved to the Trash or Recycle Bin: {path}. It stays where it is if the conversion fails or is stopped, or if it changed meanwhile.",
+      ),
+      details: [src],
+      confirmLabel: tr("fpkg.delete_source.confirm_yes", undefined, "Move it to the Trash afterwards"),
+      destructive: true,
+    });
+    if (ok) setDeleteSourceFor(src);
   };
   const barRun = idleRun(
     {
@@ -1120,6 +1235,7 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
               // A game's own: nothing to offer until the next game is checked.
               lz4: locked ? undefined : lz4Choice,
             }}
+            unpack={locked ? undefined : unpackChoice}
             language={locked ? nextLanguage : language}
             onLanguage={locked ? setNextLanguage : setLanguage}
             onCompression={setCompression}
@@ -1131,13 +1247,30 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
             plannedSize={locked ? undefined : inspection?.planned_size}
             outputFree={locked ? undefined : inspection?.output_free}
             compressedFrom={
-              !locked && build.kind === "image" && build.compress && !lz4Active(build.format, lz4Choice)
+              !locked && build.kind === "image" && build.compress
                 ? inspection?.bytes
                 : undefined
             }
           >
             {locked && <OutputChoice {...runChoice} />}
+            {!locked && backport && (
+              <RemoveBackportOption
+                backport={backport}
+                unpacks={backportUnpacks}
+                checked={removeBackportFor === src}
+                onChange={(on) => setRemoveBackportFor(on ? src : null)}
+              />
+            )}
+            {!locked && deleteSourceOffered && (
+              <DeleteSourceOption
+                path={src}
+                refusal={deleteSourceBlocked}
+                checked={deleteSourceFor === src}
+                onChange={(on) => void askDeleteSource(on)}
+              />
+            )}
           </OptionsCard>
+          {confirmDialog}
 
           <SwapJournals
             deps={swapDeps}
@@ -1197,8 +1330,13 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
               const r = queueAdd(
                 source.trim(),
                 isLocalFolder,
-                build.kind === "image" ? packOptions(build.format, lz4Choice, lz4Profile?.text) : undefined,
-                build.kind === "folder" ? folderPackOptions(lz4Choice) : undefined,
+                build.kind === "image"
+                  ? packOptions(lz4Choice, packProfile)
+                  : build.kind === "folder"
+                    ? folderLz4Options(lz4Choice, packProfile)
+                    : undefined,
+                build.kind === "folder" ? folderPackOptions(lz4Choice, packProfile) : undefined,
+                unpackOn,
               );
               if (r === "not-image" || r === "not-folder" || r === "later-part") setError(skippedText(r, 1));
               else if (!r) setError(tr("cq_already", undefined, "This game is already in the queue."));

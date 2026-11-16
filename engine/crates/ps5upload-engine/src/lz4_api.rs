@@ -255,8 +255,12 @@ fn building() -> &'static Mutex<HashMap<u64, Building>> {
 }
 
 /// A build's place in the list; dropped (the job ended, the request went away), it is gone.
+// No LZ4 build starts in this fork (Zstd only), so nothing holds a guard; /api/lz4/building
+// keeps its shape and answers an empty list.
+#[allow(dead_code)]
 pub(crate) struct BuildingGuard(u64);
 
+#[allow(dead_code)]
 impl BuildingGuard {
     pub(crate) fn set_job(&self, job_id: &str) {
         if let Some(b) = building()
@@ -278,6 +282,7 @@ impl Drop for BuildingGuard {
     }
 }
 
+#[allow(dead_code)]
 pub(crate) fn building_start(source: &str) -> BuildingGuard {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     let id = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);

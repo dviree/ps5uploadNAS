@@ -224,6 +224,17 @@
         ],
         "type": "object"
       },
+      "AddSource": {
+        "properties": {
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
       "AddrQuery": {
         "properties": {
           "addr": {
@@ -389,6 +400,13 @@
             "minimum": 0,
             "type": [
               "integer",
+              "null"
+            ]
+          },
+          "profile_toml": {
+            "description": "A profile in drakmor's `ampr_pack` TOML format (what `ampr_lz4.profile_toml` takes)\ndeciding which files stay loose: a file is packed unless its last matching `[[rule]]`,\nor `[pack] default_action` when none matches (`loose` unless set), says `loose`. System\nfiles and empty files stay loose whatever it says. Its block sizes, `hot`, `layout`,\ngroups and LZ4 settings mean nothing to zstd packs and are ignored. Absent or blank:\nevery file but the system files is packed.",
+            "type": [
+              "string",
               "null"
             ]
           },
@@ -945,6 +963,46 @@
         ],
         "type": "object"
       },
+      "BackportReport": {
+        "description": "What the inspection says about a game's backport, for Convert's \"Remove backport libraries\".",
+        "properties": {
+          "blocked": {
+            "description": "Why they can't be left out whatever the conversion: the backport lowered eboot.bin's\nSDK (or that can't be told). Absent when they can.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "emulators": {
+            "description": "The emulators beside them, which a removal keeps.",
+            "items": {
+              "$ref": "#/components/schemas/Emulator"
+            },
+            "type": "array"
+          },
+          "libraries": {
+            "description": "The backport libraries in `fakelib`/`fakelib2`, by path: what a removal leaves out.",
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "packed": {
+            "description": "`lz4` or `zstd` when the game is in asset packs: its backport can be left out only by a\nconversion that unpacks it (one that writes zstd packs).",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "libraries",
+          "emulators",
+          "blocked",
+          "packed"
+        ],
+        "type": "object"
+      },
       "BackupBody": {
         "properties": {
           "addr": {
@@ -1208,6 +1266,10 @@
             "description": "`exfat`, `ufs2`, `pfs` or `pkg`: the filesystem inside (a `.ffpfsc`'s inner one).",
             "type": "string"
           },
+          "in_place": {
+            "description": "Changes can also go into the image itself (`/api/image/edit/check` says whether a given\nset fits): an uncompressed exFAT, UFS2 or PFS image.",
+            "type": "boolean"
+          },
           "label": {
             "description": "The reader's one-line description of the image.",
             "type": "string"
@@ -1225,6 +1287,7 @@
           "filesystem",
           "compressed",
           "editable",
+          "in_place",
           "dir",
           "entries",
           "total_files",
@@ -2006,6 +2069,60 @@
         ],
         "type": "string"
       },
+      "CheckResp": {
+        "properties": {
+          "busy": {
+            "description": "The image is in use (another edit, a build reading it): try again later.",
+            "type": "boolean"
+          },
+          "filesystem": {
+            "description": "`exfat`, `ufs2` or `pfs`, when the image can be edited in place at all.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "free_bytes": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "in_place": {
+            "description": "The changes can be applied to the image itself (`in_place: true` on the build).",
+            "type": "boolean"
+          },
+          "journal_bytes": {
+            "description": "The undo journal written beside the image while the change goes in.",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "needed_bytes": {
+            "description": "What the changes take inside the image and what it has free, in bytes (exFAT, UFS2).",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "reason": {
+            "description": "Why not, in a sentence for the user (when `in_place` is false).",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "in_place",
+          "busy"
+        ],
+        "type": "object"
+      },
       "CheckoutState": {
         "description": "One image checked out for editing. At most one is active at a time —\na second concurrent checkout would need a second journal and buys nothing,\nsince editing is a foreground activity.",
         "properties": {
@@ -2710,6 +2827,21 @@
         "required": [
           "id",
           "on"
+        ],
+        "type": "object"
+      },
+      "ConvertRuntimeRequest": {
+        "properties": {
+          "host": {
+            "type": "string",
+            "x-aliases": [
+              "console",
+              "addr"
+            ]
+          }
+        },
+        "required": [
+          "host"
         ],
         "type": "object"
       },
@@ -3502,6 +3634,23 @@
         ],
         "type": "object"
       },
+      "Emulator": {
+        "description": "A homebrew emulator in a game's fakelib, which a removal keeps.",
+        "properties": {
+          "name": {
+            "description": "`AMPR`, `DLC`, `PlayGo`, or `Other` for one that could not be told.",
+            "type": "string"
+          },
+          "path": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "name"
+        ],
+        "type": "object"
+      },
       "EngineOpBody": {
         "properties": {
           "authkey": {
@@ -3689,7 +3838,7 @@
                 "type": "null"
               }
             ],
-            "description": "Pack the game's files into AMPR LZ4 asset packs first (exFAT only, not with `compress`)."
+            "description": "Pack the game's files into AMPR LZ4 asset packs first, in any image, plain or (with\n`compress`) inside a `.ffpfsc`."
           },
           "ampr_zstd": {
             "anyOf": [
@@ -3700,10 +3849,21 @@
                 "type": "null"
               }
             ],
-            "description": "Pack the game's files into zstd asset packs for ampr-emu-ng, which goes in the image: a\nplain image of any format, not with LZ4 packs. A game in LZ4 packs is decoded on the way."
+            "description": "Pack the game's files into zstd asset packs for ampr-emu-ng, which goes in the image: any\nformat, plain or (with `compress`) inside a `.ffpfsc`; not with LZ4 packs. A game in LZ4\npacks is decoded on the way."
+          },
+          "archive_password": {
+            "description": "The password of a `.rar` `source` (an archive read in place); never logged or kept.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "compress": {
             "description": "Write the image straight into a `.ffpfsc` container (no uncompressed copy on disk).",
+            "type": "boolean"
+          },
+          "delete_source": {
+            "description": "Once the image is written, read back in full and given its name, move `source` to this\ncomputer's Trash or Recycle Bin (never deleted for good). Only for a file or folder on\nthis computer made into an image on this computer; refused, with the reason, for a\nsource on a PS5 or a server, an output inside the source (or the source inside the\noutput), an engine with no Trash (Docker, a headless Linux), `edits`, `update` and a\n`destination` elsewhere. The whole image is read back whatever `full_verify` says.\nThe source stays when it changed during the run or another job reads it; the finished\njob's `commit_ack` says which: `source_removed` and `source_note`.",
             "type": "boolean"
           },
           "destination": {
@@ -3715,7 +3875,7 @@
                 "type": "null"
               }
             ],
-            "description": "Where the image goes: `{\"kind\":\"local\"}` (the default: `output_dir` on this computer) or\n`{\"kind\":\"console\",\"addr\":…,\"dir\":…}`: straight into that PS5's folder `dir` over AVA1,\nsent as it is written, so the image is never stored on this computer. The job's `dest` is\nthen the image's path on the PS5, and the read-back runs there. For `.exfat`, `.ffpkg`\nand `.ffpfs` images, and `.exfat` with `ampr_zstd` packs; a `.ffpfsc` (`compress`), LZ4\npacks and edited copies are refused for it."
+            "description": "Where the image goes: `{\"kind\":\"local\"}` (the default: `output_dir` on this computer) or\n`{\"kind\":\"console\",\"addr\":…,\"dir\":…}`: straight into that PS5's folder `dir` over AVA1,\nsent as it is written, so the image is never stored on this computer. The job's `dest` is\nthen the image's path on the PS5, and the read-back runs there. For `.exfat`, `.ffpkg`\nand `.ffpfs` images, with or without `ampr_lz4` or `ampr_zstd` packs (LZ4 packs are made\ninto the engine's data folder first, and removed once the image is there); a `.ffpfsc`\n(`compress`) and edited copies are refused for it."
           },
           "edits": {
             "description": "Write an edited COPY of the image `source` (#479): its files with these changes, as an\nimage of the same kind (format and compression are the source's; `format`/`compress`\nare ignored), named `<name>-edited` and put next to it unless `name`/`output_dir` say\notherwise. The source image is only read.",
@@ -3742,6 +3902,10 @@
             "description": "Read every byte of the image back to verify it. Off (the default): names, sizes and\nfolders are checked in full and a seeded sample of the data.",
             "type": "boolean"
           },
+          "in_place": {
+            "description": "With `edits`: change the image `source` itself instead of writing an edited copy. Only\nfor an uncompressed `.exfat`, `.ffpkg` or `.ffpfs` on this computer, not in asset packs,\nand only when every change fits the image's free space (it never grows): otherwise\nrefused (400) with the reason, before anything is written. An undo journal\n(`<image>.forge-undo`) is written beside it first; every changed file is read back and\nthe filesystem checked, and any failure restores the image. `POST /api/image/edit/check`\nsays beforehand whether it would be accepted.",
+            "type": "boolean"
+          },
           "keep_both": {
             "description": "When the image's name is taken in the output folder, add ` (2)` (and so on) instead of\nrefusing (see `BuildReq::keep_both`).",
             "type": "boolean"
@@ -3764,9 +3928,17 @@
             "description": "An edited copy of the image `source` whose one change is a regenerated\n`ampr_emu.index` (Workshop's \"Rebuild AMPR index\", #621): written like an edited copy,\nrefused for a compressed image or a game that does not read through libSceAmpr.",
             "type": "boolean"
           },
+          "remove_backport": {
+            "description": "Leave the backport libraries in the game's `fakelib`/`fakelib2` out of the image, the\nemulators there kept (the inspection's `backport` lists both). Refused, with the reason,\nwhen they can't go: the backport lowered `eboot.bin`'s SDK (nothing here restores it),\nor the game stays in asset packs whose own list names them. A game with no backport\nlibrary is converted as it is. Not with `edits`.",
+            "type": "boolean"
+          },
           "source": {
-            "description": "A game folder on this computer (one with `sce_sys` in it).",
+            "description": "A game folder (one with `sce_sys` in it) or image, on this computer, a saved server\n(`remote://`) or a console (`ps5://`); or a `.zip`, `.7z` or `.rar` on this computer (a\nmulti-part RAR set by its first part) holding one game folder, read straight out of it\nwith nothing unpacked. An archive that has to be unpacked first (a game image inside it,\nor an `update` to merge) is refused (400) with `archive_needs_unpack` at the start of\nthe reason: `POST /api/fpkg/extract` then unpacks it.",
             "type": "string"
+          },
+          "unpack_packs": {
+            "description": "For a game in LZ4 or zstd asset packs: write it as plain files again. Every packed file\ngoes in under its own name, the pack volumes and their indexes are left out, a fresh\n`ampr_emu.index` lists the files, and a libSceAmpr game whose emulator is ampr-emu-ng,\nan old ampr_emu or unknown gets the one `ampr_emu_build` names (`add_ampr_emu` off\nleaves it). Refused for a game that is not packed, and with `ampr_lz4`, `ampr_zstd` or\n`edits`. Without it a packed game is written as it is, packs and all.",
+            "type": "boolean"
           },
           "update": {
             "description": "A PS4 update (a package, image or folder) merged into the PS4 game `source`: the image\nis the game at the update's version (`ps5upload_fpkg::ps4_merge`). Not with `edits`.",
@@ -4289,6 +4461,17 @@
       },
       "FolderBuildReq": {
         "properties": {
+          "add_ampr_emu": {
+            "description": "With `unpack_packs`: replace or add the game's AMPR emulator as an image build does.\nOn unless turned off.",
+            "type": "boolean"
+          },
+          "ampr_emu_build": {
+            "description": "With `unpack_packs`: which emulator, `ampr_emu` (the default) or `ampr-emu-ng`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "ampr_lz4": {
             "anyOf": [
               {
@@ -4298,7 +4481,7 @@
                 "type": "null"
               }
             ],
-            "description": "Pack the game's files into AMPR LZ4 asset packs, as ps5-lz4 does: the folder is\n`<name>-lz4` with `ampr_assets.index` and its volumes, and the source may be a game\nfolder too."
+            "description": "Write the game with its files in AMPR LZ4 asset packs, as an image build's `ampr_lz4`\ndoes, as a plain folder: the pack volumes, their manifest, the files that stay loose and\na fresh `ampr_emu.index`. The volumes are packed into `<folder>.lz4spool/` beside it\nfirst (for a folder on a server, into the engine's data folder), so packing needs that\nroom too until the folder is written. The source may then also be a game folder. Not\nwith `ampr_zstd`, `unpack_packs` or `entry`."
           },
           "ampr_zstd": {
             "anyOf": [
@@ -4310,6 +4493,17 @@
               }
             ],
             "description": "Write the game with its files in zstd asset packs for ampr-emu-ng, as an image build's\n`ampr_zstd` does, as a plain folder: the packs, the files that stay loose, and the\nemulator in `fakelib/libSceAmpr.sprx`. The source may then also be a game folder (on\nthis computer, a saved server or a console). Not with `entry`."
+          },
+          "archive_password": {
+            "description": "The password of a `.rar` `source` (an archive read in place); never logged or kept.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "delete_source": {
+            "description": "Once the folder is written, read back in full and given its name, move `source` to this\ncomputer's Trash, as an image build's `delete_source` does and with the same refusals.\nNot with `entry`, `update` or a `destination` elsewhere.",
+            "type": "boolean"
           },
           "destination": {
             "anyOf": [
@@ -4350,9 +4544,17 @@
               "null"
             ]
           },
+          "remove_backport": {
+            "description": "Leave the game's backport libraries out of the folder, as an image build's\n`remove_backport` does, with the same refusals. Not with `entry`.",
+            "type": "boolean"
+          },
           "source": {
-            "description": "A game image (`.exfat`, `.ffpkg`/`.ufs2`, `.ffpfs`, `.ffpfsc`) or a debug-key `.pkg`,\non this computer, a saved server (`remote://`) or a console (`ps5://`).",
+            "description": "A game image (`.exfat`, `.ffpkg`/`.ufs2`, `.ffpfs`, `.ffpfsc`) or a debug-key `.pkg`,\non this computer, a saved server (`remote://`) or a console (`ps5://`); or a `.zip`,\n`.7z` or `.rar` on this computer holding one game folder, read in place as an image\nbuild reads it (and refused with `archive_needs_unpack` the same way).",
             "type": "string"
+          },
+          "unpack_packs": {
+            "description": "For a game in LZ4 or zstd asset packs: write it as plain files again, as an image\nbuild's `unpack_packs` does. The source may then also be a game folder. Not with\n`ampr_zstd` or `entry`.",
+            "type": "boolean"
           },
           "update": {
             "description": "A PS4 update merged into the PS4 game `source`, as an image build's `update`; the game\nmay then also be a folder. Not with `entry`.",
@@ -5431,6 +5633,29 @@
         },
         "type": "object"
       },
+      "HelperUninstallReq": {
+        "properties": {
+          "addr": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "x-aliases": [
+              "console",
+              "host"
+            ]
+          },
+          "check": {
+            "description": "Only ask whether the helper would go ahead (nothing mounted in its folders); nothing\nchanges and the helper keeps running. Answers `state: \"ready\"`.",
+            "type": "boolean"
+          },
+          "keep_backups": {
+            "description": "Keep the save backups made on the console (/data/ps5upload/backups). Default: kept.",
+            "type": "boolean"
+          }
+        },
+        "type": "object"
+      },
       "HiddenIcons": {
         "description": "The helper's answer to `app.icon_set` / `app.hidden_list` (#407).",
         "properties": {
@@ -6126,7 +6351,7 @@
         ]
       },
       "ImageEditReq": {
-        "description": "One change for an edited copy of an image: `{\"op\":\"delete\",\"path\":…}` removes a file or\nfolder; `{\"op\":\"put\",\"path\":…,\"from\":…}` puts a file (or a folder's contents) from this\ncomputer at `path`, replacing what is there.",
+        "description": "One change for an edited copy of an image: `{\"op\":\"delete\",\"path\":…}` removes a file or\nfolder; `{\"op\":\"put\",\"path\":…,\"from\":…}` puts a file (or a folder's contents) from this\ncomputer at `path`, replacing what is there; `{\"op\":\"rename\",\"from\":…,\"to\":…}` renames or\nmoves a file or folder to a path nothing is at yet; `{\"op\":\"mkdir\",\"path\":…}` makes a new\nempty folder. They are applied in order, each seeing what the ones before it did.",
         "oneOf": [
           {
             "allOf": [
@@ -6179,6 +6404,62 @@
                 "required": [
                   "path",
                   "from"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          {
+            "allOf": [
+              {
+                "properties": {
+                  "op": {
+                    "const": "rename"
+                  }
+                },
+                "required": [
+                  "op"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "from": {
+                    "type": "string"
+                  },
+                  "to": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "from",
+                  "to"
+                ],
+                "type": "object"
+              }
+            ]
+          },
+          {
+            "allOf": [
+              {
+                "properties": {
+                  "op": {
+                    "const": "mkdir"
+                  }
+                },
+                "required": [
+                  "op"
+                ],
+                "type": "object"
+              },
+              {
+                "properties": {
+                  "path": {
+                    "type": "string"
+                  }
+                },
+                "required": [
+                  "path"
                 ],
                 "type": "object"
               }
@@ -6400,6 +6681,24 @@
         "allOf": [
           {
             "properties": {
+              "backport": {
+                "anyOf": [
+                  {
+                    "$ref": "#/components/schemas/BackportReport"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Present when the game's `fakelib`/`fakelib2` holds backport libraries: what an image or\nfolder build's `remove_backport` would leave out, and why it can't when it can't."
+              },
+              "delete_source_refusal": {
+                "description": "Why an image or folder build could not move this source to the Trash afterwards\n(`delete_source`), whatever it makes: it is on a PS5 or a server, or this engine has no\nTrash. Absent when it could.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
               "min_firmware": {
                 "type": [
                   "string",
@@ -6468,6 +6767,13 @@
               "null"
             ]
           },
+          "packs": {
+            "description": "Which asset packs the game's files are in: `lz4` or `zstd` ([`source::packed_kind`]);\n`None` for a plain game. A packed game can be written out as plain files again.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "planned_size": {
             "description": "The package's estimated size (what the free-space check uses).",
             "minimum": 0,
@@ -6532,6 +6838,17 @@
             "description": "How many of its executables are plain ELF files, which a build fake-signs.",
             "minimum": 0,
             "type": "integer"
+          },
+          "zstd_runtime": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ZstdRuntime"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "For a game in zstd asset packs, the runtime it carries and whether it needs a newer one\n([`crate::ampr_pack::ng::zstd_runtime`]); `None` for any other game."
           }
         },
         "required": [
@@ -6545,6 +6862,8 @@
           "output_free",
           "checks",
           "ampr_packs",
+          "zstd_runtime",
+          "packs",
           "unsigned_executables",
           "ps4_game",
           "content_version",
@@ -10699,7 +11018,7 @@
             "type": "boolean"
           },
           "kind": {
-            "description": "`ok`; `runtime` (the game's ampr_emu is missing or too old: installing\n[`RUNTIME_VERSION`] into the image makes packs possible); `no_ampr` (the game does not\nread through AMPR, so nothing could serve packs: .ffpfsc is its compression).",
+            "description": "`ok`; `runtime` (the game's ampr_emu is missing or too old: installing\n[`RUNTIME_VERSION`] into the image makes packs possible); `no_ampr` (the game does not\nread through AMPR, so ampr_emu could not serve LZ4 packs: .ffpfsc is its compression,\nor zstd packs, whose ampr-emu-ng is injected whatever the game imports).",
             "type": "string"
           },
           "refusal": {
@@ -12745,6 +13064,47 @@
         ],
         "type": "object"
       },
+      "SmpEmulatorCheck": {
+        "description": "What ShadowMount+ does to a zstd-packed game's runtime on this console.",
+        "properties": {
+          "breaks_zstd": {
+            "description": "Games in zstd packs get that file instead of their own, and it won't start them, or may\nhang them (drakmor's ampr_emu, or ampr-emu-ng older than 0.3.4).",
+            "type": "boolean"
+          },
+          "kind": {
+            "description": "What that file is (as a game's runtime: `ampr-emu-ng`, `ampr_emu`, `unknown`).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "description": "The `libSceAmpr.sprx` it puts into every game in its place, when there is one.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "updates_on": {
+            "description": "ShadowMount+'s emulator updates are on.",
+            "type": "boolean"
+          },
+          "version": {
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "updates_on",
+          "path",
+          "kind",
+          "version",
+          "breaks_zstd"
+        ],
+        "type": "object"
+      },
       "SmpImageRwBeginReq": {
         "properties": {
           "addr": {
@@ -13042,7 +13402,7 @@
       "SourceInfo": {
         "properties": {
           "format": {
-            "description": "`pkg`, `split-pkg`, `exfat`, `ffpkg`, `ffpfsc` or `folder`.",
+            "description": "`pkg`, `split-pkg`, `patch-pkg` (a PS5 patch package, read as the files it carries\nwhole), `exfat`, `ffpkg`, `ffpfsc` or `folder`.",
             "type": "string"
           },
           "location": {
@@ -14360,6 +14720,10 @@
         ],
         "type": "object"
       },
+      "Users": {
+        "description": "Written by hand in the engine: the source has no field list for this.",
+        "x-rust-type": "Users"
+      },
       "Verdict": {
         "enum": [
           "installed",
@@ -14586,6 +14950,99 @@
         },
         "required": [
           "zip_path"
+        ],
+        "type": "object"
+      },
+      "ZstdRuntime": {
+        "description": "What runs a zstd-packed game.",
+        "properties": {
+          "capped": {
+            "description": "It is ampr-emu-ng [`NG_CAPPED`], which starts most games and refuses very large ones:\na newer one is worth offering, though the game may well run as it is.",
+            "type": "boolean"
+          },
+          "kind": {
+            "description": "`ampr-emu-ng`; `ampr_emu` (drakmor's, which doesn't read zstd packs); `unknown` (a\nbuild this app doesn't know, a test build or one newer than it); `missing`.",
+            "type": "string"
+          },
+          "module": {
+            "description": "The emulator's path in the game (`fakelib2/…` or `fakelib/…`); `None` when it has none.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "outdated": {
+            "description": "The game won't start or may hang with it: missing, drakmor's, or ampr-emu-ng older than\n[`NG_FIXED`]. A newer emulator fixes it.",
+            "type": "boolean"
+          },
+          "version": {
+            "description": "The release, when known.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "module",
+          "kind",
+          "version",
+          "outdated",
+          "capped"
+        ],
+        "type": "object"
+      },
+      "ZstdRuntimeOutcome": {
+        "description": "What updating a zstd-packed game's runtime did.",
+        "properties": {
+          "already": {
+            "description": "It already had exactly this one: nothing was written.",
+            "type": "boolean"
+          },
+          "folder": {
+            "type": "string"
+          },
+          "from": {
+            "description": "What the game had: `ampr-emu-ng 0.3.2`, `ampr_emu 0.4.2.1`, `unknown`, `none`.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "`folder`: replaced in the game's own folder. `backport`: a backport folder for an image.",
+            "type": "string"
+          },
+          "rescanned": {
+            "type": "boolean"
+          },
+          "to": {
+            "description": "What it has now: `ampr-emu-ng 0.4.0`.",
+            "type": "string"
+          },
+          "written": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          }
+        },
+        "required": [
+          "kind",
+          "folder",
+          "written",
+          "from",
+          "to",
+          "already",
+          "rescanned"
+        ],
+        "type": "object"
+      },
+      "ZstdRuntimeReq": {
+        "properties": {
+          "source": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "source"
         ],
         "type": "object"
       },
@@ -14933,6 +15390,27 @@
         ],
         "type": "object"
       },
+      "engine.convert_runtime.Outcome": {
+        "description": "What the console holds after a put.",
+        "properties": {
+          "path": {
+            "type": "string"
+          },
+          "version": {
+            "type": "string"
+          },
+          "written": {
+            "description": "False: the same version was already there with the right digest; nothing was written.",
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "version",
+          "path",
+          "written"
+        ],
+        "type": "object"
+      },
       "engine.disk_usage.StartReq": {
         "properties": {
           "addr": {
@@ -15061,6 +15539,26 @@
             ]
           }
         },
+        "type": "object"
+      },
+      "engine.image_edit_in_place.CheckReq": {
+        "description": "`POST /api/image/edit/check` — whether these edits can go into the image in place, without\nwriting anything (but settling a journal an interrupted edit left).",
+        "properties": {
+          "edits": {
+            "description": "The changes, as `/api/exfat/build` takes them (`edits`).",
+            "items": {
+              "$ref": "#/components/schemas/ImageEditReq"
+            },
+            "type": "array"
+          },
+          "path": {
+            "description": "The image, on this computer.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path"
+        ],
         "type": "object"
       },
       "engine.inspect.InspectReq": {
@@ -20622,7 +21120,19 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/JobCreated"
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/JobCreated"
+                    },
+                    {
+                      "properties": {
+                        "job_id": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
                 }
               }
             },
@@ -20655,12 +21165,7 @@
         ],
         "x-ps5upload": {
           "access": "loopback",
-          "long_running": {
-            "cancel": "/api/jobs/{id}/cancel",
-            "id_field": "job_id",
-            "status": "/api/jobs/{id}"
-          },
-          "response_schema": "struct"
+          "response_schema": "mixed"
         }
       }
     },
@@ -21216,7 +21721,7 @@
     },
     "/api/folder/build": {
       "post": {
-        "description": "POST /api/folder/build — unpack a game image or a debug-key package into a plain folder\n(#469). Runs as a job like an image build: stages `write` and `verify`, the folder written\nas `<name>.partial/` and renamed only once it reads back. Done's `dest` is the folder. With\n`ampr_zstd` the game's files go into zstd packs (stage `pack` first), from an image,\npackage or game folder; `commit_ack.ampr_runtime` names the emulator that went in.",
+        "description": "POST /api/folder/build — unpack a game image or a debug-key package into a plain folder\n(#469). Runs as a job like an image build: stages `write` and `verify`, the folder written\nas `<name>.partial/` and renamed only once it reads back. Done's `dest` is the folder. With\n`ampr_zstd` the game's files go into zstd packs (stage `pack` first), from an image,\npackage or game folder; `commit_ack.ampr_runtime` names the emulator that went in. With\n`ampr_lz4` they go into LZ4 packs the same way, read by the game's own ampr_emu.",
         "requestBody": {
           "content": {
             "application/json": {
@@ -21698,6 +22203,53 @@
         }
       }
     },
+    "/api/fpkg/zstd-runtime": {
+      "post": {
+        "description": "POST /api/fpkg/zstd-runtime `{source}`: a game in zstd packs gets the newest ampr-emu-ng\n(checked against GitHub's digest; the tested release when it can't be). A folder, here or on\nthe PS5, in place; an image on the PS5 through a ShadowMount+ backport.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ZstdRuntimeReq"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ZstdRuntimeOutcome"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error",
+            "description": "Bad request"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error",
+            "description": "Refused by the engine's address, Origin or Host guards."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error",
+            "description": "Any other failure, in the same shape."
+          }
+        },
+        "summary": "A game in zstd packs gets the newest ampr-emu-ng (checked against GitHub's digest; the tested release when it can't be)",
+        "tags": [
+          "workshop"
+        ],
+        "x-ps5upload": {
+          "access": "loopback",
+          "response_schema": "struct"
+        }
+      }
+    },
     "/api/game/inspect": {
       "post": {
         "description": "POST /api/game/inspect — what a package, image or game folder is.",
@@ -22170,6 +22722,56 @@
           }
         },
         "summary": "List a folder inside a game image",
+        "tags": [
+          "workshop"
+        ],
+        "x-ps5upload": {
+          "access": "loopback",
+          "response_schema": "struct"
+        }
+      }
+    },
+    "/api/image/edit/check": {
+      "post": {
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/engine.image_edit_in_place.CheckReq"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CheckResp"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error",
+            "description": "Bad request"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error",
+            "description": "Refused by the engine's address, Origin or Host guards."
+          },
+          "500": {
+            "$ref": "#/components/responses/Error",
+            "description": "Engine error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error",
+            "description": "Any other failure, in the same shape."
+          }
+        },
+        "summary": "Check whether changes fit into a game image in place",
         "tags": [
           "workshop"
         ],
@@ -23066,7 +23668,9 @@
                       },
                       "type": "array"
                     },
-                    "users": {}
+                    "users": {
+                      "$ref": "#/components/schemas/Users"
+                    }
                   },
                   "type": "object"
                 }
@@ -26106,6 +26710,144 @@
           }
         },
         "summary": "{removed}",
+        "tags": [
+          "payloads"
+        ],
+        "x-ps5upload": {
+          "access": "loopback",
+          "response_schema": "none"
+        }
+      }
+    },
+    "/api/payloads/sources": {
+      "get": {
+        "description": "GET /api/payloads/sources → {sources}: the payload lists added (#829), from the copies on disk.",
+        "responses": {
+          "200": {
+            "description": "Success. The handler builds this answer in a way the generator cannot read."
+          },
+          "403": {
+            "$ref": "#/components/responses/Error",
+            "description": "Refused by the engine's address, Origin or Host guards."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error",
+            "description": "Any other failure, in the same shape."
+          }
+        },
+        "summary": "{sources}: the payload lists added (#829), from the copies on disk",
+        "tags": [
+          "payloads"
+        ],
+        "x-ps5upload": {
+          "access": "loopback",
+          "response_schema": "none"
+        }
+      },
+      "post": {
+        "description": "POST /api/payloads/sources {url}: fetch the list and keep it. Refused when it is not one.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AddSource"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Success. The handler builds this answer in a way the generator cannot read."
+          },
+          "403": {
+            "$ref": "#/components/responses/Error",
+            "description": "Refused by the engine's address, Origin or Host guards."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error",
+            "description": "Any other failure, in the same shape."
+          }
+        },
+        "summary": "Fetch the list and keep it",
+        "tags": [
+          "payloads"
+        ],
+        "x-ps5upload": {
+          "access": "loopback",
+          "response_schema": "none"
+        }
+      }
+    },
+    "/api/payloads/sources/refresh": {
+      "post": {
+        "description": "POST /api/payloads/sources/refresh?force=1 → {sources}: lists older than an hour (all with\nforce) are fetched again; a failure keeps the last copy and sets that source's `error`.",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "force",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "x-aliases": [
+              "force_refresh"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success. The handler builds this answer in a way the generator cannot read."
+          },
+          "403": {
+            "$ref": "#/components/responses/Error",
+            "description": "Refused by the engine's address, Origin or Host guards."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error",
+            "description": "Any other failure, in the same shape."
+          }
+        },
+        "summary": "{sources}: lists older than an hour (all with force) are fetched again; a failure keeps the last copy and sets that source's `error`",
+        "tags": [
+          "payloads"
+        ],
+        "x-ps5upload": {
+          "access": "loopback",
+          "response_schema": "none"
+        }
+      }
+    },
+    "/api/payloads/sources/{id}": {
+      "delete": {
+        "description": "DELETE /api/payloads/sources/{id} → {removed}: the list, and what was downloaded from it.",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success. The handler builds this answer in a way the generator cannot read."
+          },
+          "403": {
+            "$ref": "#/components/responses/Error",
+            "description": "Refused by the engine's address, Origin or Host guards."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error",
+            "description": "Any other failure, in the same shape."
+          }
+        },
+        "summary": "{removed}: the list, and what was downloaded from it",
         "tags": [
           "payloads"
         ],
@@ -31501,6 +32243,70 @@
         }
       }
     },
+    "/api/ps5/convert-runtime": {
+      "post": {
+        "description": "POST /api/ps5/convert-runtime {host} — put the zstd runtime Convert on the PS5 needs (the\nampr-emu-ng release this app pins, digest checked) on the console, under\n/data/ps5upload/convert/runtime/. Answers {version, path, written}; written is false when the\nsame version was already there. Needs the helper up.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConvertRuntimeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/engine.convert_runtime.Outcome"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error",
+            "description": "Bad request"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error",
+            "description": "Refused by the engine's address, Origin or Host guards."
+          },
+          "500": {
+            "$ref": "#/components/responses/Error",
+            "description": "Engine error"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error",
+            "description": "The console or remote end failed"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error",
+            "description": "Any other failure, in the same shape."
+          }
+        },
+        "summary": "Put the zstd runtime Convert on the PS5 needs (the ampr-emu-ng release this app pins, digest checked) on the console, under /data/ps5upload/convert/runtime/",
+        "tags": [
+          "console-tools"
+        ],
+        "x-ps5upload": {
+          "access": "loopback",
+          "console": {
+            "aliases": [
+              "console",
+              "addr"
+            ],
+            "in": "body",
+            "name": "host",
+            "required": true
+          },
+          "response_schema": "struct"
+        }
+      }
+    },
     "/api/ps5/disk-usage": {
       "post": {
         "description": "POST /api/ps5/disk-usage",
@@ -34217,6 +35023,76 @@
             "required": true
           },
           "response_schema": "literal"
+        }
+      }
+    },
+    "/api/ps5/helper/uninstall": {
+      "post": {
+        "description": "POST /api/ps5/helper/uninstall — Body: `{ addr, keep_backups, check }`. \"Remove PS5Upload from this\nPS5\": the helper turns Minion off and removes its tile, shows the icons it hid, exits and\ndeletes its own folders on the console (`node.uninstall`). Refused (409) while this engine\nhas a job running against the console (`reason: busy`) or while something is mounted in\nthose folders (`reason: in_use`, `paths`); an older helper answers `reason: old_helper` (501).\nCopies of the helper stored in loaders are not touched here: the app removes them first.\nAfter a removal the key pinned for the console is forgotten (`key_forgotten`): its identity\nwent with the folders.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/HelperUninstallReq"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Success: JSON the engine does not describe field by field, often what the console sent."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error",
+            "description": "Bad request"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error",
+            "description": "Refused by the engine's address, Origin or Host guards."
+          },
+          "409": {
+            "$ref": "#/components/responses/Error",
+            "description": "Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error",
+            "description": "Engine error"
+          },
+          "501": {
+            "$ref": "#/components/responses/Error",
+            "description": "Not implemented"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error",
+            "description": "The console or remote end failed"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error",
+            "description": "Any other failure, in the same shape."
+          }
+        },
+        "summary": "Body: `{ addr, keep_backups, check }`",
+        "tags": [
+          "payloads"
+        ],
+        "x-ps5upload": {
+          "access": "loopback",
+          "console": {
+            "aliases": [
+              "console",
+              "host"
+            ],
+            "in": "body",
+            "name": "addr",
+            "required": true
+          },
+          "response_schema": "json-unknown"
         }
       }
     },
@@ -40386,6 +41262,59 @@
         }
       }
     },
+    "/api/ps5/smp-emulator": {
+      "get": {
+        "description": "GET /api/ps5/smp-emulator?addr=: whether ShadowMount+ swaps zstd-packed games' runtime for\none in its emulator folder that won't run them.",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "addr",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SmpEmulatorCheck"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "403": {
+            "$ref": "#/components/responses/Error",
+            "description": "Refused by the engine's address, Origin or Host guards."
+          },
+          "502": {
+            "$ref": "#/components/responses/Error",
+            "description": "The console or remote end failed"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error",
+            "description": "Any other failure, in the same shape."
+          }
+        },
+        "summary": "Whether ShadowMount+ swaps zstd-packed games' runtime for one in its emulator folder that won't run them",
+        "tags": [
+          "console-tools"
+        ],
+        "x-ps5upload": {
+          "access": "loopback",
+          "console": {
+            "aliases": [],
+            "in": "query",
+            "name": "addr",
+            "required": true
+          },
+          "response_schema": "struct"
+        }
+      }
+    },
     "/api/ps5/smp-meta/control": {
       "post": {
         "requestBody": {
@@ -44079,7 +45008,9 @@
                       },
                       "type": "array"
                     },
-                    "users": {}
+                    "users": {
+                      "$ref": "#/components/schemas/Users"
+                    }
                   },
                   "type": "object"
                 }

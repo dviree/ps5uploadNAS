@@ -10,6 +10,7 @@
 #include <pthread.h>
 #include <dlfcn.h>
 #include <ps5/kernel.h>
+#include "helper_uninstall.h"
 #include "app_dump.h"
 #include "activity.h"
 #include "instance_verdict.h"
@@ -31,6 +32,7 @@
 #include "vpad.h"
 #include "ava1_glue.h"
 #include "archive_extract.h"
+#include "console_convert.h"
 #include "takeover_flag.h"
 #include "ava1_stop.h"
 #include "ava1_data.h"
@@ -612,6 +614,7 @@ int main(void) {
     runtime_sweep_stale_pkg_temp();
     fs_pfsc_sweep();
     archive_extract_sweep();
+    console_convert_sweep();
     startup_trace("SWEEP_DONE");
 
     if (runtime_init(&state) != 0) {
@@ -896,5 +899,8 @@ int main(void) {
     (void)runtime_clear_ownership(&state);
     /* A dump stopped mid-decrypt may have left the kernel's vnode pager swapped: put it back. */
     app_dump_pager_emergency_restore();
+    /* "Remove PS5Upload from this PS5" (node.uninstall): every service has stopped writing; the
+     * helper's folders go last. Nothing is logged from here on: stderr lives in them. */
+    if (hu_requested()) hu_wipe();
     return rc == 0 ? 0 : 1;
 }

@@ -4,23 +4,89 @@ What's new in ps5upload, written for humans.
 
 ---
 
-## 12.4.14
+## 12.5.0
 
-Share:
+Convert gets most of what PS5 Dump Forge can do, and a first version of converting on the PS5 itself, from Minion. Checked with the automated tests; what was tried on a PS5 is said below.
 
-- The Share page now lines up with the rest of the app. The box for opening a friend's link sits on the left like the other pages, and beside it are three short steps on how sharing works, with a button to choose a game to share from, and your past shares (now always shown, even when there are none yet).
+**zstd packs**
+- **Runtime 0.4.1:** new zstd packs get ampr-emu-ng 0.4.1, which starts very large games that 0.4.0 refused with "index tables need … MiB, over the 48 MiB" (Final Fantasy XVI, Demon's Souls, Returnal, God of War Ragnarök and others). A game already packed with 0.4.0 is offered **Update the zstd runtime** in Convert.
+- **Any PS5 game:** zstd packs now work for games that don't read their files through AMPR too; the runtime goes in with them. This is new and not tested on every game, so keep the original until the packed one has started.
+- **Pack rules:** a pack profile can now choose which files stay unpacked for zstd packs, as it already could for LZ4.
+- **`.ini` files stay unpacked,** so `dlc_emu.ini` and other settings files can still be edited.
+- **Unpack:** Convert can turn a game in LZ4 or zstd packs back into plain files.
 
-## 12.4.13
+**Convert**
+- **Remove backport libraries:** a new option for images and folders leaves a game's backport libraries out and keeps its emulators. It says why when it can't, which is the case for most backports that lowered the game's SDK version.
+- **Move the source to the Trash once verified:** a new option, off unless you tick it for that one conversion. The source goes to the Trash or Recycle Bin only after every byte of the output has been read back; nothing is ever deleted for good.
+- **Patch packages:** a PS5 update `.pkg` can now be inspected, browsed and unpacked to a folder. Only the files the patch fully contains are shown, and the app says which ones need the base game. A patch can't be made into an image or a package on its own.
+- **Trophy files:** unpacking a package now keeps `nptitle.dat` and `npbind.dat` when the package stores them only in encrypted form.
+- **Straight from an archive:** a game image or folder is made straight from a `.zip`, `.7z` or `.rar` (multi-part too), with nothing unpacked first, so no extra disk space is needed. An archive holding a game image, or a build with an update merged in, still unpacks first.
+- **Packs everywhere:** LZ4 packs now go into `.ffpkg`, `.ffpfs` and game folders, not only `.exfat`; LZ4 and zstd packs work inside a compressed `.ffpfsc`; and a packed `.exfat`, `.ffpkg` or `.ffpfs` can be saved straight to the PS5 or a server. Packed images are now also checked by reading every file back through their packs, and they get their final name only after that check.
+- **Command line:** `ps5upload-engine convert <game> --to exfat|ffpkg|ffpfs|ffpfsc|folder|pkg --out <folder>` and `ps5upload-engine inspect <game>`, with `--json` for scripts. On Windows the output shows only when redirected to a file or another program.
 
-Cheats:
+**Images**
+- **Rename and New folder** when you look inside an image and write an edited copy.
+- **Apply in place:** when you look inside an image, your changes can now be written into the `.exfat` or `.ffpkg` itself instead of a copy, when they fit its free space (the image never grows). `.ffpfs` takes deletes, renames and replacements that fit. An undo journal is kept beside the image while the change goes in: if it's interrupted, the image is put back as it was the next time it's opened. Every changed file is read back and the image is restored if anything doesn't match. The edited copy stays the default. Tested on test images only, not yet on your own games, so keep a backup of an image you can't replace.
 
-- Cheats that write to many places, like a game's "Master Code", now apply. A cheat could hold 32 places and about 8 KB of text, and anything bigger was refused with "cheat has more locations than the engine can hold". It can now hold up to 4096. The Master Code for The Blood of Dawnwalker has 37, and the game's other cheats need it switched on first. For #811.
+**Convert on the PS5 (Minion)**
+- **Convert in Minion:** a new Convert section on the PS5's own Minion page turns a game folder or image already on the console into an `.exfat`, `.ffpkg`, `.ffpfs` or a folder, with zstd packs if you want, without a computer. Progress, Stop and a read-back check work as on the computer, and nothing is left behind when a conversion is stopped.
+- **zstd on the console:** PS5Upload on your computer puts the zstd runtime on the PS5 when it connects (or with **Put the zstd runtime on this PS5** in Settings › This PS5 › Minion); nothing is downloaded on the PS5.
+- **Tried on both our PS5s (FW 13.60):** every output format from a small game, a 30 GB game made into an `.ffpkg` with every byte checked (about 6½ minutes), a 21 GB game into zstd packs (about 4½ minutes), Stop at 10 %, 50 % and during the check, and the helper being replaced in the middle of a conversion. Not tried yet: starting a game from an image made on the console, a USB drive that is full or FAT32.
 
-Files:
+**Fixes**
+- From a review of everything in this release: a stopped or interrupted conversion no longer leaves a finished-looking but unchecked image behind; a folder you named `X.partial` is never removed by a conversion to `X`; an image left half-edited by a crash is put back before anything reads it; an archive's password is no longer kept in the queue file; and Convert's folder button, the image browser and a `.rar`'s password for folder builds work as they should.
+- A game folder with unusual characters in its `param.json`, or a damaged `eboot.bin`, could crash the engine during conversion. Found by new automated fuzz tests; it now reports the problem instead.
 
-- Files downloaded from the PS5, such as video clips and screenshots, now keep their date and time from the PS5. Before, they showed the time of the download. Zip downloads keep the dates too. For #812.
+Thanks to quer3q's PS5 Dump Forge, whose code most of this release adapts (credited in the README).
 
-## 12.4.12
+## 12.4.23
+
+Fixes from a review of everything changed since 12.4.10. Checked with the automated tests; not tried on a PS5.
+
+- **Restore a save to another user:** if the last step failed, the other user's own save was not always put back, and with an older helper on the PS5 the restore started before finding out it could not finish. It now checks first, and always puts their save back.
+- **Remove PS5Upload from a PS5:** when the helper was slow to stop, it could exit before PS5Upload's files were all removed, after the app had already said it was done. The files are now always removed first.
+- **Convert:** a game with a non-English file name of a certain length could not be checked at all. Pressing **Update the zstd runtime** or **Add the AMPR emulator** and then picking another game no longer shows the first game's result under the second. The ShadowMount+ emulator check no longer reads a PS5 that didn't answer as "nothing to warn about". An image already on the newest zstd runtime no longer gets a needless backport folder.
+- **Share:** opening the same share link a second time, or a second link while one is being received, now fills the form instead of being dropped.
+- **Payloads:** checking for updates fetched every payload source once per payload, and could show one source's error on another source's payloads. Payloads from a source now show where they come from in the playlist picker, and Remove can't be pressed twice.
+- **Tailscale:** a pause the PS5 refused is no longer shown as paused.
+- **Play Together:** the log now names the port really in use when the chosen one is taken, and the router note is left out when there is no port to name.
+- **Files:** "Search all drives" with an empty search box no longer clears what you typed in the Search view.
+- **FAQ:** new entry on how to convert a game to zstd packs in Convert (it works the same in the Windows, macOS and Linux apps).
+- **PS5 helper:** changing a save's owner now takes the same lock as every other identity change, save details with long non-English text no longer break the reply, and an icon that could not be shown again stays on the list to retry.
+
+## 12.4.22
+
+- **Games in zstd packs that hang at startup (ASTRO BOT and others):** the zstd runtime (ampr-emu-ng) that went into packed games could be 0.3.2, and versions before 0.3.4 hang some games at startup. New packs now get 0.4.0 or newer, and so does **Add the AMPR emulator** when you pick ampr-emu-ng.
+- **Update the zstd runtime:** open a game that's already in zstd packs in **Convert**. If its runtime is old, missing or the LZ4-only ampr_emu, a new button puts the newest ampr-emu-ng in. A folder is changed in place. An image on the PS5 isn't changed: the runtime goes in a ShadowMount+ backport folder. Not yet tried on a console.
+- **ShadowMount+ emulator check:** with emulator updates on, ShadowMount+ puts its own `libSceAmpr.sprx` into every game in place of the game's. If that file can't run zstd packs, Convert now says so for a game on the PS5, and how to turn it off.
+- **Security update:** updated the SSH library used for SFTP connections to fix two low-severity security issues. Nothing changes in how the app works.
+
+## 12.4.21
+
+- **Remove PS5Upload from a PS5:** a new button in Settings › This PS5 takes PS5Upload off a console you are done with. The PS5Upload Minion tile, PS5Upload's own files on the PS5 and the copies of the helper your loaders start at boot all go, and icons it hid are shown again. Games, saves and other payloads stay, and you can keep the save backups made on the PS5. The copy of your account kept from Play's offline sign-in (to undo it) always stays. Sending the helper again afterwards connects straight away. A folder of PS5Upload's that the PS5 still has in use (like the Minion tile's) is left in place rather than deleted. Before this, a deleted Minion tile came back whenever the helper started again.
+- **Play setup:** the rest-mode step (Stay Connected to the Internet, Turning On PS5 from Network) is now marked optional. It is only needed to start Play while the PS5 is in rest mode; if you turn the console on yourself, you can skip it.
+- **Payload Manager:** keeping the stored helper up to date could write the helper over PS5Upload's own copy of elfldr in Payload Manager (`ps5upload-elfldr.elf`). That file is no longer touched.
+
+## 12.4.20
+
+- **Payloads:** add a whole list of payloads at once with **Payload sources**: paste the address of a list in Payload Manager's format and its payloads show up in the catalogue. A payload is only shown when the list gives its checksum, and a download that doesn't match is refused (#829).
+- **Extract on the PS5:** extracting archives, RAR sets most of all, is much faster: the extractor now writes to the drive in large pieces instead of many small ones, and the RAR decoder works faster. Not yet timed on a console (#826).
+
+## 12.4.19
+
+- **Cheats:** switching a cheat on or off could fail with "location 1: bad offset" and garbled text, even with a correct cheat file. Fixed (#824).
+- **Cheats:** the cheat list counts switched-on cheats correctly for games with more than one cheat file.
+- **Cheats:** a cheat file with an extra section after its cheat list no longer shows a phantom cheat, and a `}` in a cheat's name no longer cuts it short.
+- **Cheats:** a cheat that was switched but couldn't be saved now says so, instead of "could not switch".
+- **Cheats:** a very large cheat file can no longer use up the helper's memory.
+- **Minion › Saves:** switching user while saves are still loading no longer shows the other user's backups, and an old error goes away once saves load.
+- **Minion › Files:** big reads and downloads are no longer cut off on a slow drive or weak Wi-Fi. Running out of memory now says so instead of "not allowed".
+- **Minion › Home:** the "USB drive plugged in" card is spaced properly in the PS5 browser.
+- Writing a file onto a folder's name is refused cleanly, and a full drive is reported as full.
+
+None of these were tried on a console yet.
+
+## 12.4.18
 
 Play Together:
 

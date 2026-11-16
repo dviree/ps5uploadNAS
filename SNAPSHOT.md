@@ -1,12 +1,13 @@
 # SNAPSHOT
 
-Last updated: 2026-11-14. Upstream phantomptr/ps5upload release v12.4.18 / c037a6ee.
+Last updated: 2026-11-16. Upstream phantomptr/ps5upload release v12.5.0 / 449d3236.
 
 The Rust engine and React client retain this fork's PKG output folder and installer.
 Convert Games now opens the Zstd NAS converter; Workshop remains alongside it.
-There are no LZ4 packing controls, and old ampr_lz4 build requests are rejected.
-Workshop defaults to Zstd packs; its tested runtime is ampr-emu-ng 0.3.5 (release
-SHA-256 verified). Existing LZ4 readers remain to support existing files and archives.
+There are no LZ4 packing controls: upstream 12.5.0's LZ4 options are hidden and inert (ZSTD_ONLY in
+FpkgConvert/ImageOptions.tsx), and fpkg_api refuses ampr_lz4 on /api/exfat/build and /api/folder/build.
+Workshop defaults to Zstd packs; the engine's tested runtime is upstream's ampr-emu-ng 0.4.1
+(zstd_packs.rs, release SHA-256 verified). Existing LZ4 readers remain to support existing files and archives.
 
 The current PS5-LZ4-NAS backend is vendored at vendor/ps5-lz4-nas from 6e580691 (full tracked source tree).
 Local patches restrict packing to Zstd, select level 5 by default and bind HTTP to loopback.

@@ -899,6 +899,10 @@ export async function browserInvoke<T>(
     case "fpkg_delete": {
       return postJson<T>("/api/fpkg/delete", { path: args["path"] });
     }
+    case "fpkg_zstd_runtime":
+      return postJson<T>("/api/fpkg/zstd-runtime", { source: args["source"] });
+    case "ps5_smp_emulator":
+      return getJson<T>(addrUrl("/api/ps5/smp-emulator", args["addr"]));
     case "fpkg_ampr_emu": {
       return postJson<T>("/api/fpkg/ampr-emu", { source: args["source"], build: args["build"] });
     }
@@ -941,6 +945,11 @@ export async function browserInvoke<T>(
         ampr_emu_build: args["amprEmuBuild"],
         destination: args["destination"],
         update: args["update"],
+        remove_backport: args["removeBackport"] ?? false,
+        delete_source: args["deleteSource"] ?? false,
+        unpack_packs: args["unpackPacks"] ?? false,
+        in_place: args["inPlace"] ?? false,
+        archive_password: args["archivePassword"],
       }, true);
     }
     case "folder_build": {
@@ -950,12 +959,24 @@ export async function browserInvoke<T>(
         name: args["name"],
         full_verify: args["fullVerify"] ?? false,
         entry: args["entry"],
-        ampr_lz4: args["amprLz4"],
         keep_both: args["keepBoth"] ?? false,
         ampr_zstd: args["amprZstd"],
+        ampr_lz4: args["amprLz4"],
         update: args["update"],
         destination: args["destination"],
+        remove_backport: args["removeBackport"] ?? false,
+        delete_source: args["deleteSource"] ?? false,
+        unpack_packs: args["unpackPacks"] ?? false,
+        add_ampr_emu: args["addAmprEmu"] ?? true,
+        ampr_emu_build: args["amprEmuBuild"],
+        archive_password: args["archivePassword"],
       }, true);
+    }
+    case "image_edit_check": {
+      return postJson<T>("/api/image/edit/check", {
+        path: args["path"],
+        edits: args["edits"] ?? [],
+      });
     }
     case "image_browse": {
       return postJson<T>("/api/image/browse", {
@@ -1191,6 +1212,35 @@ export async function browserInvoke<T>(
         addr: args["addr"],
         action: "tick",
       });
+
+    case "ps5_helper_uninstall": {
+      // Same answers as the stop, plus `paths` for an `in_use` refusal. The helper waits for the
+      // home-screen tile to go (Sony calls), so this one is given longer.
+      const r = await fetch(`${getEngineUrl()}/api/ps5/helper/uninstall`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          addr: args["addr"],
+          keep_backups: args["keepBackups"],
+          check: args["check"] ?? false,
+        }),
+        signal: AbortSignal.timeout(300_000),
+      });
+      const body = (await r.json().catch(() => ({}))) as {
+        error?: string;
+        reason?: string;
+        paths?: string[];
+      };
+      if (r.ok) return body as T;
+      if (body.reason)
+        return {
+          state: "refused",
+          reason: body.reason,
+          error: body.error ?? "",
+          paths: body.paths ?? [],
+        } as T;
+      throw new Error(body.error || `engine HTTP ${r.status}`);
+    }
 
     case "ps5_helper_stop": {
       // The engine's decided refusals (409 busy, 502 refused / still running) carry a
@@ -1814,6 +1864,30 @@ export async function browserInvoke<T>(
     case "payloads_remove_custom_repo": {
       const r = await fetch(
         `${getEngineUrl()}/api/payloads/repos/${uenc(args["id"] as string)}`,
+        { method: "DELETE", signal: AbortSignal.timeout(TIMEOUT_STANDARD) },
+      );
+      if (!r.ok) throw new Error(await extractEngineError(r));
+      return ((await r.json()) as { removed: T }).removed;
+    }
+
+    case "payloads_sources":
+      return (await getJson<{ sources: T }>("/api/payloads/sources")).sources;
+
+    case "payloads_add_source":
+      return postJson<T>("/api/payloads/sources", { url: args["url"] }, /*long=*/ true);
+
+    case "payloads_refresh_sources":
+      return (
+        await postJson<{ sources: T }>(
+          qs("/api/payloads/sources/refresh", { force: args["force"] ? 1 : undefined }),
+          {},
+          /*long=*/ true,
+        )
+      ).sources;
+
+    case "payloads_remove_source": {
+      const r = await fetch(
+        `${getEngineUrl()}/api/payloads/sources/${uenc(args["id"] as string)}`,
         { method: "DELETE", signal: AbortSignal.timeout(TIMEOUT_STANDARD) },
       );
       if (!r.ok) throw new Error(await extractEngineError(r));

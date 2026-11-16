@@ -21,6 +21,7 @@
 
 #include "archive_extract.h"
 #include "ava1_data.h"
+#include "console_convert.h"
 #include "ava1_app_gen.h"
 #include "ava1_glue.h"
 #include "ava1_op.h"
@@ -669,6 +670,7 @@ static const char *op_task_kind(int op) {
     case AVA1_JOB_OP_CRC32: return "verify";
     case AVA1_JOB_OP_FFPFSC_UNPACK: return "unpack";
     case AVA1_JOB_OP_ARCHIVE_EXTRACT: return "extract";
+    case AVA1_JOB_OP_CONSOLE_CONVERT: return "convert";
     case AVA1_JOB_OP_PKG_INSTALL: return "pkg_install";
     default: return "other";
     }
@@ -910,6 +912,68 @@ static void r_fs_extract_info(const char *b, size_t n, uint8_t *out, int fd) {
     else put_fmt(j, cap, &at, "\"free\":null,");
     put_fmt(j, cap, &at, "\"exists\":%s,\"kind\":\"%s\"}", pr.exists ? "true" : "false", pr.kind);
     send_json(fd, 200, j, at);
+}
+
+/* What a game folder or image on the console is (CONSOLE_CONVERT "inspect", run by the converter
+ * payload): {"path"}. A job, because the converter has to be started first; its result, read with
+ * /api/jobs/status: {"path","format","size","files","data_bytes","title_id","content_id","title",
+ * "content_version","master_version","packed","has_eboot","warnings","zstd_runtime"} (the newest
+ * zstd runtime on the console, or null: a zstd build is refused without one). */
+static void r_convert_inspect(const char *b, size_t n, uint8_t *out, int fd) {
+    run_path_job(b, n, out, fd, AVA1_JOB_OP_CONSOLE_CONVERT, ",\"action\":\"inspect\"");
+}
+
+/* Convert a game on the console (CONSOLE_CONVERT "build"): {"path","dest","format": "exfat"|"ffpkg"|
+ * "ffpfs"|"folder", optional "zstd": bool, "zstd_level": 1..22 (sent on only with zstd), "verify":
+ * "fast"|"full"}. The job's result: {"path"}. The
+ * helper's operation checks the paths again (console_convert.c); this route refuses what the page
+ * may never name and what is not well-formed. */
+static void r_convert_start(const char *b, size_t n, uint8_t *out, int fd) {
+    char path[API_PATH], dest[API_PATH], format[16], verify[16], *tail;
+    size_t at = 0, cap = 6 * API_PATH + 128;
+    uint64_t level = 0;
+    int zstd = 0, rc;
+    if (need_path(fd, b, n, "path", path, sizeof path) != 0) return;
+    if (need_path(fd, b, n, "dest", dest, sizeof dest) != 0) return;
+    if (webui_json_str(b, n, "format", format, sizeof format) != 1 || !cc_format_ok(format)) {
+        send_bad(fd, "bad_format");
+        return;
+    }
+    rc = webui_json_str(b, n, "verify", verify, sizeof verify);
+    if (rc == 0) snprintf(verify, sizeof verify, "fast");
+    if (rc < 0 || (strcmp(verify, "fast") != 0 && strcmp(verify, "full") != 0)) {
+        send_bad(fd, "bad_verify");
+        return;
+    }
+    if (webui_json_bool(b, n, "zstd", &zstd) < 0) {
+        send_bad(fd, "bad_zstd");
+        return;
+    }
+    rc = webui_json_u64(b, n, "zstd_level", &level);
+    if (rc < 0 || (rc == 1 && !cc_zstd_level_ok(level))) {
+        send_bad(fd, "bad_zstd");
+        return;
+    }
+    tail = malloc(cap);
+    if (!tail) {
+        send_error(fd, 500, "out_of_memory", 13);
+        return;
+    }
+    /* console_convert.c reads it back with fsj_json_str. format and verify are one of a few plain
+     * words by now, so only dest needs escaping. */
+    at = (size_t)snprintf(tail, cap, ",\"action\":\"build\",\"dest\":\"");
+    at += webui_json_escape(tail + at, cap - at, dest, strlen(dest));
+    if (at + 96 < cap) {
+        int w = snprintf(tail + at, cap - at, "\",\"format\":\"%s\",\"zstd\":%s,\"verify\":\"%s\"", format,
+                         zstd ? "true" : "false", verify);
+        /* The level goes with zstd only (at most ",\"zstd_level\":22": inside the 96 checked). */
+        if (zstd && level && w > 0)
+            snprintf(tail + at + (size_t)w, cap - at - (size_t)w, ",\"zstd_level\":%u", (unsigned)level);
+        start_path_job(fd, out, AVA1_JOB_OP_CONSOLE_CONVERT, path, NULL, tail);
+    } else {
+        send_bad(fd, "bad_path");
+    }
+    free(tail);
 }
 
 static int is_mine(const uint8_t id[16], void *ctx) {
@@ -2964,9 +3028,9 @@ static void serve_download(const webui_req_t *r, int fd) {
     }
     pthread_mutex_lock(&g_xfer_mu);
     if (g_dl.state != DL_READY || memcmp(id, g_dl.id, 16) != 0 || g_dl.expires <= now) {
+        int busy = g_dl.state == DL_SENDING && memcmp(id, g_dl.id, 16) == 0;
         pthread_mutex_unlock(&g_xfer_mu);
-        webui_send_json(fd, g_dl.state == DL_SENDING && memcmp(id, g_dl.id, 16) == 0 ? 409 : 404,
-                        "{\"error\":\"link_expired\"}");
+        webui_send_json(fd, busy ? 409 : 404, "{\"error\":\"link_expired\"}");
         return;
     }
     g_dl.state = DL_SENDING;
@@ -2977,16 +3041,21 @@ static void serve_download(const webui_req_t *r, int fd) {
     base = strrchr(path, '/');
     base = base && base[1] ? base + 1 : "ps5";
     snprintf(name, sizeof name, "%s%s", base, is_dir ? ".tar" : "");
-    buf = policy_read(path) ? malloc(WF_IO_BUF) : NULL;
-    if (!buf) {
+    int allowed = policy_read(path);
+    buf = allowed ? malloc(WF_IO_BUF) : NULL;
+    if (!allowed) {
         webui_send_json(fd, 403, "{\"error\":\"path_not_allowed\"}");
+    } else if (!buf) {
+        send_error(fd, 500, "out_of_memory", 13);
     } else if (is_dir) {
         uint64_t sent = 0;
         protected_forms_t *pf = malloc(sizeof *pf);
         char *canon = malloc(PATH_MAX);
         /* The walk starts from the canonical root (it follows no link below it), so the trust store's
          * forms are resolved once here instead of a realpath per entry. */
-        if (!pf || !canon || !realpath(path, canon) || stat(canon, &st) != 0 || !S_ISDIR(st.st_mode) ||
+        if (!pf || !canon) {
+            send_error(fd, 500, "out_of_memory", 13);
+        } else if (!realpath(path, canon) || stat(canon, &st) != 0 || !S_ISDIR(st.st_mode) ||
             path_tree_op_refused(canon)) {
             webui_send_json(fd, 404, "{\"error\":\"gone\"}");
         } else {
@@ -3116,6 +3185,8 @@ static const struct {
     { "/api/fs/unpack/info", r_fs_unpack_info },
     { "/api/fs/extract", r_fs_extract },
     { "/api/fs/extract/info", r_fs_extract_info },
+    { "/api/convert/inspect", r_convert_inspect },
+    { "/api/convert/start", r_convert_start },
     { "/api/upload/begin", r_upload_begin },
     { "/api/upload/cancel", r_upload_cancel },
     { "/api/download/begin", r_download_begin },

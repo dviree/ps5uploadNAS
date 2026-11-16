@@ -2037,6 +2037,9 @@ export interface PayloadInfo {
   /** The file name a download is cached and stored in Payload Manager under
    *  (`shadowmountplus.elf`); empty for a custom repo. Older engines omit it. */
   file_name?: string;
+  /** The payload source (#829) it came from. Absent otherwise. */
+  source_id?: string;
+  source_name?: string;
 }
 
 export interface PayloadReleaseInfo {
@@ -2132,6 +2135,38 @@ export async function payloadsAddCustomRepo(args: {
  *  Returns true if something was removed. */
 export async function payloadsRemoveCustomRepo(id: string): Promise<boolean> {
   return invoke<boolean>("payloads_remove_custom_repo", { id });
+}
+
+/** A payload list added by its address (#829), Payload Manager's "Payload Sources" format. */
+export interface PayloadSourceInfo {
+  id: string;
+  url: string;
+  name: string;
+  /** Payloads shown from it. */
+  payloads: number;
+  /** Left out: no SHA-256, a file off github.com and the list's site, or malformed. */
+  skipped: number;
+  /** Left out because the catalogue already has them. */
+  already_listed: number;
+  cached_age_secs?: number;
+  /** The last refresh failed: why. The previous copy is still used. */
+  error?: string;
+}
+
+export async function payloadsSources(): Promise<PayloadSourceInfo[]> {
+  return invoke<PayloadSourceInfo[]>("payloads_sources");
+}
+
+export async function payloadsAddSource(url: string): Promise<PayloadSourceInfo> {
+  return invoke<PayloadSourceInfo>("payloads_add_source", { url });
+}
+
+export async function payloadsRefreshSources(force = false): Promise<PayloadSourceInfo[]> {
+  return invoke<PayloadSourceInfo[]>("payloads_refresh_sources", { force });
+}
+
+export async function payloadsRemoveSource(id: string): Promise<boolean> {
+  return invoke<boolean>("payloads_remove_source", { id });
 }
 
 export async function payloadsLocalPath(id: string): Promise<string | null> {
@@ -2436,6 +2471,35 @@ export type HelperStopResult =
  *  a job on that console. Throws only when the engine could not be asked at all. */
 export async function helperStop(addr: string): Promise<HelperStopResult> {
   return invoke<HelperStopResult>("ps5_helper_stop", { addr });
+}
+
+export type HelperUninstallResult =
+  /** `check`: the helper would go ahead; nothing changed. */
+  | { state: "ready" }
+  | {
+      state: "removed";
+      /** What happened to Minion's home-screen tile ("removed", "hidden", "failed", ""). */
+      tile: string;
+      tile_failed: boolean;
+      /** Icons the helper had hidden, shown again. */
+      icons_shown: number;
+      keep_backups: boolean;
+      /** The helper stopped answering afterwards (it deletes its folders as it exits). */
+      exited: boolean;
+    }
+  | { state: "refused"; reason: string; error: string; paths: string[] };
+
+/** "Remove PS5Upload from this PS5" (`POST /api/ps5/helper/uninstall`): the helper turns Minion
+ *  off and removes its tile, shows the icons it hid, exits and deletes its own folders on the
+ *  console (save backups there stay when `keepBackups`). Stored copies of the helper in loaders
+ *  are not touched by this call. `check` only asks whether it would go ahead ("ready"). Throws
+ *  only when the engine could not be asked at all. */
+export async function helperUninstall(
+  addr: string,
+  keepBackups: boolean,
+  check = false,
+): Promise<HelperUninstallResult> {
+  return invoke<HelperUninstallResult>("ps5_helper_uninstall", { addr, keepBackups, check });
 }
 
 /** Wake a console in standby, over Sony's Device Discovery Protocol.
@@ -5736,6 +5800,8 @@ export interface ImageBrowseListing {
   compressed: boolean;
   /** An edited copy can be written (every kind but a package). */
   editable: boolean;
+  /** Changes can also be applied to the image itself (uncompressed exFAT, UFS2, PFS). */
+  in_place?: boolean;
   /** The folder listed, "" at the root. */
   dir: string;
   entries: ImageBrowseEntry[];

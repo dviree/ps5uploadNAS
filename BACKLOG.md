@@ -2,6 +2,28 @@
 
 ## >RESUME HERE
 
+- 2026-11-16: merged PS5Upload 12.5.0 (449d3236; 12.4.19-12.4.23 too: Convert gets PS5 Dump
+  Forge's features, Convert on the PS5 in Minion, in-place image editing, remove PS5Upload
+  from a PS5, zstd runtime 0.4.1 in the engine). Resolved 23 conflicts:
+  - Version files, CHANGELOG and lockfiles take upstream's.
+  - README stays the fork's.
+  - docker-engine.yml keeps the fork's LLVM fallback and adds upstream's converter build
+    (CONVERT_REQUIRED).
+  - folder_build.rs and fpkg_api.rs take upstream's, plus the fork's ampr_lz4 refusal
+    (ZSTD_ONLY) on /api/exfat/build and /api/folder/build. The fork's dead LZ4 folder path
+    (build_packed) is gone.
+  - Client: upstream's new LZ4 controls are hidden and inert (ZSTD_ONLY in ImageOptions:
+    Lz4Option renders nothing, lz4Offered/lz4Active are false for LZ4). Folder runs keep the
+    fork's thenSend and resume.
+  - Tests that expected LZ4 builds now check the refusal.
+  Checks: engine 2062, fpkg 371 and core 891 Rust tests (core's RAR tests need
+  `cargo build -p ps5upload-unrar` first; track_bench is timing-only), 6464 vitest tests,
+  tsc, eslint, i18n, and the NAS Python/Node checks pass.
+- Open: the NAS converter image still pins ampr-emu-ng 920e917 (0.4.0). quer3q released v0.4.1
+  (upstream ps5upload now uses it for Workshop). Move the pin only with the owner's OK.
+- Next: verify the Docker build (the converter's toolchain now builds in docker-engine, up to
+  45 min), then run the NAS updater.
+
 - 2026-11-14: updated to PS5Upload 12.4.18 (c037a6ee): router diagnostics, fixed
   Play Together UDP port and persistent offline Tailscale pause. Corrected the
   estimate fixture that broke verify-nas and added codec-independent rejection

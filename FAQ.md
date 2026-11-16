@@ -1936,8 +1936,18 @@ Yes: **Workshop → Look Inside** opens any image ps5upload reads (`.exfat`, `.f
 `.ffpfs`, `.ffpfsc` and debug `.pkg`) that is on the machine the engine runs on, without a
 mount, wherever the engine runs. Browse its folders with their sizes and save any file or
 folder to the computer (checked against the image). For images (not packages) you can also add,
-replace or delete files and write an edited copy next to the original; the copy is read back
-and checked, and the image you opened is never changed.
+replace, rename or delete files, make new folders, and write an edited copy next to the original;
+the copy is read back and checked, and the image you opened is not changed.
+
+**Apply in place** writes the changes into the image itself instead, with no copy, when they fit
+its free space (an image never grows): `.exfat` and `.ffpkg` take any change that fits, `.ffpfs`
+takes deletes, renames and replacements that fit its existing space, and `.ffpfsc`, packages and
+games in asset packs only get an edited copy. While the change goes in, an undo journal sits
+beside the image (`<image>.forge-undo`, the same format PS5 Dump Forge uses): if the app closes
+or the computer loses power, the image is put back as it was the next time anything opens it.
+Every changed file is read back afterwards, and the image is restored if anything doesn't match.
+The image can't be converted or edited by anything else while this runs. Keep a backup of an
+image you can't replace: this is new and has only been tried on test images.
 
 **Q: Can I queue more files or convert a folder of packages?**
 
@@ -2050,7 +2060,9 @@ refuses to start the title. Check these in order.
    launch fails. Use a PS4 package, or the folder-dump route below.
 2. **"View product" or "missing base entitlement".** Install the base game
    before its update or DLC. A package that needs an entitlement the console
-   does not have will always show "View product".
+   does not have will always show "View product". A PS5 game installed from a
+   fake package on firmware above 11.60 (item 1) ends here too: it installs,
+   then shows "View product". Use the game folder or an image instead.
 3. **kstuff or ShadowMount+ is not running.** Launching needs kernel access.
    **Games** says so above the grid when the helper has none; load kstuff and
    reconnect. Disc-image titles need ShadowMount+ running.
@@ -2061,6 +2073,18 @@ refuses to start the title. Check these in order.
 5. **A launch the app sent is not the same as a game that started.** The
    console accepts a launch and may take a while on the first start. If the
    game never appears, close it from the PS5 and start it from there.
+6. **A game in zstd packs hangs at startup or won't start (ASTRO BOT and
+   others).** A zstd-packed game is read through the ampr-emu-ng runtime in
+   its `fakelib`. Releases before 0.3.4 hang some games at startup, and
+   drakmor's ampr_emu (for LZ4 packs) can't read zstd packs at all. Open the
+   game in **Convert**: when its runtime is old or the wrong one, **Update the
+   zstd runtime** puts the newest ampr-emu-ng in (a folder in place, an image
+   on the PS5 through a ShadowMount+ backport). Also check ShadowMount+'s
+   emulator updates: when they are on, ShadowMount+ puts
+   `/data/shadowmount/emus/libSceAmpr.sprx` into every game in place of the
+   game's own, and if that file is ampr_emu, zstd games won't start. Convert
+   warns about this for a game on the PS5; turn emulator updates off in
+   ShadowMount+'s settings, or remove that file.
 
 ## Games and the Collection
 
@@ -2416,6 +2440,19 @@ Both (12.0.0).
   is stored on this computer. On SMB, NFS and SFTP a build that was cut off picks up where it
   stopped; FTP and WebDAV start the file over. Images work as plain `.exfat`, `.ffpkg` or `.ffpfs`,
   or `.exfat` with zstd packs.
+
+**Q: How do I convert a game to zstd packs (the smallest size)?**
+It's in **Convert**, in every desktop build (Windows, macOS, Linux) and the Docker image; no extra
+tool is needed, and Minion's **Convert** section does it on the PS5 itself. Pick the game under
+**① Game**: a dumped game folder, a package, an image, a `.zip`/`.7z`/`.rar` holding one game, or a
+game already on the PS5. Choose to make an **image** (`.exfat`, `.ffpkg` or `.ffpfs`) or a
+**folder**, then tick **zstd asset packs (smallest, for ShadowMount+)** and pick a level (1 is
+fastest, 19 is smallest). The game's files go into zstd packs and quer3q's ampr-emu-ng goes in as
+`fakelib/libSceAmpr.sprx`; every file is read back through the packs before the result is kept.
+zstd packs work for any PS5 game: one that doesn't read its files through AMPR gets the runtime
+too (new, so keep the original until the packed one has started). The result plays only when
+ShadowMount+ mounts it, and Convert can turn a packed game back into plain files. If a packed game hangs at startup, see "A game in
+zstd packs hangs at startup" under Troubleshooting.
 
 **Q: Can I add games to Workshop's queue while one is converting?**
 Yes. While a game is being made, pick or drop more under **① Game** (also **On the PS5…**, or
@@ -3315,6 +3352,23 @@ The SMB shares kept on the PS5: add them in Minion's **Files → Network shares*
 PC in **Shared Folders → Shares on the PS5**, which adds, edits and removes them and can copy a server
 you already saved (type the password again: the PS5 keeps its own encrypted copy). Minion
 browses them in Files, and **Games → On Drives & Shares** shows the games on them.
+
+**Q: Can I convert a game on the PS5 itself, without a computer?**
+Yes: Minion's **Convert** section makes an `.exfat`, `.ffpkg`, `.ffpfs` or a plain folder from a
+game folder or image already on the console's drives, optionally with zstd asset packs (level 1,
+5 or 19). Pick the game, check what it found, choose the format and where it goes (beside the
+source unless you change it), and start. Progress and **Stop** work as on the computer; the
+result gets its final name only after it has been read back, and a stopped conversion leaves
+nothing behind. It needs room on the destination drive for the whole result.
+
+zstd packs need the zstd runtime (ampr-emu-ng) on the console. PS5Upload on your computer puts
+it there when this PS5 connects, or press **Put the zstd runtime on this PS5** under Settings ›
+This PS5 › Minion; nothing is downloaded on the console itself. Until it's there, the zstd
+option is greyed out with that note.
+
+Converting on the console doesn't make packages (`.pkg`), read archives or write `.ffpfsc` yet:
+use Convert on the computer for those. A 30 GB game takes about 6½ minutes with every byte
+checked on a PS5 Pro.
 
 ---
 

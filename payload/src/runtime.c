@@ -43,6 +43,9 @@
 
 #include "content_db.h"
 #include "icon_keeper.h"
+#include "helper_uninstall.h"
+#include "webui_codec.h"
+#include "webui_tile.h"
 #include "register.h"
 #include "indicator.h"
 #include "hw_info.h"
@@ -371,11 +374,15 @@
 #define MGMT_FRAME_LOG_LEVEL_ACK 365u
 #define MGMT_FRAME_TAILNET 366u
 #define MGMT_FRAME_TAILNET_ACK 367u
-#define MGMT_FRAME_SAVE_OWNER 368u
-#define MGMT_FRAME_SAVE_OWNER_ACK 369u
+/* 372/373: 368/369 are HW_FPS below (a crash breadcrumb names the frame by this number) */
+#define MGMT_FRAME_SAVE_OWNER 372u
+#define MGMT_FRAME_SAVE_OWNER_ACK 373u
 /* the running game's frame count, for the sampled frame rate (game_fps.c, #774) */
 #define MGMT_FRAME_HW_FPS 368u
 #define MGMT_FRAME_HW_FPS_ACK 369u
+/* "Remove PS5Upload from this PS5" (helper_uninstall.c) */
+#define MGMT_FRAME_NODE_UNINSTALL 370u
+#define MGMT_FRAME_NODE_UNINSTALL_ACK 371u
 #define MGMT_FRAME_SDK_SCAN 214u
 #define MGMT_FRAME_SDK_SCAN_ACK 215u
 #define MGMT_FRAME_SDK_PATCH 216u
@@ -1549,6 +1556,10 @@ static void *runtime_shutdown_watchdog(void *arg) {
     /* A dump decrypting right now may have the kernel's vnode pager swapped: put it back, or every
      * file mmap on the console keeps going through the self pager after we are gone. */
     app_dump_pager_emergency_restore();
+    /* "Remove PS5Upload from this PS5": the PC was already told yes. Main removes the folders as
+     * its last step; if it is in the middle of that this waits for it, and if the stop never got
+     * that far the folders are removed here. */
+    if (hu_requested()) hu_wipe();
     _exit(g_watchdog_exit_code);
     return NULL;
 }
@@ -8792,16 +8803,19 @@ static int save_owner_info_json_raw(char *out, size_t cap, const char *what, con
     save_sfo_info_t in;
     if (n <= 0 || save_sfo_info(sfo, (size_t)n, &in) != 0)
         return snprintf(out, cap, ",\"%s\":%s", what, n == 0 ? "\"none\"" : "null");
-    char keys[1200], kesc[1300], tesc[300], desc[100];
+    char keys[1200], kesc[1300], tesc[300], desc[100], idesc[40], id[16];
     save_sfo_keys(sfo, (size_t)n, keys, sizeof keys);
-    json_escape_into(keys, kesc, sizeof kesc);
-    json_escape_into(in.main_title, tesc, sizeof tesc);
-    json_escape_into(in.dir_name, desc, sizeof desc);
+    /* Every field is the file's own bytes: none goes into the reply unescaped. */
+    snprintf(id, sizeof id, "%.15s", in.title_id);
+    json_escape_utf8_into(id, idesc, sizeof idesc);
+    json_escape_utf8_into(keys, kesc, sizeof kesc);
+    json_escape_utf8_into(in.main_title, tesc, sizeof tesc);
+    json_escape_utf8_into(in.dir_name, desc, sizeof desc);
     return snprintf(out, cap,
-                    ",\"%s\":{\"size\":%d,\"title_id\":\"%.15s\",\"dir_name\":\"%s\",\"main_title\":\"%s\","
+                    ",\"%s\":{\"size\":%d,\"title_id\":\"%s\",\"dir_name\":\"%s\",\"main_title\":\"%s\","
                     "\"account_id\":\"%016llx\",\"user_id\":%u,\"has_account\":%s,\"has_user\":%s,"
                     "\"blocks\":%llu,\"system_blocks\":%llu,\"list_param\":%u,\"fields\":\"%s\"}",
-                    what, n, in.title_id, desc, tesc, (unsigned long long)in.account_id, in.user_id,
+                    what, n, idesc, desc, tesc, (unsigned long long)in.account_id, in.user_id,
                     in.has_account ? "true" : "false", in.has_user ? "true" : "false",
                     (unsigned long long)in.blocks, (unsigned long long)in.system_blocks, in.list_param, kesc);
 }
@@ -10244,6 +10258,55 @@ static int handle_node_shutdown(runtime_state_t *state) {
     int rc = mgmt_reply(MGMT_FRAME_SHUTDOWN_ACK, "{}", 2);
     if (ava1_shutdown_defer(300, node_shutdown_fire, state) != 0) node_shutdown_fire(state);
     return rc;
+}
+
+/* node.uninstall (AVA1 method 200), "Remove PS5Upload from this PS5" (helper_uninstall.h):
+ * {keep_backups, check} -> {ok, tile, icons_shown, keep_backups}, then the helper exits and deletes its
+ * folders last thing (main.c). Refused, with nothing changed, while anything is mounted in those
+ * folders: {ok:false, err:"uninstall_in_use", paths:[...]}. check:true only answers {ok, check}
+ * (or that refusal) and changes nothing. */
+static int handle_node_uninstall(runtime_state_t *state, const char *body, uint64_t body_len) {
+    char reply[1024], mounts[768], minion[512];
+    int keep = 1, check = 0, in_use, shown, n, busy = 0, failed = 0;
+    webui_tile_result_t result = WEBUI_TILE_RESULT_NONE;
+    if (!state || body_len > 256) return -1;
+    if (webui_json_bool(body ? body : "", (size_t)body_len, "keep_backups", &keep) < 0 ||
+        webui_json_bool(body ? body : "", (size_t)body_len, "check", &check) < 0) {
+        n = snprintf(reply, sizeof reply, "{\"ok\":false,\"err\":\"bad_request\"}");
+        return mgmt_reply(MGMT_FRAME_NODE_UNINSTALL_ACK, reply, (uint64_t)n);
+    }
+    in_use = hu_mounts_in_use(mounts, sizeof mounts);
+    if (in_use != 0) {
+        n = in_use < 0 ? snprintf(reply, sizeof reply, "{\"ok\":false,\"err\":\"uninstall_mounts_unreadable\"}")
+                       : snprintf(reply, sizeof reply, "{\"ok\":false,\"err\":\"uninstall_in_use\",\"paths\":%s}", mounts);
+        fprintf(stderr, "[uninstall] refused: %s\n", reply);
+        return mgmt_reply(MGMT_FRAME_NODE_UNINSTALL_ACK, reply, (uint64_t)(n > 0 ? n : 0));
+    }
+    /* check: only whether it would go ahead (the PC asks before it deletes the stored copies of
+     * the helper, which it can only do while this helper runs). Nothing changes. */
+    if (check) {
+        n = snprintf(reply, sizeof reply, "{\"ok\":true,\"check\":true}");
+        return mgmt_reply(MGMT_FRAME_NODE_UNINSTALL_ACK, reply, (uint64_t)n);
+    }
+    fprintf(stderr, "[uninstall] removing PS5Upload from this PS5 (keep_backups=%d)\n", keep);
+    pop_notification("Removing PS5Upload from this PS5...");
+    /* Minion off and its own files gone, then the tile, waited for (Sony calls take seconds). */
+    if (webui_api_tile("{\"remove\":true}", 15, minion, sizeof minion) < 0 || strstr(minion, "\"ok\":false"))
+        fprintf(stderr, "[uninstall] Minion remove: %s\n", minion);
+    if (webui_tile_remove_wait(webui_tile_request(0, WEBUI_PORT)) != 0)
+        fprintf(stderr, "[uninstall] the tile removal did not finish\n");
+    webui_tile_state(&busy, &failed, &result);
+    shown = hu_show_hidden_icons();
+    n = snprintf(reply, sizeof reply, "{\"ok\":true,\"tile\":\"%s\",\"tile_failed\":%s,\"icons_shown\":%d,\"keep_backups\":%s}",
+                 failed ? "failed" : webui_tile_result_name(result), failed ? "true" : "false", shown,
+                 keep ? "true" : "false");
+    fprintf(stderr, "[uninstall] %s; exiting, then deleting %s and %s\n", reply, HU_ROOT, HU_USER_ROOT);
+    hu_request(keep);
+    {
+        int rc = mgmt_reply(MGMT_FRAME_NODE_UNINSTALL_ACK, reply, (uint64_t)n);
+        if (ava1_shutdown_defer(300, node_shutdown_fire, state) != 0) node_shutdown_fire(state);
+        return rc;
+    }
 }
 
 #include "mgmt_install.inc"
