@@ -21,8 +21,8 @@
   tsc, eslint, i18n, and the NAS Python/Node checks pass.
 - Open: the NAS converter image still pins ampr-emu-ng 920e917 (0.4.0). quer3q released v0.4.1
   (upstream ps5upload now uses it for Workshop). Move the pin only with the owner's OK.
-- Next: verify the Docker build (the converter's toolchain now builds in docker-engine, up to
-  45 min), then run the NAS updater.
+- The Docker build (run 54, converter included) is green. Next: the user runs the NAS
+  updater.
 
 - 2026-11-14: updated to PS5Upload 12.4.18 (c037a6ee): router diagnostics, fixed
   Play Together UDP port and persistent offline Tailscale pause. Corrected the
