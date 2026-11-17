@@ -6,6 +6,8 @@ import { Button, Spinner, WarningCard } from "../../components";
 import { hostOf, mgmtAddr } from "../../lib/addr";
 import { humanizePs5Error } from "../../lib/humanizeError";
 import { invoke } from "../../lib/invokeLogged";
+import { pickPath } from "../../lib/pickPath";
+import { krakenRuns, useMounterFor, useMounterStore } from "../../lib/mounter";
 import { useConnectionStore } from "../../state/connection";
 import { useTr } from "../../state/lang";
 
@@ -29,7 +31,10 @@ export function useSmpState(host: string): {
     setStatus("checking");
     smpStatus(mgmtAddr(host))
       .then((s) => {
-        if (!cancelled) setStatus(s);
+        if (!cancelled) {
+          setStatus(s);
+          useMounterStore.getState().put(host, s);
+        }
       })
       .catch(() => {
         if (!cancelled) setStatus(null);
@@ -57,22 +62,52 @@ export function SmpNeededWarning({
   count: number;
 }) {
   const tr = useTr();
+  const mounter = useMounterFor(host);
   const [sending, setSending] = useState(false);
   const [msg, setMsg] = useState<string | null>(null);
+  // Kraken Mount runs: it mounts no disk images, and ShadowMount+ must not be started beside it
+  // (the engine refuses that send too), so there is nothing to send here.
+  if (krakenRuns(mounter)) {
+    return (
+      <WarningCard
+        title={tr(
+          "installed_kraken_images_title",
+          { count },
+          `${count} disk image${count === 1 ? "" : "s"} can't be mounted while Kraken Mount runs`,
+        )}
+        detail={tr(
+          "installed_kraken_images_body",
+          undefined,
+          "Kraken Mount is running on this PS5. It mounts packages (.pkg) and game folders, not disk images, and ShadowMount+, which mounts images, must not run beside it. To play these, restart the PS5 with ShadowMount+ instead of Kraken Mount, or convert the games to packages or folders.",
+        )}
+      />
+    );
+  }
   const send = async () => {
     if (!host.trim()) return;
     setSending(true);
     setMsg(null);
     try {
-      const path = (await invoke("payloads_local_path", {
+      // The copy saved in the app, else a file the user picks: the app doesn't download payloads.
+      const saved = (await invoke("payloads_local_path", {
         id: "shadowmountplus",
       })) as string | null;
+      const path =
+        saved ??
+        (await pickPath({
+          mode: "file",
+          title: tr("installed_smp_pick_title", undefined, "Choose the ShadowMount+ file"),
+          filters: [
+            { name: "Payload", extensions: ["elf", "bin"] },
+            { name: "All files", extensions: ["*"] },
+          ],
+        }));
       if (!path) {
         setMsg(
           tr(
-            "installed_smp_not_downloaded",
+            "installed_smp_no_copy",
             undefined,
-            "ShadowMount+ isn't downloaded yet — grab it from the Payloads tab, then come back and send it.",
+            "ShadowMount+ isn't saved in ps5upload. Get it from its project page, then press Send and choose the file.",
           ),
         );
         return;

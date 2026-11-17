@@ -1357,19 +1357,25 @@ async fn an_image_and_a_folder_go_straight_to_a_server() {
         JobState::Failed { error, .. } => assert!(error.contains("already exists"), "{error}"),
         other => panic!("{}", json!(other)),
     }
-    // A .ffpfsc is refused before a job.
+    // A .ffpfsc goes there too, measured first.
     let r3 = post_json(
         &app,
         "/api/exfat/build",
         &json!({
             "source": game,
             "compress": true,
+            "name": "GameC",
             "destination": { "kind": "server", "source_id": id, "dir": dir },
         })
         .to_string(),
     )
     .await;
-    assert_eq!(r3.status(), StatusCode::BAD_REQUEST);
+    match finished(&st, r3).await {
+        JobState::Done { dest, .. } => {
+            assert_eq!(dest, format!("remote://{id}{dir}/GameC.ffpfsc"))
+        }
+        other => panic!("{}", json!(other)),
+    }
     // The image on the server unpacked to a folder on the server.
     let r4 = post_json(
         &app,

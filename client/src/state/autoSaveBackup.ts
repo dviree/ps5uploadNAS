@@ -25,6 +25,26 @@ export function clampKeep(n: unknown): number {
   return Math.max(1, Math.min(50, v));
 }
 
+/** How often the engine backs up when nothing else is chosen, in minutes. */
+export const DEFAULT_INTERVAL_MINUTES = 10;
+/** The intervals offered: 5 min, 10 min, 30 min, 1 hour, 6 hours, 1 day. */
+export const INTERVAL_CHOICES = [5, 10, 30, 60, 360, 1440] as const;
+
+/** The intervals to list: the offered ones, and `current` in its place if the engine has
+ *  another (set through the API). */
+export function intervalChoices(current: number | undefined): number[] {
+  const now = current ?? DEFAULT_INTERVAL_MINUTES;
+  const list: number[] = [...INTERVAL_CHOICES];
+  if (!list.includes(now)) list.push(now);
+  return list.sort((a, b) => a - b);
+}
+
+/** Whether the engine lets the interval be chosen: one before 12.5.1 leaves `interval_minutes`
+ *  out and ignores a new one, so a picker would only snap back. */
+export function intervalSupported(settings: Pick<SaveBackupSettings, "interval_minutes"> | null): boolean {
+  return typeof settings?.interval_minutes === "number";
+}
+
 /** The settings an older version kept here, if it had a folder set. */
 export function legacySettings(raw: string | null): Pick<SaveBackupSettings, "enabled" | "dir" | "keep"> | null {
   try {
@@ -47,7 +67,7 @@ interface AutoSaveBackupState {
   /** The last error talking to the engine (a refused folder, an engine that is down). */
   error: string | null;
   refresh: () => Promise<void>;
-  set: (patch: Partial<Pick<SaveBackupSettings, "enabled" | "dir" | "keep">>) => Promise<void>;
+  set: (patch: Partial<Pick<SaveBackupSettings, "enabled" | "dir" | "keep" | "interval_minutes">>) => Promise<void>;
   runNow: () => Promise<void>;
 }
 

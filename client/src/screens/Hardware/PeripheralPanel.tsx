@@ -234,10 +234,12 @@ export default function PeripheralPanel({
         ))}
       </div>
       <p className="mt-2 text-xs text-[var(--color-muted)]">
+        {/* #840: the calls return 0 everywhere, but the light did not change on a launch PS5 on
+            FW 13.60 while a FW 10.01 user saw it turn off. Offered to everyone, with this note. */}
         {tr(
-          "peripheral_indicator_note",
+          "peripheral_led_note",
           undefined,
-          "Brightness is kept by the console across restarts. The light's colour cannot be changed from here.",
+          "On some consoles the light doesn't change (seen on a PS5 on firmware 13.60); the console may also set it again by itself.",
         )}
       </p>
       {last && last.ok && !error && (

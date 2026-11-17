@@ -117,6 +117,7 @@ mod rp_stream_api;
 mod save_backup;
 mod save_backup_server;
 mod save_copy;
+mod save_sync;
 mod server_out;
 mod settings_api;
 mod settings_backup;
@@ -1755,11 +1756,93 @@ fn signal_transfer_cancel(job_id: Uuid) -> bool {
                 flag.store(true, Ordering::Relaxed);
                 // A paused Workshop job wakes to see it.
                 ps5upload_fpkg::workshop::wake(&flag);
+                stopped_jobs()
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .insert(job_id);
                 true
             }
             None => false,
         },
         None => false,
+    }
+}
+
+/// Jobs a Stop was sent to and that have not ended yet: their failure is a stop, said on the wire
+/// as `error_reason: "cancelled"` ([`stopped_reason`]).
+fn stopped_jobs() -> &'static Mutex<std::collections::HashSet<Uuid>> {
+    static SET: OnceLock<Mutex<std::collections::HashSet<Uuid>>> = OnceLock::new();
+    SET.get_or_init(Default::default)
+}
+
+/// A job that ends failed after the user stopped it ends with `error_reason: "cancelled"`, unless
+/// it already names a reason (a transfer's own `transfer_cancelled`): there is no "stopped" job
+/// state, and a builder's "cancelled; nothing was written" read as a failure in Tasks, the API
+/// and MCP. A terminal state takes the job off the stopped list.
+fn stopped_reason(job_id: Uuid, state: &mut JobState) {
+    if !matches!(state, JobState::Done { .. } | JobState::Failed { .. }) {
+        return;
+    }
+    let stopped = stopped_jobs()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&job_id);
+    if let JobState::Failed { error_reason, .. } = state {
+        if stopped && error_reason.is_none() {
+            *error_reason = Some("cancelled".into());
+        }
+    }
+}
+
+#[cfg(test)]
+mod stopped_tests {
+    use super::*;
+
+    fn failed(reason: Option<&str>) -> JobState {
+        JobState::Failed {
+            started_at_ms: 1,
+            completed_at_ms: 2,
+            elapsed_ms: 1,
+            error: "cancelled; nothing was written".into(),
+            error_reason: reason.map(str::to_string),
+            error_detail: None,
+            error_console: None,
+            error_space: None,
+        }
+    }
+
+    fn reason(s: &JobState) -> Option<String> {
+        match s {
+            JobState::Failed { error_reason, .. } => error_reason.clone(),
+            _ => None,
+        }
+    }
+
+    /// A job the user stopped ends with `error_reason: "cancelled"` (Tasks, the API and MCP say
+    /// Stopped); one nobody stopped, or one that names its own reason, keeps what it had.
+    #[test]
+    fn a_stopped_job_says_so_on_the_wire() {
+        let id = Uuid::new_v4();
+        let flag = register_workshop_job(id);
+        assert!(signal_transfer_cancel(id));
+        let mut s = failed(None);
+        stopped_reason(id, &mut s);
+        assert_eq!(reason(&s).as_deref(), Some("cancelled"));
+        // Once: the job is off the list after its end.
+        let mut again = failed(None);
+        stopped_reason(id, &mut again);
+        assert_eq!(reason(&again), None);
+        drop(flag);
+
+        let other = Uuid::new_v4();
+        let _flag = register_transfer_cancel(other);
+        let mut s = failed(None);
+        stopped_reason(other, &mut s);
+        assert_eq!(reason(&s), None, "nobody stopped it");
+        assert!(signal_transfer_cancel(other));
+        let mut s = failed(Some("transfer_cancelled"));
+        stopped_reason(other, &mut s);
+        assert_eq!(reason(&s).as_deref(), Some("transfer_cancelled"));
     }
 }
 
@@ -1806,8 +1889,9 @@ pub(crate) fn set_job(
     jobs: &Arc<Mutex<HashMap<Uuid, JobState>>>,
     events_tx: &broadcast::Sender<String>,
     job_id: Uuid,
-    state: JobState,
+    mut state: JobState,
 ) {
+    stopped_reason(job_id, &mut state);
     // Serialized before the move into the map, so the (possibly long) file
     // list is never cloned; it serializes as a count.
     let terminal = matches!(state, JobState::Done { .. } | JobState::Failed { .. });
@@ -4619,7 +4703,8 @@ struct HelperStopReq {
 ///
 /// 200 `{ "state": "stopped" }` once the helper's port went quiet, or `{ "state": "not_running" }`
 /// when nothing answered. 409 `{ "error", "reason": "busy" }` while a job runs; 502
-/// `{ "error", "reason": "refused" | "still_running" }` otherwise.
+/// `{ "error", "reason": "refused" (not paired) | "failed" (the real error) | "still_running" }`
+/// otherwise. Also 409 busy while another stop or removal of that console runs.
 async fn ps5_helper_stop(
     installs: pkg_install::PkgInstallStateHandle,
     req: HelperStopReq,
@@ -4628,8 +4713,16 @@ async fn ps5_helper_stop(
     let Some(addr) = required_console_addr(req.addr) else {
         return missing_console_addr();
     };
-    let busy = helper_stop::is_busy(&addr) || installs.jobs.active_for(&addr);
-    let r = tokio::task::spawn_blocking(move || helper_stop::stop(&addr, busy)).await;
+    // Marked first, then the jobs read: from here until the stop ends the queue starts nothing
+    // on this console (it can take seconds). A second stop or removal of it meanwhile is busy.
+    let stopping = helper_stop::begin_stopping(&addr);
+    let busy =
+        stopping.is_none() || helper_stop::jobs_running(&addr) || installs.jobs.active_for(&addr);
+    let r = tokio::task::spawn_blocking(move || {
+        let _stopping = stopping;
+        helper_stop::stop(&addr, busy)
+    })
+    .await;
     match r {
         Ok(Ok(helper_stop::Stopped::Stopped)) => {
             Json(serde_json::json!({ "state": "stopped" })).into_response()
@@ -4670,7 +4763,9 @@ struct HelperUninstallReq {
 /// PS5": the helper turns Minion off and removes its tile, shows the icons it hid, exits and
 /// deletes its own folders on the console (`node.uninstall`). Refused (409) while this engine
 /// has a job running against the console (`reason: busy`) or while something is mounted in
-/// those folders (`reason: in_use`, `paths`); an older helper answers `reason: old_helper` (501).
+/// those folders (`reason: in_use`, `paths`) or while the console itself installs a package,
+/// converts a game or extracts an archive (`reason: console_installing` | `console_converting` |
+/// `console_extracting`); an older helper answers `reason: old_helper` (501).
 /// Copies of the helper stored in loaders are not touched here: the app removes them first.
 /// After a removal the key pinned for the console is forgotten (`key_forgotten`): its identity
 /// went with the folders.
@@ -4681,11 +4776,17 @@ async fn ps5_helper_uninstall(
     let Some(addr) = required_console_addr(req.addr) else {
         return missing_console_addr();
     };
-    let busy = helper_stop::is_busy(&addr) || installs.jobs.active_for(&addr);
+    // As for a stop: marked before the jobs are read, held for the whole call (up to 240 s).
+    let stopping = helper_stop::begin_stopping(&addr);
+    let busy =
+        stopping.is_none() || helper_stop::jobs_running(&addr) || installs.jobs.active_for(&addr);
     let (keep, check) = (req.keep_backups, req.check);
     let console = addr.clone();
-    let r =
-        tokio::task::spawn_blocking(move || helper_stop::uninstall(&addr, busy, keep, check)).await;
+    let r = tokio::task::spawn_blocking(move || {
+        let _stopping = stopping;
+        helper_stop::uninstall(&addr, busy, keep, check)
+    })
+    .await;
     match r {
         Ok(Ok(mut v)) => {
             v["state"] = if check { "ready" } else { "removed" }.into();
@@ -4697,14 +4798,16 @@ async fn ps5_helper_uninstall(
                     .forget_console_key(&console)
                     .await
                     .into();
+                // The zstd runtime went with the folders: put it again with the next helper.
+                convert_runtime::forget(&console);
             }
             Json(v).into_response()
         }
         Ok(Err(e)) => {
             let code = match e {
-                helper_stop::UninstallError::Busy | helper_stop::UninstallError::InUse(_) => {
-                    StatusCode::CONFLICT
-                }
+                helper_stop::UninstallError::Busy
+                | helper_stop::UninstallError::InUse(_)
+                | helper_stop::UninstallError::ConsoleBusy(_) => StatusCode::CONFLICT,
                 helper_stop::UninstallError::OldHelper => StatusCode::NOT_IMPLEMENTED,
                 _ => StatusCode::BAD_GATEWAY,
             };
@@ -5149,30 +5252,87 @@ async fn ps5_smp_status(
     }
 }
 
-/// POST /api/ps5/smp/rescan?addr= — ask ShadowMount+ to scan again now, with its retry counters
-/// cleared, so a new image of a game is picked up without deleting the game from the home screen.
+/// POST /api/ps5/smp/rescan?addr= — ask the console's mounter to scan again now: ShadowMount+ with
+/// its retry counters cleared, so a new image of a game is picked up without deleting the game
+/// from the home screen, or Kraken Mount. Answers `{ok, mounter}` with the one asked
+/// (`shadowmount` or `kraken`).
 async fn ps5_smp_rescan(
     State(state): State<AppState>,
     Query(q): Query<AddrQuery>,
 ) -> impl IntoResponse {
     let addr = console_addr_or_default(q.addr, &state.default_ps5_addr);
+    let done = tokio::task::spawn_blocking(move || ps5upload_core::kraken::rescan(&addr))
+        .await
+        .map_err(anyhow::Error::from)
+        .and_then(|r| r);
+    match done {
+        Ok(m) => Json(serde_json::json!({ "ok": true, "mounter": m })).into_response(),
+        Err(e) => json_err(StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
+    }
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct KrakenRemoveReq {
+    #[serde(alias = "console", alias = "host")]
+    addr: Option<String>,
+    title_id: String,
+    /// The source Kraken Mount lists for the title (its `.pkg` or game folder), as shown to the
+    /// user when they confirmed: it refuses when its library has another source for it by now.
+    path: String,
+}
+
+/// POST /api/ps5/kraken/remove `{addr, title_id, path}` — remove a game Kraken Mount mounts, the
+/// way its own page does: off the home screen, and its SOURCE DELETED (the `.pkg` or the game
+/// folder at `path`), then its cache. Answers `{ok: true}`; 409 when Kraken Mount's library,
+/// read just before, no longer lists `title_id` at `path`. Kraken Mount answers once the source
+/// is deleted: the call waits up to 10 minutes, then judges by its library.
+async fn ps5_kraken_remove(
+    State(state): State<AppState>,
+    Json(req): Json<KrakenRemoveReq>,
+) -> impl IntoResponse {
+    let addr = console_addr_or_default(req.addr, &state.default_ps5_addr);
     let done = tokio::task::spawn_blocking(move || {
-        let (api, _) = ps5upload_core::smp_api::SmpApi::probe(&addr).ok_or_else(|| {
+        let (api, now) = ps5upload_core::kraken::KrakenApi::probe(&addr).ok_or_else(|| {
             anyhow::anyhow!(
-                "ShadowMount+'s API doesn't answer from this computer: it needs ShadowMount+ \
-                 1.7 or later running, with api_enabled on and api_bind_address open to the \
-                 network in /data/shadowmount/config.ini"
+                "Kraken Mount doesn't answer from this computer: it needs to be running on the \
+                 PS5 (its page is on port {})",
+                ps5upload_core::kraken::API_PORT
             )
         })?;
-        api.rescan()
+        // The delete takes the whole source: only the one the user confirmed, as listed now.
+        if let Some(why) = kraken_remove_refusal(&now, &req.title_id, &req.path) {
+            return Ok(Err(why));
+        }
+        api.remove(&req.title_id, &req.path).map(Ok)
     })
     .await
     .map_err(anyhow::Error::from)
     .and_then(|r| r);
     match done {
-        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Ok(Ok(())) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Ok(Err(why)) => json_err(StatusCode::CONFLICT, why).into_response(),
         Err(e) => json_err(StatusCode::BAD_GATEWAY, format!("{e:#}")).into_response(),
     }
+}
+
+/// Why a Kraken Mount remove of `title_id` at `path` is refused before it is sent: its library
+/// (`state`, just read) no longer lists that title at that source. `None` when it does.
+fn kraken_remove_refusal(
+    state: &ps5upload_core::kraken::KrakenState,
+    title_id: &str,
+    path: &str,
+) -> Option<String> {
+    if state
+        .games
+        .iter()
+        .any(|g| g.title_id == title_id && g.path == path)
+    {
+        return None;
+    }
+    Some(format!(
+        "Kraken Mount no longer lists {title_id} at {path}: its library changed. Refresh and \
+         check the game before removing it"
+    ))
 }
 
 /// GET /api/ps5/smp/checkout — what, if anything, is checked out for editing.
@@ -5362,22 +5522,36 @@ async fn ps5_fs_write_bytes(
 struct PeripheralReq {
     #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
-    action: ps5upload_core::diagnostics::PeripheralAction,
+    /// `bd_power_off`, `bd_power_on`, `eject_disc`, `usb_port_off`, `usb_port_on`, `beep`,
+    /// or the front light's `led_off`, `led_on` and `led_dim`.
+    action: String,
     /// The USB port, beep pattern or brightness level the action takes; 0 otherwise.
     #[serde(default)]
     port: i32,
 }
 
+/// The action a peripheral request names, or why it is refused.
+fn peripheral_action(name: &str) -> Result<ps5upload_core::diagnostics::PeripheralAction, String> {
+    serde_json::from_value(serde_json::Value::String(name.to_string()))
+        .map_err(|_| format!("unknown peripheral action: {name}"))
+}
+
 /// POST /api/ps5/peripheral
 /// Body: `{ "addr": "IP", "action": "beep", "port": 1 }`
 ///
-/// The disc drive, the USB ports, the beeper and the front light. Replies with the
-/// helper's own ack (`ok`, `action`, `code`); a transport failure is a 502.
+/// The disc drive, the USB ports, the beeper and the front light. Replies with the helper's own
+/// ack (`ok`, `action`, `code`); a transport failure is a 502, an unknown action a 400. The
+/// front light's calls are accepted on every firmware tried, but did not change the light on
+/// a launch PS5 on FW 13.60 (#840).
 async fn ps5_peripheral(Json(q): Json<PeripheralReq>) -> impl IntoResponse {
+    let action = match peripheral_action(q.action.trim()) {
+        Ok(a) => a,
+        Err(e) => return json_err(StatusCode::BAD_REQUEST, e).into_response(),
+    };
     let Some(addr) = required_console_addr(q.addr) else {
         return missing_console_addr();
     };
-    let (action, port) = (q.action, q.port);
+    let port = q.port;
     match tokio::task::spawn_blocking(move || {
         ps5upload_core::diagnostics::peripheral_control(&addr, action, port)
     })
@@ -6780,6 +6954,82 @@ fn status_failure_body(
 }
 
 #[cfg(test)]
+mod kraken_remove_tests {
+    use super::*;
+
+    /// A remove goes out only for the title at the source the user confirmed, as Kraken Mount
+    /// lists it now: another source for the title (a duplicate on another drive), another title
+    /// at the source, or a library without it is refused.
+    #[test]
+    fn a_remove_needs_the_title_at_that_source_listed_now() {
+        let state: ps5upload_core::kraken::KrakenState = serde_json::from_str(
+            r#"{"cache":{"path":"/data/krakenmount/caches"},"games":[
+                {"title_id":"PPSA01234","path":"/data/homebrew/Game.pkg"},
+                {"title_id":"PPSA05678","path":"/mnt/usb0/Other"}]}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            kraken_remove_refusal(&state, "PPSA01234", "/data/homebrew/Game.pkg"),
+            None
+        );
+        for (title, path) in [
+            ("PPSA01234", "/mnt/usb0/Game.pkg"),
+            ("PPSA05678", "/data/homebrew/Game.pkg"),
+            ("PPSA09999", "/data/homebrew/Game.pkg"),
+        ] {
+            let why = kraken_remove_refusal(&state, title, path).unwrap();
+            assert!(why.contains("no longer lists"), "{why}");
+        }
+        let empty: ps5upload_core::kraken::KrakenState =
+            serde_json::from_str(r#"{"games":[]}"#).unwrap();
+        assert!(kraken_remove_refusal(&empty, "PPSA01234", "/data/homebrew/Game.pkg").is_some());
+    }
+}
+
+#[cfg(test)]
+mod peripheral_tests {
+    use super::*;
+    use ps5upload_core::diagnostics::PeripheralAction;
+
+    #[test]
+    fn actions_are_parsed_by_name() {
+        assert!(matches!(
+            peripheral_action("beep"),
+            Ok(PeripheralAction::Beep)
+        ));
+        assert!(matches!(
+            peripheral_action("eject_disc"),
+            Ok(PeripheralAction::EjectDisc)
+        ));
+        // The front light is offered again (#840): accepted everywhere, works on some consoles.
+        assert!(matches!(
+            peripheral_action("led_off"),
+            Ok(PeripheralAction::LedOff)
+        ));
+        assert!(matches!(
+            peripheral_action("led_on"),
+            Ok(PeripheralAction::LedOn)
+        ));
+        assert!(matches!(
+            peripheral_action("led_dim"),
+            Ok(PeripheralAction::LedDim)
+        ));
+        assert!(peripheral_action("disco")
+            .unwrap_err()
+            .contains("unknown peripheral action"));
+    }
+
+    #[tokio::test]
+    async fn an_unknown_action_gets_a_400() {
+        let req: PeripheralReq =
+            serde_json::from_value(serde_json::json!({ "addr": "192.0.2.7", "action": "disco" }))
+                .unwrap();
+        let r = ps5_peripheral(Json(req)).await.into_response();
+        assert_eq!(r.status(), StatusCode::BAD_REQUEST);
+    }
+}
+
+#[cfg(test)]
 mod connect_timings_tests {
     use super::*;
     use ps5upload_core::route::Via;
@@ -7326,6 +7576,26 @@ async fn transfer_file_handler(
             return json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}")).into_response()
         }
     };
+    // A file on this computer is read until the upload ends: an in-place edit of it is refused
+    // meanwhile (and this upload while one runs), and an undo journal an interrupted edit left
+    // beside it is settled first, so the console gets the image as it is, not half-edited.
+    let reading = if source_fs.is_none() {
+        let src = src_path.clone();
+        match tokio::task::spawn_blocking(move || {
+            crate::image_edit_in_place::open_for_reading(&src)
+        })
+        .await
+        {
+            Ok(Ok((_, reading))) => Some(reading),
+            Ok(Err(why)) => return json_err(StatusCode::CONFLICT, why).into_response(),
+            Err(e) => {
+                return json_err(StatusCode::INTERNAL_SERVER_ERROR, format!("{e:#}"))
+                    .into_response()
+            }
+        }
+    } else {
+        None
+    };
     let src_basename = src_path
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
@@ -7389,6 +7659,8 @@ async fn transfer_file_handler(
     // Registered before the task so a cancel that arrives before the transfer starts is kept.
     let cancel = register_transfer_cancel(job_id);
     tokio::task::spawn_blocking(move || {
+        // Held for the whole upload (see above).
+        let _reading = reading;
         // Marks the console busy for the job: a helper stop is refused meanwhile.
         let _busy = helper_stop::enter(&addr);
         // Drops at closure end (success OR panic), stopping the
@@ -12459,8 +12731,6 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
 
     // The Collection's automatic refresh (a no-op until a folder is added).
     collection_api::spawn_auto_refresh();
-    // "Keep payloads up to date" (a no-op until the user turns it on).
-    payload_updates_api::spawn_scheduler();
     // Install sessions live in their own state (served by pkg_install::api_router below); the helper
     // log mirror also reads it, to stay off a console while an install runs.
     let pkg_state = std::sync::Arc::new(pkg_install::PkgInstallState::restored());
@@ -12504,6 +12774,8 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
     );
     // Save backups to a network share: on an interval, or when a game is closed (#592).
     save_backup_server::spawn();
+    // Save sync between two consoles: suggests a copy after a game closes, never copies itself.
+    save_sync::spawn();
     // Mesh Drive folders are kept in sync here too, app open or not.
     mesh_drive::spawn();
     pkg_install::spawn_stale_upload_sweep();
@@ -12876,6 +13148,19 @@ fn build_app_and_mcp(
             "/api/save-backup/copy-console/targets",
             get(save_copy::get_copy_targets),
         )
+        // One user's saves kept in step across two consoles, on the user's say-so.
+        .route("/api/save-sync", get(save_sync::get_view))
+        .route(
+            "/api/save-sync/pair",
+            axum::routing::put(save_sync::put_pair),
+        )
+        .route(
+            "/api/save-sync/pair/remove",
+            post(save_sync::post_remove_pair),
+        )
+        .route("/api/save-sync/status", get(save_sync::get_status))
+        .route("/api/save-sync/apply", post(save_sync::post_apply))
+        .route("/api/save-sync/dismiss", post(save_sync::post_dismiss))
         .route(
             "/api/shared/{name}",
             get(shared_state::get_doc).put(shared_state::put_doc),
@@ -13367,6 +13652,10 @@ fn build_app_and_mcp(
         .route("/api/ps5/screenshots/list", get(ps5_screenshots_list))
         .route("/api/ps5/videos/list", get(ps5_videos_list))
         .route("/api/ps5/smp/status", get(ps5_smp_status))
+        // The same snapshot by a name that says what it is now: which mounter runs (`mounter`),
+        // ShadowMount+'s state and Kraken Mount's (`kraken`).
+        .route("/api/ps5/mounter/status", get(ps5_smp_status))
+        .route("/api/ps5/kraken/remove", post(ps5_kraken_remove))
         .route(
             "/api/ps5/smp-emulator",
             get(ampr_emu_api::smp_emulator_handler),

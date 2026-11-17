@@ -11,6 +11,9 @@
  * animation program (ioctl 0x40829505) whose layout on FW 13.60 is not understood, and
  * nothing here writes a structure it cannot read back and explain.
  *
+ * The LED calls return 0 on every firmware tried but do not change the light on every
+ * console (#840: no change on a launch PS5 on FW 13.60; worked for a user on FW 10.01).
+ *
  * Returns 1 when `argv[0]` was one of ours (with *out_text malloc'd and *out_exit set),
  * 0 when it was not. */
 int indicator_shell(int argc, char *argv[], char **out_text, int *out_exit);

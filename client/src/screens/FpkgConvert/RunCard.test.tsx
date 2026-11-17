@@ -264,6 +264,21 @@ describe("RunCard", () => {
       );
     });
 
+    it("sends a .ffpfsc straight to the PS5 or a server, saying it is compressed twice", () => {
+      const img = { make: "image" as const, onSaveTo: noop, onServerFolder: noop, imageCompress: true };
+      const note = 'data-testid="convert-save-to-ffpfsc-note"';
+      const toPs5 = idle({ ...img, saveTo: "ps5" }, { canImage: true });
+      expect(toPs5).toContain(note);
+      expect(toPs5).toContain("compressed twice");
+      expect(button(toPs5, "Make compressed image")?.disabled).toBe(false);
+      const toServer = idle({ ...img, saveTo: "server", serverFolder: "remote://nas1/games" }, { canImage: true });
+      expect(toServer).toContain(note);
+      expect(button(toServer, "Make compressed image")?.disabled).toBe(false);
+      // Not for a plain image, nor for one saved here.
+      expect(idle({ ...img, imageCompress: false, saveTo: "ps5" }, { canImage: true })).not.toContain(note);
+      expect(idle({ ...img, saveTo: "computer" }, { canImage: true })).not.toContain(note);
+    });
+
     it("says a finished image is on a server, with nothing to upload, show or delete", () => {
       const out = html(
         {
@@ -532,6 +547,29 @@ describe("RunCard", () => {
     expect(button(out, "Upload & install")).not.toBeNull();
   });
 
+  it("offers mount and install after a failed run only for a kept .pkg, never an image", () => {
+    const failed = (packagePath: string, mode: "convert-install" | "image") =>
+      html(
+        {
+          phase: "failed",
+          mode,
+          source: "/g",
+          host: "10.0.0.2",
+          stage: "install",
+          message: "unreachable",
+          packagePath,
+          stageMs: {},
+          titleId: null,
+        },
+        {},
+        { kraken: true, onMount: noop },
+      );
+    expect(button(failed("/out/a.pkg", "convert-install"), "Put on the PS5 to mount")).not.toBeNull();
+    const image = failed("/out/a.ffpfsc", "image");
+    expect(button(image, "Put on the PS5 to mount")).toBeNull();
+    expect(button(image, "Stream & install")).toBeNull();
+  });
+
   it("offers no retry when the build itself failed", () => {
     const out = html({
       phase: "failed",
@@ -714,6 +752,30 @@ describe("RunCard", () => {
       expect(folderPackOptions(zstd, "t")).toEqual({ level: 5, runtime: "latest", profileToml: "t" });
       const html = renderToStaticMarkup(<ZstdOption lz4={zstd} folder />);
       expect(html).toContain('data-testid="zstd-runtime"');
+    });
+
+    it("shows only the emulator choice that applies (#828)", () => {
+      // A game that reads through AMPR and ships no emulator: its own can't read LZ4 packs.
+      const readiness = { runtime_version: null, refusal: "no emulator", kind: "runtime" as const, emulator_missing: true };
+      const toggle = 'data-testid="ampr-emu-option"';
+      const putRow = "Put ampr_emu 0.4.2.1 into the image";
+      const ngLine = "The zstd runtime (ampr-emu-ng) goes in with the packs, so no other emulator is needed.";
+      // No packs: the plain-image emulator toggle, said to be for an image without packs.
+      const plain = idle("ffpkg", lz4({ readiness }));
+      expect(plain).toContain(toggle);
+      expect(plain).toContain("For an image without asset packs");
+      expect(plain).not.toContain(putRow);
+      expect(plain).not.toContain(ngLine);
+      // This fork: LZ4 can't be picked, and an old LZ4 choice shows no LZ4 row.
+      expect(checkbox(plain, "AMPR LZ4 asset packs")).toBeNull();
+      expect(idle("ffpkg", lz4({ on: true, readiness, installRuntime: true }))).not.toContain(putRow);
+      // zstd packs: neither drakmor's toggle nor the LZ4 row, one line on ampr-emu-ng instead.
+      const zstd = idle("ffpkg", lz4({ on: true, kind: "zstd", readiness }));
+      expect(zstd).not.toContain(toggle);
+      expect(zstd).not.toContain(putRow);
+      expect(zstd).toContain(ngLine);
+      expect(renderToStaticMarkup(<ZstdOption lz4={lz4({ on: true, kind: "zstd" })} folder />)).toContain(ngLine);
+      expect(renderToStaticMarkup(<ZstdOption lz4={lz4({ kind: "zstd" })} />)).not.toContain(ngLine);
     });
 
     it("offers to write a packed game as plain files again", () => {

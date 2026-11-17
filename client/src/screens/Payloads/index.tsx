@@ -23,7 +23,8 @@ import {
 /**
  * Payloads — URL-routed tabs:
  *
- *   - **catalog**: curated GitHub-released third-party homebrew.
+ *   - **catalog**: a guide to third-party homebrew: what each does and its project page
+ *     (the app doesn't download payloads; the user sends the file they got).
  *   - **send**: arbitrary ELF/BIN/JS/LUA/JAR picker. Includes
  *     playlists and recent-sends history.
  *   - **ps5** ("On your PS5"): a card per payload running or installed on the
@@ -61,9 +62,9 @@ export default function PayloadsScreen() {
       key: "payloads_tab_catalog",
       fallback: "Catalog",
       description: tr(
-        "payloads_description_catalog_v2",
+        "payloads_description_catalog_guide",
         undefined,
-        "Curated third-party PS5 homebrew payloads. Check for the latest release, download once, then send to your PS5 with one click. Versions cache locally so you can also put them on a USB payload stick.",
+        "Third-party PS5 homebrew payloads that work with ps5upload: what each one does and where its project page is. ps5upload doesn't download them: get a payload from its project page, then send the file with Send a file….",
       ),
     },
     {
@@ -83,9 +84,9 @@ export default function PayloadsScreen() {
       key: "payloads_tab_ps5",
       fallback: "On your PS5",
       description: tr(
-        "payloads_description_ps5",
+        "payloads_description_ps5_v2",
         undefined,
-        "The payloads running or installed on the selected PS5. Open a payload's web page, update it, stop it, or manage it.",
+        "Your payloads: what's saved in Payload Manager and what's running, with their pages and settings.",
       ),
     },
     {
@@ -94,9 +95,9 @@ export default function PayloadsScreen() {
       key: "payloads_tab_running",
       fallback: "Running",
       description: tr(
-        "payloads_description_running",
+        "payloads_description_running_v2",
         undefined,
-        "The programs running on the PS5 right now, and the ports in use with what usually listens on each. You can stop or restart a program; take care with system processes, since stopping the wrong one can freeze the console.",
+        "Every process on the PS5, for stopping one by hand, and the ports in use. Take care with system processes: stopping the wrong one can freeze the console.",
       ),
     },
   ];

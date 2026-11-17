@@ -48,12 +48,80 @@ int cc_request_json(char *out, size_t cap, const char *id, const char *op, const
         if (b->zstd && b->zstd_runtime && b->zstd_runtime[0] &&
             put_member(out, cap, &at, 1, "zstd_runtime", b->zstd_runtime) != 0)
             return -1;
+        if (strcmp(b->format, "pkg") == 0 && b->pkg_level[0] &&
+            put_member(out, cap, &at, 1, "pkg_level", b->pkg_level) != 0)
+            return -1;
+        if (strcmp(b->format, "ffpfsc") == 0) {
+            if (b->inner[0] && put_member(out, cap, &at, 1, "inner", b->inner) != 0) return -1;
+            if (b->ffpfsc_level[0] && put_member(out, cap, &at, 1, "ffpfsc_level", b->ffpfsc_level) != 0) return -1;
+        }
     }
     if (at + 3 > cap) return -1;
     out[at++] = '}';
     out[at++] = '\n';
     out[at] = 0;
     return (int)at;
+}
+
+/* One optional word of the page's JSON: absent or "" leaves `out` empty (the converter's default),
+ * else it must be one `ok` accepts. 0, or -1 refused. */
+static int start_word(const char *json, size_t n, const char *key, char *out, size_t cap, int (*ok)(const char *)) {
+    int rc = webui_json_str(json, n, key, out, cap);
+    if (rc == 0) out[0] = 0;
+    if (rc < 0 || (rc == 1 && out[0] && !ok(out))) {
+        out[0] = 0;
+        return -1;
+    }
+    return 0;
+}
+
+const char *cc_start_tail(const char *json, size_t n, const char *dest, char *out, size_t cap) {
+    cc_build_t words; /* only its three words' room */
+    char format[16], verify[16];
+    uint64_t level = 0;
+    size_t at = 0;
+    int zstd = 0, rc, w;
+    if (cap) out[0] = 0;
+    if (webui_json_str(json, n, "format", format, sizeof format) != 1 || !cc_format_ok(format)) return "bad_format";
+    rc = webui_json_str(json, n, "verify", verify, sizeof verify);
+    if (rc == 0) snprintf(verify, sizeof verify, "fast");
+    if (rc < 0 || (strcmp(verify, "fast") != 0 && strcmp(verify, "full") != 0)) return "bad_verify";
+    if (webui_json_bool(json, n, "zstd", &zstd) < 0) return "bad_zstd";
+    rc = webui_json_u64(json, n, "zstd_level", &level);
+    if (rc < 0 || (rc == 1 && !cc_zstd_level_ok(level))) return "bad_zstd";
+    words.inner[0] = words.ffpfsc_level[0] = words.pkg_level[0] = 0;
+    /* Read only for the format they belong to (the op ignores them otherwise), with the op's own
+     * whitelists and tokens. */
+    if (strcmp(format, "ffpfsc") == 0) {
+        if (start_word(json, n, "inner", words.inner, sizeof words.inner, cc_inner_ok) != 0) return "convert_bad_inner";
+        if (start_word(json, n, "ffpfsc_level", words.ffpfsc_level, sizeof words.ffpfsc_level, cc_ffpfsc_level_ok) !=
+            0)
+            return "convert_bad_ffpfsc_level";
+    }
+    if (strcmp(format, "pkg") == 0 &&
+        start_word(json, n, "pkg_level", words.pkg_level, sizeof words.pkg_level, cc_pkg_level_ok) != 0)
+        return "convert_bad_pkg_level";
+    /* console_convert.c reads it back with fsj_json_str: every word is a plain one by now, and
+     * dest is escaped. */
+    w = snprintf(out, cap, ",\"action\":\"build\"");
+    if (w < 0 || (size_t)w >= cap) return "bad_path";
+    at = (size_t)w;
+    if (put_member(out, cap, &at, 1, "dest", dest) != 0 || put_member(out, cap, &at, 1, "format", format) != 0)
+        return "bad_path";
+    w = snprintf(out + at, cap - at, ",\"zstd\":%s,\"verify\":\"%s\"", zstd ? "true" : "false", verify);
+    if (w < 0 || (size_t)w >= cap - at) return "bad_path";
+    at += (size_t)w;
+    /* The level goes with zstd only. */
+    if (zstd && level) {
+        w = snprintf(out + at, cap - at, ",\"zstd_level\":%u", (unsigned)level);
+        if (w < 0 || (size_t)w >= cap - at) return "bad_path";
+        at += (size_t)w;
+    }
+    if ((words.inner[0] && put_member(out, cap, &at, 1, "inner", words.inner) != 0) ||
+        (words.ffpfsc_level[0] && put_member(out, cap, &at, 1, "ffpfsc_level", words.ffpfsc_level) != 0) ||
+        (words.pkg_level[0] && put_member(out, cap, &at, 1, "pkg_level", words.pkg_level) != 0))
+        return "bad_path";
+    return NULL;
 }
 
 static int is_space(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
@@ -164,32 +232,46 @@ static int id_ok(const char *id) {
 }
 
 int cc_record_format(char *out, size_t cap, unsigned long long xpid, long hpid, const char *id, const char *dest) {
+    return cc_record_format_boot(out, cap, xpid, hpid, id, dest, 0);
+}
+
+int cc_record_format_boot(char *out, size_t cap, unsigned long long xpid, long hpid, const char *id, const char *dest,
+                          unsigned long long boot) {
     int w;
     if (strchr(dest, '\n') || !id_ok(id)) return -1; /* the record is line-based */
-    w = snprintf(out, cap, "%llu %ld %s\n%s\n", xpid, hpid, id, dest);
+    w = boot ? snprintf(out, cap, "%llu %ld %s %llu\n%s\n", xpid, hpid, id, boot, dest)
+             : snprintf(out, cap, "%llu %ld %s\n%s\n", xpid, hpid, id, dest);
     return w < 0 || (size_t)w >= cap ? -1 : w;
 }
 
 int cc_record_parse(const char *buf, unsigned long long *xpid, long *hpid, char *id, size_t id_cap, char *dest,
                     size_t cap) {
+    return cc_record_parse_boot(buf, xpid, hpid, id, id_cap, dest, cap, NULL);
+}
+
+int cc_record_parse_boot(const char *buf, unsigned long long *xpid, long *hpid, char *id, size_t id_cap, char *dest,
+                         size_t cap, unsigned long long *boot) {
     const char *nl = strchr(buf, '\n'), *end;
-    char line[32 + CC_JOB_ID_MAX + 8], got[CC_JOB_ID_MAX + 8];
+    char line[32 + CC_JOB_ID_MAX + 32], got[CC_JOB_ID_MAX + 8];
+    unsigned long long at_boot = 0;
     size_t len;
     int n;
     if (cap) dest[0] = 0;
     if (id_cap) id[0] = 0;
+    if (boot) *boot = 0;
     if (!nl || (size_t)(nl - buf) >= sizeof line) return 0;
     /* The first line alone: a record from before job ids has none, and the id is never read
-     * from the line below it. */
+     * from the line below it. One from before boot times has no boot time (0: unknown). */
     memcpy(line, buf, (size_t)(nl - buf));
     line[nl - buf] = 0;
     got[0] = 0;
-    n = sscanf(line, "%llu %ld %47s", xpid, hpid, got);
+    n = sscanf(line, "%llu %ld %47s %llu", xpid, hpid, got, &at_boot);
     if (n < 2) return 0;
-    if (n == 3) {
+    if (n >= 3) {
         if (!id_ok(got) || strlen(got) >= id_cap) return 0;
         memcpy(id, got, strlen(got) + 1);
     }
+    if (n == 4 && boot) *boot = at_boot;
     nl++;
     end = strchr(nl, '\n');
     len = end ? (size_t)(end - nl) : strlen(nl);
@@ -199,13 +281,65 @@ int cc_record_parse(const char *buf, unsigned long long *xpid, long *hpid, char 
     return 1;
 }
 
-const char *cc_image_format(const char *path) {
-    static const char *const formats[] = {"exfat", "ffpkg", "ffpfs"};
+/* A stage's share of a build's bar: the planning is quick, the passes over the data are what
+ * take the time, and the read-back is about half a pass. */
+static unsigned stage_weight(const char *stage) {
+    if (strcmp(stage, "plan") == 0) return 0;
+    if (strcmp(stage, "check") == 0) return 1;
+    if (strcmp(stage, "verify") == 0) return 2;
+    return 4; /* pack, compress, write */
+}
+
+uint64_t cc_job_progress(const char *format, int zstd, const char *stage, uint64_t done, uint64_t total,
+                         uint64_t job_total) {
+    static const char *const pkg[] = {"check", "plan", "compress", "write", "verify"};
+    static const char *const image[] = {"plan", "write", "verify"};
+    static const char *const image_packed[] = {"pack", "plan", "write", "verify"};
+    static const char *const folder[] = {"write", "verify"};
+    static const char *const folder_packed[] = {"pack", "write", "verify"};
+    const char *const *list;
+    size_t n, i, at;
+    unsigned before = 0, all = 0;
+    double within, share;
+    if (!format || !stage || !stage[0]) {
+        /* No stages (an inspection): its own count. */
+        if (!total) return 0;
+        return (uint64_t)((double)(done < total ? done : total) * ((double)job_total / (double)total));
+    }
+    if (strcmp(format, "pkg") == 0) {
+        list = pkg;
+        n = sizeof pkg / sizeof *pkg;
+    } else if (strcmp(format, "folder") == 0) {
+        list = zstd ? folder_packed : folder;
+        n = zstd ? 3 : 2;
+    } else {
+        list = zstd ? image_packed : image;
+        n = zstd ? 4 : 3;
+        /* A .ffpfsc compresses as it writes: one stage under that name. */
+        if (strcmp(stage, "compress") == 0) stage = "write";
+    }
+    for (at = 0; at < n && strcmp(list[at], stage) != 0; at++) {
+    }
+    if (at == n) return UINT64_MAX;
+    for (i = 0; i < n; i++) {
+        all += stage_weight(list[i]);
+        if (i < at) before += stage_weight(list[i]);
+    }
+    if (!all) return 0;
+    within = total ? (double)(done < total ? done : total) / (double)total : 0.0;
+    share = ((double)before + (double)stage_weight(list[at]) * within) / (double)all;
+    if (share >= 1.0) return job_total;
+    return (uint64_t)((double)job_total * share);
+}
+
+/* The one of `exts` (lowercase) that the last part of `path` ends in after a dot, whatever its
+ * case, or NULL. */
+static const char *ext_of(const char *path, const char *const *exts, size_t n) {
     const char *slash = strrchr(path, '/'), *dot = strrchr(slash ? slash : path, '.');
     size_t i, k;
     if (!dot || !dot[1]) return NULL;
-    for (i = 0; i < sizeof formats / sizeof *formats; i++) {
-        const char *f = formats[i];
+    for (i = 0; i < n; i++) {
+        const char *f = exts[i];
         for (k = 0; f[k] && dot[1 + k]; k++) {
             char c = dot[1 + k];
             if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
@@ -216,9 +350,37 @@ const char *cc_image_format(const char *path) {
     return NULL;
 }
 
+const char *cc_image_format(const char *path) {
+    static const char *const formats[] = {"exfat", "ffpkg", "ffpfs", "ffpfsc"};
+    return ext_of(path, formats, sizeof formats / sizeof *formats);
+}
+
+const char *cc_archive_kind(const char *path) {
+    static const char *const kinds[] = {"zip", "7z", "rar"};
+    return ext_of(path, kinds, sizeof kinds / sizeof *kinds);
+}
+
+int cc_inner_ok(const char *inner) {
+    return strcmp(inner, "exfat") == 0 || strcmp(inner, "ffpkg") == 0 || strcmp(inner, "ffpfs") == 0;
+}
+
 int cc_format_ok(const char *format) {
-    return strcmp(format, "exfat") == 0 || strcmp(format, "ffpkg") == 0 || strcmp(format, "ffpfs") == 0 ||
+    return cc_inner_ok(format) || strcmp(format, "ffpfsc") == 0 || strcmp(format, "pkg") == 0 ||
            strcmp(format, "folder") == 0;
+}
+
+int cc_pkg_level_ok(const char *level) {
+    return strcmp(level, "stored") == 0 || strcmp(level, "fast") == 0 || strcmp(level, "balanced") == 0;
+}
+
+int cc_pkg_name_ok(const char *dest) {
+    const char *slash = strrchr(dest, '/'), *name = slash ? slash + 1 : dest;
+    size_t n = strlen(name);
+    return n > 4 && strcmp(name + n - 4, ".pkg") == 0;
+}
+
+int cc_ffpfsc_level_ok(const char *level) {
+    return strcmp(level, "fast") == 0 || strcmp(level, "balanced") == 0 || strcmp(level, "smallest") == 0;
 }
 
 int cc_path_within(const char *outer, const char *inner) {

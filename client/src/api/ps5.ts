@@ -2093,7 +2093,7 @@ export async function payloadsRelease(
  *  can pick a specific version — pin a known-good build or downgrade when
  *  the latest is unstable. Each entry is a full `PayloadReleaseInfo`
  *  (same shape as `payloadsRelease`), so the chosen one's
- *  `picked_asset_url` + `tag` feed straight into `payloadsDownload`. */
+ *  `html_url` links to that release's page. */
 export async function payloadsReleases(
   id: string,
   forceRefresh = false,
@@ -2106,29 +2106,6 @@ export async function payloadsReleases(
 
 export async function payloadsLocalInventory(): Promise<PayloadLocalEntry[]> {
   return invoke<PayloadLocalEntry[]>("payloads_local_inventory");
-}
-
-/** Add a user's own GitHub/Gitea repo to the Payloads catalogue (#93). The
- *  backend validates host/owner/name, mints a stable `custom-<hex>` id, and
- *  persists. Idempotent — re-adding the same repo returns the existing entry.
- *  Returns the added (or existing) catalogue row. */
-export async function payloadsAddCustomRepo(args: {
-  host: string;
-  owner: string;
-  name: string;
-  displayName?: string;
-  assetHint?: string;
-  /** A `sha256sum`-style list the repo's releases publish. A download that doesn't match is refused. */
-  checksumFile?: string;
-}): Promise<PayloadInfo> {
-  return invoke<PayloadInfo>("payloads_add_custom_repo", {
-    host: args.host,
-    owner: args.owner,
-    name: args.name,
-    displayName: args.displayName ?? null,
-    assetHint: args.assetHint ?? null,
-    checksumFile: args.checksumFile ?? null,
-  });
 }
 
 /** Remove a user-added custom repo by id (#93). No-op for a catalogue id.
@@ -2157,38 +2134,12 @@ export async function payloadsSources(): Promise<PayloadSourceInfo[]> {
   return invoke<PayloadSourceInfo[]>("payloads_sources");
 }
 
-export async function payloadsAddSource(url: string): Promise<PayloadSourceInfo> {
-  return invoke<PayloadSourceInfo>("payloads_add_source", { url });
-}
-
-export async function payloadsRefreshSources(force = false): Promise<PayloadSourceInfo[]> {
-  return invoke<PayloadSourceInfo[]>("payloads_refresh_sources", { force });
-}
-
 export async function payloadsRemoveSource(id: string): Promise<boolean> {
   return invoke<boolean>("payloads_remove_source", { id });
 }
 
 export async function payloadsLocalPath(id: string): Promise<string | null> {
   return invoke<string | null>("payloads_local_path", { id });
-}
-
-export async function payloadsDownload(
-  id: string,
-  assetUrl: string,
-  version: string,
-): Promise<PayloadLocalEntry> {
-  return invoke<PayloadLocalEntry>("payloads_download", {
-    id,
-    assetUrl,
-    version,
-  });
-}
-
-/** Stop a running download of this payload. Its `payloadsDownload` then rejects with
- *  `download_cancelled` (`isDownloadCancelled`). False when none was running. */
-export async function payloadsDownloadCancel(id: string): Promise<boolean> {
-  return invoke<boolean>("payloads_download_cancel", { id });
 }
 
 // ─── ShadowMount+ awareness (read-only) ───────────────────────────────
@@ -2208,16 +2159,91 @@ export interface SmpStatus {
   errors: string[];
   /** SMP's own version from its HTTP API (1.7beta8+); absent when the API doesn't answer. */
   version?: string | null;
+  /** Which mounter runs on the console (an engine older than this field leaves it out). */
+  mounter?: Mounter;
+  /** Kraken Mount on the console; absent from an older engine. */
+  kraken?: KrakenStatus;
+}
+
+/** Which mounter runs on a console. `unknown`: the process list could not be read and no
+ *  mounter's API answered. `both`: ShadowMount+ and Kraken Mount at once, which must not be. */
+export type Mounter = "none" | "shadowmount" | "kraken" | "both" | "unknown";
+
+/** One game in Kraken Mount's library. */
+export interface KrakenGame {
+  title_id: string;
+  title_name: string;
+  /** The `.pkg` file or game folder it mounts from. */
+  path: string;
+  /** `pkg` or `folder`. */
+  kind: string;
+  /** A folder's packing: `plain`, `zstd`, `lz4`. */
+  packing?: string | null;
+  /** `pending`, `checking`, `building`, `ready`, `error` or `duplicate`. */
+  status: string;
+  error?: string | null;
+}
+
+export interface KrakenStatus {
+  /** /data/krakenmount exists: it has run on this console. */
+  installed: boolean;
+  running: boolean;
+  /** Its API answers from this computer: rescan and remove work. */
+  api: boolean;
+  version: string | null;
+  /** `kstuff` or `shadowmount` while it waits for one to start or stop. */
+  waiting: string | null;
+  games: KrakenGame[];
+  /** Titles it has put on the home screen. */
+  title_ids: string[];
+  /** Its AMPR runtime: kind `bundled`, `downloaded`, `hand` (the user's own), `missing`. */
+  ampr: { kind: string; version?: string | null } | null;
+  settings: { inject_ampr: boolean; ampr_auto_update: boolean; scan_paths: string[] };
+  /** The folders it scans (one level deep). */
+  scan_roots: string[];
+  errors: string[];
 }
 
 /** SMP status snapshot. `addr` is the management-port address. */
 export async function smpStatus(addr: string): Promise<SmpStatus> {
-  return invoke<SmpStatus>("smp_status", { addr });
+  return normalizeSmpStatus(await invoke<Partial<SmpStatus> | null>("smp_status", { addr }));
 }
 
-/** Ask ShadowMount+ to scan again now, with its retry counters cleared. */
+/** The mounter snapshot with its lists always present: a partial answer (an older engine, a
+ *  proxy, a stand-in) must not crash the game page, which reads `errors` and
+ *  `mounted_images` directly. */
+export function normalizeSmpStatus(s: Partial<SmpStatus> | null | undefined): SmpStatus {
+  const v = s ?? {};
+  return {
+    ...v,
+    installed: v.installed === true,
+    running: v.running === true,
+    config_ini: v.config_ini ?? null,
+    autotune_ini: v.autotune_ini ?? null,
+    debug_log_tail: v.debug_log_tail ?? null,
+    mounted_images: Array.isArray(v.mounted_images) ? v.mounted_images : [],
+    errors: Array.isArray(v.errors) ? v.errors : [],
+    kraken: v.kraken
+      ? {
+          ...v.kraken,
+          games: Array.isArray(v.kraken.games) ? v.kraken.games : [],
+          title_ids: Array.isArray(v.kraken.title_ids) ? v.kraken.title_ids : [],
+        }
+      : v.kraken,
+  };
+}
+
+/** Ask the console's mounter (ShadowMount+, retry counters cleared; or Kraken Mount) to scan
+ *  again now. */
 export async function smpRescan(addr: string): Promise<void> {
   await invoke<unknown>("smp_rescan", { addr });
+}
+
+/** Remove a game Kraken Mount mounts, as its own page does: off the home screen AND its source
+ *  (`path`, the `.pkg` or game folder it lists for the title) deleted. `addr` is the
+ *  management-port address. */
+export async function krakenRemove(addr: string, titleId: string, path: string): Promise<void> {
+  await invoke<unknown>("kraken_remove", { addr, titleId, path });
 }
 
 // ─── ShadowMount+ edit sessions ───────────────────────────────────────
@@ -2337,6 +2363,8 @@ export async function usbAutoloaderInstall(req: {
   drive_path: string;
   payload_ids: string[];
   include_ps5upload?: boolean;
+  /** Payload files on this computer (.elf / .bin) to put on the stick too. */
+  local_files?: string[];
 }): Promise<AutoloaderInstallResult> {
   return invoke<AutoloaderInstallResult>("usb_autoloader_install", { req });
 }

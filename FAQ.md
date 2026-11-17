@@ -81,7 +81,8 @@ more depth further down.
 Send **elfldr** first (if your setup uses it), then **kstuff**, then
 **ShadowMount+**, then **ps5upload**. The **Set up your PS5** wizard does the
 last three in this order for you, with the delays the Payloads catalogue
-recommends. Send them one at a time; the loader takes one file per
+recommends. ps5upload doesn't download payloads: get kstuff and ShadowMount+ from their project
+pages (Payloads › Catalog links to them) and choose the files in the wizard. Send them one at a time; the loader takes one file per
 connection. After a reboot the payloads are gone, so load them again. Rest mode
 can stop them too; the PS5Upload helper usually keeps running through it.
 
@@ -107,8 +108,9 @@ running.
 3. Open **Connection** and press **Add a PS5**. **Scan** finds it on your home network; or type
    its IP under **Or type its address**. Its card then shows **Finish setting up**: **Check**,
    then **Send helper**.
-4. First time? **Open setup wizard** on the card runs **Set up your PS5**: it sends kstuff and
-   ShadowMount+, then the helper, in order. If something already loads kstuff, send only ps5upload.
+4. First time? **Open setup wizard** on the card runs **Set up your PS5**: it sends the kstuff and
+   ShadowMount+ files you choose (get them from their project pages), then the helper, in order.
+   If something already loads kstuff, send only ps5upload.
 5. Wait for the card to say **Ready for uploads** (the `helper` dot at the bottom turns green).
 6. Open **Upload & Install**, drop or choose your game, pick the drive and click **Start**. The
    free-space check runs before anything is sent.
@@ -517,10 +519,11 @@ something else, and records the send in a history panel so you
 can replay it without re-picking the file.
 
 **Q: How do I keep my payloads up to date?**
-Open **Payloads › Catalog › Payload updates** (12.0.0). **Check for payload updates** compares each
-payload you downloaded with its latest release; update one, or **Update all**. Turn on **Keep
-payloads up to date** and the app checks when it starts and once a day, and downloads newer
-releases by itself. The version an update replaced is kept: **Roll back** puts it back.
+ps5upload doesn't download payloads. Get a newer release from the payload's project page and send
+the file from **Payloads → Send payload**. **Payloads › Catalog › Payload updates** still tells you
+when one is out: **Check for payload updates** compares each payload saved in the app (copies
+earlier versions of the app downloaded) with its latest release, and links to the release page.
+A copy an earlier update replaced is kept: **Roll back** puts it back.
 
 If you use itsPLK's Payload Manager on the PS5, tick **Keep in Payload Manager** (and **Payload
 Manager loads it at boot** if you want it at boot) on a payload, and **Sync with Payload Manager**
@@ -669,9 +672,11 @@ and folded sections are shared too. Before 7.4.2 the list lived in each browser 
 `PS5UPLOAD_ALLOW_IP` to your own devices.
 
 **Q: How do automatic save backups work, and how do I restore one?**
-Save Data → Automatic backups: choose a folder and how many versions to keep, then turn it on. Every
-ten minutes the engine copies each console's saves that changed since their last backup (a save
-written in the last few minutes waits for the next round). In the desktop app this runs while the
+Save Data → Automatic backups: choose a folder, how often to back up (**Back up every**, from 5
+minutes to a day; 10 minutes unless you change it) and how many versions to keep, then turn it on.
+Each round the engine copies each console's saves that changed since their last backup (a save
+written in the last few minutes waits for the next round); the next round starts that long after
+the last one ends. In the desktop app this runs while the
 app runs; in Docker it runs all the time, with no browser open. Use a folder the container keeps,
 such as `/data/save-backups`, or a NAS share you mount into the container. To restore, close the
 game, then in Save Data press **Restore…** on the game's save (or open its page in PS5Upload and
@@ -758,7 +763,7 @@ phone or another computer?" below walks through it from start to finish.
   wait until a tab is open. Only one tab runs the queue.
 - **Payloads → Send payload** accepts an ELF from your browser machine and forwards it through
   the engine to the selected console's loader (9021 by default). Sending bytes does not confirm
-  execution. Catalog downloads and the other payload formats still use the native app.
+  execution. The other payload formats still use the native app.
 - Archives: a `.zip`, `.7z`, `.rar`, tar or `.zst` on the engine's disk uploads like on desktop. An archive on
   the device your browser runs on can't be read as an archive; unpack it first.
 - Hidden in the browser: saving a save backup or downloading files to your computer, and attaching
@@ -1943,7 +1948,7 @@ the copy is read back and checked, and the image you opened is not changed.
 its free space (an image never grows): `.exfat` and `.ffpkg` take any change that fits, `.ffpfs`
 takes deletes, renames and replacements that fit its existing space, and `.ffpfsc`, packages and
 games in asset packs only get an edited copy. While the change goes in, an undo journal sits
-beside the image (`<image>.forge-undo`, the same format PS5 Dump Forge uses): if the app closes
+beside the image (`<image>.forge-undo`): if the app closes
 or the computer loses power, the image is put back as it was the next time anything opens it.
 Every changed file is read back afterwards, and the image is restored if anything doesn't match.
 The image can't be converted or edited by anything else while this runs. Keep a backup of an
@@ -2052,17 +2057,22 @@ own Settings.
 This is almost never a bug in ps5upload: the transfer worked, and Sony's side
 refuses to start the title. Check these in order.
 
-1. **A PS5 fake game on firmware above 11.60.** The package installs, but PS5
-   fake game packages can't be played on firmware above 11.60. This is the case
-   for a PS5 game installed from a fake package on FW 11.61, 12.xx or 13.60.
-   PS4 packages are fine, and PS5 homebrew apps (Itemzflow and similar) launch.
-   The app shows a warning for this combination on Install, Convert and when a
-   launch fails. Use a PS4 package, or the folder-dump route below.
+1. **A PS5 fake game on firmware above 11.60.** The package installs, but an
+   installed PS5 fake package does not start on FW 11.61, 12.xx or 13.60 yet.
+   **Mount it with Kraken Mount instead:** with Kraken Mount running on the PS5,
+   Upload & Install puts the `.pkg` in a folder it scans, and the game plays
+   straight from the package, with nothing installed (Kraken Mount 0.2.1 or later
+   keeps its save data and trophies). Full support for installed packages on
+   these firmware versions, through the A53 patches, is coming. PS4 packages are
+   fine, and PS5 homebrew apps (Itemzflow and similar) launch. The app shows a
+   warning for this combination on Install, Convert and when a launch fails.
+   The folder-dump and image routes below work too.
 2. **"View product" or "missing base entitlement".** Install the base game
    before its update or DLC. A package that needs an entitlement the console
    does not have will always show "View product". A PS5 game installed from a
    fake package on firmware above 11.60 (item 1) ends here too: it installs,
-   then shows "View product". Use the game folder or an image instead.
+   then shows "View product". Mount the package with Kraken Mount, or use the
+   game folder or an image instead.
 3. **kstuff or ShadowMount+ is not running.** Launching needs kernel access.
    **Games** says so above the grid when the helper has none; load kstuff and
    reconnect. Disc-image titles need ShadowMount+ running.
@@ -2399,8 +2409,7 @@ name. Tick **Full verification** to re-read every byte of the output instead; it
 
 Nothing is installed. Copy the image to a folder ShadowMount+ watches on the PS5 (for example
 `/data/homebrew`, with **Upload & Install**), and ShadowMount+ mounts it and puts the game on the home
-screen. The `.ffpkg` and `.ffpfs` writers and the streaming `.ffpfsc` container come from quer3q's
-PS5 Dump Forge; the `.exfat` writer is ps5upload's own. On a PS5 on firmware 13.60 with
+screen. On a PS5 on firmware 13.60 with
 ShadowMount+ 1.7, a game image made by the app in each of `.exfat`, `.ffpkg`, `.ffpfs` and a
 compressed `.ffpfsc` mounted, registered and ran its game. A folder that is on the console or on
 a saved server cannot be made into an image from here; copy it to this computer first.
@@ -2488,7 +2497,7 @@ Packages and images Workshop builds always carry a fresh index; **Rebuild AMPR i
 - **A `.ffpfsc`**: compressed and read-only, so it is not edited. **Convert again** makes a fresh
   `.ffpfsc` with a new index.
 
-It is only offered for a game that uses libSceAmpr, and says so otherwise.
+It only shows for a game that uses libSceAmpr.
 
 **Q: Can I install a package that is already on a USB drive?**
 Yes. Plug the drive into the PS5; packages on it show in **Upload & Install → Already on the PS5**
@@ -2716,7 +2725,7 @@ The routes:
 | Content | Stream & install | Upload & install | Folder dump + ShadowMount+ | exFAT image + ShadowMount+ |
 |---|---|---|---|---|
 | **PS4 package** (base game) | Works. The most reliable route; PS4 fake packages play on every firmware. | Works on FW 13.60 from 6.3.1 (a 3.6 GiB base installed over itself on both of our consoles). Before 6.3.1 Sony refused it with `0x80B2116F`; see the firmware note below. | Works (PS4 folder dumps). | Works. |
-| **PS5 package** (fake / FPKG game) | Installs. **On firmware above 11.60 the game installs but cannot be played.** | Same as Stream. | Works for a decrypted PS5 dump — the route people use on 13.60. | Works — also the route used on 13.60. |
+| **PS5 package** (fake / FPKG game) | Installs. **On firmware above 11.60 the installed game doesn't start yet: mount the package with Kraken Mount instead** (full support through the A53 patches is coming). | Same as Stream. | Works for a decrypted PS5 dump — the route people use on 13.60. | Works — also the route used on 13.60. |
 | **PS5 homebrew app** (for example Itemzflow, `IV0002-ITEM00001`) | Works and launches, including on FW 13.60. | Works. | n/a | n/a |
 | **Patch / update** | Works (verified: a PS4 base plus its patch, streamed). Install the base first. | Works on FW 13.60 from 6.3.1 (a PS4 1.00 base took its 1.04 patch this way). Install the base first. | n/a — copy the update into the game folder. | n/a |
 | **DLC** | Works after its base is installed. | Works after its base is installed. | n/a | n/a |
@@ -3200,8 +3209,9 @@ User.
 **Q: The PS5 won't let me turn on its own Remote Play setting.**
 The PS5 offers Settings › System › Remote Play only to an account signed in to PlayStation
 Network. Open **Accounts** › **Sign in to PlayStation Network (offline)**: it checks that the
-signed-in user has an activated account, then fetches earthonion's np-fake-signin and runs it on
-the PS5 with one button. Nothing is sent to Sony. Restart the PS5 afterwards. Before it runs, the
+signed-in user has an activated account, then sends earthonion's np-fake-signin and runs it on
+the PS5. ps5upload doesn't download it: get the PS5 build from its project page, and **Sign in**
+asks for the file. Nothing is sent to Sony. Restart the PS5 afterwards. Before it runs, the
 helper keeps a copy on the PS5 of every setting and file np-fake-signin changes; **Undo sign-in**
 on the same card puts them back (restart again afterwards). In the web UI, send np-fake-signin
 from **Payloads** instead (Undo works there too, but nothing is kept unless the desktop app ran

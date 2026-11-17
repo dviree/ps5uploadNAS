@@ -15,7 +15,11 @@
 #include <ps5/kernel.h>
 
 /* /dev/icc_indicator, the LED's enable flag: 0 = off, 1 = on (the console drives it again).
- * Returned 0 for both values on a CFI-1115A, FW 13.60. */
+ *
+ * #840: this ioctl and sceKernelIccSetDynamicLedDimSetting are accepted (return 0) on every
+ * firmware we tried. On a launch PS5 (CFI-1115A) on FW 13.60 the light did not change; a user
+ * on FW 10.01 reports that "light off" did turn it off. So it is offered on every console, with
+ * a note that it may not change the light, and the console can set the light again itself. */
 #define ICC_INDICATOR_DEV      "/dev/icc_indicator"
 #define ICC_INDICATOR_SET_FLAG 0x8001950eul
 

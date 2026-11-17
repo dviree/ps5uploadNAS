@@ -2,6 +2,22 @@
 
 ## >RESUME HERE
 
+- 2026-11-17: merged PS5Upload 12.6.2 (0b7c3689; 12.5.1-12.6.2: zstd for every game, Convert
+  on the PS5, Kraken Mount, save sync, copy .pkg as a file, payloads from you, every disk in
+  the file browser). Four conflicts:
+  - README stays the fork's.
+  - ImageOptions takes upstream's emulator line without the Lz4Option.
+  - api_surface_tests keeps lz4_packs_are_refused_in_this_fork; upstream's LZ4 build tests
+    stay out.
+  - RunCard tests keep the fork's LZ4-not-offered checks, and #828's LZ4 lines now check
+    that LZ4 can't be picked.
+  Checks: engine 2108, core 882, fpkg 383, 6559 vitest tests, tsc, eslint and the NAS checks
+  pass.
+- Open, needs the owner's OK (quer3q code is reviewed first):
+  - PS5 Dump Forge v0.5.6 is out; the NAS converter pins 0.5.5 (install-forge.py).
+  - ampr-emu-ng v0.4.1 is out; the NAS converter pins 920e917 (0.4.0).
+- Next: verify the Docker build, then run the NAS updater.
+
 - 2026-11-16: merged PS5Upload 12.5.0 (449d3236; 12.4.19-12.4.23 too: Convert gets PS5 Dump
   Forge's features, Convert on the PS5 in Minion, in-place image editing, remove PS5Upload
   from a PS5, zstd runtime 0.4.1 in the engine). Resolved 23 conflicts:

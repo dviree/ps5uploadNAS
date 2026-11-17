@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it } from "vitest";
 
-import { guardElfldr, resetElfldrGuard, waitForLoader, type LoaderHealth } from "./elfldrGuard";
+import { guardElfldr, ourElfldrPid, resetElfldrGuard, waitForLoader, type LoaderHealth } from "./elfldrGuard";
 
 let now = 0;
 const clock = { now: () => now, sleep: async (ms: number) => void (now += ms) };
@@ -63,6 +63,43 @@ describe("keeping the patched elfldr in place", () => {
     expect(calls).toEqual(["10.0.0.2", "10.0.0.2"]);
   });
 
+  it("asks again every 30 s while the console settles after a wake (#842)", async () => {
+    const calls: number[] = [];
+    const answers: unknown[] = [
+      { action: "skipped", reason: "console_settling" },
+      { action: "skipped", reason: "console_settling" },
+      { action: "current" },
+    ];
+    const deps = {
+      ensure: async () => {
+        calls.push(now);
+        return answers.shift();
+      },
+      ...clock,
+    };
+    const start = now;
+    await guardElfldr("10.0.0.2", false, deps);
+    expect(calls).toEqual([start, start + 30_000, start + 60_000]);
+    // settled and swapped: the 10-minute spacing applies again
+    await guardElfldr("10.0.0.2", false, deps);
+    expect(calls).toHaveLength(3);
+  });
+
+  it("gives up after a few tries and asks at the next chance", async () => {
+    const calls: string[] = [];
+    const deps = {
+      ensure: async (h: string) => {
+        calls.push(h);
+        return { action: "skipped", reason: "console_settling" };
+      },
+      ...clock,
+    };
+    await guardElfldr("10.0.0.2", false, deps);
+    expect(calls).toHaveLength(5);
+    await guardElfldr("10.0.0.2", false, deps);
+    expect(calls).toHaveLength(10);
+  });
+
   it("swallows a failure: it is an improvement, never a blocker", async () => {
     await expect(
       guardElfldr("10.0.0.2", false, {
@@ -98,5 +135,23 @@ describe("the elfldr swap and a running playlist", () => {
     expect(swaps).toBe(0);
     await guardElfldr("10.0.0.2", false, { ...deps, playlistRuns: () => false });
     expect(swaps).toBe(1);
+  });
+});
+
+describe("which elfldr is PS5Upload's", () => {
+  it("remembers the pid of the build it swapped in or found in place", async () => {
+    const outcomes = [
+      { action: "upgraded", pid: 106 },
+      { action: "skipped", pid: 77 },
+    ];
+    const deps = { ensure: async () => outcomes.shift(), ...clock, playlistRuns: () => false };
+    expect(ourElfldrPid("10.0.0.2")).toBeNull();
+    await guardElfldr("10.0.0.2", true, deps);
+    expect(ourElfldrPid("10.0.0.2:9113")).toBe(106);
+    // A skipped swap (another loader, a shared name) says nothing about whose loader runs.
+    await guardElfldr("10.0.0.2", true, deps);
+    expect(ourElfldrPid("10.0.0.2")).toBe(106);
+    await guardElfldr("10.0.0.3", true, { ...deps, ensure: async () => ({ action: "current", pid: 51 }) });
+    expect(ourElfldrPid("10.0.0.3")).toBe(51);
   });
 });
