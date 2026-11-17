@@ -16,7 +16,7 @@
 - Open, needs the owner's OK (quer3q code is reviewed first):
   - PS5 Dump Forge v0.5.6 is out; the NAS converter pins 0.5.5 (install-forge.py).
   - ampr-emu-ng v0.4.1 is out; the NAS converter pins 920e917 (0.4.0).
-- Next: verify the Docker build, then run the NAS updater.
+- The Docker build (run 55) is green. Next: the user runs the NAS updater.
 
 - 2026-11-16: merged PS5Upload 12.5.0 (449d3236; 12.4.19-12.4.23 too: Convert gets PS5 Dump
   Forge's features, Convert on the PS5 in Minion, in-place image editing, remove PS5Upload
