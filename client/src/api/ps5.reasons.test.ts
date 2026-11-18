@@ -61,9 +61,15 @@ describe("every engine reason is humanized", () => {
     expect(humanizeJobErrorReason("ava1_refused_99")).toContain("99");
   });
 
-  it("suggests Override for an existing destination", () => {
-    expect(humanizeJobErrorReason("ava1_exists")).toMatch(/Override/);
-    expect(humanizeJobErrorReason("ava1_commit_exists")).toMatch(/Override/);
+  it("names the row's own choices for an existing destination, never a control not in view", () => {
+    for (const r of ["ava1_exists", "ava1_commit_exists"]) {
+      const withActions = humanizeJobErrorReason(r, { conflictActions: true });
+      expect(withActions).toMatch(/Replace it, or upload somewhere else/);
+      expect(withActions).not.toMatch(/Override/);
+      // Without those buttons (an install row, the activity list): no promise of them.
+      expect(humanizeJobErrorReason(r)).toMatch(/already in that folder on the PS5/);
+      expect(humanizeJobErrorReason(r)).not.toMatch(/Replace|somewhere else/);
+    }
   });
 
   it("every joberr key the humanizer uses exists in the English locale", () => {

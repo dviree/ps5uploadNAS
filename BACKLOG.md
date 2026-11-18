@@ -2,6 +2,19 @@
 
 ## >RESUME HERE
 
+- 2026-11-18: merged PS5Upload 12.6.7 (82978cdc; 12.6.3-12.6.7: Replace when a game is already
+  on the PS5, trophies after offline activation, drive backups, higher bitrate, Send a package
+  as a file, Docker prune). README stays the fork's.
+  - Upstream's docker-engine.yml no longer publishes on a branch push (resolve off) and adds
+    schedule/release triggers. Kept the fork's resolve (`!= pull_request`), PR-only verify and
+    push/PR/dispatch triggers.
+  - Removed engine-ci.yml's new nightly schedule.
+  Checks: engine 2143, core 879, fpkg 383, 6649 vitest tests, tsc, i18n and the NAS checks
+  pass.
+- Still waiting for the owner's OK: Forge v0.5.6 (pinned 0.5.5) and ampr-emu-ng v0.4.1 (pinned
+  920e917 / 0.4.0) in the NAS converter.
+- Next: verify the Docker build (it must publish on this push), then run the NAS updater.
+
 - 2026-11-17: merged PS5Upload 12.6.2 (0b7c3689; 12.5.1-12.6.2: zstd for every game, Convert
   on the PS5, Kraken Mount, save sync, copy .pkg as a file, payloads from you, every disk in
   the file browser). Four conflicts:

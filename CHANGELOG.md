@@ -6,6 +6,63 @@ What's new in ps5upload, written for humans.
 
 ## Unreleased
 
+The same as 12.6.6, which could not be published.
+
+**New**
+- **Send a package to the PS5 as a file.** On a game's page, a package now has **Send to PS5** too, for Kraken Mount users who mount packages instead of installing them. When Kraken Mount runs on the PS5 and can mount that package (a PS5 game in one file), Send to PS5 is the main button and puts it straight into Kraken Mount's folder, and Install moves to the **…** menu. Otherwise Install stays first and **…** › **Send to PS5 as a file** is there. Nothing is installed; Kraken Mount picks it up on its next scan. Packages on a server or NAS work the same way.
+
+## 12.6.6
+
+Not published: the Linux build machine could not download its packages. Everything in it is in 12.6.7.
+
+## 12.6.5
+
+Save backups on a PS5 drive, a higher Remote Play bitrate, Files remembers where you were, and a fix for Android with three or more consoles.
+
+**New**
+- **Save backups on a PS5 drive.** Save Data › Automatic backups › **Also keep a copy on a PS5 drive**: pick the M.2 or a USB drive, and every backup is copied there too (checked against the original), so resetting the internal drive doesn't take your saves with it. The copies show in each game's backups, marked "On the PS5", and restore like any other. Not yet tried on a PS5.
+- **Remote Play bitrate up to 50 Mbps.** Play › Picture › Bitrate now goes past 15 Mbps, and while streaming it shows what the PS5 is actually sending. Higher needs a fast, wired network, and the PS5 may send less than you pick; if it won't start the stream at that rate, Play goes back to Auto once and says so. Not yet tried on a PS5 above 15 Mbps.
+- **Files: back to where you were.** Going back out of a folder highlights the folder you came from, scrolls to it and puts the cursor on it, so Enter opens it again (also in Minion's Files and the folder pickers). Arrow keys move between rows.
+- **Windows: the engine on its own explains itself.** Double-clicking `ps5upload-engine-…-windows-…exe` (the engine for servers) now says what it is and points to the app installer, instead of seeming to do nothing. The release page lists which file to download.
+
+**Fixes**
+- **Android: the app squeezed into a corner (#856).** With three or more PS5s saved, the console strip at the top scrolls sideways, and hidden labels for screen readers in it sat past the right edge of the screen. Android then laid the whole app out wider than the phone, which pushed the tab bar off the screen and, on some phones, shrank the app into the top-left corner. Those labels now stay inside the strip, and nothing on any screen can widen the page that way again.
+- **Docker updates no longer pile up old images.** `docker compose pull` kept every replaced image (about 170 MB a release) until someone deleted it by hand. The update command the web UI shows, and the one in the FAQ, now ends by removing the ps5upload images no container uses; other images are left alone. Thanks to kh-mitya (#857).
+
+## 12.6.4
+
+Trophies after offline activation, a cleaner Payloads page, and fixes from an audit.
+
+**Fixes**
+- **Trophies stop after offline activation (#853).** Activation gives the user a new account, but the trophy files of games they already played kept the old one, so the PS5 stopped recording trophies for them. Activation now updates those files too, after backing them up (to `/data/ps5upload/backup/trophy/`). Users activated before this get **Repair trophies** on the Accounts screen: it shows what would change first, applies it, and can be undone. It won't run while a game is open. Not yet tried on a PS5: restart the console after a repair, and tell us if trophies don't come back.
+- **Payloads › On your PS5 and the Running tab:**
+  - **Stop:** a stop the PS5 refused was shown as done, and Restart then relaunched anyway. A failed Stop now says so.
+  - **Lists that lagged behind:** after Stop, Launch, Delete or a boot-list change, and after switching consoles, the lists now update at once.
+  - **Payload Manager card:** boot-list entries whose file is gone show up so you can remove them, and "starts at boot" shows only while the boot list is on. Launch on a payload that's already running is no longer the main button.
+  - **Where each payload came from** is said correctly in every case.
+- **Upload:**
+  - Before an upload, a folder that's already on the PS5 offers **Merge into it** (files with the same name are replaced, others stay). **Replace** now always means the old copy is deleted first.
+  - **Replace** on a failed upload no longer risks putting a leftover from an older, abandoned upload in place.
+  - **Another folder** works for archives that unpack straight into a folder.
+  - The Kraken Mount folder suggestion no longer sticks to the whole batch.
+- **Save sync:** a console can no longer be paired with itself after switching consoles; Stop asks first; removed pairs and "Not now" stay that way.
+- **Convert on the PS5:** a running conversion's files are no longer cleaned up after a clock change and a helper update; its progress no longer jumps around.
+- **Stop or Remove PS5Upload** now holds back new transfers and file actions until it's done, and says when a stop is already running.
+- **The file browser** no longer stalls on a network share that doesn't answer.
+- **ShadowMount+ and np-fake-signin:** the screen shows which copy will be sent, with **Choose file…** to send another.
+- Smaller: plain messages instead of codes, a frame-rate fix after a game pause, hints that don't name firmware versions.
+
+**Faster releases:** a release no longer waits for `main`'s CI when its PR already passed on the same code, the virus scan runs while builds finish, and CI caches stop wiping each other out.
+
+## 12.6.3
+
+A clear way to replace a game that's already on the PS5, and faster checks behind the scenes.
+
+**Changed**
+- **Already on the PS5? Replace it right there.** When an upload finds its game already in that folder on the PS5, the failed row now has **Replace** (it asks first, naming what gets deleted) and **Upload somewhere else**, instead of a message telling you to "choose Override" with no button to press. When the whole folder had already arrived, Replace puts it in place without sending it again. Before an upload, the question now reads "Already on the PS5: … in …" with **Replace**, **Resume**, **Another folder** and Cancel. The word "Override" is gone from the app.
+
+## 12.6.2
+
 Clearer Payloads › On your PS5, and what to do with PS5 fake packages on newer firmware.
 
 **Changed**

@@ -3458,6 +3458,34 @@
         ],
         "type": "object"
       },
+      "DriveChoice": {
+        "description": "One drive the copies can go to.",
+        "properties": {
+          "free_bytes": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "kind": {
+            "description": "`ext` (M.2 / extended storage) or `usb`.",
+            "type": "string"
+          },
+          "path": {
+            "description": "The mount, such as `/mnt/ext0`.",
+            "type": "string"
+          },
+          "total_bytes": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "path",
+          "kind",
+          "total_bytes",
+          "free_bytes"
+        ],
+        "type": "object"
+      },
       "DriveSensor": {
         "description": "One physical disk discovered on `/dev/daN`. Temp and usage fields are\noptional because not all drives support LOG SENSE and not all are\nmounted. `access_denied` is surfaced when the device node exists but\nthe payload can't open it (rare, only seen on very locked-down FW).",
         "properties": {
@@ -10625,6 +10653,14 @@
           },
           "slot": {
             "type": "integer"
+          },
+          "uid": {
+            "description": "The console user this slot goes with: when the id changes, their trophy files are given\nthe new one (#853). Absent: nothing else is touched.",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
           }
         },
         "required": [
@@ -11682,6 +11718,10 @@
           "file": {
             "description": "The backup's file name (`<title>_user<8 hex>_<stamp>.zip`).",
             "type": "string"
+          },
+          "on_console": {
+            "description": "The backup is the copy on the PS5's own drive (`save_backup_console`).",
+            "type": "boolean"
           },
           "server": {
             "description": "The backup is on the network share (#592), not in the backup folder.",
@@ -15043,6 +15083,68 @@
         ],
         "type": "object"
       },
+      "TrophyBackup": {
+        "description": "One backup the trophy fix kept on the console.",
+        "properties": {
+          "files": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "name",
+          "files"
+        ],
+        "type": "object"
+      },
+      "TrophyFixReq": {
+        "properties": {
+          "addr": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "x-aliases": [
+              "console",
+              "host"
+            ]
+          },
+          "backup": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "new": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "old": {
+            "description": "\"0x\" + hex. Absent: whatever the account field holds is replaced.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "slot": {
+            "description": "The account slot that goes with the user: `new` defaults to its id.",
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "uid": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "type": "object"
+      },
       "UnlinkReq": {
         "properties": {
           "addr": {
@@ -16390,6 +16492,13 @@
               "type": "string"
             },
             "type": "array"
+          },
+          "console_drive": {
+            "description": "The PS5 drive that also gets a copy of each backup (`/mnt/ext<N>`, `/mnt/usb<N>`); \"\" for\nnone.",
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "dir": {
             "type": [
@@ -24344,6 +24453,29 @@
             "$ref": "#/components/responses/Error",
             "description": "Refused by the engine's address, Origin or Host guards."
           },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "properties": {
+                        "error": {},
+                        "reason": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Conflict"
+          },
           "422": {
             "content": {
               "application/json": {
@@ -24877,6 +25009,10 @@
           "403": {
             "$ref": "#/components/responses/Error",
             "description": "Refused by the engine's address, Origin or Host guards."
+          },
+          "500": {
+            "$ref": "#/components/responses/Error",
+            "description": "Engine error"
           },
           "default": {
             "$ref": "#/components/responses/Error",
@@ -28914,12 +29050,12 @@
               "application/json": {
                 "schema": {
                   "properties": {
-                    "id": {
-                      "type": "string"
-                    },
+                    "id": {},
                     "ok": {
                       "type": "boolean"
-                    }
+                    },
+                    "old_id": {},
+                    "trophies": {}
                   },
                   "type": "object"
                 }
@@ -29468,6 +29604,364 @@
         }
       }
     },
+    "/api/profile/trophies/backups": {
+      "post": {
+        "description": "POST /api/profile/trophies/backups — the trophy backups kept on the console, newest first.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TrophyFixReq"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "backups": {
+                      "items": {
+                        "$ref": "#/components/schemas/TrophyBackup"
+                      },
+                      "type": "array"
+                    },
+                    "ok": {
+                      "type": "boolean"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error",
+            "description": "Bad request"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error",
+            "description": "Refused by the engine's address, Origin or Host guards."
+          },
+          "500": {
+            "$ref": "#/components/responses/Error",
+            "description": "Engine error"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error",
+            "description": "The console or remote end failed"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error",
+            "description": "Any other failure, in the same shape."
+          }
+        },
+        "summary": "The trophy backups kept on the console, newest first",
+        "tags": [
+          "users"
+        ],
+        "x-ps5upload": {
+          "access": "loopback",
+          "console": {
+            "aliases": [
+              "console",
+              "host"
+            ],
+            "in": "body",
+            "name": "addr",
+            "required": true
+          },
+          "response_schema": "literal"
+        }
+      }
+    },
+    "/api/profile/trophies/check": {
+      "post": {
+        "description": "POST /api/profile/trophies/check — what the fix would change; never writes.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TrophyFixReq"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Success: JSON the engine does not describe field by field, often what the console sent."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error",
+            "description": "Bad request"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error",
+            "description": "Refused by the engine's address, Origin or Host guards."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "properties": {
+                        "error": {
+                          "type": "string"
+                        },
+                        "error_reason": {
+                          "type": "string"
+                        },
+                        "title_id": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error",
+            "description": "Engine error"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error",
+            "description": "The console or remote end failed"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error",
+            "description": "Any other failure, in the same shape."
+          }
+        },
+        "summary": "What the fix would change; never writes",
+        "tags": [
+          "users"
+        ],
+        "x-ps5upload": {
+          "access": "loopback",
+          "console": {
+            "aliases": [
+              "console",
+              "host"
+            ],
+            "in": "body",
+            "name": "addr",
+            "required": false
+          },
+          "response_schema": "json-unknown"
+        }
+      }
+    },
+    "/api/profile/trophies/fix": {
+      "post": {
+        "description": "POST /api/profile/trophies/fix — a dry run unless `?dry_run=false`.",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "dry_run",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TrophyFixReq"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Success: JSON the engine does not describe field by field, often what the console sent."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error",
+            "description": "Bad request"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error",
+            "description": "Refused by the engine's address, Origin or Host guards."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "properties": {
+                        "error": {
+                          "type": "string"
+                        },
+                        "error_reason": {
+                          "type": "string"
+                        },
+                        "title_id": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error",
+            "description": "Engine error"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error",
+            "description": "The console or remote end failed"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error",
+            "description": "Any other failure, in the same shape."
+          }
+        },
+        "summary": "A dry run unless `?dry_run=false`",
+        "tags": [
+          "users"
+        ],
+        "x-ps5upload": {
+          "access": "loopback",
+          "console": {
+            "aliases": [
+              "console",
+              "host"
+            ],
+            "in": "body",
+            "name": "addr",
+            "required": false
+          },
+          "response_schema": "json-unknown"
+        }
+      }
+    },
+    "/api/profile/trophies/restore": {
+      "post": {
+        "description": "POST /api/profile/trophies/restore — puts a backup's files back (no game running).",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TrophyFixReq"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {}
+              }
+            },
+            "description": "Success: JSON the engine does not describe field by field, often what the console sent."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error",
+            "description": "Bad request"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error",
+            "description": "Refused by the engine's address, Origin or Host guards."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "properties": {
+                        "error": {
+                          "type": "string"
+                        },
+                        "error_reason": {
+                          "type": "string"
+                        },
+                        "title_id": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error",
+            "description": "Engine error"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error",
+            "description": "The console or remote end failed"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error",
+            "description": "Any other failure, in the same shape."
+          }
+        },
+        "summary": "Puts a backup's files back (no game running)",
+        "tags": [
+          "users"
+        ],
+        "x-ps5upload": {
+          "access": "loopback",
+          "console": {
+            "aliases": [
+              "console",
+              "host"
+            ],
+            "in": "body",
+            "name": "addr",
+            "required": true
+          },
+          "response_schema": "json-unknown"
+        }
+      }
+    },
     "/api/profile/username": {
       "post": {
         "requestBody": {
@@ -29969,6 +30463,29 @@
           "403": {
             "$ref": "#/components/responses/Error",
             "description": "Refused by the engine's address, Origin or Host guards."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "properties": {
+                        "error": {},
+                        "reason": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Conflict"
           },
           "502": {
             "$ref": "#/components/responses/Error",
@@ -32872,7 +33389,26 @@
             "description": "Refused by the engine's address, Origin or Host guards."
           },
           "409": {
-            "$ref": "#/components/responses/Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "properties": {
+                        "error": {},
+                        "reason": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
             "description": "Conflict"
           },
           "502": {
@@ -33478,6 +34014,29 @@
             "$ref": "#/components/responses/Error",
             "description": "Refused by the engine's address, Origin or Host guards."
           },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "properties": {
+                        "error": {},
+                        "reason": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Conflict"
+          },
           "502": {
             "$ref": "#/components/responses/Error",
             "description": "The console or remote end failed"
@@ -33543,7 +34102,26 @@
             "description": "Refused by the engine's address, Origin or Host guards."
           },
           "409": {
-            "$ref": "#/components/responses/Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "properties": {
+                        "error": {},
+                        "reason": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
             "description": "Conflict"
           },
           "502": {
@@ -33611,7 +34189,26 @@
             "description": "Refused by the engine's address, Origin or Host guards."
           },
           "409": {
-            "$ref": "#/components/responses/Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "properties": {
+                        "error": {},
+                        "reason": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
             "description": "Conflict"
           },
           "502": {
@@ -33687,7 +34284,26 @@
             "description": "Refused by the engine's address, Origin or Host guards."
           },
           "409": {
-            "$ref": "#/components/responses/Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "properties": {
+                        "error": {},
+                        "reason": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
             "description": "Conflict"
           },
           "502": {
@@ -33941,6 +34557,29 @@
             "$ref": "#/components/responses/Error",
             "description": "Refused by the engine's address, Origin or Host guards."
           },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "properties": {
+                        "error": {},
+                        "reason": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Conflict"
+          },
           "502": {
             "$ref": "#/components/responses/Error",
             "description": "The console or remote end failed"
@@ -34006,7 +34645,26 @@
             "description": "Refused by the engine's address, Origin or Host guards."
           },
           "409": {
-            "$ref": "#/components/responses/Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "properties": {
+                        "error": {},
+                        "reason": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
             "description": "Conflict"
           },
           "502": {
@@ -34412,7 +35070,26 @@
             "description": "Refused by the engine's address, Origin or Host guards."
           },
           "409": {
-            "$ref": "#/components/responses/Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "properties": {
+                        "error": {},
+                        "reason": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
             "description": "Conflict"
           },
           "502": {
@@ -35244,7 +35921,7 @@
     },
     "/api/ps5/helper/stop": {
       "post": {
-        "description": "POST /api/ps5/helper/stop — Body: `{ addr }`. Asks the console's helper to exit\n(`node.shutdown`), refused while this engine runs a job against that console.\n\n200 `{ \"state\": \"stopped\" }` once the helper's port went quiet, or `{ \"state\": \"not_running\" }`\nwhen nothing answered. 409 `{ \"error\", \"reason\": \"busy\" }` while a job runs; 502\n`{ \"error\", \"reason\": \"refused\" (not paired) | \"failed\" (the real error) | \"still_running\" }`\notherwise. Also 409 busy while another stop or removal of that console runs.",
+        "description": "POST /api/ps5/helper/stop — Body: `{ addr }`. Asks the console's helper to exit\n(`node.shutdown`), refused while this engine runs a job against that console.\n\n200 `{ \"state\": \"stopped\" }` once the helper's port went quiet, or `{ \"state\": \"not_running\" }`\nwhen nothing answered. 409 `{ \"error\", \"reason\": \"busy\" }` while a job runs; 502\n`{ \"error\", \"reason\": \"refused\" (not paired) | \"failed\" (the real error) | \"still_running\" }`\notherwise. 409 `reason: \"stopping\"` while another stop or removal of that console runs.",
         "requestBody": {
           "content": {
             "application/json": {
@@ -35280,7 +35957,24 @@
             "description": "Refused by the engine's address, Origin or Host guards."
           },
           "409": {
-            "$ref": "#/components/responses/Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "properties": {
+                        "error": {},
+                        "reason": {}
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
             "description": "Conflict"
           },
           "500": {
@@ -35420,7 +36114,27 @@
             "description": "Refused by the engine's address, Origin or Host guards."
           },
           "409": {
-            "$ref": "#/components/responses/Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "properties": {
+                        "error": {},
+                        "paths": {
+                          "type": "array"
+                        },
+                        "reason": {}
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
             "description": "Conflict"
           },
           "500": {
@@ -41173,6 +41887,29 @@
             "$ref": "#/components/responses/Error",
             "description": "Refused by the engine's address, Origin or Host guards."
           },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "properties": {
+                        "error": {},
+                        "reason": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Conflict"
+          },
           "502": {
             "$ref": "#/components/responses/Error",
             "description": "The console or remote end failed"
@@ -41307,6 +42044,29 @@
             "$ref": "#/components/responses/Error",
             "description": "Refused by the engine's address, Origin or Host guards."
           },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "properties": {
+                        "error": {},
+                        "reason": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Conflict"
+          },
           "502": {
             "$ref": "#/components/responses/Error",
             "description": "The console or remote end failed"
@@ -41364,6 +42124,29 @@
           "403": {
             "$ref": "#/components/responses/Error",
             "description": "Refused by the engine's address, Origin or Host guards."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "properties": {
+                        "error": {},
+                        "reason": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Conflict"
           },
           "502": {
             "$ref": "#/components/responses/Error",
@@ -45278,7 +46061,7 @@
         }
       },
       "put": {
-        "description": "`PUT /api/save-backup` — change any of `{enabled, dir, keep, interval_minutes, hosts, add_hosts, remove_hosts}`.",
+        "description": "`PUT /api/save-backup` — change any of `{enabled, dir, keep, interval_minutes, hosts, add_hosts, remove_hosts, console_drive}`.",
         "requestBody": {
           "content": {
             "application/json": {
@@ -45315,13 +46098,256 @@
             "description": "Any other failure, in the same shape."
           }
         },
-        "summary": "Change any of `{enabled, dir, keep, interval_minutes, hosts, add_hosts, remove_hosts}`",
+        "summary": "Change any of `{enabled, dir, keep, interval_minutes, hosts, add_hosts, remove_hosts, console_drive}`",
         "tags": [
           "saves"
         ],
         "x-ps5upload": {
           "access": "loopback",
           "response_schema": "json-unknown"
+        }
+      }
+    },
+    "/api/save-backup/console/drives": {
+      "get": {
+        "description": "`GET /api/save-backup/console/drives?addr=` — `{drives: [{path, kind, total_bytes,\nfree_bytes}]}`, the console's M.2 and USB drives a copy of each save backup can go to (never\nthe internal storage).",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "addr",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "x-aliases": [
+              "console",
+              "host"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "drives": {
+                      "items": {
+                        "$ref": "#/components/schemas/DriveChoice"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "403": {
+            "$ref": "#/components/responses/Error",
+            "description": "Refused by the engine's address, Origin or Host guards."
+          },
+          "500": {
+            "$ref": "#/components/responses/Error",
+            "description": "Engine error"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error",
+            "description": "The console or remote end failed"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error",
+            "description": "Any other failure, in the same shape."
+          }
+        },
+        "summary": "`{drives: [{path, kind, total_bytes, free_bytes}]}`, the console's M.2 and USB drives a copy of each save backup can go to (never the internal storage)",
+        "tags": [
+          "saves"
+        ],
+        "x-ps5upload": {
+          "access": "loopback",
+          "console": {
+            "aliases": [
+              "console",
+              "host"
+            ],
+            "in": "query",
+            "name": "addr",
+            "required": true
+          },
+          "response_schema": "literal"
+        }
+      }
+    },
+    "/api/save-backup/console/list": {
+      "get": {
+        "description": "`GET /api/save-backup/console/list?addr=&title_id=` — `{drive, kind, backups}`: that game's\nbackup copies on the chosen PS5 drive of that console, newest first (none when no drive is\nchosen, or it holds none).",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "addr",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "x-aliases": [
+              "console",
+              "host"
+            ]
+          },
+          {
+            "in": "query",
+            "name": "title_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "properties": {
+                        "backups": {
+                          "type": "array"
+                        },
+                        "drive": {
+                          "type": "string"
+                        },
+                        "kind": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    {
+                      "properties": {
+                        "backups": {
+                          "items": {
+                            "$ref": "#/components/schemas/BackupFile"
+                          },
+                          "type": "array"
+                        },
+                        "drive": {},
+                        "kind": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error",
+            "description": "Bad request"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error",
+            "description": "Refused by the engine's address, Origin or Host guards."
+          },
+          "500": {
+            "$ref": "#/components/responses/Error",
+            "description": "Engine error"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error",
+            "description": "The console or remote end failed"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error",
+            "description": "Any other failure, in the same shape."
+          }
+        },
+        "summary": "`{drive, kind, backups}`: that game's backup copies on the chosen PS5 drive of that console, newest first (none when no drive is chosen, or it holds none)",
+        "tags": [
+          "saves"
+        ],
+        "x-ps5upload": {
+          "access": "loopback",
+          "console": {
+            "aliases": [
+              "console",
+              "host"
+            ],
+            "in": "query",
+            "name": "addr",
+            "required": true
+          },
+          "response_schema": "literal"
+        }
+      }
+    },
+    "/api/save-backup/console/restore": {
+      "post": {
+        "description": "`POST /api/save-backup/console/restore` `{addr, title_id, file, save_path, user_id}` — puts a\nbackup copy on the chosen PS5 drive back, with the refusals and the backup first of `restore`.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/engine.save_backup.RestoreBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "403": {
+            "$ref": "#/components/responses/Error",
+            "description": "Refused by the engine's address, Origin or Host guards."
+          },
+          "500": {
+            "$ref": "#/components/responses/Error",
+            "description": "Engine error"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error",
+            "description": "The console or remote end failed"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error",
+            "description": "Any other failure, in the same shape."
+          }
+        },
+        "summary": "Puts a backup copy on the chosen PS5 drive back, with the refusals and the backup first of `restore`",
+        "tags": [
+          "saves"
+        ],
+        "x-ps5upload": {
+          "access": "loopback",
+          "console": {
+            "aliases": [
+              "console",
+              "host"
+            ],
+            "in": "body",
+            "name": "addr",
+            "required": true
+          },
+          "response_schema": "literal"
         }
       }
     },
@@ -46046,7 +47072,7 @@
     },
     "/api/save-backup/restore-to-user": {
       "post": {
-        "description": "`POST /api/save-backup/restore-to-user` `{addr, title_id, file, to_user, server?}`: a backup\nof one user's save into another user's save of the game.",
+        "description": "`POST /api/save-backup/restore-to-user` `{addr, title_id, file, to_user, server?, on_console?}`: a backup\nof one user's save into another user's save of the game.",
         "requestBody": {
           "content": {
             "application/json": {
@@ -49438,6 +50464,29 @@
             "$ref": "#/components/responses/Error",
             "description": "Refused by the engine's address, Origin or Host guards."
           },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "properties": {
+                        "error": {},
+                        "reason": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Conflict"
+          },
           "500": {
             "$ref": "#/components/responses/Error",
             "description": "Engine error"
@@ -49502,6 +50551,29 @@
           "403": {
             "$ref": "#/components/responses/Error",
             "description": "Refused by the engine's address, Origin or Host guards."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "properties": {
+                        "error": {},
+                        "reason": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Conflict"
           },
           "default": {
             "$ref": "#/components/responses/Error",
@@ -49666,6 +50738,29 @@
             "$ref": "#/components/responses/Error",
             "description": "Refused by the engine's address, Origin or Host guards."
           },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "properties": {
+                        "error": {},
+                        "reason": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Conflict"
+          },
           "default": {
             "$ref": "#/components/responses/Error",
             "description": "Any other failure, in the same shape."
@@ -49726,6 +50821,29 @@
           "403": {
             "$ref": "#/components/responses/Error",
             "description": "Refused by the engine's address, Origin or Host guards."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "properties": {
+                        "error": {},
+                        "reason": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Conflict"
           },
           "500": {
             "$ref": "#/components/responses/Error",
@@ -49814,6 +50932,15 @@
                         }
                       },
                       "type": "object"
+                    },
+                    {
+                      "properties": {
+                        "error": {},
+                        "reason": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
                     }
                   ]
                 }
@@ -49887,7 +51014,26 @@
             "description": "Refused by the engine's address, Origin or Host guards."
           },
           "409": {
-            "$ref": "#/components/responses/Error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "properties": {
+                        "error": {},
+                        "reason": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
             "description": "Conflict"
           },
           "500": {
@@ -49951,6 +51097,29 @@
             "$ref": "#/components/responses/Error",
             "description": "Refused by the engine's address, Origin or Host guards."
           },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "properties": {
+                        "error": {},
+                        "reason": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Conflict"
+          },
           "500": {
             "$ref": "#/components/responses/Error",
             "description": "Engine error"
@@ -50009,6 +51178,29 @@
           "403": {
             "$ref": "#/components/responses/Error",
             "description": "Refused by the engine's address, Origin or Host guards."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "properties": {
+                        "error": {},
+                        "reason": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Conflict"
           },
           "default": {
             "$ref": "#/components/responses/Error",
@@ -50176,6 +51368,29 @@
             "$ref": "#/components/responses/Error",
             "description": "Refused by the engine's address, Origin or Host guards."
           },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "properties": {
+                        "error": {},
+                        "reason": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Conflict"
+          },
           "500": {
             "$ref": "#/components/responses/Error",
             "description": "Engine error"
@@ -50241,6 +51456,29 @@
             "$ref": "#/components/responses/Error",
             "description": "Refused by the engine's address, Origin or Host guards."
           },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "properties": {
+                        "error": {},
+                        "reason": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Conflict"
+          },
           "default": {
             "$ref": "#/components/responses/Error",
             "description": "Any other failure, in the same shape."
@@ -50301,6 +51539,29 @@
           "403": {
             "$ref": "#/components/responses/Error",
             "description": "Refused by the engine's address, Origin or Host guards."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "properties": {
+                        "error": {},
+                        "reason": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Conflict"
           },
           "500": {
             "$ref": "#/components/responses/Error",

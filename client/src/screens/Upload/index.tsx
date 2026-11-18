@@ -1,4 +1,6 @@
 import BrowserFilePicker from "./BrowserFilePicker";
+import { UploadElsewhereDialog } from "./UploadElsewhereDialog";
+import { splitUploadFolder } from "../../lib/uploadDest";
 import { OPEN_FOLD } from "../Send/sendEvents";
 import { consoleAddr } from "../../lib/addr";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -119,6 +121,8 @@ import { BatchReview } from "./BatchReview";
 import { PkgChoiceField, PkgCopyHint } from "./PkgChoiceField";
 import {
   krakenCopyDestination,
+  krakenPrefillStep,
+  type KrakenReplaced,
   pkgChoiceOf,
   type PkgChoice,
 } from "../../lib/pkgUploadChoice";
@@ -577,6 +581,7 @@ export default function UploadScreen({
     entryCount: number;
     more: boolean;
     isFolder: boolean;
+    flat: boolean;
   }>(null);
   // Separate from transferPhase — covers the pre-flight window (probe
   // in flight, dialog not yet open) where phase is still "idle" but
@@ -589,6 +594,14 @@ export default function UploadScreen({
   // because otherwise a "preflight failed for /old/path" banner sticks
   // around after the user picks a fresh source — misleading.
   const [preflightError, setPreflightError] = useState<string | null>(null);
+  // "Another folder" in the already-on-the-PS5 question: the picker, then the same check again
+  // for the new place once the destination has changed.
+  const [elsewhereFrom, setElsewhereFrom] = useState<{
+    dest: string;
+    addr: string;
+    flat: boolean;
+  } | null>(null);
+  const recheckAfterMove = useRef(false);
 
   // Clear preflight error whenever the source changes (new file/folder
   // pick, or source cleared). The error is tied to the OLD source's
@@ -626,6 +639,13 @@ export default function UploadScreen({
     };
   }, [host]);
 
+  // The destination as the user picks it (not a prefill): a prefill never overrides it.
+  const userChoseDest = useRef(false);
+  const chooseDestination = (volume: string | null, subpath?: string) => {
+    userChoseDest.current = true;
+    setDestination(volume, subpath);
+  };
+
   // A .pkg copied as a file (for Kraken Mount): when Kraken Mount runs on this console, the
   // destination is set once to a folder it scans; the user can still change it.
   const pkgCopyIds = [
@@ -643,22 +663,25 @@ export default function UploadScreen({
   const mounterSnap = useMounterFor(host);
   const kraken = krakenRuns(mounterSnap) ? (mounterSnap?.kraken ?? null) : null;
   const krakenPrefilled = useRef<string | null>(null);
+  // What the prefill replaced, put back once no copied package remains.
+  const krakenReplaced = useRef<KrakenReplaced | null>(null);
   useEffect(() => {
-    if (!pkgCopyIds || !kraken) return;
-    const key = `${hostOf(host ?? "")}|${pkgCopyIds}`;
-    if (krakenPrefilled.current === key) return;
-    krakenPrefilled.current = key;
-    const d = krakenCopyDestination(
-      destinationVolume,
-      kraken,
-      availableVolumes.map((v) => v.path),
-    );
-    if (
-      d &&
-      (d.volume !== (destinationVolume ?? "/data") ||
-        d.subpath !== destinationSubpath.replace(/^\/+|\/+$/g, ""))
-    )
-      setDestination(d.volume, d.subpath);
+    const h = hostOf(host ?? "");
+    const key = `${h}|${pkgCopyIds}`;
+    if (pkgCopyIds && (!kraken || krakenPrefilled.current === key)) return;
+    krakenPrefilled.current = pkgCopyIds ? key : null;
+    const step = krakenPrefillStep({
+      host: h,
+      copying: !!pkgCopyIds,
+      userChose: userChoseDest.current,
+      current: { volume: destinationVolume, subpath: destinationSubpath },
+      target: kraken
+        ? krakenCopyDestination(destinationVolume, kraken, availableVolumes.map((v) => v.path))
+        : null,
+      replaced: krakenReplaced.current,
+    });
+    krakenReplaced.current = step.replaced;
+    if (step.set) setDestination(step.set.volume, step.set.subpath);
     // Once per copied package (and console): a later edit of the destination stays.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [pkgCopyIds, kraken, host]);
@@ -685,6 +708,27 @@ export default function UploadScreen({
     const id = handleAddToQueue(strategy);
     if (id && host) queueStartAdded(host, [id]);
   };
+
+  const pickAnotherFolder = (folder: string) => {
+    setElsewhereFrom(null);
+    const { volume, subpath } = splitUploadFolder(
+      folder,
+      availableVolumes.map((v) => v.path),
+    );
+    if (volume === (destinationVolume ?? "/data") && subpath === destinationSubpath.replace(/^\/+|\/+$/g, "")) {
+      void handleUpload();
+      return;
+    }
+    recheckAfterMove.current = true;
+    chooseDestination(volume, subpath);
+  };
+  useEffect(() => {
+    if (!recheckAfterMove.current) return;
+    recheckAfterMove.current = false;
+    void handleUpload();
+    // Runs once the picked folder is the destination; handleUpload reads it from this render.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [destinationVolume, destinationSubpath]);
 
   const beginUpload = (strategy: UploadStrategy) => {
     if (!source || !pending) return;
@@ -768,6 +812,8 @@ export default function UploadScreen({
         entryCount: probe.exists ? probe.entryCount : 0,
         more: probe.exists && probe.more === true,
         isFolder,
+        // Extracted straight into the destination: the destination is the folder itself.
+        flat: unpacks && !archiveIntoSubfolder,
       });
     } catch (e) {
       // Network/engine failure on probe — surface inline. Without this
@@ -944,7 +990,21 @@ export default function UploadScreen({
           isFolder={pending.isFolder}
           onOverride={() => beginUpload("overwrite")}
           onResume={() => beginUpload("resume")}
+          onElsewhere={() => {
+            setElsewhereFrom({ dest: pending.dest, addr: pending.addr, flat: pending.flat });
+            setPending(null);
+          }}
           onCancel={() => setPending(null)}
+        />
+      )}
+      {elsewhereFrom && (
+        <UploadElsewhereDialog
+          open
+          addr={elsewhereFrom.addr}
+          dest={elsewhereFrom.dest}
+          flat={elsewhereFrom.flat}
+          onCancel={() => setElsewhereFrom(null)}
+          onPick={pickAnotherFolder}
         />
       )}
       {!embedded && (
@@ -999,7 +1059,7 @@ export default function UploadScreen({
             <DestinationCard
               volume={destinationVolume}
               subpath={destinationSubpath}
-              onChange={setDestination}
+              onChange={chooseDestination}
               resolvedDest={`${destinationVolume ?? "/data"}/${destinationSubpath.replace(/^\/+|\/+$/g, "")}/…`}
               availableVolumes={availableVolumes}
             />
@@ -1102,7 +1162,7 @@ export default function UploadScreen({
           onSetMountAfterUpload={setMountAfterUpload}
           onSetMountReadOnly={setMountReadOnly}
           onSetRegisterAfterUpload={setRegisterAfterUpload}
-          onSetDestination={setDestination}
+          onSetDestination={chooseDestination}
           onSetPkgChoice={(c) => void setPkgChoice(c)}
           krakenRuns={inKrakenFolder}
           onSetExcludeMode={setExcludeMode}
@@ -2264,6 +2324,7 @@ function ExistingDestinationDialog({
   isFolder,
   onOverride,
   onResume,
+  onElsewhere,
   onCancel,
 }: {
   entryCount: number;
@@ -2272,6 +2333,8 @@ function ExistingDestinationDialog({
   isFolder: boolean;
   onOverride: () => void;
   onResume: () => void;
+  /** Pick another folder on the PS5 (offered when something is already there). */
+  onElsewhere?: () => void;
   onCancel: () => void;
 }) {
   const tr = useTr();
@@ -2282,11 +2345,11 @@ function ExistingDestinationDialog({
   const hasExisting = entryCount > 0;
   const canResume = hasExisting && isFolder;
 
+  // The path goes in the subtitle (it wraps there); a long name in the title
+  // was cut off on phones.
   const title = !hasExisting
     ? tr("upload_dialog_title_start", undefined, "Start upload?")
-    : isFolder
-      ? tr("upload_dialog_title_folder_exists", undefined, "Folder already has files")
-      : tr("upload_dialog_title_file_exists", undefined, "File already exists");
+    : tr("send_on_ps5", undefined, "Already on the PS5");
 
   const subtitle = !hasExisting ? (
     <>
@@ -2344,9 +2407,13 @@ function ExistingDestinationDialog({
             className={`${DIALOG_OPTION} ${hasExisting ? DIALOG_PLAIN : DIALOG_PRIMARY}`}
           >
             <span className="font-medium">
-              {hasExisting
-                ? tr("upload_override", "Override")
-                : tr("upload_start_upload", "Start upload")}
+              {/* "Replace" means delete-then-put; a folder here is merged into, so it
+                  says so. A single file is overwritten, which is a real replace. */}
+              {!hasExisting
+                ? tr("upload_start_upload", "Start upload")
+                : isFolder
+                  ? tr("upload_merge_into", undefined, "Merge into it")
+                  : tr("upload_replace", "Replace")}
             </span>
             <span
               className={
@@ -2354,14 +2421,39 @@ function ExistingDestinationDialog({
                 (hasExisting ? "text-[var(--color-muted)]" : "opacity-90")
               }
             >
-              {hasExisting
-                ? tr(
-                    "upload_override_desc2",
-                    "Sends everything again. Files with the same name are replaced. Other files already there stay.",
-                  )
-                : tr("upload_start_desc", "Send all files to the PS5.")}
+              {!hasExisting
+                ? tr("upload_start_desc", "Send all files to the PS5.")
+                : isFolder
+                  ? tr(
+                      "upload_merge_into_desc",
+                      undefined,
+                      "Files with the same name are replaced; other files already there stay.",
+                    )
+                  : tr(
+                      "upload_override_desc2",
+                      "Sends everything again. Files with the same name are replaced. Other files already there stay.",
+                    )}
             </span>
           </button>
+          {hasExisting && onElsewhere && (
+            <button
+              type="button"
+              onClick={onElsewhere}
+              className={`${DIALOG_OPTION} ${DIALOG_PLAIN}`}
+              data-testid="upload-dialog-another-folder"
+            >
+              <span className="font-medium">
+                {tr("upload_dialog_another_folder", undefined, "Another folder")}
+              </span>
+              <span className="text-xs text-[var(--color-muted)]">
+                {tr(
+                  "upload_dialog_another_folder_desc",
+                  undefined,
+                  "Pick a different folder on the PS5 for this upload.",
+                )}
+              </span>
+            </button>
+          )}
           <button
             type="button"
             onClick={onCancel}

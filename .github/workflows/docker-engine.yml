@@ -11,6 +11,7 @@ name: docker-engine
 # Tag pushes (v*) publish multi-arch (amd64 + arm64) manifests for both
 # images, in lockstep — one release cuts both. PRs that touch engine/ or
 # client/ get a build-only smoke-check of both Dockerfiles (no push).
+# This fork also publishes on every push to main (lz4-<commit>, lz4, latest).
 #
 # Image tags follow the release policy: every release is cut as a PRE-RELEASE
 # and promoted to a full release by hand on GitHub once it has run on a
@@ -77,6 +78,8 @@ jobs:
 
   # ── PR gate: build amd64, no push ──────────────────────────────────────────
   verify:
+    # This fork: the amd64 smoke build gates pull requests only; a push builds and smoke-tests
+    # the images it publishes.
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     # A full engine (and, for the web UI, client) build: ~7-10 min on a good
@@ -109,7 +112,8 @@ jobs:
           load: true
           tags: ps5upload-engine:smoke
           cache-from: type=gha
-          cache-to: type=gha,mode=min
+          # Written by a push to main only; a PR reads main's layers (RELEASING.md "CI caches").
+          cache-to: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') && 'type=gha,mode=min' || '' }}
 
       # Building proved nothing about whether the image works: 5.40.0 built
       # fine and refused every request, had no /tmp for uploads and no
@@ -117,7 +121,7 @@ jobs:
       - name: Smoke-test the image
         run: scripts/docker-smoke.sh ps5upload-engine:smoke
 
-  # ── PR gate for the webui image: same idea, root context + Dockerfile.webui ─
+  # ── Smoke-check of the webui image: same idea, root context + Dockerfile.webui ─
   verify-webui:
     needs: verify-nas
     if: github.event_name == 'pull_request'
@@ -156,7 +160,7 @@ jobs:
           load: true
           tags: ps5upload-engine-webui:smoke
           cache-from: type=gha,scope=webui
-          cache-to: type=gha,mode=min,scope=webui
+          cache-to: ${{ (github.event_name == 'push' && github.ref == 'refs/heads/main') && 'type=gha,mode=min,scope=webui' || '' }}
 
       - name: Smoke-test the image
         run: scripts/docker-smoke.sh ps5upload-engine-webui:smoke --webui
@@ -172,6 +176,8 @@ jobs:
   # and the lowercased image names are computed once via the safe env pattern
   # instead of interpolating ${{ github.repository_owner }} into shell.
   resolve:
+    # This fork: every push to main (and a dispatch) publishes the images (lz4-<commit>, lz4,
+    # latest); only a pull request doesn't.
     if: github.event_name != 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 5
