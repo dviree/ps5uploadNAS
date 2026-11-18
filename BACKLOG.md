@@ -13,7 +13,8 @@
   pass.
 - Still waiting for the owner's OK: Forge v0.5.6 (pinned 0.5.5) and ampr-emu-ng v0.4.1 (pinned
   920e917 / 0.4.0) in the NAS converter.
-- Next: verify the Docker build (it must publish on this push), then run the NAS updater.
+- The Docker build (run 56) is green and published: resolve, build, build-webui, merge and
+  merge-webui all ran. Next: the user runs the NAS updater.
 
 - 2026-11-17: merged PS5Upload 12.6.2 (0b7c3689; 12.5.1-12.6.2: zstd for every game, Convert
   on the PS5, Kraken Mount, save sync, copy .pkg as a file, payloads from you, every disk in
