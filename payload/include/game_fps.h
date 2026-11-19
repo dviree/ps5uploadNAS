@@ -20,7 +20,8 @@
  *   ioctl 0x80308217 on /dev/dce, 48-byte argument {selector, mask, output pointer, 3 reserved},
  *   selector 0x10000000A, mask 0x8000000000. The kernel writes a block to the output pointer
  *   (128 bytes on 13.60, more than some tools reserve); the count is the u64 at offset 8.
- *   Without a game it fails with ENOENT.
+ *   Without a game it fails with ENOENT. On 4.03 the word at offset 8 stays 0 and the count is
+ *   the block's first word (#865): the engine reads it from `head` (ps5upload-core game_fps.rs).
  *
  * Safety: the output block is a 16 KiB mapping followed by a PROT_NONE guard page, so a kernel
  * that writes more than expected fails the copy (EFAULT) instead of overwriting our memory. The
@@ -36,8 +37,11 @@
 #define GAME_FPS_COUNT_OFFSET 8
 #define GAME_FPS_BLOCK_BYTES  0x4000
 #define GAME_FPS_MARKER       0xA5
+/* The first bytes of what the kernel wrote, sent with each count as hex (#865): on firmware where
+ * the count at offset 8 never moves (4.x), the words that do move tell where the count is. */
+#define GAME_FPS_HEAD_BYTES   64
 /* A reply longer than this is a JSON line with room to spare. */
-#define GAME_FPS_JSON_MAX     192
+#define GAME_FPS_JSON_MAX     320
 
 enum {
     GAME_FPS_OK = 0,        /* `flips` is the count */
@@ -73,6 +77,7 @@ typedef struct {
     uint64_t mono_us; /* the helper's monotonic clock at the read */
     int err;          /* errno of a failed open or request, else 0 */
     uint32_t bytes;   /* how many bytes the kernel wrote (GAME_FPS_OK only) */
+    unsigned char head[GAME_FPS_HEAD_BYTES]; /* the block's first min(bytes, 64) bytes (OK only) */
 } game_fps_sample_t;
 
 /* One read through `ops` into `block` (GAME_FPS_BLOCK_BYTES, the guard page after it is the
@@ -81,7 +86,7 @@ typedef struct {
 int game_fps_read(const game_fps_ops_t *ops, int *fd, unsigned char *block, game_fps_sample_t *out);
 
 /* The reply body, one JSON object (no newline):
- *   {"ok":true,"state":"ok","flips":N,"mono_us":T,"bytes":B}
+ *   {"ok":true,"state":"ok","flips":N,"mono_us":T,"bytes":B,"head":"<hex, min(B, 64) bytes>"}
  *   {"ok":true,"state":"no_game","mono_us":T,"errno":E}      (also no_device, failed)
  * The keys are the fields of ps5upload-core's FlipRead; keep them in step. Returns the length,
  * or -1 when `cap` is too small. */

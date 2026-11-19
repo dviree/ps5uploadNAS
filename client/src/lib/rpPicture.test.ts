@@ -6,8 +6,10 @@ import {
   cropRect,
   isPlaneFormat,
   needsPass,
+  PlaneReader,
   planeLayout,
   rcasStops,
+  srcRect,
   readPicture,
   sharpens,
   upscaleSize,
@@ -202,7 +204,7 @@ describe("chromaBlank (#656 green picture)", () => {
     const { layout, size } = planeLayout(format, 64, 36);
     const data = new Uint8Array(size);
     data.fill(fill, layout[1].offset);
-    return { format, w: 64, h: 36, data, layout, colorSpace: null };
+    return { format, w: 64, h: 36, vis: { x: 0, y: 0, w: 64, h: 36 }, complete: true, data, layout, colorSpace: null };
   };
   it("is true when the copy left the chroma at zero", () => {
     expect(chromaBlank(frame("NV12", 0))).toBe(true);
@@ -211,5 +213,134 @@ describe("chromaBlank (#656 green picture)", () => {
   it("is false for a real (even black) picture", () => {
     expect(chromaBlank(frame("NV12", 128))).toBe(false);
     expect(chromaBlank(frame("I420", 128))).toBe(false);
+  });
+});
+
+/** A VideoFrame whose copyTo writes the requested rect's planes, all but the last `short`
+ *  rows of each (0: all of them), the way a Linux app's 1080p copy came back. */
+function fakeFrame(format: "NV12" | "I420", cw: number, ch: number, vh: number, short: number) {
+  const calls: Array<{ rect: { x: number; y: number; width: number; height: number }; layout: Array<{ offset: number; stride: number }> }> = [];
+  const frame = {
+    format,
+    codedWidth: cw,
+    codedHeight: ch,
+    visibleRect: { x: 0, y: 0, width: cw, height: vh },
+    colorSpace: null,
+    async copyTo(buf: Uint8Array, o: { rect: { x: number; y: number; width: number; height: number }; layout: Array<{ offset: number; stride: number }> }) {
+      calls.push(o);
+      const w = o.rect.width;
+      const h = o.rect.height;
+      const c = Math.ceil(w / 2);
+      const planes = format === "NV12" ? [{ rw: w, rh: h }, { rw: c * 2, rh: Math.ceil(h / 2) }] : [{ rw: w, rh: h }, { rw: c, rh: Math.ceil(h / 2) }, { rw: c, rh: Math.ceil(h / 2) }];
+      planes.forEach((pl, i) => {
+        const rows = short && h > 2 * short ? pl.rh - Math.ceil(short / (i ? 2 : 1)) : pl.rh;
+        for (let r = 0; r < rows; r++) buf.fill(100, o.layout[i].offset + r * o.layout[i].stride, o.layout[i].offset + r * o.layout[i].stride + pl.rw);
+      });
+    },
+  };
+  return { frame: frame as unknown as VideoFrame, calls };
+}
+
+describe("PlaneReader end marks (green band under a 1080p picture)", () => {
+  it("a copy that fills every row is complete", async () => {
+    for (const format of ["NV12", "I420"] as const) {
+      const { frame } = fakeFrame(format, 1920, 1088, 1080, 0);
+      const p = await new PlaneReader().read(frame);
+      expect(p?.complete).toBe(true);
+      expect(p?.h).toBe(1080);
+    }
+  });
+  it("a copy that leaves the last rows empty is not, even with stale rows from the last frame", async () => {
+    const r = new PlaneReader();
+    const { frame } = fakeFrame("NV12", 1920, 1088, 1080, 0);
+    await r.read(frame);
+    const short = fakeFrame("NV12", 1920, 1088, 1080, 68);
+    expect((await r.read(short.frame))?.complete).toBe(false);
+  });
+  it("coded mode copies the whole coded frame and keeps the visible part", async () => {
+    const r = new PlaneReader();
+    r.mode = "coded";
+    const { frame, calls } = fakeFrame("NV12", 1920, 1088, 1080, 0);
+    const p = await r.read(frame);
+    expect(calls[0].rect).toEqual({ x: 0, y: 0, width: 1920, height: 1088 });
+    expect(p).toMatchObject({ w: 1920, h: 1088, vis: { x: 0, y: 0, w: 1920, h: 1080 }, complete: true });
+    expect(PlaneReader.codedDiffers(frame)).toBe(true);
+  });
+  // The picture is drawn with one coordinate for luma and chroma, and the chroma planes are read
+  // with linear filtering: the last visible luma row (1079) reads chroma a quarter of the way
+  // into row 540, which a coded copy holds as padding (whatever the encoder left there; zeros
+  // are green). A visible copy ends at row 539, and the texture's edge repeats it.
+  it("coded mode repeats the picture's last chroma row and column into the padding next to them", async () => {
+    for (const format of ["NV12", "I420"] as const) {
+      const r = new PlaneReader();
+      r.mode = "coded";
+      // 16×16 coded, 12×10 visible at (2, 2): chroma 8×8, the picture's chroma columns 1-6, rows 1-5.
+      const frame = {
+        format,
+        codedWidth: 16,
+        codedHeight: 16,
+        visibleRect: { x: 2, y: 2, width: 12, height: 10 },
+        colorSpace: null,
+        async copyTo(buf: Uint8Array, o: { layout: Array<{ offset: number; stride: number }> }) {
+          const px = format === "NV12" ? 2 : 1;
+          buf.fill(200, 0, 256);
+          o.layout.slice(1).forEach((l) => {
+            for (let y = 0; y < 8; y++)
+              for (let x = 0; x < 8; x++) {
+                const inside = x >= 1 && x <= 6 && y >= 1 && y <= 5;
+                for (let b = 0; b < px; b++) buf[l.offset + y * l.stride + x * px + b] = inside ? 100 + y * 8 + x + b * 50 : 0;
+              }
+          });
+        },
+      } as unknown as VideoFrame;
+      const p = (await r.read(frame))!;
+      expect(p.complete).toBe(true);
+      const px = format === "NV12" ? 2 : 1;
+      const at = (l: { offset: number; stride: number }, x: number, y: number, b = 0) => p.data[l.offset + y * l.stride + x * px + b];
+      for (const l of p.layout.slice(1)) {
+        for (let b = 0; b < px; b++) {
+          // Below and above the picture: the row next to it.
+          for (let x = 0; x < 8; x++) {
+            expect(at(l, x, 6, b)).toBe(at(l, x, 5, b));
+            expect(at(l, x, 0, b)).toBe(at(l, x, 1, b));
+          }
+          // Right and left of it: the column next to it.
+          for (let y = 0; y <= 6; y++) {
+            expect(at(l, 7, y, b)).toBe(at(l, 6, y, b));
+            expect(at(l, 0, y, b)).toBe(at(l, 1, y, b));
+          }
+          // The picture itself is as copied.
+          expect(at(l, 3, 3, b)).toBe(100 + 3 * 8 + 3 + b * 50);
+          expect(at(l, 6, 5, b)).toBe(100 + 5 * 8 + 6 + b * 50);
+        }
+      }
+    }
+  });
+  it("visible mode asks for the visible rect", async () => {
+    const { frame, calls } = fakeFrame("I420", 1280, 720, 720, 0);
+    await new PlaneReader().read(frame);
+    expect(calls[0].rect).toEqual({ x: 0, y: 0, width: 1280, height: 720 });
+    expect(PlaneReader.codedDiffers(frame)).toBe(false);
+  });
+});
+
+describe("srcRect", () => {
+  const planes = (w: number, h: number, vh: number) => {
+    const { layout, size } = planeLayout("NV12", w, h);
+    return { format: "NV12" as const, w, h, vis: { x: 0, y: 0, w, h: vh }, complete: true, data: new Uint8Array(size), layout, colorSpace: null };
+  };
+  it("reads the whole texture for visible planes", () => {
+    expect(srcRect(planes(1920, 1080, 1080), 1080, { y: 0, h: 1080 })).toEqual([0, 0, 1, 1]);
+  });
+  it("reads only the visible rows of a coded copy", () => {
+    const [x, y, w, h] = srcRect(planes(1920, 1088, 1080), 1080, { y: 0, h: 1080 });
+    expect([x, y, w]).toEqual([0, 0, 1]);
+    expect(h).toBeCloseTo(1080 / 1088);
+  });
+  it("keeps a 21:9 crop within the visible rows", () => {
+    const crop = cropRect(1920, 1080, true);
+    const [, y, , h] = srcRect(planes(1920, 1088, 1080), 1080, crop);
+    expect(y).toBeCloseTo(crop.y / 1088);
+    expect(h).toBeCloseTo(crop.h / 1088);
   });
 });
