@@ -11,7 +11,8 @@
   Checks: engine 2192, core 891, fpkg 390, 6732 vitest tests, tsc, i18n and the NAS checks
   pass.
 - Still waiting for the owner's OK: Forge v0.5.6 and ampr-emu-ng v0.4.1 for the NAS converter.
-- Next: verify the Docker build (publishing jobs ran), then run the NAS updater.
+- The Docker build (run 58) is green and published (merge and merge-webui ran). Next: the user
+  runs the NAS updater.
 
 - 2026-11-19: merged PS5Upload 12.6.9 plus 72cce211 (Remote Play on Linux, full audit fixes,
   speed limit on Windows, frame rate on firmware 4.x, the Files move line on a phone).
