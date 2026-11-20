@@ -749,7 +749,7 @@
         "type": "object"
       },
       "AppUnregisterReq": {
-        "description": "Reverse of `app_register`, and the uninstall of a package install. A\nSony refusal is an error (502) from a 7.1.6 helper; from an older one it is\n`sony_uninstall_refused` in an `ok` reply, which the client must check\n(#476). `still_present` says the title's folders were still there after\nSony accepted (`null` from an older helper).",
+        "description": "Reverse of `app_register`, and the uninstall of a package install. A\nSony refusal is an error (502) from a 7.1.6 helper; from an older one it is\n`sony_uninstall_refused` in an `ok` reply, which the client must check\n(#476). `still_present` says the title was still listed, or still on the\nhome screen, after Sony accepted (`null` from an older helper);\n`unverified` that app.db could not be read to check the home screen; and\n`managed_by: \"shadowmount\"` + `image` that ShadowMount+ registers it from\nthat image and puts it back on its next scan while the image is in a scan\nfolder (#879).",
         "properties": {
           "addr": {
             "type": [
@@ -15268,6 +15268,7 @@
             ]
           },
           "uid": {
+            "description": "The console user id: unsigned (0 to 4294967295) or the same 32 bits signed (-2147483648 to -1).",
             "type": "integer"
           },
           "wipe_saves": {
@@ -28466,14 +28467,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "anyOf": [
-                    {
-                      "$ref": "#/components/schemas/SharedLink"
-                    },
-                    {
-                      "$ref": "#/components/schemas/InstallStartResponse"
-                    }
-                  ]
+                  "$ref": "#/components/schemas/InstallStartResponse"
                 }
               }
             },
@@ -28537,12 +28531,10 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/SharedLink"
-                }
+                "schema": {}
               }
             },
-            "description": "Success."
+            "description": "Success: JSON the engine does not describe field by field, often what the console sent."
           },
           "403": {
             "$ref": "#/components/responses/Error",
@@ -28567,7 +28559,7 @@
         ],
         "x-ps5upload": {
           "access": "loopback",
-          "response_schema": "struct"
+          "response_schema": "json-unknown"
         }
       }
     },
@@ -30567,6 +30559,8 @@
               "application/json": {
                 "schema": {
                   "properties": {
+                    "image": {},
+                    "managed_by": {},
                     "ok": {
                       "type": "boolean"
                     },
@@ -30576,7 +30570,8 @@
                     "sony_uninstall_refused": {
                       "type": "boolean"
                     },
-                    "still_present": {}
+                    "still_present": {},
+                    "unverified": {}
                   },
                   "type": "object"
                 }
@@ -33238,10 +33233,59 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "properties": {
+                    "bytes": {
+                      "type": "integer"
+                    },
+                    "dirs_scanned": {
+                      "type": "integer"
+                    },
+                    "elapsed_ms": {
+                      "type": "integer"
+                    },
+                    "error": {
+                      "type": "string"
+                    },
+                    "files": {
+                      "type": "integer"
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "partial": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "skipped": {
+                      "type": "integer"
+                    },
+                    "state": {
+                      "enum": [
+                        "running",
+                        "done",
+                        "cancelled",
+                        "failed"
+                      ],
+                      "type": "string"
+                    },
+                    "tree": {
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "path",
+                    "state",
+                    "elapsed_ms"
+                  ],
+                  "type": "object"
+                }
               }
             },
-            "description": "Success: JSON the engine does not describe field by field, often what the console sent."
+            "description": "How the walk stands; `tree` once it is done (made once, when the walk ends)."
           },
           "400": {
             "$ref": "#/components/responses/Error",
@@ -33297,7 +33341,7 @@
             "name": "addr",
             "required": false
           },
-          "response_schema": "json-unknown"
+          "response_schema": "described"
         }
       }
     },
@@ -33318,10 +33362,59 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "properties": {
+                    "bytes": {
+                      "type": "integer"
+                    },
+                    "dirs_scanned": {
+                      "type": "integer"
+                    },
+                    "elapsed_ms": {
+                      "type": "integer"
+                    },
+                    "error": {
+                      "type": "string"
+                    },
+                    "files": {
+                      "type": "integer"
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "partial": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "skipped": {
+                      "type": "integer"
+                    },
+                    "state": {
+                      "enum": [
+                        "running",
+                        "done",
+                        "cancelled",
+                        "failed"
+                      ],
+                      "type": "string"
+                    },
+                    "tree": {
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "path",
+                    "state",
+                    "elapsed_ms"
+                  ],
+                  "type": "object"
+                }
               }
             },
-            "description": "Success: JSON the engine does not describe field by field, often what the console sent."
+            "description": "How the walk stands; `tree` once it is done (made once, when the walk ends)."
           },
           "403": {
             "$ref": "#/components/responses/Error",
@@ -33342,7 +33435,7 @@
         ],
         "x-ps5upload": {
           "access": "loopback",
-          "response_schema": "json-unknown"
+          "response_schema": "described"
         }
       }
     },
@@ -33363,10 +33456,59 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "properties": {
+                    "bytes": {
+                      "type": "integer"
+                    },
+                    "dirs_scanned": {
+                      "type": "integer"
+                    },
+                    "elapsed_ms": {
+                      "type": "integer"
+                    },
+                    "error": {
+                      "type": "string"
+                    },
+                    "files": {
+                      "type": "integer"
+                    },
+                    "id": {
+                      "type": "string"
+                    },
+                    "partial": {
+                      "type": "string"
+                    },
+                    "path": {
+                      "type": "string"
+                    },
+                    "skipped": {
+                      "type": "integer"
+                    },
+                    "state": {
+                      "enum": [
+                        "running",
+                        "done",
+                        "cancelled",
+                        "failed"
+                      ],
+                      "type": "string"
+                    },
+                    "tree": {
+                      "type": "object"
+                    }
+                  },
+                  "required": [
+                    "id",
+                    "path",
+                    "state",
+                    "elapsed_ms"
+                  ],
+                  "type": "object"
+                }
               }
             },
-            "description": "Success: JSON the engine does not describe field by field, often what the console sent."
+            "description": "How the walk stands; `tree` once it is done (made once, when the walk ends)."
           },
           "403": {
             "$ref": "#/components/responses/Error",
@@ -33387,7 +33529,7 @@
         ],
         "x-ps5upload": {
           "access": "loopback",
-          "response_schema": "json-unknown"
+          "response_schema": "described"
         }
       }
     },
@@ -44029,7 +44171,10 @@
                     "ok": {
                       "type": "boolean"
                     },
-                    "uid": {}
+                    "uid": {
+                      "minimum": 0,
+                      "type": "integer"
+                    }
                   },
                   "type": "object"
                 }

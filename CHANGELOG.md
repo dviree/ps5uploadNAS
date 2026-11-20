@@ -6,6 +6,60 @@ What's new in ps5upload, written for humans.
 
 ## Unreleased
 
+**Fixes**
+- **The PS5 helper starts again when it is sent twice at once (#877).** In 12.6.13, when a payload loader and you both started the helper within a few seconds, the second copy stepped aside, and if the first then failed to start, no helper was left running and the app said the helper isn't reachable. The second copy now waits for the first and takes over if the first doesn't come up.
+- **An older helper is named as one.** When the PS5 runs an older helper (for example one a payload loader starts when the PS5 boots), the app now says an older helper is running and offers to send the new one, instead of saying the helper isn't reachable.
+- **Uninstalling a game that ShadowMount+ put on the home screen (#879).** The app no longer takes apart ShadowMount+'s own mount when you uninstall such a game, and it tells you that ShadowMount+ will add the game back on its next scan while its image is still in a scan folder. The app also no longer reports an uninstall as done while the game's tile is still on the home screen, and says so when it could not check.
+- The helper only takes down a game's mount when it is one it made itself, never the console's own mount of an installed game.
+- Not yet tried on a console.
+
+## 12.6.13
+
+**Fixes**
+- **A resumed upload finishes sooner (#873).** After an interrupted upload was resumed, the PS5 checked everything it had written before the interruption only after the last byte arrived, which could take minutes for a large game. It now checks those bytes while the rest of the file is still arriving. Stopping an upload also no longer waits up to 30 seconds while the PS5 works out its free space.
+- **Sending the PS5 helper twice at the same moment no longer leaves the two fighting.** One starts, the other steps aside. A stuck helper no longer makes the next one wait about a minute instead of 10 seconds.
+- **Deleting a user always deletes the user you picked.** Users with very large id numbers could be mixed up in the saves list or could not be deleted at all.
+- **Building from a large solid RAR or 7z archive** no longer leaves the app waiting with no progress and no Stop while the archive is scanned.
+- **Installing from a saved server** opens the package once instead of twice and reads it in larger pieces.
+- **Folder uploads stop right away** when you press Stop, even while the app is still listing the folder.
+- **Saved servers:** browsing an FTP server no longer waits for an upload on the same server to finish; long folders page faster.
+- **Copying a folder from a PS5 share** that holds a file with a very long name now says so, instead of reporting done with that file missing.
+- **Cheats:** searching is faster, and a search with no connection says it failed instead of showing no results.
+- **Mesh Drive:** a PS5 that stops answering mid-sync is marked as away instead of failing every file after it.
+- **Windows:** a build into a folder you cannot write to says so, instead of "already being built"; Tailscale works when your Windows user name has non-English letters.
+- **The PS5's package installer** no longer lets a stalled connection hold a slot for hours.
+- Smaller fixes: the engine log never skips a line, finished install sessions are cleaned up, the update check gives up quickly on a dead network, and a Payload Manager rename interrupted once is finished the next time.
+- The PS5 helper changes have not been run on a console yet.
+
+## 12.6.12
+
+**New**
+- **Save a link straight to a PS5 folder, without installing it (#872).** In Files, More › Download from a link saves the file into the folder that is open. On Send, a package link has a new "Save to a PS5 folder" button next to Install. The file goes to the console over your network and is not stored on this computer.
+- **Links from servers that only send a file in one piece now work (#872).** Some download hosts cannot hand out parts of a file. Such a link was refused everywhere. Now it can be saved to a PS5 folder, and a package from it installs by saving to this computer first (the app picks that way and says so). If one of these downloads is interrupted it starts again from the beginning, and the app tells you that before you start.
+
+**Fixes**
+- **Extracting an archive that doesn't fit is now really refused at the start (#869).** The check added in 12.6.11 did not run on the console when the archive was extracted into a new folder, which is the usual case. It does now. The PS5 also stops an extraction when the drive runs out of room, before the drive's last reserved space is used up.
+- **Uploads no longer show "Finalizing on PS5" while data is still being sent (#873).** After a Stop and Resume the app could count some bytes twice and show 100% early. When the PS5 really is quiet after the last byte, the row now says for how long, and the log records what the PS5 was doing. The long wait in the report is not explained yet; these details are there to find it.
+- **Screens keep what you were doing when you look at another console and come back.** Screenshots and Videos selections, Play set-up steps, the game page's lists and open dialogs, running Workshop tools, the Payloads cards, the shell session, the kernel log and search results were all reset.
+- **Files:** two drops in a row no longer run as two mixed-up operations; Send to another console waits until it knows what is already there; an upload queue resumed after a dropped connection carries on with the rest by itself.
+- **Queue and installs:** Retry on one failed install no longer starts the whole queue; Stop is no longer lost while archive parts download; Clear finished no longer deletes a package that is queued to install again; an install the PS5 never confirmed is no longer shown as "installed and verified".
+- **Saves:** two save operations on one console now wait for each other (they could close each other's save half done); the backup server choice no longer snaps back; Save to USB no longer fails because you looked at another console.
+- **Remote Play:** two crashes on damaged network packets; a black picture for the whole session on systems without the fast video decoder; screenshots that came out blank; one console's stream error showing on every console's Play page.
+- **Updates:** "Check for updates" no longer forgets an update that is already downloaded.
+- **Building images and packages on Windows:** a finished build is no longer deleted when an antivirus or indexer holds the file for a moment; the rename is retried and the file is kept.
+- **Saved servers:** FTP copies no longer hang at 100%; some FTP listings no longer hide files; copying a server folder to this computer no longer overwrites a file whose name differs only in upper and lower case, and downloads from the PS5 refuse that case with a clear message.
+- **Linux AppImage:** Open folder, keeping the PC awake during a transfer, and finding a leftover engine now work on systems where they silently did nothing.
+- **Android:** Reset PS5Upload no longer fails half way.
+- **On the PS5:** cheat, crash-guard and Remote Play PIN messages now appear on the TV; one broken cheat no longer blocks turning the others off; snapshots no longer mix up files whose paths look alike; on a full drive, re-registering a game no longer empties its icon and details, and fan settings are no longer lost; the shell's `cp` no longer empties a file copied onto itself.
+- Many smaller fixes from a full review of the app, the engine and the PS5 helper. The helper changes have not been run on a console yet.
+
+## 12.6.11
+
+**Fixes**
+- **Extracting a RAR that doesn't fit is refused at the start, not at 99% (#869).** A 150 GB multi-part RAR extracted for over two hours, then failed because the drive was full. The PS5 now adds up the files in the archive first, which takes a few seconds, and says right away when the drive has too little room. This works for RARs that are not "solid" (the usual kind for games); a solid one is still checked file by file as before. Not yet tried on a console.
+
+## 12.6.10
+
 Three fixes from reports.
 
 **Fixes**

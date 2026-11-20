@@ -11,6 +11,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/file.h> /* flock */
 #include <sys/socket.h>
 #include <sys/stat.h>
 #if defined(__APPLE__) || defined(__FreeBSD__)
@@ -190,19 +191,161 @@ int takeover_gate_start(int port, int max_ms, int interval_ms, void (*start)(voi
     return 1;
 }
 
+static long long mono_ms_now(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000LL + ts.tv_nsec / 1000000L;
+}
+
 int takeover_flag_request(const char *dir, uint64_t my_nonce, const int *ports, int nports,
                           int attempts, int interval_us) {
     if (takeover_flag_write(dir, my_nonce) != 0) return -1;
-    for (int i = 0; i < attempts; i++) {
+    /* Bounded by the monotonic clock, not by the number of probes: a probe of a wedged predecessor
+     * takes its whole TAKEOVER_PROBE_MS, which turned a 10 s wait into about a minute. */
+    if (attempts < 1) attempts = 1;
+    if (interval_us < 0) interval_us = 0;
+    long long budget_ms = ((long long)attempts * interval_us) / 1000LL;
+    long long t0 = mono_ms_now();
+    for (;;) {
         int busy = 0;
         for (int p = 0; p < nports; p++) busy |= takeover_port_responding(ports[p]);
         if (!busy) {
             takeover_flag_unlink(dir);
             return 0;
         }
+        if (mono_ms_now() - t0 >= budget_ms) return -1;
         usleep((useconds_t)interval_us);
     }
-    return -1;
+}
+
+#define START_LOCK_NAME "start.lock"
+
+/* The host self-test builds with -DTAKEOVER_FLOCK=<its own> to stand in for a file system or
+ * firmware where flock fails. */
+#ifndef TAKEOVER_FLOCK
+#define TAKEOVER_FLOCK flock
+#else
+int TAKEOVER_FLOCK(int fd, int op);
+#endif
+
+/* One try. Fills *outcome (TAKEOVER_START_HELD / _NO_FILE / _NO_FLOCK / _STUCK, or 0 for busy),
+ * *err (the errno behind _NO_FILE / _NO_FLOCK) and *age_ms (the holder's age, -1 when unknown). */
+static int start_lock_try(const char *dir, int max_age_ms, int *holder_pid, int *outcome, int *err,
+                          long long *age_ms) {
+    char path[300], body[64];
+    *holder_pid = 0;
+    *outcome = 0;
+    *err = 0;
+    *age_ms = -1;
+    if (!dir || flag_path(path, sizeof path, dir, START_LOCK_NAME)) {
+        *outcome = TAKEOVER_START_NO_FILE;
+        return TAKEOVER_START_NO_LOCK;
+    }
+    /* Never O_TRUNC and never unlinked: the file is only a name for the kernel's lock, and the lock
+     * dies with its holder, so a file left by a crash or a power cut holds nothing. */
+    int fd = open(path, O_RDWR | O_CREAT, 0644);
+    if (fd < 0) {
+        *err = errno;
+        *outcome = TAKEOVER_START_NO_FILE;
+        return TAKEOVER_START_NO_LOCK;
+    }
+    if (TAKEOVER_FLOCK(fd, LOCK_EX | LOCK_NB) == 0) {
+        /* Best effort: if this fails the lock is held all the same, only the holder's age is unknown
+         * to the others (they then bound their wait by their own clock). */
+        int n = snprintf(body, sizeof body, "%d %lld\n", (int)getpid(), mono_ms_now());
+        if (ftruncate(fd, 0) == 0 && n > 0) (void)pwrite(fd, body, (size_t)n, 0);
+        *outcome = TAKEOVER_START_HELD;
+        return fd;
+    }
+    int e = errno;
+    if (e != EWOULDBLOCK && e != EAGAIN) {
+        /* No locks on this file system or firmware (EOPNOTSUPP, EINVAL, ENOLCK, ...): start as before,
+         * without one. Never read as "held". */
+        close(fd);
+        *err = e;
+        *outcome = TAKEOVER_START_NO_FLOCK;
+        return TAKEOVER_START_NO_LOCK;
+    }
+    /* Another helper is starting. For how long? */
+    int pid = 0;
+    long long since = -1;
+    ssize_t got = pread(fd, body, sizeof body - 1, 0);
+    close(fd);
+    if (got > 0) {
+        body[got] = '\0';
+        if (sscanf(body, "%d %lld", &pid, &since) != 2 || since < 0) {
+            pid = 0;
+            since = -1;
+        }
+    }
+    *holder_pid = pid;
+    /* Unreadable: the holder took the lock this instant and has not written yet (or could not write).
+     * A stamp ahead of our clock is a body left from an earlier boot that the holder could not
+     * overwrite. Either way the age is unknown. */
+    if (since < 0) return TAKEOVER_START_BUSY;
+    long long age = mono_ms_now() - since;
+    if (age < 0) return TAKEOVER_START_BUSY;
+    *age_ms = age;
+    if (age > (long long)max_age_ms) {
+        *outcome = TAKEOVER_START_STUCK;
+        return TAKEOVER_START_NO_LOCK;
+    }
+    return TAKEOVER_START_BUSY;
+}
+
+int takeover_start_lock(const char *dir, int max_age_ms, int *holder_pid) {
+    int pid = 0, outcome = 0, err = 0;
+    long long age = -1;
+    int r = start_lock_try(dir, max_age_ms, &pid, &outcome, &err, &age);
+    if (holder_pid) *holder_pid = pid;
+    return r;
+}
+
+int takeover_start_lock_wait(const char *dir, int max_age_ms, int poll_ms, takeover_start_info_t *info) {
+    takeover_start_info_t local;
+    takeover_start_info_t *in = info ? info : &local;
+    memset(in, 0, sizeof *in);
+    in->holder_age_ms = -1;
+    if (poll_ms < 1) poll_ms = 1;
+    long long t0 = mono_ms_now();
+    long long since_holder = t0; /* when the holder we are waiting on was first seen */
+    int last_pid = -1;
+    for (;;) {
+        int pid = 0, outcome = 0, err = 0;
+        long long age = -1;
+        int r = start_lock_try(dir, max_age_ms, &pid, &outcome, &err, &age);
+        long long now = mono_ms_now();
+        in->waited_ms = now - t0;
+        if (r != TAKEOVER_START_BUSY) {
+            in->outcome = outcome;
+            in->flock_errno = err;
+            if (outcome == TAKEOVER_START_STUCK) {
+                in->holder_pid = pid;
+                in->holder_age_ms = age;
+            }
+            return r;
+        }
+        in->waited = 1;
+        in->holder_pid = pid;
+        in->holder_age_ms = age;
+        if (pid != last_pid) {
+            /* A different holder (the one before finished and a third start took the lock): its
+             * start is judged from now, not from when this one began waiting. */
+            last_pid = pid;
+            since_holder = now;
+        }
+        /* The holder's own stamp is unknown or unusable: bound the wait by our own clock, so a holder
+         * that hangs without a readable age cannot keep this start waiting for good. */
+        if (age < 0 && now - since_holder > (long long)max_age_ms) {
+            in->outcome = TAKEOVER_START_STUCK;
+            return TAKEOVER_START_NO_LOCK;
+        }
+        usleep((useconds_t)poll_ms * 1000u);
+    }
+}
+
+void takeover_start_unlock(int fd) {
+    if (fd >= 0) close(fd); /* closing the only descriptor releases the lock */
 }
 
 typedef struct {

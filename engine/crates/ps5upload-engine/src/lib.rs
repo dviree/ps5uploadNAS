@@ -1111,10 +1111,24 @@ async fn browser_origin_guard(req: Request, next: Next) -> impl IntoResponse {
 /// for each regular file so the UI can render per-file progress.
 /// Errors silently skipped (matches the permissive walk elsewhere).
 fn walk_plan(root: &std::path::Path, excludes: &[String]) -> (u64, Vec<PlannedFile>) {
+    walk_plan_until(root, excludes, &AtomicBool::new(false))
+}
+
+/// [`walk_plan`] that ends at the next folder once `stop` is set (the job was stopped): what it
+/// returns then is a part of the plan, for a caller that checks `stop` and goes no further. A
+/// folder upload used to go on walking a large source to its end after Stop.
+fn walk_plan_until(
+    root: &std::path::Path,
+    excludes: &[String],
+    stop: &AtomicBool,
+) -> (u64, Vec<PlannedFile>) {
     let mut stack = vec![root.to_path_buf()];
     let mut total = 0u64;
     let mut out = Vec::new();
     while let Some(dir) = stack.pop() {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
         let Ok(rd) = std::fs::read_dir(&dir) else {
             continue;
         };
@@ -1152,15 +1166,29 @@ fn walk_plan(root: &std::path::Path, excludes: &[String]) -> (u64, Vec<PlannedFi
 /// `walk_plan` over any source (a saved server): one listing per folder, sizes from the listing.
 /// A folder that cannot be listed fails the plan — over a network that is a dropped connection
 /// or a permission problem, and skipping it would upload an incomplete game and call it done.
+#[cfg(test)]
 fn walk_plan_with(
     fs: &dyn ps5upload_core::source_fs::SourceFs,
     root: &std::path::Path,
     excludes: &[String],
 ) -> Result<(u64, Vec<PlannedFile>), String> {
+    walk_plan_with_until(fs, root, excludes, &AtomicBool::new(false))
+}
+
+/// [`walk_plan_with`] that ends at the next folder once `stop` is set (see [`walk_plan_until`]).
+fn walk_plan_with_until(
+    fs: &dyn ps5upload_core::source_fs::SourceFs,
+    root: &std::path::Path,
+    excludes: &[String],
+    stop: &AtomicBool,
+) -> Result<(u64, Vec<PlannedFile>), String> {
     let mut stack = vec![root.to_path_buf()];
     let mut total = 0u64;
     let mut out = Vec::new();
     while let Some(dir) = stack.pop() {
+        if stop.load(Ordering::Relaxed) {
+            break;
+        }
         let children = fs
             .read_dir(&dir)
             .map_err(|e| format!("could not list {}: {e}", dir.display()))?;
@@ -1589,8 +1617,9 @@ fn attach_live_notes(cfg: &mut TransferConfig, job_id: Uuid) {
 }
 
 /// Adds a running job's live notes to its snapshot JSON: `phase` (`"skipping"` with
-/// `skip_done_bytes` / `skip_total_bytes`), `bottleneck` (AVA1's word), `settling` and
-/// `verifying` (the console reads its last large files back, #783). Fields
+/// `skip_done_bytes` / `skip_total_bytes`), `bottleneck` (AVA1's word), `settling`,
+/// `verifying` (the console reads its last large files back, #783) and, once the console has
+/// every byte, `all_sent_ms` / `console_quiet_ms` (#873). Fields
 /// that do not apply are absent, so the client shows nothing for them. A snapshot that is not
 /// `running` is returned as it is.
 pub(crate) fn merge_live_notes(
@@ -1677,6 +1706,17 @@ pub(crate) fn merge_live_notes(
     // Every byte is on the console and it is reading the last large files back (#783).
     if n.verifying.load(Relaxed) && !n.settling.load(Relaxed) {
         o.insert("verifying".into(), true.into());
+    }
+    // The stretch after the last byte (#873): how long ago the console acknowledged it, and
+    // how long since it last confirmed anything new. A client tells a console that is getting
+    // on with it (the second stays small) from one that has gone quiet (it grows).
+    let all_sent_ms = n.all_sent_ms.load(Relaxed);
+    if all_sent_ms > 0 {
+        o.insert("all_sent_ms".into(), all_sent_ms.into());
+        o.insert(
+            "console_quiet_ms".into(),
+            n.console_quiet_ms.load(Relaxed).into(),
+        );
     }
     v
 }
@@ -3429,8 +3469,12 @@ async fn ps5_app_register(
 /// Reverse of `app_register`, and the uninstall of a package install. A
 /// Sony refusal is an error (502) from a 7.1.6 helper; from an older one it is
 /// `sony_uninstall_refused` in an `ok` reply, which the client must check
-/// (#476). `still_present` says the title's folders were still there after
-/// Sony accepted (`null` from an older helper).
+/// (#476). `still_present` says the title was still listed, or still on the
+/// home screen, after Sony accepted (`null` from an older helper);
+/// `unverified` that app.db could not be read to check the home screen; and
+/// `managed_by: "shadowmount"` + `image` that ShadowMount+ registers it from
+/// that image and puts it back on its next scan while the image is in a scan
+/// folder (#879).
 #[derive(Debug, serde::Deserialize)]
 struct AppUnregisterReq {
     #[serde(alias = "console", alias = "host")]
@@ -3466,6 +3510,17 @@ async fn ps5_app_unregister(
     .and_then(|r| r)
     {
         Ok(outcome) => {
+            if let Some(by) = outcome.managed_by.as_deref() {
+                // #879: ShadowMount+ registers the title again while its image is in a scan
+                // folder; a bug report has to show that, whatever the result below.
+                crate::log_at!(
+                    Warn,
+                    "files",
+                    "app_unregister: {title_for_log} is registered by {by} from {}: it \
+                     comes back on its next scan while that image is in a scan folder",
+                    outcome.image.as_deref().unwrap_or("its image")
+                );
+            }
             // Our teardown succeeded. Sony's own uninstall is a SEPARATE
             // result and may have been refused — report it instead of
             // flattening both into a bare `ok: true`, which is what let a
@@ -3491,6 +3546,15 @@ async fn ps5_app_unregister(
                     started.elapsed().as_millis(),
                     outcome.sony_uninstall_rc
                 );
+            } else if outcome.unverified {
+                // #879: app.db could not be read, so the helper could not confirm it is gone.
+                crate::log_at!(
+                    Warn,
+                    "files",
+                    "app_unregister: {title_for_log} — Sony accepted in {} ms, but the \
+                     helper could not read app.db to confirm the title is off the home screen",
+                    started.elapsed().as_millis()
+                );
             } else if outcome.still_present == Some(true) {
                 // WARN so a bug report carries it: the game is still listed (#476).
                 crate::log_at!(
@@ -3515,6 +3579,9 @@ async fn ps5_app_unregister(
                     "sony_uninstall_refused": outcome.refusal_stands(),
                     "sony_uninstall_rc": format!("0x{:08X}", outcome.sony_uninstall_rc),
                     "still_present": outcome.still_present,
+                    "unverified": outcome.unverified,
+                    "managed_by": outcome.managed_by,
+                    "image": outcome.image,
                 })),
             )
                 .into_response()
@@ -7020,10 +7087,12 @@ async fn ps5_connect_timings(Query(q): Query<AddrQuery>) -> impl IntoResponse {
     }
 }
 
-/// The 502 body of a failed status probe: `{ error, reason?, power? }`. `reason` is the token
-/// the error leads with (`console_rest_mode`, `ava1_unreachable`, `helper_not_ava1`,
-/// `not_paired`, ...); `power` is what DDP said (`awake` / `rest` / `unreachable`) when the
-/// engine asked it, and absent otherwise.
+/// The 502 body of a failed status probe: `{ error, reason?, power?, helper_too_old? }`.
+/// `reason` is the token the error leads with (`console_rest_mode`, `ava1_unreachable`,
+/// `helper_not_ava1`, `not_paired`, ...); `power` is what DDP said (`awake` / `rest` /
+/// `unreachable`) when the engine asked it, and absent otherwise. `helper_too_old: true` is
+/// added (with `reason` still `helper_not_ava1`, which older clients key on) when a helper
+/// answered but is too old for this app, rather than nothing listening (#877).
 fn status_failure_body(
     e: &anyhow::Error,
     power: Option<ps5upload_core::ddp::Power>,
@@ -7039,6 +7108,9 @@ fn status_failure_body(
     }
     if let Some(p) = power {
         body["power"] = p.as_str().into();
+    }
+    if ps5upload_core::mgmt::helper_too_old(e) {
+        body["helper_too_old"] = true.into();
     }
     body
 }
@@ -7226,6 +7298,34 @@ mod status_failure_body_tests {
         let b = status_failure_body(&anyhow::anyhow!("timed out"), None);
         assert!(b.get("reason").is_none(), "{b}");
         assert_eq!(b["error"], "timed out");
+    }
+
+    /// A helper that answered but is too old: the same `helper_not_ava1` reason an older client
+    /// shows its message for, plus `helper_too_old` for a client that knows it (#877). Nothing
+    /// listening never carries it.
+    #[test]
+    fn a_too_old_helper_adds_helper_too_old_and_keeps_its_reason() {
+        let e = mgmt::helper_not_ava1_because("NODE_STATUS", mgmt::HELPER_TOO_OLD_MESSAGE);
+        let b = status_failure_body(&e, None);
+        assert_eq!(b["reason"], "helper_not_ava1");
+        assert_eq!(b["helper_too_old"], true);
+        assert!(b.get("power").is_none(), "{b}");
+        assert!(b["error"]
+            .as_str()
+            .unwrap()
+            .contains("helper_not_ava1: An older ps5upload helper"));
+        for e in [
+            mgmt::helper_not_ava1("NODE_STATUS"),
+            mgmt::console_unusable(
+                "NODE_STATUS",
+                mgmt::CONSOLE_REST_MODE,
+                mgmt::CONSOLE_REST_MODE_MESSAGE,
+            ),
+            anyhow::anyhow!("timed out"),
+        ] {
+            let b = status_failure_body(&e, Some(Power::Awake));
+            assert!(b.get("helper_too_old").is_none(), "{b}");
+        }
     }
 }
 
@@ -7606,8 +7706,6 @@ async fn transfer_file_handler(
     };
 
     let job_id = Uuid::new_v4();
-    telemetry::tag(job_id, "file");
-    telemetry::set_drive(job_id, &req.dest);
     mesh_api::note_job(job_id, &addr, "Upload", &req.dest);
     let started_at_ms = now_ms();
     crate::log_info!(
@@ -7708,6 +7806,10 @@ async fn transfer_file_handler(
     // JobState::Running's files_finalized / bytes_finalized fields.
     let progress_files_finalized = Arc::new(AtomicU64::new(0));
     let progress_bytes_finalized = Arc::new(AtomicU64::new(0));
+    // Tagged once the job is certain: a request refused above never ends as a job, and its
+    // tag would have stayed in the telemetry map for as long as the engine runs.
+    telemetry::tag(job_id, "file");
+    telemetry::set_drive(job_id, &req.dest);
     let ctx = TickerContext {
         started_at_ms,
         total_bytes,
@@ -7979,8 +8081,9 @@ async fn transfer_dir_handler(
         let renames = module_case_renames(source_fs.as_deref(), &src_path, &req.src_dir);
         let walk_started = std::time::Instant::now();
         let planned = match &source_fs {
-            Some(fs) => walk_plan_with(fs.as_ref(), &src_path, &req.excludes),
-            None => Ok(walk_plan(&src_path, &req.excludes)),
+            // Stop ends the walk at its next folder; the check below then ends the job.
+            Some(fs) => walk_plan_with_until(fs.as_ref(), &src_path, &req.excludes, &cancel),
+            None => Ok(walk_plan_until(&src_path, &req.excludes, &cancel)),
         };
         let (total_bytes, files) = match planned {
             Ok(p) => p,
@@ -8947,7 +9050,8 @@ struct UserCreateReq {
 struct UserDeleteReq {
     #[serde(alias = "console", alias = "host")]
     addr: Option<String>,
-    uid: i32,
+    /// The console user id: unsigned (0 to 4294967295) or the same 32 bits signed (-2147483648 to -1).
+    uid: i64,
     #[serde(default)]
     wipe_saves: bool,
 }
@@ -9202,9 +9306,13 @@ async fn user_delete_handler(
     let Some(addr) = required_console_addr(req.addr) else {
         return missing_console_addr();
     };
-    let uid = req.uid;
+    // Never truncated onto another user: a number that is not a 32-bit user id is refused.
+    let Some(uid) = ps5upload_core::users::user_id_from_i64(req.uid) else {
+        return json_err(StatusCode::BAD_REQUEST, format!("invalid uid {}", req.uid))
+            .into_response();
+    };
     let wipe_saves = req.wipe_saves;
-    crate::log_info!("user_delete: addr={addr} uid={uid} wipe_saves={wipe_saves}");
+    crate::log_info!("user_delete: addr={addr} uid={uid} (0x{uid:08x}) wipe_saves={wipe_saves}");
     let r = tokio::task::spawn_blocking(move || {
         ps5upload_core::users::user_delete(&addr, uid, wipe_saves)
     })
@@ -10971,14 +11079,8 @@ async fn link_download_handler(
         )
         .into_response();
     };
-    if !class.ranges {
-        return json_err(
-            StatusCode::UNPROCESSABLE_ENTITY,
-            "the server does not support partial downloads (HTTP Range), which streaming to the \
-             console needs. Download the file on this computer and upload it instead.",
-        )
-        .into_response();
-    }
+    // Without byte ranges the file is read in order on one connection (`WholeLinkSource`).
+    let ranges = class.ranges;
     let validators = class.validators.clone();
     // An .lz4 link is unpacked on the way: the console gets the image, not the .lz4.
     let lz4 = class.lz4.clone().filter(|_| req.unpack);
@@ -11019,7 +11121,7 @@ async fn link_download_handler(
         .and_then(|u| u.host().map(str::to_string))
         .unwrap_or_default();
     crate::log_info!(
-        "link_download: job={job_id} addr={addr} host={host} dest={dest_path} bytes={total}{}",
+        "link_download: job={job_id} addr={addr} host={host} dest={dest_path} bytes={total} ranges={ranges}{}",
         if lz4.is_some() {
             format!(" lz4_packed={packed}")
         } else {
@@ -11092,16 +11194,27 @@ async fn link_download_handler(
         cfg.progress_bytes_finalized = Some(Arc::clone(&progress_bytes_finalized));
         attach_live_notes(&mut cfg, job_id);
         apply_per_request_bandwidth(&mut cfg, req.bandwidth_cap_mbps);
+        let stop = cfg.cancel.clone();
         let remote = Arc::new(
-            crate::remote_pkg::RemoteSource::new_with_options(url, packed, insecure)
-                .with_validators(validators),
+            crate::remote_pkg::RemoteSource::new_with_options(url.clone(), packed, insecure)
+                .with_validators(validators)
+                // A cancel also ends a fetch that is waiting out the host's 429/503.
+                .with_stop(move || stop.as_ref().is_some_and(|c| c.load(Ordering::Relaxed))),
         );
         // A plain file is read at any offset (resume continues where the console stopped); an
         // .lz4 is decoded forward on one thread and its decoded bytes are what is sent.
         let (source, seq): (
             Arc<dyn ava1::source::Source>,
             Option<Arc<dyn ava1::seq::SeqSource>>,
-        ) = if lz4.is_some() {
+        ) = if !ranges {
+            let s = Arc::new(link::WholeLinkSource::new(
+                url,
+                insecure,
+                name.clone(),
+                total,
+            ));
+            (s.clone(), Some(s))
+        } else if lz4.is_some() {
             let s = Arc::new(
                 link_lz4::Lz4LinkSource::new(remote, packed, name.clone(), total)
                     .pad_short(lz4.as_ref().is_some_and(|i| i.size_from_image)),
@@ -11190,8 +11303,6 @@ async fn transfer_file_list_handler(
     };
 
     let job_id = Uuid::new_v4();
-    telemetry::tag(job_id, "file_list");
-    telemetry::set_drive(job_id, &req.dest_root);
     mesh_api::note_job(job_id, &addr, "Upload", &req.dest_root);
     let started_at_ms = now_ms();
     let entries: Vec<FileListEntry> = req
@@ -11295,6 +11406,9 @@ async fn transfer_file_list_handler(
         skipped_files: 0,
         skipped_bytes: 0,
     };
+    // Tagged once the job is certain (see `transfer_file_handler`).
+    telemetry::tag(job_id, "file_list");
+    telemetry::set_drive(job_id, &req.dest_root);
     set_job(
         &state.jobs,
         &state.events_tx,
@@ -12898,6 +13012,7 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
     }
 
     let state_jobs_for_presence = state.jobs.clone();
+    let sweep_installs = pkg_state.clone();
     let (app, mcp_state) = build_app_and_mcp(
         state,
         pkg_state,
@@ -12910,7 +13025,15 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
     // terminal is closed). Printed only once the bind has succeeded:
     // it used to come first, so a log showing it proved nothing about
     // whether the engine was actually listening.
-    println!("[ps5upload-engine] listening on http://{bind}  (ps5={ps5_addr})");
+    // Never `println!`: it panics when stdout is a closed pipe (the app that started the
+    // engine already gone), and the engine then never serves.
+    {
+        use std::io::Write;
+        let _ = writeln!(
+            std::io::stdout(),
+            "[ps5upload-engine] listening on http://{bind}  (ps5={ps5_addr})"
+        );
+    }
     crate::log_info!("listening on http://{bind}  (ps5={ps5_addr})");
     // Fan boosts end on time and are undone even if the app closed in between.
     fan_boost::spawn_sweeper();
@@ -12925,7 +13048,7 @@ async fn run(cfg: EngineConfig) -> anyhow::Result<()> {
     save_sync::spawn();
     // Mesh Drive folders are kept in sync here too, app open or not.
     mesh_drive::spawn();
-    pkg_install::spawn_stale_upload_sweep();
+    pkg_install::spawn_stale_upload_sweep(sweep_installs);
     // What the other devices see of this engine, with no window open to say so.
     mesh_api::spawn_presence(state_jobs_for_presence);
     // Server copies an earlier run left behind (an extract that failed, then the app closed)
@@ -14178,7 +14301,9 @@ where
                     match tokio::net::TcpListener::bind(bind).await {
                         Ok(l) => break l,
                         Err(e) => {
-                            eprintln!("[ps5upload-engine] listening again on {bind}: {e}");
+                            stderr_quiet(&format!(
+                                "[ps5upload-engine] listening again on {bind}: {e}"
+                            ));
                             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
                         }
                     }
@@ -14968,6 +15093,24 @@ mod helpers_tests {
         let _ = std::fs::remove_dir_all(&base);
     }
 
+    /// A stopped folder upload's walk ends at its next folder, not at the end of the source.
+    #[test]
+    fn a_stopped_walk_ends_at_once() {
+        let root = std::env::temp_dir().join(format!("ps5upload-walkstop-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("a/b")).unwrap();
+        std::fs::write(root.join("a/b/f.bin"), b"xyz").unwrap();
+        let stop = AtomicBool::new(true);
+        assert!(walk_plan_until(&root, &[], &stop).1.is_empty());
+        let local = ps5upload_core::source_fs::LocalFs;
+        assert!(walk_plan_with_until(&local, &root, &[], &stop)
+            .unwrap()
+            .1
+            .is_empty());
+        assert_eq!(walk_plan(&root, &[]).0, 3);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// Every transfer reports a resume the same way: zip, 7z and RAR used to say 0 skipped and the
     /// planned count as sent, whatever the console had.
     #[test]
@@ -15462,6 +15605,23 @@ mod helpers_tests {
         n.verifying.store(true, Relaxed);
         let v = merge_live_notes(Some(&n), running.clone());
         assert_eq!(v["verifying"], true);
+        // #873: nothing about the stretch after the last byte while bytes are on their way,
+        // then how long ago it was acknowledged and how long the console has been quiet
+        assert!(v.get("all_sent_ms").is_none() && v.get("console_quiet_ms").is_none());
+        n.all_sent_ms.store(90_000, Relaxed);
+        n.console_quiet_ms.store(61_000, Relaxed);
+        let v = merge_live_notes(Some(&n), running.clone());
+        assert_eq!(
+            (v["all_sent_ms"].as_u64(), v["console_quiet_ms"].as_u64()),
+            (Some(90_000), Some(61_000))
+        );
+        n.console_quiet_ms.store(0, Relaxed);
+        let v = merge_live_notes(Some(&n), running.clone());
+        assert_eq!(
+            v["console_quiet_ms"], 0,
+            "a console getting on with it: present and small"
+        );
+        n.all_sent_ms.store(0, Relaxed);
         n.settling.store(true, Relaxed);
         n.unswept.store(12, Relaxed);
         n.unswept_peak.store(50, Relaxed);

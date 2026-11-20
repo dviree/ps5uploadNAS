@@ -116,6 +116,10 @@ static runtime_state_t *g_state = NULL;
  * other process of ours is a stray copy: sweep it. */
 #define LATE_SWEEP_DELAY_S 65
 
+/* Longest a helper's start may hold the start lock before the next one takes it for stuck: the takeover
+ * waits (10 s each, up to three), the reap and sweep, and the 15 s transfer-port gate, with room. */
+#define START_LOCK_MAX_AGE_MS 120000
+
 static void *late_sweep_main(void *arg) {
     (void)arg;
     proc_name_set_self(PS5UPLOAD2_PROC_NAME);
@@ -603,11 +607,48 @@ int main(void) {
     }
     startup_trace("ENSURE_DIRECTORIES_DONE");
 
+    /* One helper starts at a time (takeover_flag.h). Taken before anything that touches shared state
+     * (the log file, the staging sweeps, the ownership record, the takeover flag, the ports): a helper
+     * sent while another is still starting waits, touching none of it, so the one starting is not
+     * asked to exit, reaped or stripped of its record. It never leaves: if the one starting dies or
+     * gives up before it serves, this one starts instead (12.6.13 left at once, and then nothing
+     * served). Held until the transfer port serves; a helper sent after that, or one that waited,
+     * takes over as always. */
+    int start_lock = -1;
+    takeover_start_info_t start_info;
+    startup_trace("START_LOCK_ASK");
+    start_lock = takeover_start_lock_wait(PS5UPLOAD2_RUNTIME_DIR, START_LOCK_MAX_AGE_MS, 200, &start_info);
+    startup_trace(start_lock >= 0 ? (start_info.waited ? "START_LOCK_HELD_AFTER_WAIT" : "START_LOCK_HELD")
+                                  : "START_LOCK_NONE");
+
     /* Now that the runtime root exists, capture stdout+stderr to a fetchable
      * file and detach stdin so the helper's own error diagnostics survive for
      * bug reports. */
     redirect_stdio_to_file();
     startup_trace("STDIO_REDIRECTED");
+    /* Logged here, not at the lock: before the redirect stderr is the sender's socket, gone by now. */
+    if (start_info.waited)
+        fprintf(stderr, "[payload2] start lock: helper pid %d was starting; waited %lld ms for it\n",
+                start_info.holder_pid, start_info.waited_ms);
+    switch (start_info.outcome) {
+    case TAKEOVER_START_NO_FILE:
+        fprintf(stderr, "[payload2] start lock: %s/start.lock cannot be opened (errno=%d); starting without it\n",
+                PS5UPLOAD2_RUNTIME_DIR, start_info.flock_errno);
+        break;
+    case TAKEOVER_START_NO_FLOCK:
+        fprintf(stderr, "[payload2] start lock: flock failed (errno=%d), no locks here; starting without it\n",
+                start_info.flock_errno);
+        break;
+    case TAKEOVER_START_STUCK:
+        fprintf(stderr,
+                "[payload2] start lock: helper pid %d has been starting for %lld ms, longer than any start "
+                "takes; taking it for stuck and starting without the lock\n",
+                start_info.holder_pid,
+                start_info.holder_age_ms >= 0 ? start_info.holder_age_ms : start_info.waited_ms);
+        break;
+    default:
+        break;
+    }
 
     /* Sweep orphan Tier-1 staging files. Crash-recovery only;
      * the desktop-side post-install delete handles steady-state. */
@@ -800,10 +841,14 @@ int main(void) {
     }
     if (!ava1_up) {
         /* Nothing is serving: a helper that idles with no port is worse than none (the app would wait on it).
-         * Leave, and take our ownership record with us so the next instance does not read it as live. */
+         * Leave, and take our ownership record with us so the next instance does not read it as live. The
+         * start lock is still held here, so the record is this helper's own, never a newer starter's. */
         (void)runtime_clear_ownership(&state);
         return 1;
     }
+    /* Serving: the start is over, and a helper sent from now on takes over from this one. */
+    takeover_start_unlock(start_lock);
+    start_lock = -1;
     startup_trace("AVA1_STARTED");
     printf("ps5upload2 payload ready on port %d (instance=%llu)\n", (int)AVA1_DEFAULT_PORT,
            (unsigned long long)state.instance_id);

@@ -20,7 +20,7 @@ use tokio::sync::Mutex;
 
 use super::host_key;
 use super::store::{Connection, Secret};
-use super::{Entry, Page, RemoteError, RemoteFile, RemoteFs, PAGE};
+use super::{Entry, Page, RemoteError, RemoteFile, RemoteFs};
 
 /// Most sessions one open file keeps for concurrent reads.
 const READ_SESSIONS: usize = 4;
@@ -76,8 +76,12 @@ fn plain_listing_line(line: &str, mlsd: bool) -> Option<Entry> {
     // `ls -l`: mode, links, owner, [group], size, three parts of a date, then the name, which may
     // hold any spaces. Split by hand, so the name comes out as it is.
     let mut rest = line.trim_start();
-    let mut fields: Vec<&str> = Vec::with_capacity(8);
-    while fields.len() < 8 {
+    // Seven fields are there with or without a group; what follows is the time and the name,
+    // or with no group the name already. (Eight were asked for whatever the line: a name with
+    // no space in it on a server with no group column has no eighth, and the file was not
+    // listed; and its name was then looked for by its first word, found in an earlier field.)
+    let mut fields: Vec<&str> = Vec::with_capacity(7);
+    while fields.len() < 7 {
         let end = rest.find(char::is_whitespace)?;
         fields.push(&rest[..end]);
         rest = rest[end..].trim_start();
@@ -88,11 +92,11 @@ fn plain_listing_line(line: &str, mlsd: bool) -> Option<Entry> {
     }
     let numeric = |s: &str| !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit());
     let (size, name) = if numeric(fields[4]) {
-        (fields[4], rest)
+        let end = rest.find(char::is_whitespace)?;
+        (fields[4], rest[end..].trim_start())
     } else if numeric(fields[3]) {
-        // No group column: the date ends a field sooner, and the eighth field starts the name.
-        let start = line.find(fields[7])?;
-        (fields[3], &line[start..])
+        // No group column: the date ends a field sooner, and the name follows it.
+        (fields[3], rest)
     } else {
         return None;
     };
@@ -478,6 +482,10 @@ pub struct FtpFs {
     /// back is not an option there.
     mlsd: bool,
     session: Mutex<Ftp>,
+    /// Set while an upload holds `session` (FTP has one transfer per session): a listing then
+    /// goes over a read session instead of waiting for the whole file.
+    writing: std::sync::atomic::AtomicBool,
+    pages: super::Pages,
 }
 
 /// A file being written over STOR, holding the session it was started on. A failed or given-up
@@ -485,6 +493,7 @@ pub struct FtpFs {
 /// reply first.
 struct FtpWriter<'a> {
     _session: tokio::sync::MutexGuard<'a, Ftp>,
+    _writing: Writing<'a>,
     stream: suppaftp::tokio::TransferStream<suppaftp::tokio::AsyncRustlsStream>,
     host: String,
     path: String,
@@ -508,6 +517,15 @@ impl super::RemoteWriter for FtpWriter<'_> {
     }
 
     async fn abort(self: Box<Self>) {}
+}
+
+/// [`FtpFs::writing`] while a writer lives: cleared when it goes, however it goes.
+struct Writing<'a>(&'a std::sync::atomic::AtomicBool);
+
+impl Drop for Writing<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// `path` ("/games/x") under `home` ("/ftp/t") on the server.
@@ -541,15 +559,22 @@ impl FtpFs {
         };
         let mut session = sign_in(&target).await?;
         let host = addr_of(conn);
-        let login = session.pwd().await.unwrap_or_else(|_| "/".into());
+        // Both answers are waited for no longer than any other step: a server that takes the
+        // sign-in and then says nothing held "Test connection" open for good.
+        let login = tokio::time::timeout(STEP, session.pwd())
+            .await
+            .ok()
+            .and_then(Result::ok)
+            .unwrap_or_else(|| "/".into());
         let home = if conn.from_root {
             String::new()
         } else {
             login.clone()
         };
-        let mlsd = session
-            .feat()
+        let mlsd = tokio::time::timeout(STEP, session.feat())
             .await
+            .ok()
+            .and_then(Result::ok)
             .map(|f| {
                 f.keys()
                     .any(|k| k.eq_ignore_ascii_case("MLSD") || k.eq_ignore_ascii_case("MLST"))
@@ -565,6 +590,8 @@ impl FtpFs {
             readers: Arc::new(Mutex::new(Vec::new())),
             mlsd,
             session: Mutex::new(session),
+            writing: Default::default(),
+            pages: Default::default(),
         })
     }
 
@@ -592,7 +619,42 @@ impl FtpFs {
         self.counts
             .1
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        // An upload holds the session for its whole file: a listing meanwhile (the user
+        // browsing the server) goes over a read session rather than wait for it to end.
+        if self.writing.load(std::sync::atomic::Ordering::SeqCst) {
+            let mut side = self.side_session().await?;
+            let listed = self.list_on(&mut side.ftp, dir).await;
+            if listed.is_ok() {
+                let mut idle = self.readers.lock().await;
+                if idle.len() < READ_SESSIONS {
+                    idle.push(side);
+                }
+            }
+            return listed;
+        }
         let mut s = self.session.lock().await;
+        self.list_on(&mut s, dir).await
+    }
+
+    /// A read session with no transfer open, or a new sign-in.
+    async fn side_session(&self) -> Result<Session, RemoteError> {
+        {
+            let mut idle = self.readers.lock().await;
+            if let Some(i) = idle.iter().position(|s| s.open.is_none()) {
+                return Ok(idle.swap_remove(i));
+            }
+        }
+        self.counts
+            .0
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(Session {
+            ftp: sign_in(&self.target).await?,
+            open: None,
+        })
+    }
+
+    /// The listing of `dir` (a server path) over the session `s`.
+    async fn list_on(&self, s: &mut Ftp, dir: &str) -> Result<Vec<Entry>, RemoteError> {
         let host = self.host.as_str();
         let mlsd = self.mlsd;
         timed(host, "a folder listing", async move {
@@ -749,8 +811,15 @@ impl RemoteFile for FtpFile {
             Some((stream, _, _)) => stream,
             None => {
                 let (ftp, path, host) = (&mut s.ftp, self.path.as_str(), self.host.as_str());
+                // On a 32-bit build (Android armv7) `as usize` cut an offset past 4 GiB short: the
+                // read then came from the wrong place in the file with no error.
+                let at = usize::try_from(offset).map_err(|_| {
+                    RemoteError::Unsupported(format!(
+                        "This device can't read an FTP file past 4 GiB (offset {offset})"
+                    ))
+                })?;
                 timed(host, "a read", async move {
-                    ftp.resume_transfer(offset as usize)
+                    ftp.resume_transfer(at)
                         .await
                         .map_err(|e| map_err(host, e))?;
                     ftp.retr_as_stream(path).await.map_err(|e| map_err(host, e))
@@ -773,8 +842,11 @@ impl RemoteFile for FtpFile {
         out.truncate(got);
         let at = offset + got as u64;
         if at >= self.size {
-            // The whole rest of the file came through: the transfer ends cleanly.
-            if stream.finish().await.is_err() {
+            // The whole rest of the file came through: the transfer ends cleanly. The bytes are
+            // all here, so a server that never says so (its control connection went quiet
+            // during a long file and a router dropped it) costs this session, not the read:
+            // waited for without a limit, the copy sat at 100% and could not be stopped.
+            if !matches!(tokio::time::timeout(STEP, stream.finish()).await, Ok(Ok(_))) {
                 return Ok(out);
             }
         } else {
@@ -795,16 +867,7 @@ impl RemoteFs for FtpFs {
     }
 
     async fn list(&self, path: &str, cursor: Option<String>) -> Result<Page, RemoteError> {
-        let all = self.entries(path).await?;
-        let from = cursor
-            .and_then(|c| c.parse::<usize>().ok())
-            .unwrap_or(0)
-            .min(all.len());
-        let to = (from + PAGE).min(all.len());
-        Ok(Page {
-            entries: all[from..to].to_vec(),
-            next_cursor: (to < all.len()).then(|| to.to_string()),
-        })
+        self.pages.page(path, cursor, || self.entries(path)).await
     }
 
     async fn stat(&self, path: &str) -> Result<Entry, RemoteError> {
@@ -990,8 +1053,11 @@ impl RemoteFs for FtpFs {
                 .map_err(|e| map_err(host, e))
         })
         .await?;
+        self.writing
+            .store(true, std::sync::atomic::Ordering::SeqCst);
         Ok(Box::new(FtpWriter {
             _session: s,
+            _writing: Writing(&self.writing),
             stream,
             host: self.host.clone(),
             path: path.to_string(),
@@ -1061,6 +1127,21 @@ mod tests {
         assert!(got.contains(&("папка", true, 0)), "{got:?}");
         assert!(got.contains(&("link", false, 7)), "{got:?}");
         assert_eq!(got.len(), 5, "{got:?}");
+    }
+
+    /// No group column: a name with no space in it is listed, and a name that starts with a
+    /// word from earlier in the line keeps all of itself.
+    #[test]
+    fn a_line_with_no_group_shows_a_name_with_no_space_in_it() {
+        let got = parse_listing(
+            &lines(&[
+                "-rw-r--r-- 1 root 34 ноя 6 12:00 game.pkg",
+                "-rw-r--r-- 1 root 5 ноя 6 12:00 root x.bin",
+            ]),
+            false,
+        );
+        let got: Vec<(&str, u64)> = got.iter().map(|e| (e.name.as_str(), e.size)).collect();
+        assert_eq!(got, [("game.pkg", 34), ("root x.bin", 5)]);
     }
 
     #[test]
@@ -1501,6 +1582,34 @@ mod tests {
         assert_eq!((e.is_dir, e.size), (false, GLOB_SIZE));
         // A folder the server won't enter falls back to listing by its path.
         assert!(fs.list("/nope", None).await.unwrap().entries.is_empty());
+    }
+
+    /// An upload holds the session for its whole file; browsing meanwhile is answered over
+    /// another session, not after the upload.
+    #[tokio::test]
+    async fn browsing_is_not_held_up_by_an_upload() {
+        let port = globbing_server().await;
+        let mut conn = crate::remote::store::conn("t", crate::remote::store::Protocol::Ftp);
+        conn.host = "127.0.0.1".into();
+        conn.port = port;
+        conn.user = "t".into();
+        let secret = Secret::Password {
+            password: "t".into(),
+        };
+        let fs = FtpFs::connect(&conn, &secret, false).await.unwrap();
+        let held = fs.session.lock().await;
+        fs.writing.store(true, std::sync::atomic::Ordering::SeqCst);
+        let page =
+            tokio::time::timeout(std::time::Duration::from_secs(10), fs.list(GLOB_DIR, None))
+                .await
+                .expect("the listing waited for the upload")
+                .unwrap();
+        assert_eq!(triples(&page.entries), [(GLOB_FILE, false, GLOB_SIZE)]);
+        // The session it signed in for is kept for the next one.
+        let sign_ins = fs.counters().0;
+        fs.list(GLOB_DIR, None).await.unwrap();
+        assert_eq!(fs.counters().0, sign_ins);
+        drop(held);
     }
 
     /// The same against a real Pure-FTPd: in `<dir>`, make the report's folder

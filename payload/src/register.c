@@ -366,14 +366,21 @@ static int copy_file_bytes(const char *src, const char *dst) {
     if (in_fd < 0) return -1;
     struct stat st;
     if (fstat(in_fd, &st) != 0) { close(in_fd); return -1; }
-    int out_fd = open(dst, O_WRONLY | O_CREAT | O_TRUNC, st.st_mode & 0777);
+    /* Into a sibling temp, renamed over `dst` only when every byte is written. Opened with O_TRUNC
+     * in place, a copy that failed (a full drive) left `dst` empty: registering a title again
+     * emptied the param.json / icons of a registration that worked. A sibling, so the rename
+     * never leaves the directory (cross_device.h). */
+    char tmp[REG_MAX_PATH + 8];
+    int tn = snprintf(tmp, sizeof(tmp), "%s.tmp~", dst);
+    if (tn < 0 || (size_t)tn >= sizeof(tmp)) { close(in_fd); return -1; }
+    int out_fd = open(tmp, O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW, st.st_mode & 0777);
     if (out_fd < 0) { close(in_fd); return -1; }
 
     /* 64 KiB heap buffer -- large enough to amortize syscall overhead,
      * small enough to keep peak memory low when copying many files. */
     const size_t BUF_SZ = 64 * 1024;
     char *buf = (char *)malloc(BUF_SZ);
-    if (!buf) { close(in_fd); close(out_fd); return -1; }
+    if (!buf) { close(in_fd); close(out_fd); unlink(tmp); return -1; }
     ssize_t n;
     int ok = 0;
     while ((n = read(in_fd, buf, BUF_SZ)) > 0) {
@@ -389,7 +396,10 @@ static int copy_file_bytes(const char *src, const char *dst) {
 done:
     free(buf);
     close(in_fd);
-    close(out_fd);
+    if (ok == 0 && fsync(out_fd) != 0) ok = -1;
+    if (close(out_fd) != 0) ok = -1;
+    if (ok == 0 && rename(tmp, dst) != 0) ok = -1;
+    if (ok != 0) unlink(tmp);
     return ok;
 }
 
@@ -993,7 +1003,12 @@ static int mount_title_nullfs(const char *title_id, const char *src_path,
     if (statfs(dst, &dst_stat) == 0 &&
         strcmp(dst_stat.f_mntonname, dst) == 0) {
         if (unmount(dst, 0) != 0 && errno != EINVAL && errno != ENOENT) {
-            if (unmount(dst, MNT_FORCE) != 0 && errno != EINVAL && errno != ENOENT) {
+            /* Forced only for a nullfs: an earlier registration (ours, ShadowMount+'s). Anything
+             * else mounted here and busy is Sony's own mount of an installed copy of this title,
+             * in use; forcing that off takes live content out from under the console
+             * (unregister_title has the same rule). */
+            if (strcmp(dst_stat.f_fstypename, "nullfs") != 0 ||
+                (unmount(dst, MNT_FORCE) != 0 && errno != EINVAL && errno != ENOENT)) {
                 if (err_out) *err_out = "register_preclean_unmount_failed";
                 return -1;
             }
@@ -1034,6 +1049,18 @@ static int unmount_title_nullfs(const char *title_id) {
     char dst[REG_MAX_PATH];
     int n = snprintf(dst, sizeof(dst), "%s/%s", REG_SYSTEM_EX_APP, title_id);
     if (n < 0 || (size_t)n >= sizeof(dst)) return -1;
+
+    /* Only a nullfs mounted at exactly this path (#879). Nothing mounted here is the end state
+     * already; anything else here (Sony's own mount of an installed copy) is not ours to take
+     * off, and the old blind unmount + MNT_FORCE would have. */
+    struct statfs on;
+    if (statfs(dst, &on) != 0) return (errno == ENOENT) ? 0 : -1;
+    if (strcmp(on.f_mntonname, dst) != 0) return 0;
+    if (!unregister_bind_unmountable(dst, on.f_mntonname, on.f_fstypename)) {
+        fprintf(stderr, "[register] %s holds a %s mount, not a bind: left alone\n", dst,
+                on.f_fstypename);
+        return 0;
+    }
 
     /* unmount then MNT_FORCE. Either rc=0 OR errno in (EINVAL, ENOENT)
      * is acceptable -- both mean "nothing mounted here" which is our
@@ -1444,22 +1471,46 @@ int register_appdb_has_title(const char *title_id) {
     return content_db_has_title(title_id);
 }
 
-/* Whether the PC app's installed list would still show `title_id` (see unregister_presence_t). */
-static int title_still_present(const char *title_id) {
+/* Whether the PC app's installed list would still show `title_id`, or the home screen still
+ * draws it (see unregister_presence_t). `*unverified` is set when app.db could not be read and
+ * nothing else showed the title: then it cannot be called gone. */
+static int title_still_present(const char *title_id, int *unverified) {
     unregister_presence_t p = {0};
     char path[REG_MAX_PATH];
+    *unverified = 0;
     snprintf(path, sizeof(path), "%s/%s", UNREGISTER_APPMETA_ROOT, title_id);
     p.appmeta_dir = path_exists(path);
     for (size_t i = 0; i < sizeof UNREGISTER_APP_ROOTS / sizeof UNREGISTER_APP_ROOTS[0]; i++) {
         snprintf(path, sizeof(path), "%s/%s", UNREGISTER_APP_ROOTS[i], title_id);
         if (path_exists(path)) p.app_dir = 1;
     }
-    if (!p.appmeta_dir && p.app_dir) {
-        int row = register_appdb_has_title(title_id);
-        p.appdb_known = row >= 0;
-        p.appdb_row = row > 0;
+    if (!p.appmeta_dir) {
+        /* Read whatever folders are left: the home screen draws app.db alone (#879). */
+        content_db_presence_t db;
+        if (content_db_title_presence(title_id, &db) == 0) {
+            p.appdb_known = 1;
+            p.appdb_row = db.any;
+            p.appdb_icon_visible = db.icons_visible > 0;
+            if (db.any)
+                fprintf(stderr, "[register] %s still in app.db: %s\n", title_id, db.where);
+        }
     }
-    return unregister_still_listed(&p);
+    *unverified = unregister_presence_unverified(&p);
+    return unregister_still_present(&p) || *unverified;
+}
+
+/* The text of a small link file (mount.lnk / mount_img.lnk), trailing newline cut. 1 when the
+ * file exists (`out` may then be empty), 0 when it does not. */
+static int read_link_text(const char *path, char *out, size_t cap) {
+    out[0] = '\0';
+    int fd = open(path, O_RDONLY);
+    if (fd < 0) return 0;
+    ssize_t n = read(fd, out, cap - 1);
+    close(fd);
+    if (n < 0) n = 0;
+    out[n] = '\0';
+    out[strcspn(out, "\r\n")] = '\0';
+    return 1;
 }
 
 /* Sony's uninstall removed every title on the Phat (FW 13.60) before it returned, but a large
@@ -1497,8 +1548,23 @@ int unregister_title(const char *title_id, const char **err_reason_out,
     char lnk_img[REG_MAX_PATH];
     snprintf(lnk,     sizeof(lnk),     "%s/%s/mount.lnk",     REG_APP_BASE, title_id);
     snprintf(lnk_img, sizeof(lnk_img), "%s/%s/mount_img.lnk", REG_APP_BASE, title_id);
-    int ours = path_exists(lnk);
+    /* #879: ShadowMount+ writes the same mount.lnk. Its image titles are its own: their bind is
+     * the top of a mount stack it manages, and taking it and the links away behind its back
+     * only makes it register the title again on its next scan. Those are left to it. */
+    char lnk_text[REG_MAX_PATH];
+    char img_text[REG_MAX_PATH];
+    int has_lnk = read_link_text(lnk, lnk_text, sizeof lnk_text);
+    int has_img = read_link_text(lnk_img, img_text, sizeof img_text);
+    unregister_tracker_t owner =
+        unregister_tracker_owner(has_lnk ? lnk_text : NULL, has_img ? img_text : NULL);
+    int ours = owner == UNREGISTER_TRACKER_OURS;
     out->ours = ours;
+    if (owner == UNREGISTER_TRACKER_SMP) {
+        out->smp = 1;
+        snprintf(out->smp_image, sizeof out->smp_image, "%s", has_img ? img_text : "");
+        fprintf(stderr, "[register] unregister %s: ShadowMount+ title (%s), its mounts left to it\n",
+                title_id, has_img && img_text[0] ? img_text : lnk_text);
+    }
 
     if (ours) {
         /* Nullfs unmount first. This is the teardown that matters most --
@@ -1595,11 +1661,11 @@ int unregister_title(const char *title_id, const char **err_reason_out,
      * goes too (#476 review). */
     if (ours) remove_our_appmeta(title_id);
     /* Judge by what the PC app would still list; Sony's code alone proves nothing. */
-    out->still_present = title_still_present(title_id);
-    for (int i = 0; out->still_present && out->api_called && out->sony_rc == 0
-                    && i < UNREGISTER_SETTLE_POLLS; i++) {
+    out->still_present = title_still_present(title_id, &out->unverified);
+    for (int i = 0; out->still_present && !out->unverified && out->api_called
+                    && out->sony_rc == 0 && i < UNREGISTER_SETTLE_POLLS; i++) {
         usleep(UNREGISTER_SETTLE_STEP_US);
-        out->still_present = title_still_present(title_id);
+        out->still_present = title_still_present(title_id, &out->unverified);
     }
     if (out->still_present) {
         fprintf(stderr, "[register] uninstall %s: still listed after rc=0x%08X\n",

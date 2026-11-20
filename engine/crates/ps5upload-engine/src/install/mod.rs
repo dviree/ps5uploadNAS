@@ -831,6 +831,16 @@ pub enum DeliveryProgress {
 /// install is not completion — PS5 installs pull asynchronously — so the
 /// orchestrator waits on this before it reports a verdict or lets a caller
 /// delete the source.
+/// One round's delivery observation `(served, covered, total, daemon phase)`, or, when it
+/// could not be read, the last figures with no total (so the round can't declare success).
+fn unreadable_observation(
+    obs: Option<(u64, u64, u64, Option<String>)>,
+    last_served: u64,
+    last_covered: u64,
+) -> (u64, u64, u64, Option<String>) {
+    obs.unwrap_or((last_served, last_covered, 0, None))
+}
+
 pub fn delivery_progress(served: u64, total: u64, idle_ms: u64, stall_ms: u64) -> DeliveryProgress {
     if total > 0 && served >= total {
         DeliveryProgress::Complete
@@ -1189,13 +1199,21 @@ async fn run_install(state: PkgInstallStateHandle, job: String, mut req: Install
         }
     }
     // And for a package on a saved server: the client does not read it, the serve session would.
+    // Its header is kept for the category check below, which opened and fingerprinted the
+    // package on the server a second time to read the same bytes.
+    // The package stays open for the serve session too, fingerprint and all: opening it there
+    // again cost a second sign-in, open and sampled read of a file on a server.
+    let mut remote_header = None;
+    let mut remote_opened = None;
     if let Source::Remote { connection, path } = &req.source {
         let remote = format!("remote://{connection}/{path}");
+        let at = remote.clone();
         let head = unless_stopped(&state, &job, async move {
-            crate::pkg_install::open_remote_package(&remote).await
+            crate::pkg_install::open_remote_package(&at).await
         })
         .await;
-        if let Some(Ok((_, _, h, _, _))) = head {
+        if let Some(Ok(opened)) = head {
+            let h = &opened.2;
             fill_from_header(
                 &mut req,
                 &h.content_id,
@@ -1203,6 +1221,8 @@ async fn run_install(state: PkgInstallStateHandle, job: String, mut req: Install
                 &h.category,
                 &h.app_ver,
             );
+            remote_header = Some(h.clone());
+            remote_opened = Some((remote, opened));
         }
     }
     crate::log_at!(
@@ -1222,13 +1242,16 @@ async fn run_install(state: PkgInstallStateHandle, job: String, mut req: Install
         .clone()
         .filter(|c| certainly_a_game(c) && !matches!(req.source, Source::Url(_)))
     {
-        let header = unless_stopped(
-            &state,
-            &job,
-            read_source_header(&req.source, &mgmt, req.options.insecure_tls),
-        )
-        .await
-        .flatten();
+        let header = match remote_header {
+            Some(h) => Some(h),
+            None => unless_stopped(
+                &state,
+                &job,
+                read_source_header(&req.source, &mgmt, req.options.insecure_tls),
+            )
+            .await
+            .flatten(),
+        };
         if let Some(fixed) = category_from_header(&sent, header.as_ref()) {
             crate::log_at!(
                 Info,
@@ -1440,7 +1463,9 @@ async fn run_install(state: PkgInstallStateHandle, job: String, mut req: Install
                             .await;
                         }
                         let console_url = format!("ps5://{ip}{path}");
-                        match serve_session_unless_stopped(&state, &job, &req, &console_url).await {
+                        match serve_session_unless_stopped(&state, &job, &req, &console_url, None)
+                            .await
+                        {
                             Ok((sid, url)) => {
                                 served_from = origin_of(&url);
                                 route = Route::Stream;
@@ -1517,7 +1542,7 @@ async fn run_install(state: PkgInstallStateHandle, job: String, mut req: Install
                                 "{tag}: the console refused the link (0x{code:08X}); proxying it through this engine instead"
                             );
                         }
-                        match serve_session_unless_stopped(&state, &job, &req, url).await {
+                        match serve_session_unless_stopped(&state, &job, &req, url, None).await {
                             Ok((sid, purl)) => {
                                 served_from = origin_of(&purl);
                                 route = Route::Stream;
@@ -1550,7 +1575,7 @@ async fn run_install(state: PkgInstallStateHandle, job: String, mut req: Install
                 }
             }
             Source::HostFile(_) | Source::Remote { .. } => {
-                match create_serve_session(&state, &job, &req).await {
+                match create_serve_session(&state, &job, &req, remote_opened.take()).await {
                     Ok((sid, url)) => {
                         served_from = origin_of(&url);
                         // No reach pre-check: hand the URL to the console and let it try. If it
@@ -1765,6 +1790,7 @@ async fn run_install(state: PkgInstallStateHandle, job: String, mut req: Install
     let observable = session_id.is_some()
         || (install_job_id.is_some() && matches!(req.source, Source::ConsolePath(_)));
     let mut last_served: u64 = 0;
+    let mut last_covered: u64 = 0;
     let mut last_move = std::time::Instant::now();
     // The file behind the link changed: reading on would only hand the console errors until it gave
     // up, and the job would read as a stall.
@@ -1802,8 +1828,12 @@ async fn run_install(state: PkgInstallStateHandle, job: String, mut req: Install
                 None
             };
             // An unreadable observation counts as "no movement": it can only
-            // run the stall clock, never declare success.
-            let (served, covered, total, dphase) = obs.unwrap_or((last_served, 0, 0, None));
+            // run the stall clock, never declare success (its total is 0). What was
+            // delivered is what the last readable one said, not 0: one daemon poll that
+            // timed out put the progress bar back at the start.
+            let (served, covered, total, dphase) =
+                unreadable_observation(obs, last_served, last_covered);
+            last_covered = covered;
             if served > last_served {
                 last_served = served;
                 last_move = std::time::Instant::now();
@@ -1845,6 +1875,15 @@ async fn run_install(state: PkgInstallStateHandle, job: String, mut req: Install
     if let Some(sid) = &session_id {
         match session_after_delivery(delivery) {
             SessionAfterDelivery::Release => {
+                // Only a user's Stop comes here: what is still being fetched from a link is
+                // given up with it.
+                let remote = {
+                    let s = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
+                    s.get(sid).and_then(|x| x.remote.clone())
+                };
+                if let Some(remote) = remote {
+                    remote.stop();
+                }
                 crate::pkg_install::release_serve_session(&state.sessions, sid);
             }
             SessionAfterDelivery::ReleaseWhenQuiet => release_when_quiet(&state, sid),
@@ -2194,7 +2233,7 @@ async fn run_install(state: PkgInstallStateHandle, job: String, mut req: Install
         s.app_ver_after = app_ver_after.clone();
         s.shortened = shortened;
         s.metrics.total_bytes = total;
-        s.metrics.served_bytes = served;
+        s.metrics.served_bytes = status::served_of_total(served, total);
         s.metrics.throughput_mbps = status::throughput_mbps(served, deliver_ms);
         s.metrics.phase_ms.insert("deliver".into(), deliver_ms);
         s.metrics.phase_ms.insert("verify".into(), verify_ms);
@@ -2283,6 +2322,7 @@ async fn create_serve_session(
     state: &PkgInstallStateHandle,
     job: &str,
     req: &InstallRequest,
+    opened: Option<(String, crate::pkg_install::OpenedRemote)>,
 ) -> Result<(String, String), ServeFailure> {
     let path = match &req.source {
         Source::HostFile(p) => p.clone(),
@@ -2293,7 +2333,7 @@ async fn create_serve_session(
             ))
         }
     };
-    serve_session_unless_stopped(state, job, req, &path).await
+    serve_session_unless_stopped(state, job, req, &path, opened).await
 }
 
 /// `create_serve_session_for`, given up on as soon as the user stops `job`. Setting a session up can
@@ -2304,10 +2344,12 @@ async fn serve_session_unless_stopped(
     job: &str,
     req: &InstallRequest,
     path: &str,
+    opened: Option<(String, crate::pkg_install::OpenedRemote)>,
 ) -> Result<(String, String), ServeFailure> {
     let start_req = serve_session_request(req, path);
     let st = state.clone();
-    let mut task = tokio::spawn(async move { create_serve_session_for(&st, start_req).await });
+    let mut task =
+        tokio::spawn(async move { create_serve_session_for(&st, start_req, opened).await });
     tokio::select! {
         biased;
         _ = state.jobs.stop_requested(job) => {
@@ -2391,9 +2433,11 @@ impl ServeFailure {
 async fn create_serve_session_for(
     state: &PkgInstallStateHandle,
     start_req: serde_json::Value,
+    opened: Option<(String, crate::pkg_install::OpenedRemote)>,
 ) -> Result<(String, String), ServeFailure> {
-    let start_req: crate::pkg_install::InstallStartRequest = serde_json::from_value(start_req)
+    let mut start_req: crate::pkg_install::InstallStartRequest = serde_json::from_value(start_req)
         .map_err(|e| ServeFailure::plain(format!("build start request: {e}")))?;
+    start_req.opened_remote = opened;
     let resp =
         crate::pkg_install::install_start_handler(State(state.clone()), Json(start_req)).await;
     let (parts, body) = resp.into_parts();
@@ -2806,6 +2850,20 @@ async fn finalize(
 mod tests {
     use super::*;
     use crate::install::deliver::{decide_delivery, Delivery, Source};
+
+    /// A poll of the daemon that fails keeps the progress where it was (it showed 0 for that
+    /// round) and carries no total, so it can run the stall clock but never finish the job.
+    #[test]
+    fn a_delivery_poll_that_fails_keeps_the_last_progress() {
+        let read = (700, 600, 1000, Some("serving".to_string()));
+        assert_eq!(unreadable_observation(Some(read.clone()), 0, 0), read);
+        let (served, covered, total, phase) = unreadable_observation(None, 700, 600);
+        assert_eq!((served, covered, total, phase), (700, 600, 0, None));
+        assert_eq!(
+            delivery_progress(covered, total, 0, DELIVERY_STALL_MS),
+            DeliveryProgress::Pending
+        );
+    }
 
     // ── console-path installs learn their identity from the package header ──
 

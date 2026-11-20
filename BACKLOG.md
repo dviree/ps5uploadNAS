@@ -2,6 +2,17 @@
 
 ## >RESUME HERE
 
+- 2026-11-20: merged upstream 4e813f5b (after 12.6.13: helper start fixes, ShadowMount+
+  uninstall, AVA1 1.0.11, links without byte ranges, save a link to a PS5 folder, RAR room
+  check, full review fixes).
+  - One conflict: fpkgConversion.test.ts, upstream's swap test added before the fork's
+    resume tests.
+  - Workflow jobs and triggers are unchanged.
+  Checks: engine 2192, core 891, fpkg 390, 6732 vitest tests, tsc, i18n and the NAS checks
+  pass.
+- Still waiting for the owner's OK: Forge v0.5.6 and ampr-emu-ng v0.4.1 for the NAS converter.
+- Next: verify the Docker build (publishing jobs ran), then run the NAS updater.
+
 - 2026-11-19: merged PS5Upload 12.6.9 plus 72cce211 (Remote Play on Linux, full audit fixes,
   speed limit on Windows, frame rate on firmware 4.x, the Files move line on a phone).
   - One conflict: docker-engine.yml's toolchain step keeps the fork's LLVM 22 fallback, not

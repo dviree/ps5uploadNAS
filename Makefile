@@ -1441,6 +1441,12 @@ test-payload: payload
 		$(PAYLOAD_DIR)/tests/proc_identity_selftest.c
 	@$(RUN_LIMITED) $(SELFTEST_DIR)/ps5upload-proc-identity-selftest
 	@echo "✓ only our own threads are ever in SIGKILL range"
+	@echo "Running start lock + takeover wait self-test (host build)..."
+	@cc -O2 -Wall -Wextra -Werror -pthread -DTAKEOVER_FLOCK=test_flock -I$(PAYLOAD_DIR)/include \
+		-o $(SELFTEST_DIR)/ps5upload-takeover-lock-selftest \
+		$(PAYLOAD_DIR)/tests/takeover_lock_selftest.c $(PAYLOAD_DIR)/src/takeover_flag.c
+	@$(RUN_LIMITED) $(SELFTEST_DIR)/ps5upload-takeover-lock-selftest
+	@echo "✓ two helpers starting together run one after the other; a holder that dies, hangs or has no flock never leaves nobody serving"
 	@echo "Running prior-instance verdict self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
 		-o $(SELFTEST_DIR)/ps5upload-instance-verdict-selftest \

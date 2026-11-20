@@ -63,6 +63,15 @@ impl RemotePkg {
         }
     }
 
+    /// The install was stopped: give up what is being fetched from a link. Without this the
+    /// body in flight and the windows read ahead went on fetching after the stop, for as long
+    /// as the host kept answering 429/503 (each has its own clone of the source).
+    pub fn stop(&self) {
+        if let RemotePkg::Http(r) = self {
+            r.stop();
+        }
+    }
+
     /// The file behind a link changed under this install. Only a link can do that.
     pub fn origin_changed(&self) -> bool {
         matches!(self, RemotePkg::Http(r) if r.origin_changed())
@@ -477,12 +486,26 @@ fn cleanup_stale_uploads_in(dir: &std::path::Path) {
 }
 
 /// Sweeps staged browser uploads when the engine starts and every hour after: an upload that was
-/// the last one for a while must not leave its copy for as long as the engine runs.
-pub(crate) fn spawn_stale_upload_sweep() {
-    tokio::spawn(async {
+/// the last one for a while must not leave its copy for as long as the engine runs. Install
+/// sessions no console reads from any more are pruned every ten minutes (`gc_old_sessions`).
+pub(crate) fn spawn_stale_upload_sweep(state: PkgInstallStateHandle) {
+    tokio::spawn(async move {
+        let mut tick = 0u64;
         loop {
-            let _ = tokio::task::spawn_blocking(cleanup_stale_pkg_uploads).await;
-            tokio::time::sleep(std::time::Duration::from_secs(60 * 60)).await;
+            let state = state.clone();
+            let uploads_too = tick.is_multiple_of(6);
+            tick = tick.wrapping_add(1);
+            let _ = tokio::task::spawn_blocking(move || {
+                if uploads_too {
+                    cleanup_stale_pkg_uploads();
+                }
+                let mut sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
+                if gc_old_sessions(&mut sessions, now_unix(), pkg_session_max_age_sec()) > 0 {
+                    persist::save(&sessions);
+                }
+            })
+            .await;
+            tokio::time::sleep(std::time::Duration::from_secs(10 * 60)).await;
         }
     });
 }
@@ -1069,20 +1092,55 @@ pub struct SharedLink {
     pub any_device: bool,
 }
 
-/// The link the console fetches, shortened when it is too long for its installer.
-fn link_url(s: &InstallSession) -> Option<String> {
-    let url = pkg_host_url_for(&s.ps5_mgmt_addr, &s.id, &s.content_id).ok()?;
-    match shorten_for_installer(&s.ps5_mgmt_addr, &url) {
+/// The link the console fetches, shortened when it is too long for its installer. Looks the
+/// console's name up when it was added by name, which can take seconds: never called with the
+/// sessions lock held.
+fn link_url(ps5_mgmt_addr: &str, id: &str, content_id: &str) -> Option<String> {
+    let url = pkg_host_url_for(ps5_mgmt_addr, id, content_id).ok()?;
+    match shorten_for_installer(ps5_mgmt_addr, &url) {
         Ok(Some(short)) => Some(short),
         Ok(None) => Some(url),
         Err(_) => None,
     }
 }
 
-fn shared_link(s: &InstallSession) -> Option<SharedLink> {
-    Some(SharedLink {
+/// A link as it is read out of its session under the sessions lock: everything but the URL,
+/// which [`LinkDraft::finish`] works out once the lock is released.
+struct LinkDraft {
+    link: SharedLink,
+    ps5_mgmt_addr: String,
+}
+
+impl LinkDraft {
+    fn finish(mut self) -> Option<SharedLink> {
+        self.link.url = link_url(&self.ps5_mgmt_addr, &self.link.id, &self.link.content_id)?;
+        Some(self.link)
+    }
+}
+
+/// [`LinkDraft::finish`] for each draft, off the async workers (a name lookup blocks).
+async fn finish_links(drafts: Vec<LinkDraft>) -> Vec<SharedLink> {
+    tokio::task::spawn_blocking(move || {
+        drafts
+            .into_iter()
+            .filter_map(LinkDraft::finish)
+            .collect::<Vec<_>>()
+    })
+    .await
+    .unwrap_or_default()
+}
+
+fn link_draft(s: &InstallSession) -> LinkDraft {
+    LinkDraft {
+        ps5_mgmt_addr: s.ps5_mgmt_addr.clone(),
+        link: shared_link_without_url(s),
+    }
+}
+
+fn shared_link_without_url(s: &InstallSession) -> SharedLink {
+    SharedLink {
         id: s.id.clone(),
-        url: link_url(s)?,
+        url: String::new(),
         title: s.title.clone(),
         content_id: s.content_id.clone(),
         total_size: s.total_size,
@@ -1091,7 +1149,7 @@ fn shared_link(s: &InstallSession) -> Option<SharedLink> {
         created_at_unix: s.created_at_unix,
         last_activity_unix: s.last_activity_unix,
         any_device: s.shared_any,
-    })
+    }
 }
 
 async fn link_create_handler(
@@ -1104,19 +1162,22 @@ async fn link_create_handler(
     static ONE_AT_A_TIME: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
     let _turn = ONE_AT_A_TIME.lock().await;
     // An existing link for the same file is handed back, not doubled.
-    {
+    let same = {
         let sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
-        let same = sessions.values().find(|s| {
-            s.shared_link
-                && !s.cancelled
-                && s.ps5_mgmt_addr == normalize_mgmt_addr(&req.ps5_addr)
-                && s.parts
-                    .first()
-                    .is_some_and(|p| p == std::path::Path::new(&req.path))
-        });
-        if let Some(link) = same.and_then(shared_link) {
-            return json_ok(&link);
-        }
+        sessions
+            .values()
+            .find(|s| {
+                s.shared_link
+                    && !s.cancelled
+                    && s.ps5_mgmt_addr == normalize_mgmt_addr(&req.ps5_addr)
+                    && s.parts
+                        .first()
+                        .is_some_and(|p| p == std::path::Path::new(&req.path))
+            })
+            .map(link_draft)
+    };
+    if let Some(link) = finish_links(same.into_iter().collect()).await.pop() {
+        return json_ok(&link);
     }
     let mut start: InstallStartRequest = match serde_json::from_value(serde_json::json!({
         "ps5_addr": req.ps5_addr,
@@ -1139,17 +1200,20 @@ async fn link_create_handler(
         Ok(s) => s,
         Err(e) => return json_err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     };
-    let mut sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
-    let Some(s) = sessions.get_mut(&started.session_id) else {
-        return json_err(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            "the link's session is gone",
-        );
+    let draft = {
+        let mut sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(s) = sessions.get_mut(&started.session_id) else {
+            return json_err(
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "the link's session is gone",
+            );
+        };
+        s.shared_link = true;
+        let draft = link_draft(s);
+        persist::save(&sessions);
+        draft
     };
-    s.shared_link = true;
-    let link = shared_link(s);
-    persist::save(&sessions);
-    match link {
+    match finish_links(vec![draft]).await.pop() {
         Some(link) => json_ok(&link),
         None => json_err(
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -1159,12 +1223,15 @@ async fn link_create_handler(
 }
 
 async fn links_list_handler(State(state): State<PkgInstallStateHandle>) -> Response<Body> {
-    let sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
-    let mut links: Vec<SharedLink> = sessions
-        .values()
-        .filter(|s| s.shared_link && !s.cancelled)
-        .filter_map(shared_link)
-        .collect();
+    let drafts: Vec<LinkDraft> = {
+        let sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        sessions
+            .values()
+            .filter(|s| s.shared_link && !s.cancelled)
+            .map(link_draft)
+            .collect()
+    };
+    let mut links = finish_links(drafts).await;
     links.sort_by_key(|l| std::cmp::Reverse(l.created_at_unix));
     json_ok(&links)
 }
@@ -1181,16 +1248,19 @@ async fn link_open_handler(
     State(state): State<PkgInstallStateHandle>,
     Json(req): Json<LinkOpenRequest>,
 ) -> Response<Body> {
-    let mut sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
-    match sessions.get_mut(&req.id) {
-        Some(s) if s.shared_link && !s.cancelled => {
-            s.shared_any = req.any;
-            match shared_link(s) {
-                Some(link) => json_ok(&link),
-                None => json_err(StatusCode::INTERNAL_SERVER_ERROR, "the link is gone"),
+    let draft = {
+        let mut sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
+        match sessions.get_mut(&req.id) {
+            Some(s) if s.shared_link && !s.cancelled => {
+                s.shared_any = req.any;
+                link_draft(s)
             }
+            _ => return json_err(StatusCode::NOT_FOUND, &format!("no link {}", req.id)),
         }
-        _ => json_err(StatusCode::NOT_FOUND, &format!("no link {}", req.id)),
+    };
+    match finish_links(vec![draft]).await.pop() {
+        Some(link) => json_ok(&link),
+        None => json_err(StatusCode::INTERNAL_SERVER_ERROR, "the link is gone"),
     }
 }
 
@@ -1204,14 +1274,19 @@ async fn link_stop_handler(
     Json(req): Json<LinkStopRequest>,
 ) -> Response<Body> {
     let mut sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
-    match sessions.get_mut(&req.id) {
-        Some(s) if s.shared_link => {
-            s.cancelled = true;
-            persist::save(&sessions);
-            json_ok(&serde_json::json!({ "ok": true }))
-        }
-        _ => json_err(StatusCode::NOT_FOUND, &format!("no link {}", req.id)),
+    if stop_link(&mut sessions, &req.id) {
+        persist::save(&sessions);
+        json_ok(&serde_json::json!({ "ok": true }))
+    } else {
+        json_err(StatusCode::NOT_FOUND, &format!("no link {}", req.id))
     }
+}
+
+/// Stops the shared link `id` (and only a link: an install's session is not stopped this way).
+/// Released as any session is, so a link to a package on a saved server lets go of its SMB
+/// handle, FTP sessions and window cache now and not at the next install's prune.
+fn stop_link(map: &mut HashMap<String, InstallSession>, id: &str) -> bool {
+    map.get(id).is_some_and(|s| s.shared_link) && mark_released(map, id)
 }
 
 // ─── /api/pkg/installed ──────────────────────────────────────────────
@@ -1451,49 +1526,73 @@ fn verify_installed_artifact(
     expected_size: u64,
     expected_fingerprint: &str,
 ) -> InstalledArtifactCheck {
-    // Sony's in-flight placeholder title id means the install never got
-    // rewritten with the real one. That is a BROKEN install, not an
-    // unverifiable one: the tile exists but launches Sony's CloudClientApp
-    // instead of the user's eboot. It must map to Different (a real failure)
-    // and not Unsupported, which the poll treats as "can't tell, assume fine"
-    // and would hand the user a broken tile with a green tick.
-    if ps5upload_core::pkg_install::is_placeholder_content_id(content_id) {
-        return InstalledArtifactCheck::Different;
-    }
-    let Some(title_id) = ps5upload_core::pkg_install::title_id_from_content_id(content_id) else {
-        return InstalledArtifactCheck::Unsupported;
-    };
-    let wanted_kind = package_kind_for_type(package_type);
-    let inventory = installed_pkg_inventory(addr, &title_id);
-    // These exact bytes anywhere for the title are this package, whatever its category says:
-    // a PS5 update that carries the whole app lands as the app (`/user/app/<id>/app.pkg`).
-    // Measured with a YouTube update package (PS5DP) on 13.60.
-    if exact_bytes_installed(&inventory.artifacts, expected_fingerprint) {
-        return InstalledArtifactCheck::Match;
-    }
-    let candidates: Vec<_> = inventory
-        .artifacts
-        .iter()
-        .filter(|a| a.kind == wanted_kind)
-        .collect();
-    if candidates.is_empty() {
-        return InstalledArtifactCheck::Absent;
-    }
-    let matched = candidates.iter().any(|a| {
-        artifact_identity_matches(
-            a,
-            wanted_kind,
-            content_id,
-            expected_size,
-            expected_fingerprint,
-            package_type,
-        )
-    });
-    if matched {
-        InstalledArtifactCheck::Match
-    } else {
-        InstalledArtifactCheck::Different
-    }
+    verify_installed_artifact_seen(
+        addr,
+        content_id,
+        package_type,
+        expected_size,
+        expected_fingerprint,
+    )
+    .0
+}
+
+/// [`verify_installed_artifact`], and the inventory it read from the console to decide (none
+/// when it never asked): a caller that also wants the title's bytes does not read it again.
+fn verify_installed_artifact_seen(
+    addr: &str,
+    content_id: &str,
+    package_type: &str,
+    expected_size: u64,
+    expected_fingerprint: &str,
+) -> (InstalledArtifactCheck, Option<InstalledPkgInventory>) {
+    let mut seen = None;
+    let check = (|| {
+        // Sony's in-flight placeholder title id means the install never got
+        // rewritten with the real one. That is a BROKEN install, not an
+        // unverifiable one: the tile exists but launches Sony's CloudClientApp
+        // instead of the user's eboot. It must map to Different (a real failure)
+        // and not Unsupported, which the poll treats as "can't tell, assume fine"
+        // and would hand the user a broken tile with a green tick.
+        if ps5upload_core::pkg_install::is_placeholder_content_id(content_id) {
+            return InstalledArtifactCheck::Different;
+        }
+        let Some(title_id) = ps5upload_core::pkg_install::title_id_from_content_id(content_id)
+        else {
+            return InstalledArtifactCheck::Unsupported;
+        };
+        let wanted_kind = package_kind_for_type(package_type);
+        let inventory = &*seen.insert(installed_pkg_inventory(addr, &title_id));
+        // These exact bytes anywhere for the title are this package, whatever its category says:
+        // a PS5 update that carries the whole app lands as the app (`/user/app/<id>/app.pkg`).
+        // Measured with a YouTube update package (PS5DP) on 13.60.
+        if exact_bytes_installed(&inventory.artifacts, expected_fingerprint) {
+            return InstalledArtifactCheck::Match;
+        }
+        let candidates: Vec<_> = inventory
+            .artifacts
+            .iter()
+            .filter(|a| a.kind == wanted_kind)
+            .collect();
+        if candidates.is_empty() {
+            return InstalledArtifactCheck::Absent;
+        }
+        let matched = candidates.iter().any(|a| {
+            artifact_identity_matches(
+                a,
+                wanted_kind,
+                content_id,
+                expected_size,
+                expected_fingerprint,
+                package_type,
+            )
+        });
+        if matched {
+            InstalledArtifactCheck::Match
+        } else {
+            InstalledArtifactCheck::Different
+        }
+    })();
+    (check, seen)
 }
 
 fn remote_pkg_size(addr: &str, path: &str) -> Option<u64> {
@@ -1841,6 +1940,10 @@ pub struct InstallStartRequest {
     /// Set by `link_create_handler`, never by a request body.
     #[serde(skip)]
     pub link_only: bool,
+    /// A package on a saved server the install job has opened already, with the `remote://`
+    /// path it was opened from: served from as it is. Never from a request body.
+    #[serde(skip)]
+    pub opened_remote: Option<(String, OpenedRemote)>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -1988,64 +2091,11 @@ pub(crate) async fn install_start_handler(
     // 2.2.55: opportunistic GC pass under the same lock to bound the
     // sessions map across a long-running engine.
     //
-    // Two-policy GC, by design — see `gc_old_sessions` for the
-    // status-poll-time fallback. Policies:
-    //   1. (here, install_start) Drop sessions whose staging_path is
-    //      already None AND that are older than ~half the
-    //      configured max-age. staging_path == None is a strong
-    //      "we already cleaned up" signal — set by the terminal and cancel
-    //      paths. Aggressive prune of
-    //      definitely-done sessions, while still keeping recent
-    //      rows the UI may poll.
-    //   2. (gc_old_sessions, status_handler) Pure age-based prune at
-    //      full max-age; runs on every status poll. Catches
-    //      sessions that never reached terminal (e.g. user closed
-    //      the app mid-install, no cancel ever fired).
-    //
-    // Without this insert-time pass, a sequence of register-reject
-    // failures (no status polls fire because the UI sees the
-    // immediate error) would bloat the map unbounded — gc_old_sessions
-    // alone wouldn't help because nothing calls status.
+    // The same prune the periodic sweep runs (`gc_old_sessions`): here too, so a run of
+    // installs refused at once (no poll, no serving) cannot grow the map between sweeps.
     let rival = {
         let mut sessions = state.sessions.lock().unwrap_or_else(|e| e.into_inner());
-        let now = now_unix();
-        let max_age = pkg_session_max_age_sec();
-        let full_cutoff = now.saturating_sub(max_age);
-        let aggressive_cutoff = now.saturating_sub(max_age / 2);
-        // Aggressive prune: drop sessions that are clearly "done with
-        // host-side work AND old enough." `staging_path == None`
-        // *alone* doesn't qualify any more — HTTP-mode (streaming)
-        // installs always have staging_path == None for their entire
-        // lifetime, so the v2.16.0 gate `staging_path.is_some()` was
-        // evicting in-flight multi-GB downloads at the half-max-age
-        // mark.
-        //
-        // The correct "definitely done" signal is `terminal_status.is_
-        // some()` — set by the status handler the moment BGFT reaches
-        // Done or Error. Sessions in either of those states have no
-        // further polls to serve and can safely be reaped early.
-        //
-        // ALSO apply a pure age prune at full max-age regardless of state.
-        // Register-reject installs (err_code != 0) never reach the status
-        // poll's Done/Error path, so their terminal_status stays None forever
-        // — the `terminal_status.is_none()` arm would otherwise retain them
-        // indefinitely (gc_old_sessions only runs from the status handler,
-        // which a register-reject never calls). The full-age sweep here is the
-        // only thing that reaps them, bounding the sessions map.
-        sessions.retain(|_, s| {
-            // Measured from the last sign of life, so an install that is still
-            // pulling bytes is never reaped no matter how long it runs.
-            // A shared link lasts until it is stopped (or the engine quits), however long no
-            // console fetches it, as PS Game Library's served packages did.
-            if s.shared_link && !s.cancelled {
-                return true;
-            }
-            let idle_since = s.last_activity_unix.max(s.created_at_unix);
-            if idle_since <= full_cutoff {
-                return false;
-            }
-            idle_since > aggressive_cutoff || s.terminal_status.is_none()
-        });
+        gc_old_sessions(&mut sessions, now_unix(), pkg_session_max_age_sec());
         // ── Rival-session guard ──────────────────────────────────────────
         //
         // Sony keys an install by content_id, and a base, its patch and its
@@ -2558,7 +2608,7 @@ fn observe_artifact(
     expected_fingerprint: &str,
     title: Option<&str>,
 ) -> ArtifactObservation {
-    let c = verify_installed_artifact(
+    let (c, seen) = verify_installed_artifact_seen(
         addr,
         content_id,
         package_type,
@@ -2587,8 +2637,11 @@ fn observe_artifact(
         matched: false,
         unsupported: false,
         answered: ps5upload_core::volumes::list_volumes(addr).is_ok(),
+        // The check above read this title's packages a moment ago: twice per poll doubled
+        // the console round trips of a wait that can last an hour.
         seen_bytes: title.map_or(0, |t| {
-            installed_pkg_inventory(addr, t)
+            seen.filter(|i| i.title_id == t)
+                .unwrap_or_else(|| installed_pkg_inventory(addr, t))
                 .artifacts
                 .iter()
                 .map(|a| a.size)
@@ -3094,6 +3147,17 @@ async fn serve_handler(
     builder.body(body).unwrap_or_else(builder_failed_response)
 }
 
+/// How much one read of a range response asks for. A package on a saved server is read
+/// [`crate::remote::range::READ_AT_ONCE`] at a time: its source splits that into positioned
+/// reads that run together, where a megabyte at a time was one read, waited for, then the next,
+/// each a round trip to the server. Everything else reads [`PKG_HOST_STREAM_CHUNK`].
+fn read_chunk_for(session: &InstallSession, source: &ServeSource) -> u64 {
+    match (source, session.remote.as_deref()) {
+        (ServeSource::Package, Some(RemotePkg::Remote(_))) => crate::remote::range::READ_AT_ONCE,
+        _ => PKG_HOST_STREAM_CHUNK,
+    }
+}
+
 /// Bytes read per chunk while streaming a range response. Small enough that a
 /// quarter-gigabyte range costs kilobytes of buffer, large enough that the
 /// per-chunk overhead stays negligible against disk and LAN throughput.
@@ -3146,12 +3210,15 @@ fn range_body(
     let (tx, rx) = tokio::sync::mpsc::channel::<Result<axum::body::Bytes, std::io::Error>>(4);
     tokio::task::spawn_blocking(move || {
         let mut cursor = start;
+        // The part file being read, kept open from one chunk to the next.
+        let mut open = None;
+        let chunk = read_chunk_for(&session, &source);
         while cursor <= end {
-            let stop = end.min(cursor + PKG_HOST_STREAM_CHUNK - 1);
+            let stop = end.min(cursor + chunk - 1);
             let read = match &source {
-                ServeSource::Package => read_split_range(&session, cursor, stop),
+                ServeSource::Package => read_split_range_keeping(&session, cursor, stop, &mut open),
                 ServeSource::EmbeddedCrc { offset, .. } => {
-                    read_split_range(&session, offset + cursor, offset + stop)
+                    read_split_range_keeping(&session, offset + cursor, offset + stop, &mut open)
                 }
                 // A range past the file (an empty one has no byte 0) is an error for this
                 // response, not a panic of the task that fills it.
@@ -3167,11 +3234,20 @@ fn range_body(
             };
             match read {
                 Ok(b) => {
-                    // A send error means the console hung up; stop reading.
-                    if tx.blocking_send(Ok(axum::body::Bytes::from(b))).is_err() {
-                        return;
+                    // Sent a megabyte at a time whatever was read at once, so what is counted
+                    // as served stays what the console has been handed.
+                    let b = axum::body::Bytes::from(b);
+                    let mut at = 0usize;
+                    while at < b.len() {
+                        let n = (b.len() - at).min(PKG_HOST_STREAM_CHUNK as usize);
+                        // A send error means the console hung up; stop reading.
+                        if tx.blocking_send(Ok(b.slice(at..at + n))).is_err() {
+                            return;
+                        }
+                        let from = cursor + at as u64;
+                        on_sent(from, from + n as u64 - 1);
+                        at += n;
                     }
-                    on_sent(cursor, stop);
                 }
                 Err(e) => {
                     let _ = tx.blocking_send(Err(e));
@@ -3337,19 +3413,18 @@ mod remote_type_tests {
     }
 }
 
-/// Open a package on a saved server and read its header through ranges.
-pub(crate) async fn open_remote_package(
-    remote_path: &str,
-) -> Result<
-    (
-        Arc<RemotePkg>,
-        u64,
-        ps5upload_pkg::ReaderMetadata,
-        String,
-        String,
-    ),
+/// A package on a saved server, opened: the source, its size, its header, its fingerprint and
+/// its file name.
+pub(crate) type OpenedRemote = (
+    Arc<RemotePkg>,
+    u64,
+    ps5upload_pkg::ReaderMetadata,
     String,
-> {
+    String,
+);
+
+/// Open a package on a saved server and read its header through ranges.
+pub(crate) async fn open_remote_package(remote_path: &str) -> Result<OpenedRemote, String> {
     let r = crate::remote::pool::global().map_err(|e| e.to_string())?;
     let source = crate::remote::range::RemoteRangeSource::open(
         Arc::clone(&r.pool),
@@ -3402,7 +3477,17 @@ async fn resolve_remote_fs_source(
     if req.split_root.is_some() || req.remote_url.is_some() {
         return Err("a server path cannot be combined with split_root or remote_url".into());
     }
-    let (remote, total_size, head, fingerprint, name) = open_remote_package(remote_path).await?;
+    // The install job opened it already, to read its header: the same open handle and
+    // fingerprint serve the console, rather than a second sign-in, open and sampled read.
+    let opened = match req
+        .opened_remote
+        .as_ref()
+        .filter(|(path, _)| path == remote_path)
+    {
+        Some((_, o)) => o.clone(),
+        None => open_remote_package(remote_path).await?,
+    };
+    let (remote, total_size, head, fingerprint, name) = opened;
     let metadata = streamed_metadata(req, head, fingerprint, total_size, &name);
     Ok((vec![], vec![], total_size, metadata, Some(remote)))
 }
@@ -3501,6 +3586,7 @@ async fn remote_probe_handler(Json(req): Json<RemoteProbeRequest>) -> Response<B
         package_fingerprint: None,
         serve_only: true,
         link_only: false,
+        opened_remote: None,
     };
     match resolve_remote_source(&url, &probe_req).await {
         Ok((_, _, total_size, meta, _)) => {
@@ -3569,6 +3655,7 @@ async fn console_probe_handler(Json(req): Json<ConsoleProbeRequest>) -> Response
         package_fingerprint: None,
         serve_only: true,
         link_only: false,
+        opened_remote: None,
     };
     match resolve_console_source(&url, &probe_req).await {
         Ok((_, _, total_size, meta, _)) => {
@@ -3778,6 +3865,19 @@ fn resolve_crc(session: &InstallSession, filename: &str) -> std::io::Result<Opti
 /// Read a byte range `[start, end]` (inclusive) from the split-pkg
 /// part list, crossing part boundaries as needed.
 fn read_split_range(s: &InstallSession, start: u64, end: u64) -> std::io::Result<Vec<u8>> {
+    read_split_range_keeping(s, start, end, &mut None)
+}
+
+/// [`read_split_range`] for a caller that reads one range after another (a response body, a
+/// megabyte at a time): the part file it read last stays open in `open`. Opening the file anew
+/// for every megabyte cost a 100 GB install a hundred thousand opens, each of which a virus
+/// scanner on Windows looks at.
+fn read_split_range_keeping(
+    s: &InstallSession,
+    start: u64,
+    end: u64,
+    open: &mut Option<(usize, std::fs::File)>,
+) -> std::io::Result<Vec<u8>> {
     // Install-from-a-link: there is no local file, so the range is satisfied
     // from the origin (many connections at once, short in-memory window
     // cache). Everything downstream — 206/Content-Range, the transfer
@@ -3822,7 +3922,10 @@ fn read_split_range(s: &InstallSession, start: u64, end: u64) -> std::io::Result
                 std::io::Error::new(std::io::ErrorKind::InvalidInput, "take too large for usize")
             })?;
 
-            let mut f = std::fs::File::open(&s.parts[i])?;
+            let mut f = match open.take() {
+                Some((part, f)) if part == i => f,
+                _ => std::fs::File::open(&s.parts[i])?,
+            };
             f.seek(SeekFrom::Start(local_start))?;
             // Read directly into `out`'s tail to avoid a double allocation
             // (previously allocated `chunk` + `out.extend_from_slice`, using
@@ -3830,6 +3933,7 @@ fn read_split_range(s: &InstallSession, start: u64, end: u64) -> std::io::Result
             let old_len = out.len();
             out.resize(old_len + take_usize, 0);
             f.read_exact(&mut out[old_len..])?;
+            *open = Some((i, f));
 
             cursor = want_end_global + 1;
             if cursor > end {
@@ -4286,6 +4390,31 @@ mod loader_route_tests {
     }
 }
 
+/// Drops the sessions no console reads from any more. Called at each install start and by the
+/// periodic sweep (`spawn_stale_upload_sweep`): a session kept after a stall, or one whose job
+/// ended with no reply, used to stay (window cache, SMB handle and FTP sessions of a saved
+/// server included) until the next install happened to start.
+///
+/// Measured from the last byte served (`last_activity_unix`), never from creation: a console
+/// still pulling, however long the install runs, keeps its session. Gone after `max_age` idle;
+/// one already released (`cancelled`, it answers 410 to everything) or with a terminal status
+/// after half that. A shared link stays until it is stopped. Returns how many were dropped.
+fn gc_old_sessions(map: &mut HashMap<String, InstallSession>, now: u64, max_age: u64) -> usize {
+    let before = map.len();
+    map.retain(|_, s| {
+        if s.shared_link && !s.cancelled {
+            return true;
+        }
+        let idle = now.saturating_sub(s.last_activity_unix.max(s.created_at_unix));
+        if idle >= max_age {
+            return false;
+        }
+        let ended = s.cancelled || s.terminal_status.is_some();
+        !(ended && idle >= max_age / 2)
+    });
+    before - map.len()
+}
+
 /// Whether `other` is a live install of the same package to the same console as `new`.
 fn is_rival(other: &InstallSession, new: &InstallSession, now: u64) -> bool {
     !other.cancelled
@@ -4415,6 +4544,16 @@ mod persist_tests {
         assert!(map["released"].cancelled);
         // Releasing an unknown session is a harmless no-op.
         assert!(!super::mark_released(&mut map, "missing"));
+
+        // Stopping a link releases it the same way; an install's session is not a link.
+        let mut link = session("a-link", dir.join("game.pkg"), 4096);
+        link.shared_link = true;
+        let plain = session("an-install", dir.join("game.pkg"), 4096);
+        let mut links = HashMap::from([(link.id.clone(), link), (plain.id.clone(), plain)]);
+        assert!(super::stop_link(&mut links, "a-link"));
+        assert!(links["a-link"].cancelled && links["a-link"].remote.is_none());
+        assert!(!super::stop_link(&mut links, "an-install"));
+        assert!(!links["an-install"].cancelled);
 
         let file = dir.join("sessions.json");
         persist::save_to(&file, &map);
@@ -5024,6 +5163,36 @@ Marvel's%20Spider-Man%202%20-%20PPSA03016%20-%20v1.4.3%20-%20US%20-%20BASE.pkg";
         );
     }
 
+    /// Ended and abandoned sessions are pruned by the sweep, not only by the next install start;
+    /// one a console still fetches from, or a live shared link, is kept however old.
+    #[test]
+    fn the_sweep_drops_ended_sessions_and_keeps_live_ones() {
+        let (now, max_age) = (1_000_000u64, 7200u64);
+        let mut map = HashMap::new();
+        let mut add = |id: &str, idle: u64, f: &dyn Fn(&mut InstallSession)| {
+            let mut s = dummy_session(vec![]);
+            s.id = id.into();
+            s.created_at_unix = now - 5 * max_age;
+            s.last_activity_unix = now - idle;
+            f(&mut s);
+            map.insert(id.to_string(), s);
+        };
+        add("busy", 1, &|_| {});
+        add("stalled-recent", max_age / 4, &|_| {});
+        add("stalled-old", max_age, &|_| {});
+        add("released-recent", 60, &|s| s.cancelled = true);
+        add("released-old", max_age / 2, &|s| s.cancelled = true);
+        add("link", 10 * max_age, &|s| s.shared_link = true);
+        add("stopped-link", max_age, &|s| {
+            s.shared_link = true;
+            s.cancelled = true;
+        });
+        assert_eq!(gc_old_sessions(&mut map, now, max_age), 3);
+        let mut kept: Vec<_> = map.keys().cloned().collect();
+        kept.sort();
+        assert_eq!(kept, ["busy", "link", "released-recent", "stalled-recent"]);
+    }
+
     /// A remote-backed session must satisfy ranges from the HTTP origin
     /// instead of the (empty) `parts` list. This is the seam between the
     /// range proxy and the pkg-host serve path: if `read_split_range` ever
@@ -5185,6 +5354,56 @@ Marvel's%20Spider-Man%202%20-%20PPSA03016%20-%20v1.4.3%20-%20US%20-%20BASE.pkg";
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A package on a saved server is read several pieces at once, and still handed to the
+    /// console (and counted) a megabyte at a time, byte for byte.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_package_on_a_server_is_served_in_large_reads_byte_for_byte() {
+        use crate::remote::store::{conn, Protocol, Secret};
+        let data: Vec<u8> = (0..(21 * 1024 * 1024 + 7))
+            .map(|i| (i % 251) as u8)
+            .collect();
+        let r = crate::remote::pool::testing::remote_with_shared(
+            Arc::new(crate::remote::MemFs::new(&[("/g/a.pkg", &data)])),
+            None,
+        );
+        let id = r
+            .store
+            .add(conn("NAS", Protocol::Smb), Secret::None)
+            .unwrap()
+            .conn
+            .id;
+        let src = crate::remote::range::RemoteRangeSource::open(
+            Arc::clone(&r.pool),
+            Arc::clone(&r.store),
+            &format!("remote://{id}/g/a.pkg"),
+            crate::remote::pool::Backoff::instant(),
+        )
+        .await
+        .unwrap();
+        let mut s = dummy_session(vec![]);
+        s.remote = Some(Arc::new(RemotePkg::Remote(src)));
+        assert_eq!(
+            read_chunk_for(&s, &ServeSource::Package),
+            crate::remote::range::READ_AT_ONCE
+        );
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let log = Arc::clone(&sent);
+        let (start, end) = (3u64, data.len() as u64 - 2);
+        let body = range_body(s, ServeSource::Package, start, end, move |a, b| {
+            log.lock().unwrap().push((a, b))
+        });
+        let got = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+        assert!(got[..] == data[start as usize..=end as usize]);
+        let sent = sent.lock().unwrap();
+        let mut next = start;
+        for &(a, b) in sent.iter() {
+            assert_eq!(a, next);
+            assert!(b - a < PKG_HOST_STREAM_CHUNK);
+            next = b + 1;
+        }
+        assert_eq!(next, end + 1);
+    }
+
     #[test]
     fn range_header_full_when_absent() {
         let h = HeaderMap::new();
@@ -5334,6 +5553,31 @@ Marvel's%20Spider-Man%202%20-%20PPSA03016%20-%20v1.4.3%20-%20US%20-%20BASE.pkg";
         // Take the last byte of part0, all of part1, first byte of part2.
         let chunk = read_split_range(&s, 3, 8).unwrap();
         assert_eq!(chunk, b"ABBBBC");
+    }
+
+    /// A body read chunk after chunk keeps its part file open, and still reads the right
+    /// bytes when a chunk crosses into the next part or the reads go backwards.
+    #[test]
+    fn split_range_read_chunk_by_chunk_keeps_the_part_open() {
+        let dir = std::env::temp_dir().join(format!("pkg-test3-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let (p1, p2) = (dir.join("a.pkg"), dir.join("a.pkg.0"));
+        std::fs::write(&p1, b"AAAAaa").unwrap();
+        std::fs::write(&p2, b"BBBBbb").unwrap();
+        let s = dummy_session(vec![(p1, 6), (p2, 6)]);
+        let mut open = None;
+        let mut got = Vec::new();
+        for start in (0..12).step_by(4) {
+            got.extend(read_split_range_keeping(&s, start, start + 3, &mut open).unwrap());
+            assert!(open.is_some());
+        }
+        assert_eq!(got, b"AAAAaaBBBBbb");
+        assert_eq!(open.as_ref().map(|o| o.0), Some(1));
+        assert_eq!(
+            read_split_range_keeping(&s, 1, 4, &mut open).unwrap(),
+            b"AAAa"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

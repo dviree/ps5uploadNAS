@@ -1687,8 +1687,21 @@ impl Side for LocalSide {
         unstorable(rel)
     }
     fn case_insensitive(&self) -> bool {
-        cfg!(windows) || cfg!(target_os = "macos")
+        folder_ignores_case(&self.root)
     }
+}
+
+/// Whether the folder `root` ignores case in names, asked of the folder itself: its marker,
+/// looked for in capitals. The system alone does not say: a phone's shared storage ignores
+/// case on Android, and so does an exFAT, NTFS or network disk on Linux. Taken for
+/// case-sensitive there, two files of the console that differ only in case were downloaded in
+/// turn onto one name, the second failing as "changed here" on every pass. With no marker to
+/// ask (it is checked before a pass), what the system usually does.
+fn folder_ignores_case(root: &Path) -> bool {
+    if root.join(MARKER).is_file() {
+        return root.join(MARKER.to_ascii_uppercase()).is_file();
+    }
+    cfg!(windows) || cfg!(target_os = "macos")
 }
 
 /// A folder on a second console. Bytes go console to console (directly when the consoles can
@@ -1727,7 +1740,11 @@ const BATCH_FILES: usize = 200;
 const BATCH_BYTES: u64 = 512 << 20;
 
 /// How often a running pass checks that its consoles still answer.
-const WATCH_EVERY: Duration = Duration::from_secs(10);
+const WATCH_EVERY: Duration = if cfg!(test) {
+    Duration::from_millis(600)
+} else {
+    Duration::from_secs(10)
+};
 /// How often a running pass checks that its member is still wanted.
 const WANTED_EVERY: Duration = if cfg!(test) {
     Duration::from_millis(600)
@@ -1740,9 +1757,14 @@ const WANTED_EVERY: Duration = if cfg!(test) {
 /// console put to rest mid-copy would hold the pass, and every drive behind it, until it woke.
 /// Two missed checks in a row (or the drive's lock lost, or the member stopped) flip the pass's
 /// cancel flag: the copy stops, the pass finds out why and ends, keeping what it did.
+///
+/// A console that stopped answering is named in `silent`: the pass ends there as for a console
+/// that went away. It used to go on to the next file with the flag still set, each copy then
+/// failing at once and counted against its file.
 struct Watchdog {
     stop: std::sync::Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
+    silent: std::sync::Arc<Mutex<Option<String>>>,
 }
 
 impl Watchdog {
@@ -1756,6 +1778,8 @@ impl Watchdog {
         XFER_CANCEL.with(|c| *c.borrow_mut() = Some(cancel.clone()));
         let stop = std::sync::Arc::new(AtomicBool::new(false));
         let st = stop.clone();
+        let silent: std::sync::Arc<Mutex<Option<String>>> = Default::default();
+        let quiet = silent.clone();
         let thread = std::thread::Builder::new()
             .name("mesh-drive-watch".into())
             .spawn(move || {
@@ -1787,23 +1811,36 @@ impl Watchdog {
                         continue;
                     }
                     last = std::time::Instant::now();
-                    let answers = consoles.iter().all(|c| {
-                        crate::mesh_api::call(c, || mesh::state(c, u64::MAX, u64::MAX)).is_ok()
+                    let silent_now = consoles.iter().find(|c| {
+                        crate::mesh_api::call(c, || mesh::state(c, u64::MAX, u64::MAX)).is_err()
                     });
-                    misses = if answers { 0 } else { misses + 1 };
+                    misses = if silent_now.is_none() { 0 } else { misses + 1 };
                     if misses >= 2 {
                         crate::log_at!(
                             Info,
                             "mesh",
                             "mesh drive: a console stopped answering mid-pass; its copy stops"
                         );
+                        *quiet.lock().unwrap_or_else(|e| e.into_inner()) = silent_now.cloned();
                         cancel.store(true, Ordering::SeqCst);
                         return;
                     }
                 }
             })
             .ok();
-        Self { stop, thread }
+        Self {
+            stop,
+            thread,
+            silent,
+        }
+    }
+
+    /// The console that stopped answering, once two checks in a row have missed it.
+    fn went_silent(&self) -> Option<String> {
+        self.silent
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .clone()
     }
 }
 
@@ -2072,6 +2109,19 @@ impl Pass<'_> {
         self.hub.away(e).or_else(|| self.side.away(e))
     }
 
+    /// The watchdog found `addr` silent: away (unless something more exact is known of it).
+    fn silent_mid_pass(&self, addr: &str) {
+        crate::log_at!(
+            Info,
+            "mesh",
+            "mesh drive {}: {addr} stopped answering mid-pass; stopping",
+            self.drive.name
+        );
+        if away_of(addr).is_none() {
+            mark_away(addr, AwayWhy::Unreachable);
+        }
+    }
+
     /// One pass. Returns whether it changed the hub, and whether it changed this member's side.
     fn run(&self) -> Result<Changed> {
         let member_id = self.member_id.as_str();
@@ -2229,6 +2279,7 @@ impl Pass<'_> {
         }
         let (today, stamp) = date_parts(now);
         let (mut up, mut down, mut del, mut conf) = (0, 0, 0, 0);
+        let mut base_saved_at = 0;
         let mut hub_changed = false;
         let mut side_changed = false;
         // What each op left on both sides (stat right after it): the base is refreshed from the
@@ -2294,6 +2345,11 @@ impl Pass<'_> {
             }
             if self.lost.load(Ordering::SeqCst) {
                 first_error.get_or_insert_with(lock_taken);
+                break;
+            }
+            if let Some(addr) = watch.as_ref().and_then(Watchdog::went_silent) {
+                self.silent_mid_pass(&addr);
+                went = Some(addr);
                 break;
             }
             let rel = op.path().to_string();
@@ -2416,6 +2472,12 @@ impl Pass<'_> {
                         first_error.get_or_insert_with(lock_taken);
                         break;
                     }
+                    // Stopped by the watchdog: the console it names went quiet, not the file.
+                    if let Some(addr) = watch.as_ref().and_then(Watchdog::went_silent) {
+                        self.silent_mid_pass(&addr);
+                        went = Some(addr);
+                        break;
+                    }
                     if let Some((addr, why)) = self.gone(&e) {
                         // Not this file's fault: it is not counted, and nothing else is tried
                         // (each would wait out the same silence).
@@ -2443,8 +2505,12 @@ impl Pass<'_> {
                 }
             }
             set_status(member_id, |s| s.done += 1);
-            // Progress survives an interrupted pass.
-            if up + down + del + conf > 0 && (up + down + del + conf) % 20 == 0 {
+            // Progress survives an interrupted pass. Once per 20 changes: asked after every
+            // step, a count resting on a multiple of 20 wrote the whole base again (to the
+            // console, for a link) for each later step that changed nothing.
+            let changes = up + down + del + conf;
+            if save_base_due(changes, base_saved_at) {
+                base_saved_at = changes;
                 let _ = self.side.save_base(&self.drive.id, member_id, &base);
             }
         }
@@ -3376,7 +3442,12 @@ fn sync_one(lm: &LocalMember, me: &str) {
 /// own, and the links on another, so a long first sync holds up only what shares its console.
 /// A worker still busy from its last round is left to it.
 pub fn tick() {
-    let me = crate::mesh_api::id_hex().unwrap_or_default();
+    // No identity this round (its file could not be read just now): nothing is synced, and
+    // above all no folder is taken for "removed from its drive" because no member of the
+    // drive is this device's. That forgot every folder here, base files and all.
+    let Some(me) = crate::mesh_api::id_hex() else {
+        return;
+    };
     let mut by_console: BTreeMap<String, Vec<LocalMember>> = BTreeMap::new();
     for lm in load_config().members {
         by_console.entry(lm.console.clone()).or_default().push(lm);
@@ -3548,6 +3619,21 @@ fn valid_name(name: &str) -> bool {
 fn inside(a: &str, b: &str) -> bool {
     let (a, b) = (a.trim_end_matches('/'), b.trim_end_matches('/'));
     a == b || a.starts_with(&format!("{b}/"))
+}
+
+/// [`inside`] for two folders on this computer, compared part by part: on Windows a path is
+/// spelled with `\` (which `inside` took for part of a name, so a folder inside another
+/// drive's folder was let through), and there and on macOS `D:\Sync` is `d:\sync`.
+fn inside_local(a: &str, b: &str) -> bool {
+    let fold = |s: &str| {
+        if cfg!(any(windows, target_os = "macos")) {
+            s.to_lowercase()
+        } else {
+            s.to_string()
+        }
+    };
+    let (a, b) = (fold(a), fold(b));
+    Path::new(&a).starts_with(Path::new(&b))
 }
 
 fn fail_check(path: &str, problem: &str, detail: Option<String>) -> FolderCheck {
@@ -3756,7 +3842,7 @@ pub fn check_local(path: &str, drive: Option<&str>) -> FolderCheck {
     }
     if let Some(data) = crate::remote::store::data_dir() {
         let (a, b) = (p.to_string_lossy(), data.to_string_lossy());
-        if inside(&a, &b) || inside(&b, &a) {
+        if inside_local(&a, &b) || inside_local(&b, &a) {
             return fail_check(&shown, "app_data", None);
         }
     }
@@ -3769,11 +3855,11 @@ pub fn check_local(path: &str, drive: Option<&str>) -> FolderCheck {
         .filter(|m| Some(m.drive.as_str()) != drive)
     {
         let (a, b) = (shown.as_str(), m.path.as_str());
-        let problem = if inside(a, b) && inside(b, a) {
+        let problem = if inside_local(a, b) && inside_local(b, a) {
             "taken"
-        } else if inside(a, b) {
+        } else if inside_local(a, b) {
             "inside"
-        } else if inside(b, a) {
+        } else if inside_local(b, a) {
             "holds"
         } else {
             continue;
@@ -5054,8 +5140,39 @@ pub async fn confirm(Json(req): Json<MemberReq>) -> Response {
     Json(json!({ "supported": true, "ok": true })).into_response()
 }
 
+/// Whether the base is saved now, part way through a pass: at each 20th change, once.
+fn save_base_due(changes: usize, saved_at: usize) -> bool {
+    changes > 0 && changes.is_multiple_of(20) && changes != saved_at
+}
+
 #[cfg(test)]
 mod tests {
+    /// A folder is asked whether it ignores case, whatever the system: checked against what
+    /// this disk really does.
+    #[test]
+    fn a_folder_says_itself_whether_it_ignores_case() {
+        let dir = std::env::temp_dir().join(format!("ps5u-mesh-case-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("probe.txt"), b"x").unwrap();
+        let really = dir.join("PROBE.TXT").is_file();
+        std::fs::write(dir.join(super::MARKER), b"").unwrap();
+        assert_eq!(super::folder_ignores_case(&dir), really);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A step that changes nothing (a file that already matches, a failed copy) does not save
+    /// the base again while the count of changes rests on a multiple of 20.
+    #[test]
+    fn the_base_is_saved_once_at_each_twentieth_change() {
+        assert!(!super::save_base_due(0, 0));
+        assert!(!super::save_base_due(19, 0));
+        assert!(super::save_base_due(20, 0));
+        assert!(!super::save_base_due(20, 20));
+        assert!(!super::save_base_due(21, 20));
+        assert!(super::save_base_due(40, 20));
+    }
+
     /// Checked as text: no id from a console's document reaches a path with a separator, a
     /// drive or `..` in it.
     #[test]
@@ -5840,6 +5957,25 @@ mod tests {
         assert!(!next.stop.load(Ordering::SeqCst));
     }
 
+    /// A console that misses two checks stops the copy and is named, so the pass ends there
+    /// instead of going on with every later copy refused by the same flag.
+    #[test]
+    fn a_watchdog_names_the_console_that_went_quiet() {
+        let quiet = "127.0.0.1:1".to_string();
+        let watch = Watchdog::start(vec![quiet.clone()], Arc::default(), Arc::default(), None);
+        let cancel = xfer_cancel();
+        let from = std::time::Instant::now();
+        while !cancel.load(Ordering::SeqCst) && from.elapsed() < Duration::from_secs(20) {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(cancel.load(Ordering::SeqCst));
+        assert_eq!(watch.went_silent(), Some(quiet));
+        // Nothing to watch: nobody is named.
+        let none = Watchdog::start(Vec::new(), Arc::default(), Arc::default(), None);
+        std::thread::sleep(Duration::from_millis(1500));
+        assert_eq!(none.went_silent(), None);
+    }
+
     #[test]
     fn a_watchdog_stops_the_copy_when_the_member_is_stopped_or_not_wanted() {
         let flag_after = |stop: bool, wanted: Option<Wanted>, wait: Duration| {
@@ -6207,6 +6343,17 @@ mod tests {
         assert!(inside("/data/A/B", "/data/A"));
         assert!(inside("/data/A", "/data/A/"));
         assert!(!inside("/data/AB", "/data/A"));
+        // Folders on this computer, part by part.
+        assert!(inside_local("/data/A/B", "/data/A"));
+        assert!(inside_local("/data/A", "/data/A/"));
+        assert!(!inside_local("/data/AB", "/data/A"));
+        assert!(!inside_local("/data/A", "/data/A/B"));
+        #[cfg(windows)]
+        {
+            assert!(inside_local(r"D:\Sync\A\Photos", r"D:\Sync\A"));
+            assert!(inside_local(r"d:\sync\a", r"D:\Sync\A\"));
+            assert!(!inside_local(r"D:\Sync\AB", r"D:\Sync\A"));
+        }
     }
 
     #[test]
