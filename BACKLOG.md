@@ -10,7 +10,8 @@
   pass.
 - Waiting for the owner's OK: Forge v0.5.6 (pinned 0.5.5) and ampr-emu-ng, now v0.5.0 (the
   NAS converter pins 920e917 / 0.4.0; upstream's engine uses 0.4.1).
-- Next: verify the Docker build (publishing jobs ran), then run the NAS updater.
+- The Docker build (run 59) is green and published (merge and merge-webui ran). Next: the user
+  runs the NAS updater.
 
 - 2026-11-20: merged upstream 4e813f5b (after 12.6.13: helper start fixes, ShadowMount+
   uninstall, AVA1 1.0.11, links without byte ranges, save a link to a PS5 folder, RAR room
