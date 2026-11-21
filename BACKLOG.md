@@ -2,6 +2,16 @@
 
 ## >RESUME HERE
 
+- 2026-11-21: merged upstream 417c9100 (self-hosted Play Together, quieter updates, automatic
+  helper update, the window remembers its place, save backups to a PS5 drive for shares and
+  in a by-user layout, copying into a running game's temp folder, dependency bumps).
+  - README stays the fork's; workflows are unchanged.
+  Checks: engine 2251, core 896, fpkg 390, 6932 vitest tests, tsc, i18n and the NAS checks
+  pass.
+- Waiting for the owner's OK: Forge v0.5.6 (pinned 0.5.5) and ampr-emu-ng, now v0.5.0 (the
+  NAS converter pins 920e917 / 0.4.0; upstream's engine uses 0.4.1).
+- Next: verify the Docker build (publishing jobs ran), then run the NAS updater.
+
 - 2026-11-20: merged upstream 4e813f5b (after 12.6.13: helper start fixes, ShadowMount+
   uninstall, AVA1 1.0.11, links without byte ranges, save a link to a PS5 folder, RAR room
   check, full review fixes).

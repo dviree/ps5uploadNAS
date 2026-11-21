@@ -108,7 +108,7 @@ CMD ["/usr/local/bin/ps5lz4-entrypoint"]
 
 # ── Stage 1: build the React frontend ────────────────────────────────────────
 # Pinned to a release with the October 2026 Node security fixes (Brotli, TLS hostname checks).
-FROM node:26.13.0-alpine AS frontend
+FROM node:26.13.1-alpine AS frontend
 
 # The client at its repo-relative place: the FAQ and Changelog screens bundle
 # ../FAQ.md and ../CHANGELOG.md from the repo root.
@@ -147,6 +147,8 @@ COPY AUTOMATION.md API.md MCP.md ./
 # See engine/Dockerfile: build.rs embeds these, and the web UI's update /
 # DLC install is exactly what breaks without them (the web UI half of #152).
 COPY payload/ ./payload/
+# The built-in Play Together hub serves the website's Share page (src/builtin_hub.rs).
+COPY site/share/index.html ./site/share/index.html
 WORKDIR /build/engine
 
 # Populate the webui/ embed directory from the frontend build output.
