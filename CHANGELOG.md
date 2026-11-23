@@ -6,6 +6,85 @@ What's new in ps5upload, written for humans.
 
 ## Unreleased
 
+**Play Together**
+- **"Press PS, then pick Quick Play on the TV" no longer stays over a friend's game (#916).** The app only learns that a friend picked a user when it sees PS and then ✕, so a pick made any other way left that hint, and the buttons with it, on top of the picture in full screen for the whole session. It now holds the screen for 30 seconds at most, then hides like the other buttons.
+
+**Uploads**
+- **Stream & install on a package already waiting in the queue starts it.** A package added with Add to queue and then sent with Stream & install joined the waiting row but didn't start it.
+
+**Other**
+- **Thank you** to Sponge Bob, Kornakkel and two anonymous supporters, now on the Thanks & Support page.
+- Two Remote Play messages no longer name another app.
+
+## 12.6.23
+
+**Uploads**
+- **Add to queue streams packages too.** On Upload & Install, Add to queue used to copy a .pkg or .fpkg to the PS5 before installing it. It now adds it as a Stream & install, the same as the main button, but waits for Start queue. To copy a package first, use Upload & install.
+
+**Windows**
+- **A clear message when Windows blocks the engine (#914).** Smart App Control and app-control policies only run code-signed programs, and PS5Upload's Windows builds aren't signed yet, so the engine couldn't start and the app showed a generic hint. It now says Windows blocked it and what you can do: ask your administrator to allow the PS5Upload folder, turn Smart App Control off, or use the Docker version from a browser. RAR extraction blocked the same way says so too.
+
+**Docker**
+- **Folders the container can't use are named at startup.** If the data folder, the staging folder or a browse folder isn't writable (or readable) by the container's user, the log says which folder, that the container runs as user 65532, and the `chown` command that fixes it. The health check's data folder line gives the same fix.
+
+**Payloads**
+- **On your PS5 lists your payloads first.** The payloads saved in Payload Manager are now the tab's main list, "Your payloads", each with Launch, Load at boot, Stop and Delete. Payload Manager's own settings stay under Manage on its card, and the count at the top matches what is listed.
+- **A removed payload no longer shows as Installed.** Some payloads leave a folder or settings file behind when removed (LZ4 Compression's /data/LZ4Compression). That alone no longer counts as installed.
+
+**Saves**
+- **Copy to another user works for games that name every save differently, like The Witcher 3.** These games never make a save slot with the same name for another user, so the copy used to stop and ask you to "save in the same slot", which could never work. The save's slots are now added to the other user and made theirs; their other saves of the game stay, and their save is backed up first. The same goes for Copy to another console, and for a user with no save of the game yet.
+
+## 12.6.22
+
+**Uploads**
+- **The check on the PS5 after an upload shows its progress (#873).** Before a big file counts as done, the PS5 reads it back from its drive to check it. When the drive can't keep up while the file is still arriving, part of that check is left for after the last byte, which on a 70–160 GB game can take several minutes, and the row said the PS5 had reported no progress. It now shows "Checking on the PS5: X of Y" with the time left, and the no-progress warning stays off while the check moves.
+- **A stopped upload that you resume isn't checked twice (#873).** The part the PS5 had already checked before the Stop isn't read again, as long as the helper wasn't restarted in between and the file hasn't changed since. Tried on a PS5: a 20 GB upload stopped at 10 GB and resumed checked only the new 10 GB.
+
+**Other**
+- **Clear all in the notification bell (#911).** Thanks @Dang3rZone.
+- **Security:** updated the `url` library for a newly published advisory (RUSTSEC-2026-0592).
+
+## 12.6.21
+
+**Workshop**
+- **Clearer AMPR choices in Convert (#828).** The asset pack choice and the emulator now sit together under Asset packs, and only combinations that start are offered. A game that doesn't use AMPR shows no emulator options. zstd packs always get the emulator that reads zstd, and LZ4 packs always get ampr_emu 0.4.2.1, so a game can no longer end up with an emulator that can't read its packs (which made some converted games close at start). The engine corrects that mix too, including for "Add the AMPR emulator" on a game already in packs. "Rebuild AMPR index" is hidden for games in LZ4 packs, where it doesn't apply.
+
+## 12.6.20
+
+**Fixes**
+- **With the app using an engine on another computer, a PS5 added by its Tailscale address shows up (#907).** It was saved on the engine but never reached the app's list, so its card never appeared. The app now adds it straight away. The same goes for Add in Settings › Tailscale and in "Found on your Tailscale network". With a remote engine, the home network scan in Add a PS5 also runs on the engine's computer, so it no longer lists a PS5 as answering that the engine can't reach. Thanks to the reporter for the diagnosis.
+
+## 12.6.19
+
+**New**
+- **Backup progress, and continue after an interruption (#895).** Both backup cards have a Backup progress button: saves and size done, speed, time left, and each game and user's state on the network share, the PS5 drive and this computer, with Retry for failed ones and Cancel. The backup's state is kept by the app's engine, so after a crash, a disconnect or a closed app the card says where it stopped, with Continue backup to do only what is left. Earlier runs are listed too.
+- **Back up folders on the PS5 too (#899).** "Also back up these folders on the PS5" on both backup cards: pick a folder where an app keeps its saves (a port or an emulator, for example under /data), and it's zipped with every backup, with the same number of versions, kept per PS5, and can be restored to the same place (what is there is kept first). Trophies and play time are not included: they belong to your account and the console's database, and restoring them can break them.
+- **Extract here (#891).** The Extract dialog can unpack straight into the current folder. If something with the same name is already there, it asks once: Keep both, Skip existing or Replace.
+- **Playlist steps from the PS5 or a network share (#900).** "Add from the PS5…" and "Add from a network share…" add payloads stored on the console or on a saved share, so automatic playlists don't need a copy of each payload on the device you connect from.
+- **Picture from a capture device in Play (#893).** On the desktop app, Settings › Picture can take the picture (and, if you like, the sound) from an HDMI capture device while Remote Play keeps handling the controller, keyboard and mouse at a low setting.
+- **Android TV and Google TV (#897).** The Android app installs and shows on a TV's home screen, and can be used with the remote's arrows, OK and Back.
+- **Your own Tailscale server.** SELF_HOSTING.md now explains how to use your own control and relay server with the app's Tailscale support (#901).
+
+**Fixes**
+- **Network share backups no longer fall behind the PS5-drive copy (#896).** A copy to the share was tried only once, so a single dropped connection while a big save was written failed that save for the whole run. Copies are now retried, saves the share missed are tried again later, and the card shows what reached each place and why anything failed.
+- **Workshop: queued games keep their zstd setting (#905).** Games added to the queue while another was being built, or whose image format was changed in "Settings for this game", lost their asset packs. The queue's settings now show and let you change the packs, and each row shows a tag like "zstd 19".
+- **Converting to a package keeps the game's own languages.** A package made from a dump listed every language with Japanese first, so some games came up in Japanese. It now uses the languages the game itself declares.
+- **Clean up never offers Kraken Mount's games (#894).** Package files Kraken Mount mounts, or that sit in the folders it scans, are kept and marked "Used by Kraken Mount"; Clear finished, deleting a package after install and the space planner leave them alone too.
+- **DualShock 4 touchpad press works in Remote Play.** The app's own controller readers only knew the DualSense, so pressing a DS4's touchpad (for example to open a game's menu) never reached the console.
+- **Automatic playlists never load kstuff twice.** A kernel patcher that was already sent since the console started isn't sent again automatically, even when the console can't show that it is running.
+- **Replacing the PS5 helper is safer (#903).** A new helper now waits until the old one has completely stopped, and a stopping helper finishes its system calls before it exits. Every start and stop step is written to a log on the PS5 that survives a crash, and bug reports include it. Automatic helper updates stay off for now.
+- **The Windows app no longer slowly uses up memory** while left open: status checks that never read their reply are now closed (#904, thanks ivmreg).
+- **Docker: `:latest` moves even when a release is promoted right after it's published** (#902, thanks AstroBoot-Dev).
+- **Older Macs and iPhones:** the Playlists screen no longer crashes on systems older than macOS 13 / iOS 16.
+- Many smaller fixes from a review of all of the above. The PS5 helper changes in this release were tried on a console before release.
+
+## 12.6.18
+
+**Fixes**
+- **The PS5 helper is no longer replaced by itself (#903).** Two consoles crashed when the app sent a new helper over a running one by itself, and the cause isn't known yet. Automatic helper updates are switched off until it is. Sending the helper yourself works as before: press Send helper when the app says a newer one is available.
+
+## 12.6.17
+
 **Fixes**
 - **Copying files into a running game's temporary folder works (#889).** Some games' add-on guides have you copy folders into the game's temporary folder on the internal drive while the game runs (`/app_temp0/...`). PS5Upload refused that with "console refused the transfer (9)", because that folder was not on the PS5 helper's list of places it may write to. It is now. Not yet tried on a console.
 

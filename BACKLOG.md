@@ -2,6 +2,24 @@
 
 ## >RESUME HERE
 
+- 2026-11-23: merged PS5Upload 12.6.24 (4bfce98e; 12.6.19-12.6.24: save-backup progress and
+  continue, folder backups, Extract here, Kraken-safe cleanup, capture card, Android TV,
+  clearer AMPR choices, Clear all in the bell, the url advisory fix, queue fixes).
+  Conflicts:
+  - README stays the fork's.
+  - ImageOptions takes upstream's AmprSection (LZ4 stays hidden through ZSTD_ONLY).
+  - index.tsx keeps packKind as "zstd".
+  - lib.rs keeps ps5_addr next to upstream's new caps.
+  - Cargo.lock takes upstream's.
+  - RunCard tests keep the fork's LZ4-not-offered checks.
+  - ava1 was left at an old pointer (80fe957) by the 11-21 merge; it now takes upstream's
+    ae1d471 (learning added).
+  Checks: engine 2288, core 905, fpkg 392, 7064 vitest tests, tsc, i18n and the NAS checks
+  pass.
+- Waiting for the owner's OK: Forge v0.5.7 (pinned 0.5.5) and ampr-emu-ng v0.5.0 (pinned 0.4.0)
+  for the NAS converter.
+- Next: verify the Docker build (publishing jobs ran), then run the NAS updater.
+
 - 2026-11-21: merged upstream 417c9100 (self-hosted Play Together, quieter updates, automatic
   helper update, the window remembers its place, save backups to a PS5 drive for shares and
   in a by-user layout, copying into a running game's temp folder, dependency bumps).

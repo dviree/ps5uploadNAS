@@ -235,7 +235,7 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
   const [lz4Profile, setLz4Profile] = useState<{ name: string; text: string; measured?: boolean } | null>(null);
   // A game in asset packs written as plain files again; the game's own, off for the next one.
   const [unpackPacks, setUnpackPacks] = useState(false);
-  const [lz4InstallRuntime, setLz4InstallRuntime] = useState(false);
+  // This fork packs with Zstd only.
   const packKind = "zstd" as const;
   const [emuAddedTo, setEmuAddedTo] = useState<string | null>(null);
   const [zstdUpdatedTo, setZstdUpdatedTo] = useState<string | null>(null);
@@ -467,7 +467,6 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
       setLanguage("");
       setLz4On(false);
       setLz4Profile(null);
-      setLz4InstallRuntime(false);
       setUnpackPacks(false);
       void check(path);
     },
@@ -724,7 +723,6 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
     setLanguage("");
     setLz4On(false);
     setLz4Profile(null);
-    setLz4InstallRuntime(false);
     setUnpackPacks(false);
     setInspection(null);
     setEstimates(null);
@@ -793,13 +791,13 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
         profileName: lz4Profile?.name ?? null,
         profileMeasured: !!lz4Profile?.measured,
         onProfile: setLz4Profile,
-        installRuntime: lz4InstallRuntime,
-        onInstallRuntime: setLz4InstallRuntime,
         kind: packKind,
         onKind: () => {},
         zstdLevel,
         onZstdLevel: setZstdLevel,
         ps4: !!inspection?.ps4_game,
+        packed: inspection.packs ?? null,
+        unpacking: unpackPacks,
       }
     : undefined;
   // The profile the packs are made with. A profile measured from play is written for LZ4 packs
@@ -991,6 +989,7 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
         {emulatable && (
           <AmprEmuTool
             source={source}
+            inspection={inspection}
             locked={locked}
             onAdded={() => {
               setEmuAddedTo(source);

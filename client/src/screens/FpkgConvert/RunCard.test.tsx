@@ -16,11 +16,14 @@ import {
   UnpackOption,
   ZstdOption,
   Lz4Option,
+  emulatorRule,
   folderLz4Options,
   folderPackOptions,
   folderPacks,
   packOptions,
 } from "./ImageOptions";
+import { amprEmuBuildFor } from "./AmprEmuTool";
+import type { FpkgInspection } from "../../api/fpkg";
 import {
   RunCard,
   deleteLabel,
@@ -657,8 +660,6 @@ describe("RunCard", () => {
       onToggle: noop,
       profileName: null,
       onProfile: noop,
-      installRuntime: false,
-      onInstallRuntime: noop,
       kind: "lz4",
       onKind: noop,
       zstdLevel: 5,
@@ -700,7 +701,9 @@ describe("RunCard", () => {
       const noEmulator = { runtime_version: null, refusal: "no emulator", kind: "runtime" as const };
       const zstd = lz4({ on: true, kind: "zstd", readiness: noEmulator });
       expect(lz4Active(zstd)).toBe(true);
-      // LZ4 for that game waits on the runtime checkbox.
+      // zstd packs bring ampr-emu-ng, the only emulator that reads them: never drakmor's.
+      expect(emulatorRule(zstd)).toEqual({ kind: "fixed", build: "ampr-emu-ng", added: "always" });
+      // This fork: LZ4 is never active, whatever the game's emulator.
       expect(lz4Active(lz4({ on: true, readiness: noEmulator }))).toBe(false);
       expect(checkbox(idle("ffpkg", zstd), "zstd asset packs")).not.toBeNull();
       expect(checkbox(idle("ffpkg", zstd), "AMPR LZ4 asset packs")).toBeNull();
@@ -758,7 +761,7 @@ describe("RunCard", () => {
       // A game that reads through AMPR and ships no emulator: its own can't read LZ4 packs.
       const readiness = { runtime_version: null, refusal: "no emulator", kind: "runtime" as const, emulator_missing: true };
       const toggle = 'data-testid="ampr-emu-option"';
-      const putRow = "Put ampr_emu 0.4.2.1 into the image";
+      const putRow = 'data-testid="lz4-install-runtime"';
       const ngLine = "The zstd runtime (ampr-emu-ng) goes in with the packs, so no other emulator is needed.";
       // No packs: the plain-image emulator toggle, said to be for an image without packs.
       const plain = idle("ffpkg", lz4({ readiness }));
@@ -768,7 +771,7 @@ describe("RunCard", () => {
       expect(plain).not.toContain(ngLine);
       // This fork: LZ4 can't be picked, and an old LZ4 choice shows no LZ4 row.
       expect(checkbox(plain, "AMPR LZ4 asset packs")).toBeNull();
-      expect(idle("ffpkg", lz4({ on: true, readiness, installRuntime: true }))).not.toContain(putRow);
+      expect(idle("ffpkg", lz4({ on: true, readiness }))).not.toContain(putRow);
       // zstd packs: neither drakmor's toggle nor the LZ4 row, one line on ampr-emu-ng instead.
       const zstd = idle("ffpkg", lz4({ on: true, kind: "zstd", readiness }));
       expect(zstd).not.toContain(toggle);
@@ -776,6 +779,48 @@ describe("RunCard", () => {
       expect(zstd).toContain(ngLine);
       expect(renderToStaticMarkup(<ZstdOption lz4={lz4({ on: true, kind: "zstd" })} folder />)).toContain(ngLine);
       expect(renderToStaticMarkup(<ZstdOption lz4={lz4({ kind: "zstd" })} />)).not.toContain(ngLine);
+      // zstd is never offered with drakmor's emulator: no emulator picker at all with it.
+      expect(zstd).not.toContain('data-testid="ampr-emu-build"');
+      // The packs come first, then the emulator that goes with them.
+      expect(plain.indexOf('data-testid="lz4-option"')).toBeLessThan(plain.indexOf(toggle));
+      expect(plain.indexOf('data-testid="zstd-option"')).toBeLessThan(plain.indexOf(toggle));
+      expect(emulatorRule(lz4({ readiness }))).toEqual({ kind: "choose" });
+    });
+
+    it("a game kept in the packs it is in gets only the emulator that reads them (#828)", () => {
+      const readiness = { runtime_version: null, refusal: "no emulator", kind: "runtime" as const, emulator_missing: true };
+      expect(emulatorRule(lz4({ readiness, packed: "zstd" }))).toEqual({
+        kind: "fixed",
+        build: "ampr-emu-ng",
+        added: "switch",
+      });
+      expect(emulatorRule(lz4({ readiness, packed: "lz4" }))).toEqual({ kind: "fixed", build: "ampr_emu", added: "switch" });
+      // Written out as plain files: either emulator reads them.
+      expect(emulatorRule(lz4({ readiness, packed: "zstd", unpacking: true }))).toEqual({ kind: "choose" });
+      const kept = idle("ffpkg", lz4({ readiness, packed: "zstd" }));
+      expect(kept).toContain('data-testid="ampr-emu-fixed"');
+      expect(kept).toContain("This game stays in its zstd packs, so it gets ampr-emu-ng");
+      expect(kept).not.toContain('data-testid="ampr-emu-build"');
+      expect(idle("ffpkg", lz4({ readiness, packed: "zstd", unpacking: true }))).toContain('data-testid="ampr-emu-build"');
+      // In place, too: Workshop's "Add the AMPR emulator" follows the packs.
+      expect(amprEmuBuildFor({ packs: "zstd" } as FpkgInspection, "ampr_emu")).toBe("ampr-emu-ng");
+      expect(amprEmuBuildFor({ packs: "lz4" } as FpkgInspection, "ampr-emu-ng")).toBe("ampr_emu");
+      expect(amprEmuBuildFor({ packs: null } as FpkgInspection, "ampr-emu-ng")).toBe("ampr-emu-ng");
+    });
+
+    it("shows no AMPR choice at all for a game that doesn't use AMPR (#828)", () => {
+      const notAmpr = lz4({ readiness: { refusal: "no", kind: "no_ampr" } });
+      expect(emulatorRule(notAmpr)).toEqual({ kind: "none" });
+      expect(emulatorRule({ ...notAmpr, packed: "zstd" })).toEqual({ kind: "none" });
+      const out = idle("ffpkg", notAmpr);
+      expect(out).toContain('data-testid="ampr-not-used"');
+      for (const id of ["lz4-option", "ampr-emu-option", "ampr-emu-build", "lz4-install-runtime"]) {
+        expect(out).not.toContain(`data-testid="${id}"`);
+      }
+      // Its zstd packs bring their own runtime: still no emulator choice.
+      const zstd = idle("ffpkg", { ...notAmpr, on: true, kind: "zstd" });
+      expect(zstd).not.toContain('data-testid="ampr-emu-option"');
+      expect(zstd).not.toContain('data-testid="ampr-emu-build"');
     });
 
     it("offers to write a packed game as plain files again", () => {

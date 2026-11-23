@@ -136,6 +136,7 @@ import { startPs5ToPs5 } from "../api/ava1";
 import { isTauriEnv } from "../lib/tauriEnv";
 import { createQueueLeader } from "../lib/queueLeader";
 import { isJobUnknownError } from "../lib/pollRead";
+import { krakenGuard } from "../lib/krakenGuard";
 
 /** The engine job id currently uploading on each console (bare host key).
  *  runOne records it so stopHost/stop can ask the engine to TRULY cancel the
@@ -1296,7 +1297,8 @@ export const useUploadQueueStore = create<QueueState>((rawSet, get) => {
       row.sourceKind === "pkg"
         ? row.deletePkgAfterInstall !== false
         : row.install?.via === "library" && useInstallSettingsStore.getState().autoRemoveAfterInstall;
-    if (stagedByUs && path) {
+    // Never a package Kraken Mount uses: that file is the game (#894).
+    if (stagedByUs && path && !(await krakenGuard(h))(path)) {
       await fsDelete(mgmtAddr(h), path).catch(() => {});
     }
     void pkgLibraryStore(row.addr).getState().refresh(h);
@@ -1996,7 +1998,10 @@ export const useUploadQueueStore = create<QueueState>((rawSet, get) => {
               // installer release the file first (it can hold it for a beat
               // after the title registers — the cause of "fs_delete_failed"),
               // then retry a couple of times instead of a single attempt.
-              if (item.deletePkgAfterInstall !== false) {
+              if (
+                item.deletePkgAfterInstall !== false &&
+                !(await krakenGuard(hostOf(item.addr)))(finalDest)
+              ) {
                 await sleep(800);
                 for (let attempt = 0; attempt < 3; attempt++) {
                   try {
@@ -2817,7 +2822,14 @@ export const useUploadQueueStore = create<QueueState>((rawSet, get) => {
       // The same install again (a second click, or the same package from
       // another screen) joins the one already queued: one run, one result
       // for every caller.
-      if (existing) return { id: existing.id, done: wait(existing.id) };
+      if (existing) {
+        // Waiting from "Add to queue" and now asked to run (Stream & install on the same
+        // package): start it, as a new row would be.
+        if (input.start !== false && existing.status === "pending") {
+          get().startAdded(hostOf(input.host), [existing.id]);
+        }
+        return { id: existing.id, done: wait(existing.id) };
+      }
       const bare = hostOf(input.host);
       get().add({
         sourceKind: "install",
@@ -2839,7 +2851,8 @@ export const useUploadQueueStore = create<QueueState>((rawSet, get) => {
       const items = get().items;
       const added = items[items.length - 1];
       const done = wait(added.id);
-      get().startAdded(bare, [added.id]);
+      // "Add to queue" only adds, as it does for an upload: the row waits for Start.
+      if (input.start !== false) get().startAdded(bare, [added.id]);
       return { id: added.id, done };
     },
 
