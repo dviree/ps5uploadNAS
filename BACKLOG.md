@@ -18,7 +18,8 @@
   pass.
 - Waiting for the owner's OK: Forge v0.5.7 (pinned 0.5.5) and ampr-emu-ng v0.5.0 (pinned 0.4.0)
   for the NAS converter.
-- Next: verify the Docker build (publishing jobs ran), then run the NAS updater.
+- The Docker build (run 60) is green and published, with the new ava1 (merge and merge-webui
+  ran). Next: the user runs the NAS updater.
 
 - 2026-11-21: merged upstream 417c9100 (self-hosted Play Together, quieter updates, automatic
   helper update, the window remembers its place, save backups to a PS5 drive for shares and
