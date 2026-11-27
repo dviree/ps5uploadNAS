@@ -7,7 +7,6 @@ import { isTarArchiveName, stripTarSuffix } from "../lib/tarNames";
 import { create } from "zustand";
 
 import { t as translate } from "../i18n";
-import { ps5FakeGameUnplayableFirmware } from "../lib/ps5Firmware";
 import { useLangStore } from "./lang";
 import { useConvertPrefs, type AmprEmuBuild } from "./convertPrefs";
 import { safeGetItem, safeRemoveItem, safeSetItem } from "../lib/safeStorage";
@@ -34,13 +33,13 @@ import {
   type WorkshopRun,
   type ZstdPacks,
 } from "../api/fpkg";
-import { jobCancel, jobPause, jobResume, jobStatus } from "../api/ps5";
+import { jobCancel, jobPause, jobResume, jobStatus, type JobSnapshot } from "../api/ps5";
 import { useConnectionStore } from "./connection";
 import { useRosterStore } from "./roster";
 import { hostOf } from "../lib/addr";
 import { pushNotification } from "./notifications";
 import { pkgLibraryStore, type PkgLibraryStore } from "./pkgLibrary";
-import { useTaskStore } from "./tasks";
+import { interruptedAtLoad, useTaskStore, type Task } from "./tasks";
 import { remoteApi } from "../api/remote";
 import { fetchRemote } from "../lib/materialize";
 import { isRemotePath, parseRemotePath } from "../lib/remotePath";
@@ -106,6 +105,10 @@ export type Pipeline =
       /** The game unpacked from an archive (inside an engine unpack folder); removed with it
        *  once the run is over. */
       extractedSource: string | null;
+      /** `extractedSource` was unpacked with its archive deleted on the way ("free the
+       *  archive's space while it unpacks"): that folder is the only copy of the game until
+       *  something is made of it, so a run that fails keeps it. */
+      freedArchive?: boolean;
       /** Found running, not started by this window (see `attachRunning`). */
       attached?: boolean;
       /** The engine job is paused (#631): it waits, and so does the queue behind it. */
@@ -158,7 +161,19 @@ export type Pipeline =
       titleId: string | null;
       /** Stopped by the user: not a fault. */
       cancelled?: boolean;
+      /** The archive this run unpacked with its space freed is gone, and nothing was made of
+       *  its game: where the unpacked files were kept. */
+      archiveGone?: ArchiveGone;
     };
+
+/** An archive deleted while it unpacked, in a run that did not finish. */
+export interface ArchiveGone {
+  /** The folder holding what was unpacked. */
+  kept: string;
+  /** The unpack itself stopped part way: the archive is cut short, and only some of the
+   *  game is in `kept`. Otherwise the whole game is there and the archive is gone. */
+  partly: boolean;
+}
 
 export interface ConversionState {
   pipeline: Pipeline;
@@ -174,6 +189,9 @@ export interface ConversionState {
       deleteAfter?: boolean;
       /** This game's own choice (a queued game keeps what it was added with); else the setting. */
       fullVerify?: boolean;
+      /** DELETES the archive `source` as it unpacks, to free its space (confirmed on the
+       *  screen for this one game; never for a copy fetched from a server). */
+      freeArchive?: boolean;
     },
   ) => Promise<void>;
   /** Write a game folder or image as one game image (`format`, .exfat by default); with
@@ -212,6 +230,9 @@ export interface ConversionState {
       deleteSource?: boolean;
       /** A game in asset packs is written as plain files again. */
       unpackPacks?: boolean;
+      /** DELETES the archive `source` as it unpacks, when this run has to unpack it (a game
+       *  image inside, an update merged in, a tar): see `start`. */
+      freeArchive?: boolean;
     },
   ) => Promise<void>;
   /** Unpack a game image or a debug-key package into a plain folder in `outputDir`; with
@@ -241,6 +262,8 @@ export interface ConversionState {
       amprEmuBuild?: AmprEmuBuild;
       /** An archive's password (RAR); never stored. */
       password?: string;
+      /** DELETES the archive `source` as it unpacks, when this run has to unpack it. */
+      freeArchive?: boolean;
     },
     /** Once the folder is built and checked, send it to the PS5 (the Upload queue). */
     thenSend?: FolderSendPlan,
@@ -310,6 +333,21 @@ function update(patch: Partial<Running>) {
   if (p) useFpkgConversion.setState({ pipeline: { ...p, ...patch } });
 }
 
+/** What a run's engine job is: a build (followed by `poll`) or an archive's unpack. */
+type JobKind = "build" | "extract";
+
+/** The run follows the engine job `jobId` from now on. Its task keeps the job's id and kind, so
+ *  a page closed or reloaded meanwhile finds the job again (`attachRunning`, #954): the engine
+ *  runs it by itself, whether a page watches or not. */
+function follow(jobId: string, kind: JobKind) {
+  update({ jobId });
+  const p = running();
+  if (p?.taskId)
+    useTaskStore
+      .getState()
+      .updateTask(p.taskId, { engineJobId: jobId, payload: { mode: p.mode, source: p.source, jobKind: kind } });
+}
+
 /** Time this run has spent paused up to `now`, the current pause included. */
 export function pausedSoFar(p: Running, now: number): number {
   return (p.pausedMs ?? 0) + (p.pausedAtMs != null ? Math.max(0, now - p.pausedAtMs) : 0);
@@ -368,16 +406,22 @@ function enterStage(stage: PipelineStage, done = 0, total = 0) {
   });
 }
 
-function fail(stage: PipelineStage, message: string, packagePath: string | null) {
+function fail(stage: PipelineStage, message: string, packagePath: string | null, gone?: ArchiveGone) {
   const p = running();
   if (!p) return;
-  dropCopy(p);
+  // A game unpacked from an archive that was deleted on the way, with nothing made of it yet:
+  // its folder is all there is of the game, so it stays and the result says where it is.
+  const archiveGone =
+    gone ??
+    (p.freedArchive && p.extractedSource && !packagePath ? { kept: p.extractedSource, partly: false } : undefined);
+  dropCopy(p, !archiveGone);
   const cancelled = isCancelMessage(message);
+  const said = archiveGone ? `${message} ${archiveGoneText(archiveGone)}` : message;
   if (p.taskId) {
     if (cancelled) useTaskStore.getState().finishTask(p.taskId, "cancelled");
     else
       useTaskStore.getState().finishTask(p.taskId, "failed", {
-        lastError: { code: "FPKG_FAILED", message, recoverable: false },
+        lastError: { code: "FPKG_FAILED", message: said, recoverable: false },
       });
   }
   const failedTitle =
@@ -400,6 +444,7 @@ function fail(stage: PipelineStage, message: string, packagePath: string | null)
       stageMs: { ...p.stageMs, [p.stage]: Date.now() - p.stageStartedMs },
       titleId: p.titleId,
       cancelled,
+      ...(archiveGone ? { archiveGone } : {}),
     },
   });
   // The user asked for this: the card says so, and it is not an error to report.
@@ -409,7 +454,7 @@ function fail(stage: PipelineStage, message: string, packagePath: string | null)
   pushNotification("error", failedTitle, {
     // The install stage's failure is an engine job's ending, which the host announces.
     jobOutcome: stage === "install",
-    body: message,
+    body: said,
     link: stage === "install" ? installErrorLink(message) : "/workshop",
   });
 }
@@ -485,7 +530,7 @@ function finish(packagePath: string, packageBytes: number, convertMs: number, so
   pendingFolderSend = null;
   if (send) queueFolder(packagePath, packageBytes, send);
   if (p.taskId) useTaskStore.getState().finishTask(p.taskId, "done");
-  dropCopy(p);
+  dropCopy(p, true);
   const now = Date.now();
   useFpkgConversion.setState({
     pipeline: {
@@ -656,7 +701,7 @@ function installDone(
   const p = running();
   if (!p) return;
   if (p.taskId) useTaskStore.getState().finishTask(p.taskId, "done");
-  dropCopy(p);
+  dropCopy(p, true);
   const now = Date.now();
   useFpkgConversion.setState({
     pipeline: {
@@ -785,10 +830,13 @@ function poll(jobId: string, install: InstallMethod | null, failures = 0) {
 }
 
 
-function beginRun(mode: PipelineMode, source: string, host: string | null, stage: PipelineStage) {
+/** `taskId`: the task of a run this page started before it was closed or reloaded (#954), which
+ *  goes on in place of a new one. */
+function beginRun(mode: PipelineMode, source: string, host: string | null, stage: PipelineStage, taskId0?: string) {
   const now = Date.now();
   const taskId =
-    mode === "install"
+    taskId0 ??
+    (mode === "install"
       ? null
       : useTaskStore.getState().registerTask({
           kind: "fpkg-convert",
@@ -796,8 +844,9 @@ function beginRun(mode: PipelineMode, source: string, host: string | null, stage
           label: `${mode === "image" ? "Make image of" : mode === "folder" ? "Make folder of" : "Convert"} ${baseName(source)}`,
           detail: source,
           consoleId: host ?? "",
+          payload: { mode, source },
           control: { owner: "fpkg-convert" },
-        });
+        }));
   reportStage(taskId, stage, 0, 0);
   useFpkgConversion.setState({
     pipeline: {
@@ -872,15 +921,78 @@ export function archiveErrorText(message: string): string {
   return message;
 }
 
-/** Unpack an archive with the engine, following its job; the game path found inside. */
-async function extractArchive(archive: string, outputDir: string | undefined, password?: string) {
-  const { job_id } = await fpkg.extract(archive, outputDir, password);
-  update({ jobId: job_id });
+/** Whether a run of `source` unpacks it to disk first, so that freeing the archive on the way
+ *  gives room back: a package always does, and a tar always is; an image or a folder is made
+ *  straight from a `.zip`, `.7z` or `.rar` with nothing unpacked, unless the game inside is a
+ *  game image or an update is merged in. Never an archive on a server (what is unpacked is a
+ *  copy of it). */
+export function archiveIsUnpacked(
+  source: string,
+  kind: "pkg" | "image" | "folder",
+  o: { merge?: boolean; game?: "folder" | "image" } = {},
+): boolean {
+  const path = source.trim();
+  if (!isArchiveSource(path) || isRemotePath(path) || path.startsWith("ps5://")) return false;
+  if (kind === "pkg" || !isInPlaceArchive(path)) return true;
+  return !!o.merge || o.game === "image";
+}
+
+/** The engine's `error_reason` for an unpack that stopped with part of its archive deleted;
+ *  `error_detail` is then the folder holding what was unpacked. */
+const ARCHIVE_PARTLY_DELETED = "archive_partly_deleted";
+
+/** Such a failure's cause alone: the engine's message goes on to say what the result card
+ *  says in the user's language. */
+function causeOf(error: string | undefined): string {
+  const text = error ?? "The archive did not unpack.";
+  const at = text.indexOf(". The archive is partly deleted");
+  return at > 0 ? text.slice(0, at) : text;
+}
+
+/** An unpack that stopped with part of its archive deleted: `kept` holds what was unpacked. */
+class ArchiveGoneError extends Error {
+  constructor(
+    message: string,
+    readonly kept: string,
+  ) {
+    super(message);
+  }
+}
+
+/** A scratch unpack folder (`.ps5upload-extract-*`), which is removed after use; the folder of
+ *  an unpack that deleted its archive is not one, and stays. */
+function isScratchUnpack(path: string): boolean {
+  return /(^|[\\/])\.ps5upload-extract-[^\\/]+/.test(path);
+}
+
+/** What became of an archive deleted on the way and where its game is, in the user's language. */
+export function archiveGoneText(gone: ArchiveGone): string {
+  return translate(
+    useLangStore.getState().lang,
+    gone.partly ? "fpkg.free.gone_partly" : "fpkg.free.gone_whole",
+    { path: gone.kept },
+  );
+}
+
+/** A failed run's message as a list row says it: with where an archive's game was kept. */
+export function failureText(p: Extract<Pipeline, { phase: "failed" }>): string {
+  return p.archiveGone ? `${p.message} ${archiveGoneText(p.archiveGone)}` : p.message;
+}
+
+/** Unpack an archive with the engine, following its job; the game path found inside. With
+ *  `free`, the archive is deleted as it unpacks. */
+async function extractArchive(archive: string, outputDir: string | undefined, password?: string, free?: boolean) {
+  const { job_id } = await fpkg.extract(archive, outputDir, password, ...(free ? [true as const] : []));
+  follow(job_id, "extract");
   for (;;) {
     const s = await readWithRetries(() => jobStatus(job_id));
     if (running()?.jobId === job_id) markPaused(s.status === "running" && s.paused === true);
     if (s.status === "done") return s.dest ?? "";
-    if (s.status === "failed") throw new Error(s.error ?? "The archive did not unpack.");
+    if (s.status === "failed") {
+      if (s.error_reason === ARCHIVE_PARTLY_DELETED && s.error_detail)
+        throw new ArchiveGoneError(causeOf(s.error), s.error_detail);
+      throw new Error(s.error ?? "The archive did not unpack.");
+    }
     if (running()?.jobId === job_id) enterStage("extract", s.bytes_sent ?? 0, s.total_bytes ?? 0);
     await new Promise((r) => setTimeout(r, POLL_MS));
   }
@@ -904,6 +1016,8 @@ async function prepareThenStart(
   install: InstallMethod | null,
   password?: string,
   inPlace?: (local: string) => Promise<{ job_id: string }>,
+  /** Delete the archive as it unpacks (the user's own archive only, and only when unpacked). */
+  free?: boolean,
 ) {
   let local = source;
   if (isRemotePath(source)) {
@@ -914,7 +1028,7 @@ async function prepareThenStart(
     enterStage("check");
     try {
       const { job_id } = await inPlace(local);
-      update({ jobId: job_id });
+      follow(job_id, "build");
       poll(job_id, install);
       return;
     } catch (error) {
@@ -929,42 +1043,29 @@ async function prepareThenStart(
   }
   if (isArchiveSource(local)) {
     enterStage("extract");
+    // Only ever the archive that was chosen, never a copy fetched from a server.
+    const freeing = !!free && local === source;
     try {
-      local = await extractArchive(local, outputDir, password);
+      local = await extractArchive(local, outputDir, password, freeing);
     } catch (error) {
-      fail("extract", archiveErrorText(error instanceof Error ? error.message : String(error)), null);
+      const gone = error instanceof ArchiveGoneError ? { kept: error.kept, partly: true } : undefined;
+      fail("extract", archiveErrorText(error instanceof Error ? error.message : String(error)), null, gone);
       return;
     }
     if (!running()) {
-      void fpkg.cleanupExtract(local).catch(() => {});
+      // Unpacked with its archive deleted, the folder is all there is of the game: it stays.
+      if (!freeing) void fpkg.cleanupExtract(local).catch(() => {});
       return;
     }
-    update({ extractedSource: local, jobId: null });
-    void warnIfUnplayable(local, outputDir);
+    update({ extractedSource: local, jobId: null, ...(freeing ? { freedArchive: true } : {}) });
   }
   enterStage("check");
   try {
     const { job_id } = await startJob(local);
-    update({ jobId: job_id });
+    follow(job_id, "build");
     poll(job_id, install);
   } catch (error) {
     fail("check", error instanceof Error ? error.message : String(error), null);
-  }
-}
-
-/** An archive can't be looked inside before it is unpacked, so the firmware note a checked game
- *  gets under ② comes now: a PS5 game that would install as a package but not play here. */
-async function warnIfUnplayable(local: string, outputDir: string | undefined) {
-  const p = running();
-  if (!p || (p.mode !== "convert" && p.mode !== "convert-install")) return;
-  const seen = await fpkg.inspect(local, outputDir).catch(() => null);
-  const fw = seen && ps5FakeGameUnplayableFirmware(useConnectionStore.getState().ps5Kernel, seen.content_id);
-  if (fw) {
-    const lang = useLangStore.getState().lang;
-    pushNotification("warning", translate(lang, "fpkg.unpacked_unplayable_title", undefined), {
-      body: translate(lang, "fpkg.unpacked_unplayable", { fw }),
-      link: "/workshop",
-    });
   }
 }
 
@@ -995,10 +1096,14 @@ function runFolder(): string {
 }
 
 /** The copy of a server source and an archive's unpack are only scaffolding: drop them once
- *  the build is over, whether it finished or not (the next run makes its own). */
-function dropCopy(p: Running) {
+ *  the build is over, whether it finished or not (the next run makes its own). The unpack of
+ *  an archive that was deleted on the way is the game's only copy until something is `made`
+ *  of it: it goes then, and stays otherwise. */
+function dropCopy(p: Running, made: boolean) {
   if (p.copiedSource) void remoteApi.cleanupFetched(p.copiedSource).catch(() => {});
-  if (p.extractedSource) void fpkg.cleanupExtract(p.extractedSource).catch(() => {});
+  if (!p.extractedSource) return;
+  if (!p.freedArchive) void fpkg.cleanupExtract(p.extractedSource).catch(() => {});
+  else if (made) void fpkg.cleanupExtract(p.extractedSource, true).catch(() => {});
 }
 
 /** "UP4433-PPSA17221_00-MINECRAFTPS50000" → "PPSA17221". */
@@ -1037,6 +1142,61 @@ function modeOfKind(kind: WorkshopRun["kind"]): PipelineMode {
   return kind === "image" ? "image" : kind === "folder" ? "folder" : "convert";
 }
 
+/** A run this page left going when it was closed or reloaded, as the engine answers for its job. */
+interface LeftRun {
+  task: Task;
+  jobId: string;
+  kind: JobKind;
+  snap: JobSnapshot;
+}
+
+/** The Convert tasks this start-up found running and marked interrupted, with their engine job's
+ *  state now; those the engine does not know (it restarted) or did not answer for are left out
+ *  and stay interrupted. */
+async function leftRunning(): Promise<LeftRun[]> {
+  const tasks = useTaskStore
+    .getState()
+    .tasks.filter((t) => t.kind === "fpkg-convert" && t.status === "interrupted" && interruptedAtLoad.has(t.id));
+  const found = await Promise.all(
+    tasks.map(async (task): Promise<LeftRun | null> => {
+      const jobId = task.engineJobId;
+      if (!jobId) return null;
+      try {
+        const snap = await readWithRetries(() => jobStatus(jobId));
+        return { task, jobId, kind: task.payload.jobKind === "extract" ? "extract" : "build", snap };
+      } catch {
+        return null;
+      }
+    }),
+  );
+  return found.filter((l): l is LeftRun => l !== null);
+}
+
+/** A left run this screen does not follow (it follows one run at a time): a build that ended has
+ *  its task say how; one still running, or an unpack whose build was lost, stays interrupted. */
+function settleLeft({ task, kind, snap }: LeftRun) {
+  if (kind !== "build" || (snap.status !== "done" && snap.status !== "failed")) return;
+  const tasks = useTaskStore.getState();
+  if (!tasks.reopenTask(task.id)) return;
+  if (snap.status === "done") tasks.finishTask(task.id, "done", snap.dest ? { detail: snap.dest } : undefined);
+  else if (isCancelMessage(snap.error ?? "")) tasks.finishTask(task.id, "cancelled");
+  else
+    tasks.finishTask(task.id, "failed", {
+      lastError: { code: "FPKG_FAILED", message: snap.error ?? "The build failed.", recoverable: false },
+    });
+}
+
+/** The run mode a left task is followed in: what it makes. An install that was to follow a build
+ *  is not started from here (another window may be doing it): the result offers Install. */
+function modeOfTask(task: Task): PipelineMode {
+  const mode = task.payload.mode;
+  return mode === "image" || mode === "folder" ? mode : "convert";
+}
+
+function sourceOfTask(task: Task): string {
+  return typeof task.payload.source === "string" ? task.payload.source : (task.detail ?? "");
+}
+
 /** Follow an unpack whose page was closed: the build that was to follow it died with the page, so
  *  its folder is dropped and the user is told to start again. */
 async function followLostUnpack(jobId: string) {
@@ -1046,12 +1206,18 @@ async function followLostUnpack(jobId: string) {
       const s = await jobStatus(jobId);
       if (running()?.jobId !== jobId) return;
       if (s.status === "done") {
-        if (s.dest) void fpkg.cleanupExtract(s.dest).catch(() => {});
-        fail("extract", translate(useLangStore.getState().lang, "fpkg.unpack_lost", undefined), null);
+        // An unpack that deleted its archive: its folder is the game now, and stays.
+        const gone = s.dest && !isScratchUnpack(s.dest) ? { kept: s.dest, partly: false } : undefined;
+        if (s.dest && !gone) void fpkg.cleanupExtract(s.dest).catch(() => {});
+        fail("extract", translate(useLangStore.getState().lang, "fpkg.unpack_lost", undefined), null, gone);
         return;
       }
       if (s.status === "failed") {
-        fail("extract", archiveErrorText(s.error ?? "The archive did not unpack."), null);
+        const gone =
+          s.error_reason === ARCHIVE_PARTLY_DELETED && s.error_detail
+            ? { kept: s.error_detail, partly: true }
+            : undefined;
+        fail("extract", archiveErrorText(gone ? causeOf(s.error) : (s.error ?? "The archive did not unpack.")), null, gone);
         return;
       }
       markPaused(s.paused === true);
@@ -1112,7 +1278,7 @@ function folderTail(
 export const useFpkgConversion = create<ConversionState>((set, get) => ({
   pipeline: { phase: "idle" },
 
-  start: async (req, { install, host, method = "stream", password, deleteAfter, fullVerify: ownVerify }) => {
+  start: async (req, { install, host, method = "stream", password, deleteAfter, fullVerify: ownVerify, freeArchive }) => {
     const then = install ? method : null;
     if (get().pipeline.phase === "running") return;
     const fullVerify = ownVerify ?? useConvertPrefs.getState().fullVerify;
@@ -1130,13 +1296,15 @@ export const useFpkgConversion = create<ConversionState>((set, get) => ({
         (local) => fpkg.build({ ...req, source: local, fullVerify }),
         then,
         password,
+        undefined,
+        freeArchive,
       );
       return;
     }
     beginRun(install ? "convert-install" : "convert", req.source, host, "check");
     try {
       const { job_id } = await fpkg.build({ ...req, fullVerify });
-      update({ jobId: job_id });
+      follow(job_id, "build");
       poll(job_id, then);
     } catch (error) {
       fail("check", error instanceof Error ? error.message : String(error), null);
@@ -1198,6 +1366,7 @@ export const useFpkgConversion = create<ConversionState>((set, get) => ({
         inPlace
           ? (local) => job(local, extrasOf(own, isRemotePath(source), undefined, password || undefined))
           : undefined,
+        own?.freeArchive,
       );
       return;
     }
@@ -1218,7 +1387,7 @@ export const useFpkgConversion = create<ConversionState>((set, get) => ({
         // Only when it goes to the PS5: a local build's call stays as it was.
         ...buildTail(toConsole ? await consoleDestination(toConsole) : toServer, own?.update, extrasOf(own)),
       );
-      update({ jobId: job_id });
+      follow(job_id, "build");
       poll(job_id, null);
     } catch (error) {
       fail(lz4 ? "pack" : "write", error instanceof Error ? error.message : String(error), null);
@@ -1257,6 +1426,7 @@ export const useFpkgConversion = create<ConversionState>((set, get) => ({
         null,
         own?.password,
         (local) => job(local, extrasOf(own, isRemotePath(source), amprEmu, own?.password || undefined)),
+        own?.freeArchive,
       );
       return;
     }
@@ -1276,7 +1446,7 @@ export const useFpkgConversion = create<ConversionState>((set, get) => ({
           withLz4(extras),
         ),
       );
-      update({ jobId: job_id });
+      follow(job_id, "build");
       poll(job_id, null);
     } catch (error) {
       fail(first, error instanceof Error ? error.message : String(error), null);
@@ -1324,11 +1494,31 @@ export const useFpkgConversion = create<ConversionState>((set, get) => ({
 
   attachRunning: async () => {
     if (get().pipeline.phase !== "idle") return;
+    // This page's own runs that were going when it was closed or reloaded (#954). The engine
+    // runs a job by itself, so each is asked about: still running, or ended while the page was
+    // away, its task goes on instead of staying "interrupted". A failed read is asked again
+    // (readWithRetries); only an engine that no longer knows the job (it restarted), or no
+    // answer at all, leaves the task interrupted.
+    const left = await leftRunning();
     const runs: WorkshopRun[] | null = await fpkg.runningJobs().catch(() => null);
-    // An engine that answers with no list has nothing to follow.
-    const run = Array.isArray(runs) ? runs[0] : undefined;
-    // Started by hand meanwhile, or nothing to follow.
-    if (!run || get().pipeline.phase !== "idle") return;
+    // An engine that answers with no list has nothing else to follow.
+    const others = (Array.isArray(runs) ? runs : []).filter((r) => !left.some((l) => l.jobId === r.job_id));
+    // Followed on this screen: a run of ours still going, else one from another window, else
+    // one of ours that ended meanwhile (its result and Install, Delete... as if never away).
+    const mine = left.find((l) => l.snap.status === "running") ?? (others.length ? undefined : left[0]);
+    const followed = get().pipeline.phase === "idle" ? mine ?? others[0] : undefined;
+    for (const l of left) if (l !== followed) settleLeft(l);
+    if (!followed) return;
+    if ("task" in followed) {
+      const { task, jobId, kind, snap } = followed;
+      useTaskStore.getState().reopenTask(task.id);
+      beginRun(modeOfTask(task), sourceOfTask(task), task.consoleId || null, kind === "extract" ? "extract" : "check", task.id);
+      update({ jobId, attached: true, startedMs: snap.started_at_ms || Date.now() });
+      if (kind === "extract") void followLostUnpack(jobId);
+      else poll(jobId, null);
+      return;
+    }
+    const run = followed;
     const stage: PipelineStage = run.kind === "extract" ? "extract" : "check";
     beginRun(modeOfKind(run.kind), run.source, null, stage);
     update({ jobId: run.job_id, attached: true, startedMs: run.started_at_ms || Date.now() });

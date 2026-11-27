@@ -588,6 +588,31 @@ pub(crate) fn save_op(hosts: &[&str]) -> SaveOp {
     SaveOp(keys)
 }
 
+/// [`save_op`] without waiting: None while another save operation runs on `host`. For a save
+/// opened or closed from Save Data, which must neither close a copy's or backup's save part way
+/// through nor wait minutes for one to finish.
+pub(crate) fn try_save_op(host: &str) -> Option<SaveOp> {
+    let me = std::thread::current().id();
+    let (held, _) = save_ops();
+    let mut held = held.lock().unwrap_or_else(|e| e.into_inner());
+    let k = crate::helper_stop::console_key(host);
+    if k.is_empty() {
+        return Some(SaveOp(Vec::new()));
+    }
+    match held.get(&k) {
+        Some(t) if *t == me => Some(SaveOp(Vec::new())),
+        Some(_) => None,
+        None => {
+            held.insert(k.clone(), me);
+            Some(SaveOp(vec![k]))
+        }
+    }
+}
+
+/// What Save Data's Open and Close answer while a copy, sync or backup has the console's save.
+pub(crate) const SAVE_JOB_RUNNING: &str =
+    "A save copy, sync or backup is using this PS5's saves now. Try again when it finishes.";
+
 impl Drop for SaveOp {
     fn drop(&mut self) {
         if self.0.is_empty() {
@@ -612,6 +637,20 @@ pub(crate) fn back_up_one(
     keep: u32,
     tag: Option<&str>,
     verify: &dyn Fn() -> Result<(), String>,
+) -> Result<PathBuf, String> {
+    back_up_one_sparing(host, entry, dir, keep, tag, verify, None)
+}
+
+/// [`back_up_one`], never pruning `spare`: the backup a restore is putting back, which is in
+/// this folder too and may be the oldest of its kind.
+fn back_up_one_sparing(
+    host: &str,
+    entry: &SaveEntry,
+    dir: &str,
+    keep: u32,
+    tag: Option<&str>,
+    verify: &dyn Fn() -> Result<(), String>,
+    spare: Option<&Path>,
 ) -> Result<PathBuf, String> {
     let _op = save_op(&[host]);
     let user = entry.user_id as u32;
@@ -650,7 +689,9 @@ pub(crate) fn back_up_one(
         }
         // Older backups go only once the new one is there, so a failed zip never costs one;
         // counted in both layouts of the folder.
-        prune_local(dir, &entry.title_id, user, backup_tag(&st), keep, &dest);
+        let mut spared = vec![dest.as_path()];
+        spared.extend(spare);
+        prune_local_sparing(dir, &entry.title_id, user, backup_tag(&st), keep, &spared);
         Ok(dest)
     })();
     let _ = cleanup_temp_dir(&tmp_s);
@@ -694,11 +735,26 @@ pub(crate) fn prune_local(
     keep: u32,
     just_made: &Path,
 ) {
+    prune_local_sparing(dir, title_id, user, tag, keep, &[just_made]);
+}
+
+/// [`prune_local`], never deleting any of `spared` (the backup just made, and the one a restore
+/// is putting back). A spared file is told by what it is on disk, however its path is spelled.
+fn prune_local_sparing(
+    dir: &str,
+    title_id: &str,
+    user: u32,
+    tag: Option<&str>,
+    keep: u32,
+    spared: &[&Path],
+) {
+    let real = |p: &Path| std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+    let spared: Vec<PathBuf> = spared.iter().map(|p| real(p)).collect();
     let list = local_list(dir);
     let files = layout::backup_files(&list, title_id);
     for old in layout::to_prune(&files, title_id, user, tag, keep) {
         let p = local_path(dir, &old.rel());
-        if p != just_made {
+        if !spared.contains(&real(&p)) {
             let _ = std::fs::remove_file(p);
         }
     }
@@ -1723,6 +1779,52 @@ pub(crate) fn mark_restored(host: &str, save_path: &str) {
     let _ = save(DONE_FILE, &done);
 }
 
+/// Whether `save_path` is one of the places this app keeps the saves of `title_id` in: the
+/// console's own (`/user/home/<user>/savedata_prospero/<TITLE>`, a PS5 game's, or
+/// `/user/home/<user>/savedata/<TITLE>`, a PS4 game's; the user is its hex number), a Switch
+/// game's in the Switch emulator (`…/<profile>/<TITLE>`, see [`crate::emulator_saves`]), or a
+/// PlayStation or PlayStation 2 emulator's cards or saved states, under that emulator's own title
+/// (see [`crate::ps2_saves`]). Anything else is no save folder of `title_id`, however it ends.
+fn known_save_place(save_path: &str, title_id: &str) -> bool {
+    let parts: Vec<&str> = save_path.split('/').collect();
+    let console = matches!(
+        parts.as_slice(),
+        ["", "user", "home", user, "savedata_prospero" | "savedata", title]
+            if (1..=8).contains(&user.len())
+                && user.bytes().all(|b| b.is_ascii_hexdigit())
+                && *title == title_id
+    );
+    console
+        || (crate::emulator_saves::place_of(save_path).is_some()
+            && save_path.ends_with(&format!("/{title_id}")))
+        || crate::ps2_saves::place_of(save_path).is_some_and(|p| p.emulator.app == title_id)
+}
+
+/// A restore empties the console folder `save_path` and fills it from a backup, and unpacks the
+/// backup under `title_id` here: refused unless `title_id` is one plain name ([`plain`]) and
+/// `save_path` is a plain absolute path, with no `.`, `..` or empty part, no backslash and
+/// no control character. Otherwise a path such as `/user/home/1/savedata_prospero/../../../x/CUSA1`
+/// ends with the title ID and passed, and the folder it reaches was emptied. And it must be one
+/// of the app's own save places for that title ([`known_save_place`]): a plain path that merely
+/// ends with the title ID (`/data/games/PPSA01234`, say) is some other folder, and is not
+/// emptied either.
+pub(crate) fn save_folder_ok(save_path: &str, title_id: &str) -> Result<(), String> {
+    if !plain(title_id) {
+        return Err(format!("{title_id:?} is not a title ID"));
+    }
+    let plain_path = save_path.starts_with('/')
+        && !save_path.contains('\\')
+        && !save_path.chars().any(char::is_control)
+        && save_path
+            .split('/')
+            .skip(1)
+            .all(|part| !part.is_empty() && part != "." && part != "..");
+    if !plain_path || !known_save_place(save_path, title_id) {
+        return Err(format!("{save_path} is not a save folder of {title_id}"));
+    }
+    Ok(())
+}
+
 /// The app that writes a save folder, which must be closed while it is restored.
 #[derive(Debug, PartialEq)]
 pub(crate) struct Writer<'a> {
@@ -1740,9 +1842,17 @@ pub(crate) fn save_writer<'a>(
     title_id: &'a str,
     user_id: u32,
 ) -> Result<Writer<'a>, String> {
+    save_folder_ok(save_path, title_id)?;
     let ps2 = crate::ps2_saves::place_of(save_path);
+    let switch = crate::emulator_saves::place_of(save_path);
     let fits = match &ps2 {
         Some(p) => p.emulator.app == title_id && p.user as u32 == user_id,
+        None if switch.is_some() => {
+            save_path.ends_with(&format!("/{title_id}"))
+                && switch
+                    .as_ref()
+                    .is_some_and(|(_, user)| *user as u32 == user_id)
+        }
         None => save_path.ends_with(&format!("/{title_id}")),
     };
     if !fits {
@@ -1753,10 +1863,10 @@ pub(crate) fn save_writer<'a>(
             app: p.emulator.app,
             emulator: Some(p.emulator.name),
         }
-    } else if crate::emulator_saves::is_save_path(save_path) {
+    } else if let Some((emulator, _)) = switch {
         Writer {
-            app: crate::emulator_saves::APP,
-            emulator: Some("ProsperoEden"),
+            app: emulator.app,
+            emulator: Some(emulator.name),
         }
     } else {
         Writer {
@@ -1889,6 +1999,7 @@ pub(crate) fn restore_zip_with(
             &s,
             Some(crate::save_backup_server::BEFORE_RESTORE_TAG),
             keep_current,
+            Some(zip),
         )
     })();
     let _ = cleanup_temp_dir(&tmp_s);
@@ -1952,7 +2063,9 @@ pub(crate) fn all_entries(
 /// `src`: the save there now is backed up first (tagged `tag`, so it can be put back), then the
 /// folder is emptied (kept itself: the console refuses a fresh mkdir under its save root) and
 /// `src`'s files are uploaded into it. `keep_current` false skips that backup (the caller
-/// already kept the save).
+/// already kept the save). `restoring` is the backup `src` was unpacked from, when it is one:
+/// keeping the current save never prunes it (it may be the oldest of that kind in the backup
+/// folder, and if the restore then fails it is the only copy of what it holds).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn put_in_place(
     host: &str,
@@ -1963,7 +2076,10 @@ pub(crate) fn put_in_place(
     s: &Settings,
     tag: Option<&str>,
     keep_current: bool,
+    restoring: Option<&Path>,
 ) -> Result<(), String> {
+    // Every name first: this empties the folder.
+    save_folder_ok(save_path, title_id)?;
     let _op = save_op(&[host]);
     // Keep what is there now, so the change can be undone: in the backup folder, or (with none
     // set) on the server the save backups go to.
@@ -1987,7 +2103,7 @@ pub(crate) fn put_in_place(
         // Already kept by the caller, or nothing to keep.
     } else if !s.dir.trim().is_empty() {
         kept = Some(
-            back_up_one(host, &current, &s.dir, s.keep, tag, &|| Ok(()))
+            back_up_one_sparing(host, &current, &s.dir, s.keep, tag, &|| Ok(()), restoring)
                 .map_err(|e| format!("could not back up the current save first: {e}"))?,
         );
     } else {
@@ -2017,7 +2133,7 @@ pub(crate) fn put_in_place(
     let folder = place.as_ref().map_or(save_path, |p| p.folder);
     // Every name first, then the deletes: a page asked for after a delete would skip some.
     let replaced = (|| {
-        let names = folder_entries(host, folder)?;
+        let names = save_folder_entries(host, save_path, folder)?;
         for e in names {
             let Some(name) = e.get("name").and_then(Value::as_str) else {
                 continue;
@@ -2069,11 +2185,35 @@ pub(crate) fn put_in_place(
 fn holds_nothing(host: &str, save_path: &str) -> Result<bool, String> {
     let place = crate::ps2_saves::place_of(save_path);
     let folder = place.as_ref().map_or(save_path, |p| p.folder);
-    Ok(!folder_entries(host, folder)?.iter().any(|e| {
-        e.get("name").and_then(Value::as_str).is_some_and(|name| {
-            name != "." && name != ".." && place.as_ref().is_none_or(|p| p.holds(name))
-        })
-    }))
+    Ok(!save_folder_entries(host, save_path, folder)?
+        .iter()
+        .any(|e| {
+            e.get("name").and_then(Value::as_str).is_some_and(|name| {
+                name != "." && name != ".." && place.as_ref().is_none_or(|p| p.holds(name))
+            })
+        }))
+}
+
+/// The entries of `folder`, the folder the save at `save_path` is kept in, before a save is put
+/// into it.
+fn save_folder_entries(host: &str, save_path: &str, folder: &str) -> Result<Vec<Value>, String> {
+    let emulator = crate::emulator_saves::kind_of_path(save_path).is_some();
+    listed_or_not_there(folder_entries(host, folder), emulator)
+}
+
+/// A save folder's listing, with "there is no such folder" read as an empty one for an
+/// emulator's save: its folder is an ordinary one the upload makes, and a console the game was
+/// never played on has none yet (copying or syncing a save to it stopped here, at the listing).
+/// A PS5 or PS4 save's folder has to be there (the console refuses a new one under its save
+/// root), and any other failure is no answer at all: both stay errors.
+fn listed_or_not_there(
+    listing: Result<Vec<Value>, String>,
+    emulator: bool,
+) -> Result<Vec<Value>, String> {
+    match listing {
+        Err(e) if emulator && ps5upload_core::fs_ops::is_not_found(&e) => Ok(Vec::new()),
+        other => other,
+    }
 }
 
 // ── PS4 saves onto the PS5 ──────────────────────────────────────────────
@@ -2186,6 +2326,7 @@ fn import_ps4(
         &s,
         Some(BEFORE_PS4_TAG),
         true,
+        None,
     )?;
     crate::log_info!("save backup: PS4 save of {title_id} put on {host} ({save_path})");
     Ok(())
@@ -2273,33 +2414,38 @@ pub(crate) fn folder_of(image: &str) -> &str {
 }
 
 /// Opens `image` decrypted on the console; its mount point.
+///
+/// Called straight, not through the engine's own `/api/ps5/saves/open`: that route refuses while
+/// a save operation holds the console (Save Data's Open must not close a copy's save part way
+/// through), and the operation calling this is the one holding it.
 pub(crate) fn open_save(host: &str, image: &str) -> Result<String, String> {
-    let v = post(
-        "/api/ps5/saves/open",
-        json!({ "addr": host, "image": image }),
-    )?;
-    match (
-        v.get("mounted").and_then(Value::as_bool),
-        v.get("mount_point").and_then(Value::as_str),
-    ) {
-        (Some(true), Some(mp)) if !mp.is_empty() => Ok(mp.to_string()),
-        _ => Err("the save did not open".into()),
+    let _busy = crate::helper_stop::try_enter(host)
+        .ok_or_else(|| crate::helper_stop::STOPPING_MESSAGE.to_string())?;
+    let v = crate::save_open_now(host, image).map_err(|e| format!("{e:#}"))?;
+    if v.mounted && !v.mount_point.is_empty() {
+        Ok(v.mount_point)
+    } else {
+        Err("the save did not open".into())
     }
 }
 
-/// Closes the open save (written back when it changed); whether one was open.
+/// Closes the open save (written back when it changed); whether one was open. Straight to the
+/// helper, as [`open_save`].
 pub(crate) fn close_save(host: &str) -> Result<bool, String> {
-    let v = post("/api/ps5/saves/close", json!({ "addr": host }))?;
+    let _busy = crate::helper_stop::try_enter(host)
+        .ok_or_else(|| crate::helper_stop::STOPPING_MESSAGE.to_string())?;
+    let v = ps5upload_core::saves::save_close(host).map_err(|e| format!("{e:#}"))?;
     // An older helper does not say: assume it was.
-    Ok(v.get("was_open").and_then(Value::as_bool).unwrap_or(true))
+    Ok(v.was_open.unwrap_or(true))
 }
 
 /// Whether a save is open on the console (one at a time); Err when it could not be asked.
 pub(crate) fn save_open_state(host: &str) -> Result<bool, String> {
-    let v = post("/api/ps5/saves/open", json!({ "addr": host, "image": "" }))?;
-    v.get("mounted")
-        .and_then(Value::as_bool)
-        .ok_or_else(|| "the PS5 did not say whether a save is open".to_string())
+    let _busy = crate::helper_stop::try_enter(host)
+        .ok_or_else(|| crate::helper_stop::STOPPING_MESSAGE.to_string())?;
+    ps5upload_core::saves::save_open(host, "")
+        .map(|v| v.mounted)
+        .map_err(|e| format!("{e:#}"))
 }
 
 /// The title a save image belongs to (`/user/home/<uid>/savedata[_prospero]/<title>/<image>`).
@@ -2707,7 +2853,7 @@ mod tests {
 
     #[test]
     fn a_file_that_cannot_be_read_is_kept_aside_not_emptied() {
-        let dir = std::env::temp_dir().join(format!("ps5u-state-load-{}", std::process::id()));
+        let dir = crate::test_tmp::temp_path(format!("ps5u-state-load-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("save-sync.json");
@@ -2828,6 +2974,37 @@ mod tests {
         }
     }
 
+    /// Save Data's Open and Close never take the save of a copy or backup running on that console
+    /// (they are refused, without waiting), and a copy starting meanwhile waits for them.
+    #[test]
+    fn save_data_open_is_refused_while_a_save_operation_runs() {
+        let (held_tx, held_rx) = std::sync::mpsc::channel();
+        let (go_tx, go_rx) = std::sync::mpsc::channel::<()>();
+        let job = std::thread::spawn(move || {
+            let _op = save_op(&["192.0.2.61"]);
+            held_tx.send(()).unwrap();
+            go_rx.recv().unwrap();
+        });
+        held_rx.recv().unwrap();
+        assert!(try_save_op("192.0.2.61:9020").is_none());
+        // Another console's saves are free.
+        assert!(try_save_op("192.0.2.62").is_some());
+        go_tx.send(()).unwrap();
+        job.join().unwrap();
+
+        let open = try_save_op("192.0.2.61").expect("free once the copy ended");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let copy = std::thread::spawn(move || {
+            let _op = save_op(&["192.0.2.61"]);
+            tx.send(()).unwrap();
+        });
+        assert!(rx.recv_timeout(Duration::from_millis(200)).is_err());
+        drop(open);
+        rx.recv_timeout(Duration::from_secs(20))
+            .expect("the copy waited past the open");
+        copy.join().unwrap();
+    }
+
     #[tokio::test]
     async fn a_missing_local_zip_is_the_requests_fault() {
         let body: RestoreFileBody = serde_json::from_value(json!({
@@ -2920,6 +3097,54 @@ mod tests {
         assert!(title.join(oldest).exists());
         assert!(slot.exists());
         let _ = cleanup_temp_dir(&d);
+    }
+
+    /// Undoing a restore puts back a backup of the "before restore" kind, and keeping the save
+    /// there now makes another of that kind. The one being put back is then the oldest: it was
+    /// pruned mid-restore, and a restore that failed after that left its save nowhere.
+    #[test]
+    fn a_before_restore_backup_being_restored_is_not_pruned() {
+        let dir = make_temp_dir("prunespare").unwrap();
+        let d = dir.to_string_lossy().into_owned();
+        let title = dir.join("PPSA01234");
+        std::fs::create_dir_all(&title).unwrap();
+        let tag = crate::save_backup_server::BEFORE_RESTORE_TAG;
+        let name = |st: &str| format!("PPSA01234_user00000001_{st}_{tag}.zip");
+        let restoring = title.join(name("2026-01-01_000000"));
+        let older = title.join(name("2025-12-01_000000"));
+        let made = title.join(name("2026-02-01_000000"));
+        for p in [&restoring, &older, &made] {
+            std::fs::write(p, b"z").unwrap();
+        }
+        // The restored one named another way than the folder's listing spells it.
+        let spelled = title.join(".").join(name("2026-01-01_000000"));
+        prune_local_sparing(
+            &d,
+            "PPSA01234",
+            1,
+            Some(tag),
+            1,
+            &[made.as_path(), spelled.as_path()],
+        );
+        assert!(restoring.exists(), "the backup being restored was pruned");
+        assert!(made.exists());
+        assert!(!older.exists(), "the others of its kind are still pruned");
+        let _ = cleanup_temp_dir(&d);
+    }
+
+    /// An emulator's save goes to a console that has no folder for it yet (the upload makes
+    /// it): the listing's "no such folder" is an empty folder there. For a PS5 save, and for
+    /// any other failure, the listing's error stands and nothing is deleted or uploaded.
+    #[test]
+    fn a_missing_folder_is_empty_only_for_an_emulators_save() {
+        let missing = || Err::<Vec<Value>, String>("fs_list_dir_failed_errno_2".into());
+        assert_eq!(listed_or_not_there(missing(), true), Ok(Vec::new()));
+        assert!(listed_or_not_there(missing(), false).is_err());
+        for other in ["fs_list_dir_failed_errno_20", "HTTP 502", "timed out"] {
+            assert!(listed_or_not_there(Err(other.into()), true).is_err());
+        }
+        let some = vec![json!({"name": "a"})];
+        assert_eq!(listed_or_not_there(Ok(some.clone()), true), Ok(some));
     }
 
     /// #886: a backup folder holding both layouts lists, finds, dates and prunes them as one.
@@ -3062,7 +3287,7 @@ mod tests {
     /// Save Data's "Backed up …" line: the newest of each game and user, tags left off.
     #[test]
     fn the_newest_backup_of_each_game_and_user() {
-        let base = std::env::temp_dir().join(format!("ps5u-latest-{}", std::process::id()));
+        let base = crate::test_tmp::temp_path(format!("ps5u-latest-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let t = base.join("PPSA01234");
         std::fs::create_dir_all(&t).unwrap();
@@ -3124,7 +3349,7 @@ mod tests {
     /// it carries files; the sender's sce_sys never goes in.
     #[test]
     fn a_shared_save_is_checked_and_its_sce_sys_left_out() {
-        let base = std::env::temp_dir().join(format!("ps5u-share-{}", std::process::id()));
+        let base = crate::test_tmp::temp_path(format!("ps5u-share-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let dir = base.join("PPSA01234");
         std::fs::create_dir_all(dir.join(SYS_DIR)).unwrap();
@@ -3157,7 +3382,7 @@ mod tests {
     /// the API has no sign-in, so a path from a request must not reach the rest of the disk).
     #[test]
     fn a_ps4_import_reads_only_inside_the_backup_folder() {
-        let base = std::env::temp_dir().join(format!("ps5u-src-{}", std::process::id()));
+        let base = crate::test_tmp::temp_path(format!("ps5u-src-{}", std::process::id()));
         let root = base.join("backups");
         let inside = root
             .join("PS4 10.0.0.2 1 2026-10-30 1200")
@@ -3463,6 +3688,36 @@ mod tests {
     }
 
     #[test]
+    fn eglantine_waits_for_its_own_writer_and_restores_only_its_profile() {
+        let path = "/data/eglantineps5/user/nand/user/save/0000000000000000/1F1E1D1C1B1A19181716151413121110/0100F2C0115B6000";
+        let entry = SaveEntry {
+            title_id: "0100F2C0115B6000".into(),
+            user_id: 0x11f1_e1d1,
+            path: path.into(),
+            size: 17,
+            mtime: 1000,
+            kind: "switch".into(),
+        };
+        let writer = save_writer(path, &entry.title_id, entry.user_id as u32).unwrap();
+        assert_eq!(
+            (writer.app, writer.emulator),
+            (crate::emulator_saves::EGLANTINE_APP, Some("EglantinePS5"))
+        );
+        assert!(save_writer(path, &entry.title_id, 0x01f1_e1d1).is_err());
+        assert!(save_writer(path, "0100000000000000", entry.user_id as u32).is_err());
+        let saves = [entry];
+        let busy = [crate::emulator_saves::EGLANTINE_APP.to_string()].into();
+        assert!(needing_backup("h", &saves, &Done::new(), 2000, &busy).is_empty());
+        for app in [crate::emulator_saves::APP, crate::emulator_saves::MIRROR] {
+            let busy = [app.to_string()].into();
+            assert_eq!(
+                needing_backup("h", &saves, &Done::new(), 2000, &busy).len(),
+                1
+            );
+        }
+    }
+
+    #[test]
     fn the_ps2_emulators_cards_and_states_are_backed_up_too() {
         use crate::ps2_saves::{CARDS_USER, CRUX2, KIND, STATES_USER};
         let ps2 = |path: &str, user: i32| SaveEntry {
@@ -3495,7 +3750,7 @@ mod tests {
 
     #[test]
     fn a_loose_save_restores_only_its_own_entries() {
-        let dir = std::env::temp_dir().join(format!("ps5u-ps2-loose-{}", std::process::id()));
+        let dir = crate::test_tmp::temp_path(format!("ps5u-ps2-loose-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("Mcd002.ps2")).unwrap();
         std::fs::write(dir.join("Mcd001.ps2"), b"card").unwrap();
@@ -3509,6 +3764,100 @@ mod tests {
         let err = only_the_saves_own(&dir, &cards).unwrap_err();
         assert!(err.contains("bios"), "{err}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A restore empties the folder it is given, so a save path that climbs out with `..` (it
+    /// still ends with the title ID), or a title ID that is a path, is refused before the console
+    /// or this computer is touched. The payload's own restore refuses the same (backup.c).
+    #[test]
+    fn a_restore_never_reaches_outside_the_save_folder() {
+        for (path, title) in [
+            (
+                "/user/home/1/savedata_prospero/../../../system_data/PPSA01234",
+                "PPSA01234",
+            ),
+            ("/user/home/1/savedata_prospero/./PPSA01234", "PPSA01234"),
+            ("/user/home/1/savedata_prospero//PPSA01234", "PPSA01234"),
+            ("user/home/1/savedata_prospero/PPSA01234", "PPSA01234"),
+            (
+                "/user/home/1/savedata_prospero\\..\\x/PPSA01234",
+                "PPSA01234",
+            ),
+            ("/user/home/1/savedata_prospero/PPSA01234\n", "PPSA01234"),
+            ("/user/home/1/savedata_prospero/..", ".."),
+            ("/user/home/1/savedata_prospero/a/../b", "a/../b"),
+            ("/user/home/1/savedata_prospero/x", ""),
+        ] {
+            assert!(save_folder_ok(path, title).is_err(), "{path:?} {title:?}");
+            assert!(save_writer(path, title, 1).is_err(), "{path:?} {title:?}");
+            // Refused before anything else: no console answers at this address.
+            let e = put_in_place(
+                "127.0.0.1",
+                title,
+                Path::new("/nonexistent"),
+                path,
+                1,
+                &Settings::default(),
+                None,
+                false,
+                None,
+            )
+            .unwrap_err();
+            assert!(
+                e.contains("not a save folder") || e.contains("not a title ID"),
+                "{path:?} {title:?}: refused for another reason"
+            );
+        }
+        let ok = "/user/home/1/savedata_prospero/PPSA01234";
+        assert!(save_folder_ok(ok, "PPSA01234").is_ok());
+        assert!(save_writer(ok, "PPSA01234", 1).is_ok());
+        assert!(save_folder_ok("/data/PCSX2/*.ps2", "PPSA99203").is_ok());
+    }
+
+    /// The audit's case: any plain path that ended with the title ID passed, so a restore could
+    /// empty a folder that is no save at all. Only the app's own save places are taken, each
+    /// for its own title.
+    #[test]
+    fn only_the_apps_own_save_places_are_save_folders() {
+        for (path, title) in [
+            ("/user/home/1/savedata_prospero/PPSA01234", "PPSA01234"),
+            ("/user/home/1de82450/savedata_prospero/PPSA01234", "PPSA01234"),
+            ("/user/home/1de82450/savedata/CUSA01234", "CUSA01234"),
+            (
+                "/data/prosperoeden/user/nand/user/save/0000000000000000/1F1E1D1C1B1A19181716151413121110/0100F2C0115B6000",
+                "0100F2C0115B6000",
+            ),
+            ("/data/crux2/memcards", "PPSA99249"),
+            ("/data/PCSX2/savestates", "PPSA99203"),
+            ("/data/PCSX2/*.p2s", "PPSA99203"),
+        ] {
+            assert!(save_folder_ok(path, title).is_ok(), "{path} {title}");
+        }
+        for (path, title) in [
+            // Ends with the title, and is some other folder.
+            ("/data/games/PPSA01234", "PPSA01234"),
+            ("/user/app/PPSA01234", "PPSA01234"),
+            ("/mnt/ext1/PPSA01234", "PPSA01234"),
+            (
+                "/user/home/1/savedata_prospero/PPSA01234/sce_sys",
+                "sce_sys",
+            ),
+            ("/user/home/1/other/PPSA01234", "PPSA01234"),
+            ("/user/home/nothex/savedata_prospero/PPSA01234", "PPSA01234"),
+            (
+                "/user/home/123456789/savedata_prospero/PPSA01234",
+                "PPSA01234",
+            ),
+            // A save place, of another title.
+            ("/user/home/1/savedata_prospero/PPSA01234", "PPSA09999"),
+            ("/data/crux2/memcards", "PPSA99203"),
+            ("/data/PCSX2/memcards", "PPSA99249"),
+            // The Switch emulator's root, or a game folder named with another ID.
+            ("/data/prosperoeden/user/nand/user/save", "save"),
+        ] {
+            let e = save_folder_ok(path, title).unwrap_err();
+            assert!(e.contains("is not a save folder"), "{path} {title}: {e}");
+        }
     }
 
     #[test]
@@ -3592,7 +3941,7 @@ mod tests {
 
     #[test]
     fn backups_are_listed_newest_first_and_names_cannot_escape() {
-        let dir = std::env::temp_dir().join(format!("ps5upload-savebk-{}", std::process::id()));
+        let dir = crate::test_tmp::temp_path(format!("ps5upload-savebk-{}", std::process::id()));
         let title = dir.join("PPSA01234");
         std::fs::create_dir_all(&title).unwrap();
         for s in [
@@ -3642,7 +3991,7 @@ mod tests {
         st.move_to("");
         assert_eq!(st.read_dirs(), ["/old", "/new"]);
 
-        let base = std::env::temp_dir().join(format!("ps5u-dirs-{}", std::process::id()));
+        let base = crate::test_tmp::temp_path(format!("ps5u-dirs-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let (old, new) = (base.join("old"), base.join("new"));
         for (dir, stamp) in [

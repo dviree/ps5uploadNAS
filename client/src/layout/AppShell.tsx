@@ -9,12 +9,14 @@ import RemotePlayBanner from "./RemotePlayBanner";
 import EngineDownBanner from "./EngineDownBanner";
 import MovedConsoleBanner, { useMovedConsoleWatch } from "./MovedConsoleBanner";
 import LinkDropBanner from "./LinkDropBanner";
+import HelperUpdatePromptHost from "./HelperUpdatePrompt";
 import { InstallAskHost } from "../components/InstallAskHost";
 import { PairingDialog } from "../screens/Connection/PairingDialog";
 import ConsoleTabs from "./ConsoleTabs";
 import ActivityBar from "./ActivityBar";
 import { WhatsNewOnLaunch } from "./UpdateToast";
 import UpdateBanner from "./UpdateBanner";
+import UpdateFinishing from "./UpdateFinishing";
 import { useWebUpdateStore } from "./WebUpdateToast";
 import { Button } from "../components/Button";
 import {
@@ -1840,8 +1842,14 @@ export default function AppShell() {
           and the Bug report). */}
       {isTauriEnv() && <CaptureViewer />}
       {/* v5 mobile top bar — kept slim; primary nav is the bottom
-          tab bar. Only renders below md. */}
-      <div className="h-top-bar flex shrink-0 items-center gap-2.5 pb-2 pt-[calc(var(--safe-top)_+_0.5rem)] md:hidden">
+          tab bar. Only renders below md. In the phone layout it is as short as its bell is
+          comfortable to tap, and has no arrows (#936, NavigationControls). A screen that shows
+          the bell in a header of its own takes this bar's place (`html[data-screen-bar]`,
+          index.css). */}
+      <div
+        data-top-bar=""
+        className="h-top-bar flex shrink-0 items-center gap-2.5 pb-2 pt-[calc(var(--safe-top)_+_0.5rem)] phone:pb-0.5 phone:pt-[calc(var(--safe-top)_+_0.125rem)] md:hidden"
+      >
         <NavigationControls />
         <AppLogo size={28} />
         {/* One word that never breaks (on a 320 px phone it wrapped its last letter onto a
@@ -1875,7 +1883,13 @@ export default function AppShell() {
             tabIndex={-1}
             className="flex min-w-0 flex-1 flex-col overflow-hidden outline-none"
           >
-            <div className="flex min-w-0 items-center gap-3 px-3 md:px-6 md:pt-[calc(var(--safe-top)_+_1rem)]">
+            {/* A phone held sideways is short: less room over this row there. */}
+            {/* On a phone held sideways, a screen with its own header (Files) takes this row's
+                place: only the console tabs stay (`html[data-screen-bar]`, index.css). */}
+            <div
+              data-top-row=""
+              className="flex min-w-0 items-center gap-3 px-3 md:px-6 md:pt-[calc(var(--safe-top)_+_1rem)] phone:md:pt-[calc(var(--safe-top)_+_0.375rem)]"
+            >
               {/* Browser-style history for a desktop app: route and workspace-tab
                   changes are first-class views, so users can retrace a workflow
                   without reopening More or rebuilding a search. */}
@@ -1885,7 +1899,7 @@ export default function AppShell() {
               {/* Console tab strip — one tab per PS5; switches the viewed console
                   while every console's uploads/installs keep running in their own
                   background loops. Hidden for single-console users. */}
-              <div className="min-w-0 flex-1">
+              <div className="min-w-0 flex-1" data-keep="">
                 <ConsoleTabs />
               </div>
               <TopBarActions />
@@ -1894,6 +1908,8 @@ export default function AppShell() {
                 that runs a newer helper than this app (lib/updateNotice). A routine update is a
                 dot on Settings and a row there. Pinned above the scroll area. */}
             <UpdateBanner />
+            {/* Opened again while an update from the last quit is still replacing the app. */}
+            <UpdateFinishing />
             {/* The first launch of a new version: its release notes, once. */}
             <WhatsNewOnLaunch />
             {/* Vertical scroll only. overflow-x-hidden is a backstop: the
@@ -1907,7 +1923,7 @@ export default function AppShell() {
                 guarantees scroll position resets per screen. Same-path query
                 changes (e.g. /payloads?tab=send) keep the node, so tab
                 switches inside a screen don't re-animate. */}
-            <KeptScreens pathname={location.pathname} className="tab-room anim-screen flex-1 overflow-y-auto overflow-x-hidden pb-[calc(88px+var(--safe-bottom))] md:pb-0 [overscroll-behavior:contain]" />
+            <KeptScreens pathname={location.pathname} className="tab-room anim-screen flex-1 overflow-y-auto overflow-x-hidden pb-[var(--float-bottom)] [overscroll-behavior:contain]" />
           </main>
         </div>
       </div>
@@ -1920,6 +1936,7 @@ export default function AppShell() {
       {/* v5 Toaster — critical-toast overlay. Mounted last so it
           sits above all other chrome in DOM order. */}
       <Toaster />
+      <HelperUpdatePromptHost />
       <SignInNeededHost />
       <WakePasscodeHost />
       <RemotePlayHost />

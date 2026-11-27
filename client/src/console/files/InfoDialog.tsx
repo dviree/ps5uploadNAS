@@ -3,6 +3,7 @@ import { Calculator, ShieldCheck, Square } from "lucide-react";
 import { formatBytes } from "../../lib/format";
 import { call } from "../api";
 import { getLanguage, t } from "../strings";
+import { formatDateTime } from "../time";
 import { topModal } from "../nav";
 import { Modal } from "../ui/Modal";
 import { refocusIfLost } from "../ui/restoreFocus";
@@ -43,7 +44,7 @@ export function walkNote(r: SizeResult): string | null {
   else if (r.end === "cancelled") note = t("cw_files_size_cancelled");
   else if (r.end === "error") note = t("cw_files_err_read");
   if (r.unreadable > 0) {
-    const u = t("cw_files_size_unreadable", { n: num(r.unreadable) });
+    const u = t("cw_files_size_unreadable_v2", { n: num(r.unreadable) });
     note = note ? `${note} ${u}` : u;
   }
   return note;
@@ -168,7 +169,7 @@ export function InfoDialog({
     rows.push([t("cw_files_info_type"), kindText(s.kind)]);
     if (s.kind === "dir") rows.push([t("cw_files_info_items"), info.items ?? "—"]);
     else rows.push([t("cw_files_info_size"), formatBytes(s.size)]);
-    if (s.mtime > 0) rows.push([t("cw_files_info_modified"), new Date(s.mtime * 1000).toLocaleString(getLanguage())]);
+    if (s.mtime > 0) rows.push([t("cw_files_info_modified"), formatDateTime(s.mtime * 1000)]);
     rows.push([t("cw_files_info_mode"), `${modeText(s.mode)} ${modeLetters(s.mode)}`]);
   }
   const stat = info && "stat" in info ? info.stat : null;

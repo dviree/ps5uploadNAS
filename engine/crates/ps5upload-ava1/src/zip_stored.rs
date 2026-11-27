@@ -691,7 +691,7 @@ impl Sink for StoredZipSink {
             let mut buf = vec![0u8; READBACK];
             let mut at = 0u64;
             while at < s.size {
-                let n = ((s.size - at) as usize).min(READBACK);
+                let n = crate::step(s.size - at, READBACK);
                 read_exact_at(&file, &mut buf[..n], s.data_off + at)?;
                 crc.update(&buf[..n]);
                 at += n as u64;
@@ -712,7 +712,7 @@ impl Sink for StoredZipSink {
             let mut buf = vec![0u8; READBACK];
             let mut at = 0u64;
             while at < partial_bytes {
-                let n = ((partial_bytes - at) as usize).min(READBACK);
+                let n = crate::step(partial_bytes - at, READBACK);
                 read_exact_at(&file, &mut buf[..n], s.data_off + at)?;
                 crc.update(&buf[..n]);
                 at += n as u64;
@@ -793,7 +793,7 @@ mod tests {
     }
 
     fn dir(tag: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("p5a-zs-{tag}-{}", std::process::id()));
+        let d = crate::test_tmp::temp_path(format!("p5a-zs-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d

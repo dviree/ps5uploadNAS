@@ -69,6 +69,7 @@ pub mod sys_time;
 pub mod system_control;
 pub mod tailnet;
 pub mod tar_archive;
+pub mod title_restore;
 pub mod transfer;
 pub mod units;
 pub mod users;
@@ -76,3 +77,8 @@ pub mod vinput;
 pub mod volumes;
 pub mod vpad;
 pub mod zip_cd;
+
+// Test scratch paths removed when the test process exits (engine/test-support/test_tmp.rs).
+#[cfg(test)]
+#[path = "../../../test-support/test_tmp.rs"]
+mod test_tmp;

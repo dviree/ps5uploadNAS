@@ -5,7 +5,9 @@
 // TCP send) stay in-process.
 
 import { trStatic } from "../lib/trStatic";
+import type { InstallWaiting, ReachFail } from "../lib/streamReach";
 import { discardBody } from "../lib/discardBody";
+import { notifyPathsGone } from "../lib/fsPathsGone";
 import { requestStatusRecheck } from "../lib/statusRecheck";
 import { formatBytes } from "../lib/format";
 import {
@@ -27,6 +29,7 @@ import { isTauriEnv } from "../lib/tauriEnv";
 import { toExtractResult, type ExtractResult } from "../lib/archiveName";
 import { invoke } from "../lib/invokeLogged";
 import { randomHexId } from "../lib/randomId";
+import { APPINFO_VERSION_KEYS, installedAppVersion } from "../lib/versionNumbers";
 import { noteJobWatched } from "../lib/watchedJobIds";
 import { getCachedIcon, setCachedIcon } from "../lib/iconMemoryCache";
 import {
@@ -454,6 +457,12 @@ export interface BackupRestoreResult {
   ok: boolean;
   tag: string;
   restored: number;
+  /** Entries not used (outside the allowed folders, damaged); absent from an older engine. */
+  skipped?: number;
+  /** Files that could not be written back. */
+  failed?: number;
+  /** Some files came back and some did not. */
+  partial?: boolean;
 }
 
 /** Snapshot a file or directory tree under a backup tag. */
@@ -1086,6 +1095,9 @@ export async function startTransferDownload(
   transferAddr: string,
   kind: "file" | "folder",
   unsafeRead: boolean = false,
+  /** A move to a saved server (`destDir` is `remote://…`): the engine deletes the source on the
+   *  PS5 only once the copy is complete and checked there. */
+  removeSource: boolean = false,
 ): Promise<string> {
   const res = await invoke<{ job_id: string }>("transfer_download", {
     req: {
@@ -1094,6 +1106,7 @@ export async function startTransferDownload(
       addr: transferAddr,
       kind,
       unsafe_read: unsafeRead,
+      ...(removeSource ? { remove_source: true } : {}),
     },
   });
   return res.job_id;
@@ -1239,9 +1252,9 @@ export interface Volume {
   fs_type: string;
   total_bytes: number;
   free_bytes: number;
-  /** Space deliberately excluded from large-upload capacity (the internal
-   * PS5 allocator hides a fixed reserve from statfs; external filesystems keep
-   * a smaller metadata/activity margin). Present on current payloads. */
+  /** A small working margin left out of what an upload may take (room for metadata and for
+   * other activity on the drive; at most 1 GiB). It is not what the PS5 holds back on internal
+   * storage: that is already out of `free_bytes`, and its growth is in `likely_fits_bytes`. */
   safety_reserve_bytes?: number;
   /** Bytes a new upload may safely allocate after the reserve above. */
   allocatable_bytes?: number;
@@ -1494,6 +1507,7 @@ export async function fsDelete(
 ): Promise<void> {
   const addr = toMgmtAddr(transferAddr);
   await fsLongOp("/api/ps5/fs/delete", { addr, path, op_id: opId ?? 0 });
+  notifyPathsGone(transferAddr, [path]);
 }
 
 /** Decompress a `.ffpfsc` on the console into the image it holds, beside it (#453). Resolves
@@ -1651,6 +1665,7 @@ export async function fsMove(
 ): Promise<void> {
   const addr = toMgmtAddr(transferAddr);
   await fsLongOp("/api/ps5/fs/move", { addr, from, to, op_id: opId ?? 0, overwrite: overwrite ?? false });
+  if (from !== to) notifyPathsGone(transferAddr, [from]);
 }
 
 export async function fsChmod(
@@ -1991,6 +2006,11 @@ export interface UnregisterResult {
   shadowMount: boolean;
   /** That image, when the helper named one. */
   image: string | null;
+  /** Asked to delete the source: it was deleted. */
+  sourceDeleted?: boolean;
+  /** Asked to delete the source and it was kept: why (`uninstall_not_finished`,
+   *  `unmount_failed: ...`, the delete's error, or `engine_too_old`). */
+  sourceError?: string | null;
 }
 
 /** Reverse of `appRegister` (tears down our nullfs at `/system_ex/app/<titleId>`), and the
@@ -2004,10 +2024,46 @@ export async function appUnregister(
   titleId: string,
   /** `registrationOnly`: a folder or image row taking its own registration off (#884). A game
    *  the PS5's installer installed under the same title id is then refused, by the app and by a
-   *  12.6.16+ helper, instead of uninstalled. The game page's Uninstall leaves it off. */
-  opts?: { registrationOnly?: boolean },
+   *  12.6.16+ helper, instead of uninstalled. The game page's Uninstall leaves it off.
+   *  `deleteSource`: also delete this folder or disk image once the uninstall succeeded (the
+   *  `path` {@link appUninstallSource} named); registration-only then. */
+  opts?: { registrationOnly?: boolean; deleteSource?: string },
 ): Promise<UnregisterResult> {
   const addr = toMgmtAddr(transferAddr);
+  if (opts?.deleteSource) {
+    // Deleting a big folder runs for minutes: followed past any one request's limit (#712).
+    const ans = await engineLongPost(getEngineUrl(), "/api/ps5/app/unregister", {
+      addr,
+      title_id: titleId,
+      registration_only: true,
+      delete_source: opts.deleteSource,
+    });
+    if (!ans.ok) {
+      const error = ans.body.error;
+      throw new Error(typeof error === "string" ? error : `engine HTTP ${ans.status}`);
+    }
+    const b = ans.body as {
+      sony_uninstall_refused?: boolean;
+      sony_uninstall_rc?: string;
+      still_present?: boolean | null;
+      unverified?: boolean | null;
+      source_deleted?: boolean;
+      source_error?: string | null;
+    };
+    if (b.sony_uninstall_refused && b.still_present !== false) {
+      throw new Error(`uninstall_refused:${b.sony_uninstall_rc ?? "unknown"}`);
+    }
+    if (b.source_deleted) notifyPathsGone(transferAddr, [opts.deleteSource]);
+    return {
+      stillPresent: b.still_present === true,
+      unverified: b.unverified === true,
+      shadowMount: false,
+      image: null,
+      // An engine without delete_source answers without these: the source was kept.
+      sourceDeleted: b.source_deleted === true,
+      sourceError: b.source_deleted === true ? null : (b.source_error ?? "engine_too_old"),
+    };
+  }
   if (opts?.registrationOnly) {
     const installed = await findConsoleInstall(
       { exists: (p) => fsPathPresent(transferAddr, p) },
@@ -2041,6 +2097,40 @@ export async function appUnregister(
     shadowMount: res?.managed_by === "shadowmount",
     image: res?.image || null,
   };
+}
+
+/** What an Uninstall can also delete (`GET /api/ps5/app/uninstall-source`): the folder or disk
+ *  image a registered game plays from, with its size. `offer` false (with `reason`) when there is
+ *  nothing to ask: a package install, a system title, a ShadowMount+ title, a source already
+ *  gone, or one that is not safe to delete. */
+export interface UninstallSource {
+  offer: boolean;
+  reason?: string;
+  kind?: "folder" | "image";
+  path?: string;
+  mount_point?: string;
+  bytes?: number;
+  /** The folder walk stopped early: `bytes` is at least that much. */
+  size_partial?: boolean;
+}
+
+/** Read {@link UninstallSource}. An engine without the route, or any failure, reads as nothing
+ *  to offer: the Uninstall is then the plain one. */
+export async function appUninstallSource(transferAddr: string, titleId: string): Promise<UninstallSource> {
+  try {
+    const q = `addr=${encodeURIComponent(toMgmtAddr(transferAddr))}&title_id=${encodeURIComponent(titleId)}`;
+    const res = await engineFetch(`${getEngineUrl()}/api/ps5/app/uninstall-source?${q}`, {
+      timeoutMs: 120_000,
+    });
+    if (!res.ok) {
+      await discardBody(res);
+      return { offer: false, reason: "unreadable" };
+    }
+    const body = (await res.json()) as UninstallSource;
+    return body && typeof body.offer === "boolean" ? body : { offer: false, reason: "unreadable" };
+  } catch {
+    return { offer: false, reason: "unreadable" };
+  }
 }
 
 // ─── Hardware monitoring ──────────────────────────────────────────────
@@ -2195,10 +2285,14 @@ export async function fetchHwPower(transferAddr: string): Promise<HwPower> {
   return invoke<HwPower>("ps5_hw_power", { addr });
 }
 
-/** "Console Storage" aggregate matching what PS5 Settings shows
- *  (added in 2.2.26). Sums `/user effective + /system_data + /system_ex`
- *  with reserved-space accounting. Distinct from `fsListVolumes` —
- *  that returns per-volume detail; this is the single-line summary. */
+/** The internal drive as its filesystem counts it (`statfs` on `/user`, `/system_data` and
+ *  `/system_ex`; added in 2.2.26). NOT the PS5's Settings > Storage figures: that screen can
+ *  show a smaller drive and much less free space (#944: 175 GB here, 71 GB there, on one 2 TB
+ *  console), by a rule not known here. `user_free_bytes` is `/user`'s free space for a writer, with
+ *  `user_reserved_bytes` (what the filesystem holds back) already left out: never subtract it
+ *  again. `total/free/used_bytes` are the three partitions together, so `free_bytes` counts
+ *  system-partition space nothing can be copied into. Distinct from `fetchVolumes`, which
+ *  returns per-volume detail. */
 export interface HwStorage {
   total_bytes: number;
   free_bytes: number;
@@ -5755,12 +5849,23 @@ export interface LastInstall {
   message: string;
   /** Not reported before: say so once. */
   new: boolean;
+  /** The installer is still working (the app was opened again while an install from the last
+   *  quit runs): nothing is judged yet. Wait for it with `updateWaitForInstall`. */
+  pending?: boolean;
 }
 
 /** The last install's outcome (null when there was none). Also deletes what a finished
  *  install left in the app's updates folder. Once per launch. */
 export async function updateLastInstall(): Promise<LastInstall | null> {
   return invoke<LastInstall | null>("update_last_install");
+}
+
+/** An install is still working (`LastInstall.pending`): wait for it, at most a few minutes.
+ *  "relaunch": the app quits now and starts again as the new version. "report": it ended and
+ *  this copy is unchanged; `updateLastInstall` now says what happened. "keep-running": it is
+ *  still working; carry on and say nothing. */
+export async function updateWaitForInstall(): Promise<"relaunch" | "report" | "keep-running"> {
+  return invoke<"relaunch" | "report" | "keep-running">("update_wait_for_install");
 }
 
 /** Forget a failed install so that version may be installed by itself again ("Try again"). */
@@ -6414,8 +6519,9 @@ export async function cheatsEngineSet(
  *  id and install / last-opened times. Keys are appinfo.db column names;
  *  absent ones are simply missing from the result. */
 export interface AppInfoDetails {
-  /** CONTENT_VERSION (PS5, `01.000.016`) or APP_VER (PS4, `01.05`) — the
-   *  same form the cheat files name their target version in. */
+  /** CONTENT_VERSION (PS5, `01.000.016`), else the higher of VERSION and
+   *  APP_VER (PS4, `01.32`: an update raises VERSION) — the same form the
+   *  cheat files name their target version in. */
   version: string | null;
   sizeBytes: number | null;
   contentId: string | null;
@@ -6436,7 +6542,7 @@ export async function appInfoDetails(
       addr: toMgmtAddr(transferAddr),
       // Tauri maps camelCase to the command's snake_case `title_id`.
       titleId,
-      keys: "CONTENT_VERSION,APP_VER,#_size,#_install_time,#_last_access_time,CONTENT_ID",
+      keys: `${APPINFO_VERSION_KEYS},#_size,#_install_time,#_last_access_time,CONTENT_ID`,
     });
     // A refusal throws here and lands in the catch below: no details.
     const res = assertOk(resp, "Read game details");
@@ -6444,7 +6550,7 @@ export async function appInfoDetails(
     const get = (k: string) => v.get(k) || null;
     const size = Number(get("#_size"));
     return {
-      version: get("CONTENT_VERSION") ?? get("APP_VER"),
+      version: installedAppVersion(get),
       sizeBytes: Number.isFinite(size) && size > 0 ? size : null,
       contentId: get("CONTENT_ID"),
       installedAt: get("#_install_time"),
@@ -6735,6 +6841,12 @@ export interface InstallStatus {
   /** Windows only: the local adapter facing the console and what Windows says about it, set
    *  when the console could not reach this computer. Absent elsewhere and from an older engine. */
   net_diag?: NetDiag | null;
+  /** With `reason: "stream_unreachable"` from the engine's reach check or its no-request
+   *  watchdog: where the PS5 was sent and how its connect ended (lib/streamReach words it).
+   *  Absent from an older engine. */
+  reach?: ReachFail | null;
+  /** On a running job: what it waits for before the PS5 has moved a byte. */
+  waiting?: InstallWaiting | null;
   started_at: number;
   updated_at: number;
 }

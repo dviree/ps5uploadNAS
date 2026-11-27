@@ -44,6 +44,7 @@ import { RUNNING_LINK } from "../payloadTabs";
 import { groupCards, matchDetail, originOf, payloadCount, type ListState, type Origin } from "./pmMerge";
 import { usePmView, usePmViewStore } from "./pmViewStore";
 import { runGate } from "./runGate";
+import { KstuffKernelNote, kstuffProbablyInKernel } from "./kstuffKernel";
 import { HushPanel, HushSummary, useHush, useHushActions } from "../../Hush";
 import {
   detectHubCards,
@@ -115,6 +116,7 @@ function OnPs5Body() {
   const navigate = useNavigate();
   const host = useConnectionStore((s) => s.host);
   const payloadStatus = useConnectionStore((s) => s.payloadStatus);
+  const ucredElevated = useConnectionStore((s) => s.ucredElevated);
   const online = payloadStatus === "up";
   const addr = mgmtAddr(host);
   const windowVisible = useDocumentVisible();
@@ -586,16 +588,18 @@ function OnPs5Body() {
   const savedList = savedShown ? (
     <PayloadManagerPanel part="saved" running={pmRunning ?? undefined} onChanged={afterPmChange} />
   ) : null;
+  // Each section says how many it lists, so the number at the top can be added up from them.
   const detectedHeading = savedShown ? (
     <h3 className="text-xs font-semibold uppercase tracking-wide text-[var(--color-muted)]">
       {tr("hub_detected", undefined, "Found on this PS5")}
+      {` · ${groups ? groups.top.length : cards.length}`}
     </h3>
   ) : null;
 
   return (
     <div className="flex flex-col gap-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
-        <span className="text-sm text-[var(--color-muted)]">
+        <span className="text-sm text-[var(--color-muted)]" data-testid="hub-count">
           {loading
             ? tr("hub_checking", undefined, "Checking what is on this PS5…")
             : tr("hub_count", { n: count }, `${count} on this PS5`)}
@@ -627,6 +631,8 @@ function OnPs5Body() {
           onDismiss={() => setStopError(null)}
         />
       )}
+
+      {procsLoaded && kstuffProbablyInKernel(procs, ucredElevated) && <KstuffKernelNote variant="hub" />}
 
       {loading && cards.length === 0 ? (
         <SkeletonRows rows={3} />
@@ -664,6 +670,7 @@ function OnPs5Body() {
               <div>
                 <h3 className="text-xs font-semibold uppercase tracking-wide text-[var(--color-muted)]">
                   {tr("hub_also_running", undefined, "Also running")}
+                  {` · ${groups.also.length}`}
                 </h3>
                 <p className="mt-0.5 text-xs text-[var(--color-muted)]">
                   {tr("hub_also_running_body_v2", undefined, "Not in your Payload Manager list.")}{" "}

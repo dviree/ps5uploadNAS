@@ -15,8 +15,8 @@ use axum::{
     Json, Router,
 };
 use ps5upload_core::payload_lifecycle::{
-    image_is_helper, is_ps5upload_payload, send_payload_file, send_payload_image, SentPayload,
-    PS5_LOADER_PORT,
+    image_is_helper, is_payload_file_name, is_ps5upload_payload, send_payload_file,
+    send_payload_image, SentPayload, PS5_LOADER_PORT,
 };
 use serde::Deserialize;
 use serde_json::json;
@@ -87,11 +87,6 @@ struct SendRequest {
     #[serde(flatten)]
     opts: SendOpts,
 }
-
-/// What a loader takes (`payload_probe`'s list). The `path` form reads any file the engine can,
-/// and a port other than :9021 has no ELF check, so without this it would stream any file on this
-/// machine to any address.
-const PAYLOAD_EXTENSIONS: &[&str] = &["elf", "bin", "js", "lua", "jar"];
 
 #[derive(Deserialize)]
 struct CheckBody {
@@ -432,12 +427,9 @@ async fn send_json(installs: PkgInstallStateHandle, body: &[u8]) -> Response {
     }
     let path = match (req.path, req.payload_id) {
         (Some(path), None) => {
-            let ext_ok = std::path::Path::new(&path)
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|e| e.to_ascii_lowercase())
-                .is_some_and(|e| PAYLOAD_EXTENSIONS.contains(&e.as_str()));
-            if !ext_ok {
+            // What a loader takes (`payload_lifecycle::PAYLOAD_EXTENSIONS`): the send by path
+            // reads any file the engine can, so it is refused here in words, as well as there.
+            if !is_payload_file_name(&path) {
                 return bad_request("path must be a .elf, .bin, .js, .lua or .jar file");
             }
             path
@@ -635,7 +627,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_json_form_sends_a_file_from_a_path() {
-        let dir = std::env::temp_dir().join(format!("ps5upload-send-api-{}", std::process::id()));
+        let dir = crate::test_tmp::temp_path(format!("ps5upload-send-api-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("thing.elf");
         std::fs::write(&file, b"\x7fELFfrom a path").unwrap();
@@ -656,7 +648,7 @@ mod tests {
     #[tokio::test]
     async fn the_json_form_accepts_the_other_names_for_the_console() {
         let (port, received) = listen_once();
-        let dir = std::env::temp_dir().join(format!("ps5upload-send-api2-{}", std::process::id()));
+        let dir = crate::test_tmp::temp_path(format!("ps5upload-send-api2-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("a.bin");
         std::fs::write(&file, b"x").unwrap();
@@ -826,7 +818,7 @@ mod tests {
     /// own one in place of a damaged copy, and never a file that is not named .elf.
     #[test]
     fn the_bundled_form_takes_a_good_copy_and_replaces_a_damaged_one() {
-        let dir = std::env::temp_dir().join(format!("ps5upload-bundled-{}", std::process::id()));
+        let dir = crate::test_tmp::temp_path(format!("ps5upload-bundled-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let good = dir.join("ps5upload.elf");
         std::fs::write(&good, b"\x7fELF the app's helper").unwrap();

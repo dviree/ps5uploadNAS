@@ -112,6 +112,11 @@ export function humanizePs5Error(
     }
   }
 
+  // A folder whose title ID the helper will not put on the home screen (install_guard.h): one of
+  // the console's own apps, or no title ID at all.
+  if (/register_system_title/.test(raw)) return te("err_register_system_title");
+  if (/register_title_id_unsafe/.test(raw)) return te("err_register_title_id_unsafe");
+
   // ─── Remote Play pairing ───────────────────────────────────────────
   // The console refused the registration with "a pairing is pending" (rp_regist.rs), also when
   // Enable Remote Play on its own screen is not on, whatever the registry says: unpairing and
@@ -362,6 +367,13 @@ export function humanizePs5Error(
     return te("err_launch_no_user");
   }
 
+  // #961: the console's database has no record of the title (Rebuild Database drops games
+  // installed from fake packages, their files stay). The helper stops there instead of trying the
+  // other launch routes; the game's page offers Restore to home screen.
+  if (/launch_not_in_database/i.test(raw)) {
+    return te("err_launch_not_in_database");
+  }
+
   // ─── Sony launcher error codes (after 2.2.32 auto-retry) ──────────
   // launch_title surfaces sceLncUtilLaunchApp's return value as
   // `launch_sony_error_0xNNNNNNNN`. The codes below are the ones we
@@ -384,6 +396,11 @@ export function humanizePs5Error(
     }
     if (code === "80940033") {
       return te("err_launch_homebrew_refused");
+    }
+    // SCE kernel EINVAL: the console refused to start the program itself. The helper stops here
+    // rather than trying the ShellUI route, which only restarted the system UI for it.
+    if (code === "80020016") {
+      return te("err_launch_program_refused");
     }
     return te("err_launch_unknown", { code });
   }

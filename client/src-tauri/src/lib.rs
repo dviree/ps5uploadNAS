@@ -39,6 +39,9 @@ mod engine;
 #[cfg(any(target_os = "android", target_os = "ios"))]
 #[path = "engine_mobile.rs"]
 mod engine;
+// Why the engine inside a phone app is not answering, as the renderer words it (#950).
+#[cfg(any(mobile, test))]
+mod engine_in_app;
 // HTTP client for talking to either engine. `pub` only so
 // tests/engine_http_proxy.rs can drive it with proxy variables set.
 pub mod engine_http;
@@ -166,6 +169,10 @@ pub fn run() {
     // for it before anything else, or its single-instance lock sends this launch away.
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     commands::self_install::wait_for_previous_instance();
+    // The program file as it is now: an install still working from the last quit may replace
+    // it under this launch (`update_wait_for_install` then starts the new one).
+    #[cfg(not(any(target_os = "android", target_os = "ios")))]
+    commands::self_install::note_program();
 
     let builder = tauri::Builder::default();
     // Single-instance MUST run before any other setup (window creation,
@@ -467,6 +474,7 @@ pub fn run() {
             commands::ps5_app_launch,
             commands::ps5_app_register,
             commands::ps5_app_unregister,
+            commands::ps5_app_restore,
             commands::fpkg_inspect,
             commands::lz4_status,
             commands::lz4_ffpfsc,
@@ -489,6 +497,7 @@ pub fn run() {
             commands::exfat_build,
             commands::folder_build,
             commands::fpkg_extract,
+            commands::fpkg_extract_free_check,
             commands::fpkg_extract_cleanup,
             commands::job_status,
             commands::job_cancel,
@@ -737,6 +746,7 @@ pub fn run() {
             commands::update_install_on_quit,
             commands::update_quit_for_manual_install,
             commands::update_last_install,
+            commands::update_wait_for_install,
             commands::update_forget_failure,
             commands::update_old_downloads,
             commands::update_remove_old_downloads,
@@ -820,7 +830,7 @@ pub fn run() {
         // Back from the background: iOS may have reclaimed the engine's listening socket.
         #[cfg(mobile)]
         if let tauri::RunEvent::Resumed = &event {
-            tauri::async_runtime::spawn(engine::check_listener());
+            tauri::async_runtime::spawn(engine::check_listener(_handle.clone()));
         }
         if let tauri::RunEvent::Exit = event {
             // The window's last size and place, if the delayed save has not written it yet.
@@ -858,6 +868,149 @@ pub fn run() {
 }
 
 #[cfg(test)]
+mod asset_scope_tests {
+    use std::path::{Path, PathBuf};
+
+    /// The asset protocol's scope from tauri.conf.json, `$TEMP` resolved as Tauri resolves it
+    /// (`std::env::temp_dir`), each pattern also with its existing parent canonicalized, as
+    /// Tauri adds it.
+    fn scope() -> Vec<glob::Pattern> {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let mut out = Vec::new();
+        for p in conf["app"]["security"]["assetProtocol"]["scope"]
+            .as_array()
+            .expect("the asset protocol has a scope")
+        {
+            let p = p.as_str().unwrap();
+            let raw = match p.strip_prefix("$TEMP/") {
+                Some(rest) => crate::test_tmp::temp_path(rest),
+                None => PathBuf::from(p),
+            };
+            out.push(glob::Pattern::new(&raw.to_string_lossy()).unwrap());
+            let mut base = raw.clone();
+            let mut tail = Vec::new();
+            while let Some(name) = base.file_name().map(|n| n.to_os_string()) {
+                if let Ok(c) = base.canonicalize() {
+                    let full = tail.iter().rev().fold(c, |acc: PathBuf, t| acc.join(t));
+                    out.push(glob::Pattern::new(&full.to_string_lossy()).unwrap());
+                    break;
+                }
+                tail.push(name);
+                base.pop();
+            }
+        }
+        out
+    }
+
+    /// Whether the asset protocol serves `path`: Tauri matches the canonical path, and a path
+    /// that does not exist is never served.
+    fn served(scope: &[glob::Pattern], path: &Path) -> bool {
+        let Ok(path) = path.canonicalize() else {
+            return false;
+        };
+        let opts = glob::MatchOptions {
+            case_sensitive: true,
+            require_literal_separator: true,
+            require_literal_leading_dot: !cfg!(windows),
+        };
+        scope.iter().any(|p| p.matches_path_with(&path, opts))
+    }
+
+    /// The asset protocol serves what the app shows from disk, and nothing else: the previews
+    /// and thumbnails it downloads into its own scratch folders, and a game folder's cover.
+    /// With `**` the page could read any file on the computer (a key, a browser profile).
+    #[test]
+    fn the_asset_protocol_serves_only_what_the_app_shows() {
+        let scope = scope();
+        assert!(
+            !scope.iter().any(|p| p.as_str() == "**"),
+            "the scope must not be every file"
+        );
+        // Previews (Screenshots, Videos, Captures) land in a scratch dir of `make_temp_dir`.
+        let scratch = ps5upload_core::save_archive::make_temp_dir("ss-preview").unwrap();
+        let shot = scratch.join("shot.png");
+        std::fs::write(&shot, b"png").unwrap();
+        std::fs::create_dir_all(scratch.join("sub")).unwrap();
+        let clip = scratch.join("sub").join("clip.mp4");
+        std::fs::write(&clip, b"mp4").unwrap();
+        // A game folder's cover (Upload), wherever the folder is.
+        let other = crate::test_tmp::temp_path(format!("ps5upload-scope-{}", std::process::id()));
+        let game = other.join("My Game").join("sce_sys");
+        std::fs::create_dir_all(&game).unwrap();
+        let icon = game.join("icon0.png");
+        let param = game.join("param.json");
+        let loose = other.join("notes.txt");
+        for f in [&icon, &param, &loose] {
+            std::fs::write(f, b"x").unwrap();
+        }
+
+        assert!(served(&scope, &shot), "{}", shot.display());
+        assert!(served(&scope, &clip), "{}", clip.display());
+        assert!(served(&scope, &icon), "{}", icon.display());
+        assert!(!served(&scope, &param), "{}", param.display());
+        assert!(!served(&scope, &loose), "{}", loose.display());
+        assert!(!served(&scope, &std::env::current_exe().unwrap()));
+        #[cfg(unix)]
+        assert!(!served(&scope, Path::new("/etc/hosts")));
+
+        let _ = std::fs::remove_dir_all(&scratch);
+        let _ = std::fs::remove_dir_all(&other);
+    }
+
+    /// A game folder's cover in any letter case. Windows and macOS file systems ignore case,
+    /// so the app finds `sce_sys/icon0.png` in a dump that names it `SCE_SYS/ICON0.PNG`, and
+    /// Tauri checks the scope against the name as it is on disk. Still only that one file.
+    #[test]
+    fn a_cover_is_served_in_any_letter_case_and_nothing_else_is() {
+        let scope = scope();
+        let root =
+            crate::test_tmp::temp_path(format!("ps5upload-scope-case-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for (game, dir, icon) in [
+            ("Upper", "SCE_SYS", "ICON0.PNG"),
+            ("Mixed", "Sce_Sys", "Icon0.png"),
+            ("LowerDir", "sce_sys", "ICON0.PNG"),
+            ("UpperDir", "SCE_SYS", "icon0.png"),
+        ] {
+            let sys = root.join(game).join(dir);
+            std::fs::create_dir_all(&sys).unwrap();
+            let cover = sys.join(icon);
+            std::fs::write(&cover, b"png").unwrap();
+            assert!(served(&scope, &cover), "{}", cover.display());
+            // The path the app asks for is always lower case (`game_meta::inspect_folder`);
+            // it exists only where the file system ignores case, and there it is served too.
+            let asked = root.join(game).join("sce_sys").join("icon0.png");
+            if asked.is_file() {
+                assert!(served(&scope, &asked), "{}", asked.display());
+            }
+            // Its neighbours, in any case, are not.
+            for other in [
+                "PARAM.SFO",
+                "param.json",
+                "ICON1.PNG",
+                "ICON0.PNG.BAK",
+                "PIC0.PNG",
+            ] {
+                let f = sys.join(other);
+                std::fs::write(&f, b"x").unwrap();
+                assert!(!served(&scope, &f), "{}", f.display());
+            }
+        }
+        // The same file name outside an sce_sys folder is not a cover.
+        let loose = root.join("Upper").join("ICON0.PNG");
+        std::fs::write(&loose, b"x").unwrap();
+        assert!(!served(&scope, &loose), "{}", loose.display());
+        let near = root.join("Upper").join("XSCE_SYS");
+        std::fs::create_dir_all(&near).unwrap();
+        let near_icon = near.join("ICON0.PNG");
+        std::fs::write(&near_icon, b"x").unwrap();
+        assert!(!served(&scope, &near_icon), "{}", near_icon.display());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+}
+
+#[cfg(test)]
 mod profile_tests {
     /// `panic = "abort"` in this package's release profile switches off every `catch_unwind` in
     /// shipped builds, and `cargo test` ignores the setting, so no other test can notice.
@@ -879,3 +1032,8 @@ mod profile_tests {
         );
     }
 }
+
+// Test scratch paths removed when the test process exits (engine/test-support/test_tmp.rs).
+#[cfg(test)]
+#[path = "../../../engine/test-support/test_tmp.rs"]
+mod test_tmp;

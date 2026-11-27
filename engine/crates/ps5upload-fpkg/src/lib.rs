@@ -51,6 +51,7 @@ pub mod pfs_source;
 pub mod pfsc;
 pub mod pfsc_reader;
 pub mod pfsimage;
+pub mod pkg_name;
 pub mod pkg_source;
 pub mod plan;
 pub mod playgo;
@@ -205,3 +206,8 @@ mod prealloc_tests {
         assert_eq!(prealloc(usize::MAX), PREALLOC_CAP);
     }
 }
+
+// Test scratch paths removed when the test process exits (engine/test-support/test_tmp.rs).
+#[cfg(test)]
+#[path = "../../../test-support/test_tmp.rs"]
+mod test_tmp;

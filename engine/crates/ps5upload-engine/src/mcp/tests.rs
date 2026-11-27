@@ -2612,11 +2612,58 @@ async fn each_post_tool_sends_what_its_route_reads() {
     let asked = route_of(
         &server,
         "games_unregister",
-        json!({"console": c, "title_id": "PPSA00001"}),
+        json!({"console": c, "title_id": "PPSA00001", "delete_source": "/data/homebrew/g"}),
     )
     .await;
     assert_eq!(asked["path"], "/api/ps5/app/unregister");
+    assert_eq!(asked["body"]["delete_source"], "/data/homebrew/g");
     reads_as::<crate::AppUnregisterReq>(&asked["body"]);
+
+    let asked = route_of(
+        &server,
+        "games_uninstall_source",
+        json!({"console": c, "title_id": "PPSA00001"}),
+    )
+    .await;
+    assert_eq!(asked["path"], "/api/ps5/app/uninstall-source");
+    assert_eq!(asked["query"]["addr"], c);
+    assert_eq!(asked["query"]["title_id"], "PPSA00001");
+
+    let asked = route_of(
+        &server,
+        "games_restore",
+        json!({"console": c, "title_ids": ["PPSA00001", "CUSA00002"]}),
+    )
+    .await;
+    assert_eq!(asked["path"], "/api/ps5/app/restore");
+    reads_as::<crate::title_restore_api::RestoreStart>(&asked["body"]);
+
+    let asked = route_of(
+        &server,
+        "games_restore_finish",
+        json!({"console": c, "title_id": "PPSA00001", "rollback": true}),
+    )
+    .await;
+    assert_eq!(asked["path"], "/api/ps5/app/restore/finish");
+    reads_as::<crate::title_restore_api::RestoreFinish>(&asked["body"]);
+
+    for (tool, path) in [
+        ("games_restore_check", "/api/ps5/app/restore/check"),
+        ("games_restore_status", "/api/ps5/app/restore/status"),
+    ] {
+        let asked = route_of(
+            &server,
+            tool,
+            json!({"console": c, "title_id": "PPSA00001"}),
+        )
+        .await;
+        assert_eq!(asked["path"], path);
+        assert_eq!(asked["query"]["addr"], c);
+        assert_eq!(asked["query"]["title_id"], "PPSA00001");
+    }
+    let asked = route_of(&server, "games_restore_list", json!({"console": c})).await;
+    assert_eq!(asked["path"], "/api/ps5/app/restore/candidates");
+    assert_eq!(asked["query"]["addr"], c);
 
     let asked = route_of(&server, "processes_kill", json!({"console": c, "pid": 77})).await;
     assert_eq!(asked["path"], "/api/ps5/process/kill");
@@ -2743,6 +2790,24 @@ async fn the_routes_that_say_host_get_the_console_as_host() {
         assert_eq!(asked["body"]["host"], "1.2.3.4", "{tool}");
         assert!(asked["body"].get("console").is_none(), "{tool}");
     }
+}
+
+#[tokio::test]
+async fn the_payload_source_tools_reach_their_routes() {
+    let server = echo_server();
+    let asked = route_of(&server, "payloads_sources", json!({"check": true})).await;
+    assert_eq!(asked["path"], "/api/payloads/repos");
+    assert_eq!(asked["query"]["check"], "true");
+    let asked = route_of(
+        &server,
+        "payloads_source_download",
+        json!({"id": "custom-0a1b2c3d4e5f"}),
+    )
+    .await;
+    assert_eq!(
+        asked["path"],
+        "/api/payloads/repos/custom-0a1b2c3d4e5f/download"
+    );
 }
 
 #[tokio::test]
@@ -3411,4 +3476,59 @@ async fn the_guides_and_the_document_are_resources() {
             .unwrap();
         assert!(text.len() > 1000, "{uri}");
     }
+}
+
+/// The package-name and Convert tools reach their routes with fields the routes read, and the ones
+/// that write are marked destructive, so a client asks the user first.
+#[tokio::test]
+async fn package_name_and_convert_tools_send_what_their_routes_read() {
+    let server = echo_server();
+    let asked = route_of(&server, "install_pkg_name", json!({"path": "/g/a.pkg"})).await;
+    assert_eq!(asked["method"], "GET");
+    assert_eq!(asked["path"], "/api/pkg/name");
+    assert_eq!(asked["query"]["path"], "/g/a.pkg");
+
+    let asked = route_of(
+        &server,
+        "install_pkg_rename",
+        json!({"path": "/g/a.pkg", "name": "My game", "all_languages": true}),
+    )
+    .await;
+    assert_eq!(asked["method"], "POST");
+    assert_eq!(asked["path"], "/api/pkg/name");
+    reads_as::<crate::pkg_name_api::RenameRequest>(&asked["body"]);
+    assert_eq!(asked["body"]["all_languages"], true);
+
+    let asked = route_of(
+        &server,
+        "convert_archive_free_check",
+        json!({"source": "/g/a.7z", "output_dir": "/out"}),
+    )
+    .await;
+    assert_eq!(asked["path"], "/api/fpkg/extract/free-check");
+    reads_as::<crate::archive_free::FreeCheckReq>(&asked["body"]);
+
+    let asked = route_of(
+        &server,
+        "convert_ampr_emu_to_console",
+        json!({"console": "1.2.3.4"}),
+    )
+    .await;
+    assert_eq!(asked["path"], "/api/ps5/convert-ampr-emu");
+    assert_eq!(asked["body"]["host"], "1.2.3.4");
+    reads_as::<crate::convert_runtime::ConvertRuntimeRequest>(&asked["body"]);
+
+    let answer = server.legacy("tools/list", json!({})).await;
+    let tools = answer.body["result"]["tools"].as_array().unwrap();
+    let hints = |name: &str| {
+        let tool = tools.iter().find(|t| t["name"] == name).unwrap();
+        (
+            tool["annotations"]["readOnlyHint"].as_bool().unwrap(),
+            tool["annotations"]["destructiveHint"].as_bool().unwrap(),
+        )
+    };
+    assert_eq!(hints("install_pkg_name"), (true, false));
+    assert_eq!(hints("convert_archive_free_check"), (true, false));
+    assert_eq!(hints("install_pkg_rename"), (false, true));
+    assert_eq!(hints("convert_ampr_emu_to_console"), (false, true));
 }

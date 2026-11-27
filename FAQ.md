@@ -71,6 +71,8 @@ more depth further down.
 - **Jailbreak and ELF loader.** The jailbreak leaves an *ELF loader* on port **9021**; every
   payload is sent to it. ps5upload does not jailbreak your console.
 - **kstuff.** Live kernel patches. Installing fake packages and launching them needs it.
+- **Kraken Mount.** Puts a fake PS5 package on the home screen straight from the `.pkg` file,
+  without installing it.
 - **ShadowMount+.** Auto-mounts game images and folders so they appear on the home screen.
 - **etaHEN.** A separate homebrew environment. If it already loads kstuff for you, send only
   ps5upload; a second kstuff stacks another copy.
@@ -81,25 +83,47 @@ more depth further down.
 Send **elfldr** first (if your setup uses it), then **kstuff**, then
 **ShadowMount+**, then **ps5upload**. The **Set up your PS5** wizard does the
 last three in this order for you, with the delays the Payloads catalogue
-recommends. ps5upload doesn't download payloads: get kstuff and ShadowMount+ from their project
-pages (Payloads › Catalog links to them) and choose the files in the wizard. Send them one at a time; the loader takes one file per
+recommends. The built-in catalogue only links to payloads: get kstuff and ShadowMount+ from their
+project pages (Payloads › Catalog links to them) and choose the files in the wizard. Send them one at a time; the loader takes one file per
 connection. After a reboot the payloads are gone, so load them again. Rest mode
 can stop them too; the PS5Upload helper usually keeps running through it.
 
 **Q: Which payloads must be running before I install a package?**
-In this order: **kstuff** (the build with PS5 fake-package support), **a53_ppr_install_fast.elf**
-(needed for PS5 fake packages) and **ShadowMount+**, plus the ps5upload helper. **Upload &
-Install** shows the same list in its fake-package note at the top. Many setups also run **nanoDNS** (keeps
-the console away from PSN and update servers) and **ftpsrv-ps5**; send those from **Payloads**.
-ps5upload itself does not use ftpsrv-ps5. If an install is refused, first check that kstuff is
-running.
+**kstuff** first, then **ShadowMount+**, plus the ps5upload helper. To install a fake PS5 package
+on firmware 11.61 to 13.60, the kstuff has to be the latest one (with fake-package support up to
+13.60); up to 11.60 any kstuff with fake-package support works. The catalog's kstuff may be older
+than that; send the latest one with **Payloads › Send payload**. If the console refuses the
+install, also load **a53_ppr_install_fast.elf** (built from drakmor/ppr-patch on GitHub).
+Installing is one of the two ways to play a fake PS5 package; mounting it with Kraken Mount is the
+other (see the next question). Many setups also run **nanoDNS** (keeps the console away from PSN
+and update servers) and **ftpsrv-ps5**; send those from **Payloads**. ps5upload itself does not
+use ftpsrv-ps5. If an install is refused, first check that kstuff is running.
+
+**Q: What are the two ways to play a fake PS5 package?**
+- **Install it.** The PS5 installs the package like a game from the store. This needs kstuff
+  running (and ShadowMount+, which registers the installed title). On firmware 11.61 to 13.60
+  it has to be the latest kstuff (with fake-package support up to 13.60): with an older kstuff
+  the package installs, but the game does not start. Up to 11.60 any kstuff with fake-package
+  support works. The catalog's kstuff may be older than that; send the latest one with
+  **Payloads › Send payload**. If the console refuses the install, also load
+  **a53_ppr_install_fast.elf** (built from drakmor/ppr-patch on GitHub).
+- **Mount it with Kraken Mount.** The `.pkg` goes to the PS5 as a plain file, in a folder Kraken
+  Mount scans (such as `/data/homebrew`), and Kraken Mount puts the game on the home screen
+  without installing it. This needs Kraken Mount running, without ShadowMount+ beside it. In
+  **Upload & Install**, choose **Copy as a file** for the package; when Kraken Mount runs, the
+  folder is filled in for you. Kraken Mount mounts PS5 packages made with the debug key only,
+  not PS4 or retail packages.
+
+PS4 fake packages are installed, and play on any firmware. The note at the top of **Upload &
+Install** shows both ways side by side, and says when Kraken Mount is running on the PS5.
 
 **Q: Which firmware limits apply to what I install?**
-- **PS5 fake *game* packages install above firmware 11.60 (including 13.60) but are not
-  playable.** PS4 fake packages work and PS5 homebrew apps launch. The note at the top of
-  **Upload & Install** says so before you send anything. See "My
-  uploaded game won't launch" for the folder-dump route.
-- On **13.60**, Stream & install is the dependable route.
+- **PS5 fake *game* packages:** installed, they play on firmware 11.61 to 13.60 only with the
+  latest kstuff (with fake-package support up to 13.60); with an older kstuff the package
+  installs, but the game does not start. Up to 11.60 any kstuff with fake-package support works.
+  Mounting the package with Kraken Mount is the other way to play it (see the question above).
+- PS4 fake packages work and PS5 homebrew apps launch.
+- On **13.60**, Stream & install is the dependable install route.
 
 **Q: Quick start: from a fresh jailbreak to my first upload.**
 1. Confirm the console's ELF loader is running (port 9021) and note the console's IP
@@ -199,6 +223,13 @@ own server instead of Tailscale's, see
 - **Friends without a Tailscale account** don't need one: send them an internet invite (see "Can a
   friend who isn't at my place play together").
 - **The web UI:** see the next question.
+
+**Q: How do I select several files on a phone?**
+Long-press a row in **Files** (or ⋮ → **Select**). The top bar then shows how many are selected
+and **Select all**, and a bar at the bottom has **Copy**, **Move**, **Rename**, **Delete** and
+**More**. The phone's Back button leaves selection. On a phone the top of Files is one compact bar
+that stays in place while you scroll: the folder's name, Search, the drive switcher and ⋮, with
+the path under it. Tablets and computers keep their checkboxes and toolbar.
 
 **Q: Can I add my PS5 from a phone that was never at home?**
 Yes, when the PS5 is on Tailscale (set up once, at home, from another device: see above).
@@ -303,6 +334,13 @@ is you on the TV. If there's only one user on the console, add one first.
 - **Some games count the stream's user as a player too**, even though it presses nothing, so a
   two-player game may have no place left for a friend. Friends' controllers are checked the same way
   as always (they pick **Quick Play** on the TV), but this setup hasn't been tried with every game.
+
+**Q: Can a friend join Play Together from a TV?**
+Yes (12.6.30). The invite's join page works in a TV's browser with nothing but the remote: the
+arrows move between buttons, OK presses one, and Back closes what is open, then shows the
+buttons, then leaves full screen. On Android TV or Google TV, the Android app's first screen has
+**Join Play Together**, and the game opens in full screen. During the game the remote's arrows
+and OK play the game.
 
 **Q: Can a friend who isn't at my place play together, or use a phone controller?**
 Play Together, yes: with an **internet invite** (11.6.0). Your friend needs nothing installed;
@@ -521,8 +559,10 @@ something else, and records the send in a history panel so you
 can replay it without re-picking the file.
 
 **Q: How do I keep my payloads up to date?**
-ps5upload doesn't download payloads. Get a newer release from the payload's project page and send
-the file from **Payloads → Send payload**. **Payloads › Catalog › Payload updates** still tells you
+For a payload from a project you added as your own payload source, its card says **New version
+available** and **Update** downloads it (see *How do I add my own payload source?*). The built-in
+catalogue's payloads aren't downloaded by the app: get a newer release from the payload's project
+page and send the file from **Payloads → Send payload**. **Payloads › Catalog › Payload updates** still tells you
 when one is out: **Check for payload updates** compares each payload saved in the app (copies
 earlier versions of the app downloaded) with its latest release, and links to the release page.
 A copy an earlier update replaced is kept: **Roll back** puts it back.
@@ -531,6 +571,32 @@ If you use itsPLK's Payload Manager on the PS5, tick **Keep in Payload Manager**
 Manager loads it at boot** if you want it at boot) on a payload, and **Sync with Payload Manager**
 copies the ones you keep into it when they change and adds the marked ones to its boot list.
 Nothing else in its list is changed. Payload Manager has to be running on the PS5 for this.
+
+**Q: How do I add my own payload source (a custom GitHub or Gitea repo)?**
+In **Payloads › Catalog**, under **Your payload sources**, press **Add a payload source** and paste
+the project's address: `https://github.com/owner/project`, or a Gitea or Forgejo project
+(`https://your-server/owner/project`; a server on your home network and its own port is fine).
+Only https addresses work, without a user name or password in them. **Show its files** lists the
+`.elf` and `.bin` files of the project's newest release: pick the payload once and press **Add
+source**. PS5Upload will download and send whatever that project publishes under that name, so
+only add projects you trust.
+
+Newer releases are matched by name: the same name apart from its version numbers. If you picked
+`kstuff-v1.6.0.elf`, a later `kstuff-v1.7.elf` is the update; a name like `ftpsrv-ps5.elf` (no
+version in it) has to stay exactly the same. The card shows the rule it uses. If the project
+renames the file, use **Change file**.
+
+Each source gets a card. Nothing happens on its own: the app looks for new releases when you open
+Payloads or press **Check** (at most every ten minutes otherwise; GitHub allows 60 checks an hour,
+and when it says to wait, the card says until when). **Download** (or **Update**, when the card
+says *New version available*) saves the file in the app's payload folder, checked against the
+size the release gives and against its checksum file when it has one. The card then shows the
+file's name, release, size and SHA-256, and **Send to PS5** asks once more, naming them, before
+it sends. **Remove source** deletes the source and its downloaded file. The built-in catalogue
+stays a list of project pages: PS5Upload never downloads those for you, so for them download the
+file yourself and send it from **Payloads → Send payload**.
+
+Repos you added before 12.6.0 come back as sources: press **Pick the file** on their card once.
 
 **Q: The Send button says "Waiting for the helper to start…" for a long time.**
 That is the normal probe window, up to 20 seconds. If it times out, the helper likely crashed on
@@ -696,6 +762,16 @@ listed under Saves, in "Switch games (ProsperoEden)": each game by its title ID 
 known), per profile ("Console" is the console's own save), with Back up now and its backups. To
 put one back, close ProsperoEden and press Restore on the version you want; the save there now is
 backed up first. A restore is refused while ProsperoEden runs.
+
+EglantinePS5 (PPSA98515) is included too. Its saves stay in
+`/data/eglantineps5/user/nand/user/save/0000000000000000/<profile>/<title ID>/`,
+regardless of where its games are kept. Each profile and game's folder is backed up by the same
+local, console-drive and server passes, including after EglantinePS5 closes. Save Data lists them
+in their own “Switch / Switch 2 games (EglantinePS5)” group. A restore waits for EglantinePS5 to close and
+backs up the save there first. Its backups have their own profile numbers, so
+copies of the same game and profile in ProsperoEden stay separate, including retention. The
+profile label still shows the emulator's profile, and older ProsperoEden backup names stay valid.
+
 
 The saves of the PS2 emulators Crux2 (PPSA99249) and PS5SX2 (PPSA99203) are backed up the same
 way, after the emulator closes: its memory cards folder and its saved states folder, each as one
@@ -2062,22 +2138,26 @@ own Settings.
 This is almost never a bug in ps5upload: the transfer worked, and Sony's side
 refuses to start the title. Check these in order.
 
-1. **A PS5 fake game on firmware above 11.60.** The package installs, but an
-   installed PS5 fake package does not start on FW 11.61, 12.xx or 13.60 yet.
-   **Mount it with Kraken Mount instead:** with Kraken Mount running on the PS5,
-   Upload & Install puts the `.pkg` in a folder it scans, and the game plays
-   straight from the package, with nothing installed (Kraken Mount 0.2.1 or later
-   keeps its save data and trophies). Full support for installed packages on
-   these firmware versions, through the A53 patches, is coming. PS4 packages are
-   fine, and PS5 homebrew apps (Itemzflow and similar) launch. The app shows a
-   warning for this combination on Install, Convert and when a launch fails.
-   The folder-dump and image routes below work too.
+1. **An installed PS5 fake game on firmware 11.61 to 13.60 with an older
+   kstuff.** There it starts only with the latest kstuff (with fake-package
+   support up to 13.60) loaded. With an older kstuff the package installs, but
+   the game does not start: load the latest kstuff, reboot if an older one was
+   running, and launch again. The catalog's kstuff may be older than that; send
+   the latest one with **Payloads › Send payload**. When a launch fails on these
+   firmware versions, the app says so. The other way to play the package is to
+   mount it with Kraken Mount: with Kraken Mount running on the PS5, the `.pkg`
+   goes as a plain file to a folder it scans, and the game plays straight from
+   the package, with nothing installed (see "What are the two ways to play a
+   fake PS5 package?"). PS4 packages are fine, and PS5 homebrew apps
+   (Itemzflow and similar) launch. The folder-dump and image routes below work
+   too.
 2. **"View product" or "missing base entitlement".** Install the base game
    before its update or DLC. A package that needs an entitlement the console
    does not have will always show "View product". A PS5 game installed from a
-   fake package on firmware above 11.60 (item 1) ends here too: it installs,
-   then shows "View product". Mount the package with Kraken Mount, or use the
-   game folder or an image instead.
+   fake package without a kstuff that supports it on that firmware (item 1)
+   ends here too: it installs, then shows "View product". Load the latest
+   kstuff, mount the package with Kraken Mount, or use the game folder or an
+   image.
 3. **kstuff or ShadowMount+ is not running.** Launching needs kernel access.
    **Games** says so above the grid when the helper has none; load kstuff and
    reconnect. Disc-image titles need ShadowMount+ running.
@@ -2135,6 +2215,50 @@ whose title ID can't be read) are counted in a line under the grid; **Show them*
 with the same actions. To dump an installed game to a drive, open it and use **Dump this game**
 under **On <console>**.
 
+**Q: When I uninstall a game, are its files deleted too?**
+That depends on how the game got onto the PS5:
+
+- **Installed from a package** (a fake package installed with the PS5's installer): Uninstall
+  removes it, files and all, as Settings › Storage does. There is nothing else to choose.
+- **Played from a game folder or a disk image** (`.ffpkg`, `.exfat`, `.ffpfs`) that you added to
+  the home screen: Uninstall asks whether to delete that folder or image too, and shows where it is
+  and how much space it frees. **Uninstall only** (picked to start with) takes the game off the
+  home screen and keeps its files. **Uninstall and delete** deletes them once the game is
+  uninstalled; an image is unmounted first. Saves are kept either way. If the folder or image is
+  already gone, it just uninstalls.
+- It only ever deletes the game's own folder or image: never a drive's top level, a top folder of
+  the internal storage, the PS5's own folders, a folder or image another game on the home screen
+  also uses, or a folder with another game inside. For those you get the plain question.
+- Games that **ShadowMount+** or **Kraken Mount** put on the home screen work as before: Kraken
+  Mount's Remove deletes its package or folder, and a ShadowMount+ image stays where it is.
+
+The same choice is in **Games** on the PS5's own page. Through the API or an agent, read
+`GET /api/ps5/app/uninstall-source` (`games_uninstall_source`) first, then pass its `path` as
+`delete_source` to the uninstall.
+
+**Q: After Rebuild Database my games installed from fake packages are gone from the home screen. Do I have to download them again?**
+No. Rebuild Database (Safe Mode) removes games installed from fake packages from the home screen
+and from Settings › Storage, but their files stay on the drive. With the helper running and
+fake-package support (kstuff) loaded, open such a game in **Games**: instead of **Play** it says
+it is not on the PS5's home screen and offers **Restore to home screen**. When several are
+missing, **Games** shows **Restore all** above the grid.
+
+Restore installs the game again from the package that is already on the PS5, with the PS5's own
+installer, the same way as the first install. Nothing is downloaded. What happens, in order: a
+copy of the PS5's game database is saved in `/data/ps5upload/backup/restore/`; the package
+(`…/user/app/<title ID>/app.pkg`) is moved into a `ps5upload/restore` folder on the same drive;
+the PS5 installs it from there, writing a new copy where **Settings › Storage › Installation
+Location** says (so that drive needs room for one more copy while it runs); then the moved copy
+is deleted. If the install fails, the package is put back where it was. The game's update file
+is kept aside during the install and put back afterwards as a file; install the update package
+again to update the game. Don't start the game or turn the PS5 off while it runs.
+
+A game that the PS5 still lists, a retail game, and a game added from a folder are never
+touched. Pressing **Play** on a game that is not on the home screen no longer tries to start it:
+nothing on the PS5 knows the game until it is restored. If a restore was interrupted (the app or
+the PS5 was closed), the game's page says so and offers **Finish** (when the game is back on the
+home screen) or **Put back** (when it is not).
+
 **Q: What is the Collection?**
 It is what the **Games** grid shows of this computer: every game you keep on its drives and
 saved servers, grouped by game: its full copies, its updates and DLC, the duplicates and the
@@ -2181,6 +2305,10 @@ let any device on your network fetch it instead, for an installer on another con
 carries a random code, there is no folder listing, and only the packages you share can be
 reached. A link lasts until you stop it (one at a time, or **Stop all**) or the app quits;
 nothing stays published after that. **Copy all links** copies every one at once.
+
+**Q: My updated PS4 game showed version 01.00 and was offered its update again.**
+Fixed in 12.6.30. The app now reads a PS4 game's version where its update keeps it, so the game's
+page, update installs and cheat matching see the real version (01.32, say, instead of 01.00).
 
 **Q: What does Organize collection do, and can I undo it?**
 It organizes packages, images (`.exfat`, `.ffpkg`, `.ffpfs`, `.ffpfsc`) and extracted game folders
@@ -2277,12 +2405,22 @@ offers the two ways a package can reach the PS5:
   (`/user/data/ps5upload/pkg_library/`), then installed from that copy. The copies stay listed
   under **Already on the PS5**, each with **Install**, **Reinstall** and **Delete**.
 
-The note at the top of the screen lists the payloads fake packages need, and says that **PS5
-fake packages are not supported on firmware later than 11.60**: they install, but the game does
-not start. PS4 fake packages are fine. What is installing or waiting shows in the screen's queue
+The note at the top of the screen shows **the two ways to play a fake PS5 package** side by
+side: install it (with kstuff loaded; on firmware 11.61 to 13.60 the latest kstuff, with
+fake-package support up to 13.60), or mount it with Kraken Mount (choose **Copy as a file** and
+send it to a folder Kraken Mount scans). Each way lists what it needs, and the mount side says
+when Kraken Mount is running on the PS5. PS4 fake packages are installed, on any firmware. What is installing or waiting shows in the screen's queue
 and in the progress bar, and keeps going when you open another screen. Installs from a link or
 an archive (**From a Link or an Archive**) and from the PS5 or a USB drive (**Already on the
 PS5**) are in the small "Or install a package" row under the drop zone.
+
+**Q: Can I change the name a game installs under?**
+Yes, for fake packages. Pick the package in **Upload & Install** and its card shows **Name on the
+PS5**. Type the new name and press **Change name**, then install. The name is changed inside the
+package file itself (a few kilobytes are rewritten, nothing is copied), and a box applies it to
+every language the package has a name in. A game that is already installed keeps its name until
+you install it again. Official packages, split packages, and packages on a server or already on
+the PS5 keep their name, and the card says why.
 
 **Q: Stream & install or Upload & install: which one?**
 Use **Stream & install** unless you have a reason not to. Use **Upload & install** when the PS5
@@ -2474,6 +2612,13 @@ Yes. While a game is being made, pick or drop more under **① Game** (also **On
 in order. With **Start the queue when you add something** on (Settings › Uploads, the default)
 nothing else is needed; off, they wait until you press **Convert N queued**. A game set to
 install still goes on to **Upload & Install**'s queue once it is made.
+
+**Q: My game is in asset packs. Can I make an ordinary package from it?**
+Yes. In **Workshop → Convert**, choose **A fake package (FPKG, .pkg)** for a game kept in zstd or
+LZ4 asset packs, and **Unpack the asset packs** is already ticked: the package holds every file as
+a plain file again, so it is about as large as the game was before packing. **Leave out the AMPR
+emulator**, under it, is off unless you tick it: it isn't known yet whether every game runs
+without the emulator.
 
 **Q: Can I pause a conversion, or make it use less of my computer?**
 Yes, both. While a game is being made (or an archive unpacked) in Workshop, ④ has **Pause** beside
@@ -2730,7 +2875,7 @@ The routes:
 | Content | Stream & install | Upload & install | Folder dump + ShadowMount+ | exFAT image + ShadowMount+ |
 |---|---|---|---|---|
 | **PS4 package** (base game) | Works. The most reliable route; PS4 fake packages play on every firmware. | Works on FW 13.60 from 6.3.1 (a 3.6 GiB base installed over itself on both of our consoles). Before 6.3.1 Sony refused it with `0x80B2116F`; see the firmware note below. | Works (PS4 folder dumps). | Works. |
-| **PS5 package** (fake / FPKG game) | Installs. **On firmware above 11.60 the installed game doesn't start yet: mount the package with Kraken Mount instead** (full support through the A53 patches is coming). | Same as Stream. | Works for a decrypted PS5 dump — the route people use on 13.60. | Works — also the route used on 13.60. |
+| **PS5 package** (fake / FPKG game) | Installs. **On firmware 11.61 to 13.60 it plays with the latest kstuff (fake-package support up to 13.60).** The other way to play it: Kraken Mount mounts the package. | Same as Stream. | Works for a decrypted PS5 dump — the route people use on 13.60. | Works — also the route used on 13.60. |
 | **PS5 homebrew app** (for example Itemzflow, `IV0002-ITEM00001`) | Works and launches, including on FW 13.60. | Works. | n/a | n/a |
 | **Patch / update** | Works (verified: a PS4 base plus its patch, streamed). Install the base first. | Works on FW 13.60 from 6.3.1 (a PS4 1.00 base took its 1.04 patch this way). Install the base first. | n/a — copy the update into the game folder. | n/a |
 | **DLC** | Works after its base is installed. | Works after its base is installed. | n/a | n/a |
@@ -3300,8 +3445,10 @@ The PS5Upload helper serves it on port 9180. It has seven sections, on the left:
 - **Files**: browse, copy, move, rename, delete, view, verify and search; set permissions, make
   and edit text files. **Network shares** adds an SMB share (a PC or NAS) you can browse like a
   drive and copy to and from. **Extract** unpacks a `.zip`, `.7z`, `.rar` (multi-part too) or
-  `.tar` on the console into a folder there (password-protected `.zip` and `.7z` work,
-  password-protected `.rar` does not). Pick a `.pkg` on internal storage or USB to see its icon,
+  `.tar` on the console into a folder there. Password-protected `.zip`, `.7z` and `.rar` work: it
+  asks for the password, also when a `.rar` hides its file list behind it. For a multi-part
+  `.rar`, pick the first part (`.part1.rar`, or the `.rar` of an old `.r00` set) with the others in
+  the same folder. Pick a `.pkg` on internal storage or USB to see its icon,
   title, version and type and **Install** it (a USB package is copied to internal storage first,
   then the copy removed). **Load payload** sends an `.elf` or `.bin` on the console to the
   payload loader, after a confirm.
@@ -3366,7 +3513,11 @@ Minion, and shows the address to open.
 The SMB shares kept on the PS5: add them in Minion's **Files → Network shares**, or from the
 PC in **Shared Folders → Shares on the PS5**, which adds, edits and removes them and can copy a server
 you already saved (type the password again: the PS5 keeps its own encrypted copy). Minion
-browses them in Files, and **Games → On Drives & Shares** shows the games on them.
+browses them in Files, and **Games → On Drives & Shares** shows the games on them. A game image
+(`.exfat`, `.ffpkg`, `.ffpfs`) shows the title and cover stored inside it, and copies of one game
+on different shares or under different names are one card. A compressed `.ffpfsc` can't be read
+on the console: it shows the title id from its file name, tagged **Title not read**. A rescan reads
+only the images that are new or changed since the last one.
 
 **Q: Can I convert a game on the PS5 itself, without a computer?**
 Yes: Minion's **Convert** section makes an `.exfat`, `.ffpkg`, `.ffpfs` or a plain folder from a

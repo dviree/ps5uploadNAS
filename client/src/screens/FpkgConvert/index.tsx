@@ -16,8 +16,7 @@ import { Folder, FolderSearch, HardDrive, Hammer, Send } from "lucide-react";
 import { fpkg, type AmprLz4Options, type FpkgEstimates, type FpkgInspection, type ZstdPacks } from "../../api/fpkg";
 import { appLaunch } from "../../api/ps5";
 import { Button, Callout, Card, PageHeader } from "../../components";
-import { FakeGameFirmwareNotice } from "../../components/FakeGameFirmwareNotice";
-import { hostOf, transferAddr } from "../../lib/addr";
+import { transferAddr } from "../../lib/addr";
 import { createLatest } from "../../lib/latest";
 import { openLocalPath } from "../../lib/openLocalPath";
 import { pickPath } from "../../lib/pickPath";
@@ -29,6 +28,7 @@ import { useWebviewDropAll } from "../../lib/useWebviewDrop";
 import { useConnectionStore } from "../../state/connection";
 import { useConvertPrefs } from "../../state/convertPrefs";
 import {
+  archiveIsUnpacked,
   imageFormatOf,
   isArchiveSource,
   isFolderableSource,
@@ -53,7 +53,13 @@ import { MakeCard } from "./MakeCard";
 import { mergeRole, Ps4MergePicker } from "./Ps4Merge";
 import { OptionsCard } from "./OptionsCard";
 import { folderLz4Options, folderPackOptions, folderPacks, packOptions, type UnpackChoice } from "./ImageOptions";
-import { DeleteSourceOption, RemoveBackportOption, backportRefusal, deleteSourceRefusal } from "./SourceOptions";
+import {
+  DeleteSourceOption,
+  FreeArchiveOption,
+  RemoveBackportOption,
+  backportRefusal,
+  deleteSourceRefusal,
+} from "./SourceOptions";
 import { useConfirm } from "../../components/ConfirmDialog";
 import {
   OutputChoice,
@@ -74,12 +80,14 @@ import { AmprEmuTool, amprEmuOffered } from "./AmprEmuTool";
 import { ZstdRuntimeTool, zstdRuntimeOffered } from "./ZstdRuntimeTool";
 import { AmprIndexTool, amprIndexPlan } from "./AmprIndexTool";
 import {
+  archiveSurelyUnpacked,
   imageBuildWith,
   buildExtension,
   startAfterBuild,
   thenFor,
   useConvertQueue,
   type ConvertBuild,
+  type ConvertItem,
   type ConvertThen,
 } from "../../state/convertQueue";
 import { gameFoldersAmong, gamesInFolder } from "../../lib/folderScan";
@@ -149,9 +157,6 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
   const kraken = krakenIsTheMounter(mounterProbe.status === "checking" ? null : mounterProbe.status);
   const [mountRun, setMountRun] = useState<MountRun>(IDLE_MOUNT_RUN);
   const mountClash = useMountClashAsk(host);
-  const kernel = useConnectionStore((s) =>
-    host ? (s.runtimeByHost[hostOf(host)]?.ps5Kernel ?? null) : null,
-  );
 
   const baseOutputDir = useConvertPrefs((s) => s.outputDir);
   const setBaseOutputDir = useConvertPrefs((s) => s.setOutputDir);
@@ -188,6 +193,7 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
   const finishReplace = useFpkgConversion((s) => s.finishReplace);
   const queueItems = useConvertQueue((s) => s.items);
   const queueRunning = useConvertQueue((s) => s.running);
+  const queueStoppedByClose = useConvertQueue((s) => s.stoppedByClose);
   const queueAutoStart = useUploadSettingsStore((s) => s.queueAutoStart);
   // ③'s one choice of what happens after converting, for Convert and the queue alike.
   const [thenChoice, setThen] = useState<ConvertThen>("keep");
@@ -235,6 +241,10 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
   const [lz4Profile, setLz4Profile] = useState<{ name: string; text: string; measured?: boolean } | null>(null);
   // A game in asset packs written as plain files again; the game's own, off for the next one.
   const [unpackPacks, setUnpackPacks] = useState(false);
+  // The same for a package (#933): on for each new game, since a package is installed and read
+  // by the console itself; its AMPR emulator stays unless the user leaves it out.
+  const [pkgUnpack, setPkgUnpack] = useState(true);
+  const [leaveOutEmu, setLeaveOutEmu] = useState(false);
   // This fork packs with Zstd only.
   const packKind = "zstd" as const;
   const [emuAddedTo, setEmuAddedTo] = useState<string | null>(null);
@@ -257,6 +267,10 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
     zstd?: ZstdPacks,
     /** Write this game's asset packs out as plain files (the game under ①, when ticked). */
     unpack?: boolean,
+    /** With `unpack`, a package's: leave its AMPR emulator out. */
+    leaveOutAmprEmu?: boolean,
+    /** The packs the game is in ("none": in none), when it is the game checked under ①. */
+    packs?: ConvertItem["packs"],
   ): boolean | QueueSkip => {
     // A later part of a multi-part archive is read through its first part.
     if (isRarLaterVolume(src)) return "later-part";
@@ -274,7 +288,10 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
     const prefs = useConvertPrefs.getState();
     const making = useFpkgConversion.getState().pipeline.phase === "running";
     const lang = making ? nextLanguage : language;
-    return useConvertQueue.getState().add({
+    // The archive's space freed as it unpacks: only for the game it was confirmed for under ③,
+    // never the others added with it, and only when this build is sure to unpack the archive.
+    const frees = freeArchiveFor?.src === src && src === source.trim() && archiveSurelyUnpacked(src, build.kind);
+    const added = useConvertQueue.getState().add({
       source: src,
       isDir: isFolder || undefined,
       // The password under ① is this game's; it stays in memory only.
@@ -291,12 +308,15 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
               ? { ...build, lz4 }
               : build.kind === "folder" && unpack
               ? { ...build, unpackPacks: true }
-              : build,
+              : build.kind === "pkg" && unpack
+                ? { kind: "pkg", unpackPacks: true, ...(leaveOutAmprEmu ? { leaveOutAmprEmu: true } : {}) }
+                : build,
       imageDest:
         build.kind === "image"
           ? { volume: u.destinationVolume, subpath: u.destinationSubpath || DEFAULT_IMAGE_SUBPATH }
           : undefined,
       language: lang || undefined,
+      packs,
       then,
       host: then !== "keep" ? host : null,
       deleteAfterInstall: then !== "keep" && deleteAfter,
@@ -310,7 +330,11 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
         (build.kind === "image" || build.kind === "folder") && savesToServer(runChoice) ? serverFolder : undefined,
       // Only the game it was ticked for under ③, never the others added with it.
       removeBackport: (removesBackport && src === source.trim()) || undefined,
+      freeArchive: frees || undefined,
     });
+    // The answer went with the queued game: it is asked again for anything else.
+    if (added && frees) setFreeArchiveFor(null);
+    return added;
   };
   /** Queue what was picked or found, then say what was left out. */
   const queueAll = (sources: { path: string; isDir: boolean }[], notGames: number) => {
@@ -398,6 +422,10 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
   // "Move the source to the Trash once the output is verified": the one source it was
   // confirmed for, in this window's memory only, and cleared when that conversion starts.
   const [deleteSourceFor, setDeleteSourceFor] = useState<string | null>(null);
+  // "Free the archive's space while it unpacks" (the archive is deleted on the way): the one
+  // archive it was confirmed for, with what the engine found in it. In this window's memory
+  // only, cleared when that archive's run starts or it is queued, and for any other source.
+  const [freeArchiveFor, setFreeArchiveFor] = useState<{ src: string; game: "folder" | "image" } | null>(null);
   const { confirm, dialog: confirmDialog } = useConfirm();
   const [error, setError] = useState<string | null>(null);
   const [deleteArmed, setDeleteArmed] = useState(false);
@@ -468,6 +496,9 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
       setLz4On(false);
       setLz4Profile(null);
       setUnpackPacks(false);
+      setPkgUnpack(true);
+      setLeaveOutEmu(false);
+      setFreeArchiveFor(null);
       void check(path);
     },
     [check, reset, setSource, setPassword],
@@ -628,9 +659,11 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
         ...(unpackOn ? { unpackPacks: true } : {}),
         // A .rar read in place needs its password as an image build does.
         ...(password ? { password } : {}),
+        ...(freesArchive ? { freeArchive: true } : {}),
       });
       // Asked for this one conversion: off again for whatever comes next.
       setDeleteSourceFor(null);
+      setFreeArchiveFor(null);
       return;
     }
     if (build.kind === "image") {
@@ -654,7 +687,7 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
         packOptions(lz4Choice, packProfile),
         password || undefined,
         out.keepBoth,
-        direct || toServer || update || removesBackport || deletesSource || unpackOn
+        direct || toServer || update || removesBackport || deletesSource || unpackOn || freesArchive
           ? {
               ...(direct ? { toConsole: plan } : {}),
               ...(toServer ? { toServer } : {}),
@@ -662,10 +695,12 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
               ...(removesBackport ? { removeBackport: true } : {}),
               ...(deletesSource ? { deleteSource: true } : {}),
               ...(unpackOn ? { unpackPacks: true } : {}),
+              ...(freesArchive ? { freeArchive: true } : {}),
             }
           : undefined,
       );
       setDeleteSourceFor(null);
+      setFreeArchiveFor(null);
       return;
     }
     const install = then !== "keep";
@@ -678,6 +713,9 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
         language: language || undefined,
         keepBoth: out.keepBoth,
         update,
+        ...(pkgUnpackOn && !update
+          ? { unpackPacks: true, ...(pkgLeavesOutEmu ? { leaveOutAmprEmu: true } : {}) }
+          : {}),
       },
       {
         install,
@@ -685,8 +723,10 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
         method: then === "upload" ? "upload" : "stream",
         password: password || undefined,
         deleteAfter: install && deleteAfter,
+        ...(freesArchive ? { freeArchive: true } : {}),
       },
     );
+    setFreeArchiveFor(null);
   };
 
   const onDelete = () => {
@@ -724,6 +764,8 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
     setLz4On(false);
     setLz4Profile(null);
     setUnpackPacks(false);
+    setPkgUnpack(true);
+    setLeaveOutEmu(false);
     setInspection(null);
     setEstimates(null);
     setChecking(false);
@@ -813,6 +855,24 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
       ? { kind: inspection.packs, on: unpackPacks, onToggle: setUnpackPacks }
       : undefined;
   const unpackOn = !!unpackChoice?.on;
+  // A package of a packed game (#933): its files plain unless unticked, and under that the
+  // choice to leave its AMPR emulator out.
+  const pkgUnpackChoice: UnpackChoice | undefined =
+    inspection?.packs && build.kind === "pkg" && !inspection.ps4_game
+      ? {
+          kind: inspection.packs,
+          on: pkgUnpack,
+          onToggle: setPkgUnpack,
+          leaveOutEmulator: { on: leaveOutEmu, onToggle: setLeaveOutEmu },
+        }
+      : undefined;
+  const pkgUnpackOn = !!pkgUnpackChoice?.on;
+  const pkgLeavesOutEmu = pkgUnpackOn && leaveOutEmu;
+  // Whether what is about to be made holds the game in the packs it is in now, and so carries
+  // its own ampr_emu.index as it is. Unpacking it or making new packs writes a fresh index, and
+  // a warning about the old one would be about a file that never ships.
+  const packsKept =
+    !!inspection?.packs && !inspection.ps4_game && (build.kind === "pkg" ? !pkgUnpackOn : !unpackOn && !packsOn);
   // "Remove backport libraries" is for an image or folder of the one game checked, when its
   // fakelib holds any; not with an update merged in (the merged game is another source).
   const backport =
@@ -1051,6 +1111,7 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
       }
       canBrowse={canBrowse}
       inspection={inspection}
+      packsKept={packsKept}
       checking={checking}
       locked={locked}
       queueStarts={queueAutoStart}
@@ -1147,6 +1208,14 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
     elsewhere: (build.kind === "image" && savesToPs5(runChoice)) || savesToServer(runChoice),
   });
   const deletesSource = deleteSourceOffered && deleteSourceFor === src && !deleteSourceBlocked;
+  // "Free the archive's space while it unpacks" is for an archive on this computer. It counts
+  // only for the archive it was confirmed for, and only while this run unpacks it to disk (a
+  // package always does; an image or folder is made straight from most archives).
+  const freeArchiveOffered = isArchiveSource(src) && !isRemotePath(src) && !src.startsWith("ps5://");
+  const freesArchive =
+    freeArchiveOffered &&
+    freeArchiveFor?.src === src &&
+    archiveIsUnpacked(src, build.kind, { merge: mergePair !== null, game: freeArchiveFor.game });
   /** Ticking it asks first, naming what would go; unticking needs no question. */
   const askDeleteSource = async (on: boolean) => {
     if (!on) {
@@ -1199,12 +1268,6 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
         }
       />
 
-      {/* Building still works (it runs on this computer), but a PS5 fake GAME
-          installs and then can't be played on firmware above 11.60. Said
-          before the user spends an hour converting; silent for PS4, for
-          homebrew and when the firmware is unknown. */}
-      <FakeGameFirmwareNotice kernel={kernel} contentId={inspection?.content_id} />
-
       {/* One column at every width (the user asked for it): the steps read top to bottom,
           ① to ⑤, and each card takes the window's whole width. */}
       <div className="flex min-w-0 flex-col gap-3">
@@ -1218,8 +1281,6 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
               if (m === "folder") setThen("keep");
             }}
             // While a game is being made, what is checked under ① is that game, not the next.
-            kernel={locked ? null : kernel}
-            contentId={locked ? null : inspection?.content_id}
             checked={!locked && inspection !== null}
             archive={!locked && isArchiveSource(src)}
             forNext={locked}
@@ -1243,7 +1304,9 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
               // A game's own: nothing to offer until the next game is checked.
               lz4: locked ? undefined : lz4Choice,
             }}
-            unpack={locked ? undefined : unpackChoice}
+            unpack={locked ? undefined : (unpackChoice ?? pkgUnpackChoice)}
+            // An archive is not looked inside until the run unpacks it: its packs aren't known.
+            gameChecked={!locked && inspection !== null && !noFiles && !isArchiveSource(src)}
             language={locked ? nextLanguage : language}
             onLanguage={locked ? setNextLanguage : setLanguage}
             onCompression={setCompression}
@@ -1275,6 +1338,17 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
                 refusal={deleteSourceBlocked}
                 checked={deleteSourceFor === src}
                 onChange={(on) => void askDeleteSource(on)}
+              />
+            )}
+            {!locked && freeArchiveOffered && (
+              <FreeArchiveOption
+                source={src}
+                outputDir={outFor(src).outputDir}
+                password={password || undefined}
+                kind={build.kind}
+                merge={mergePair !== null}
+                checked={freeArchiveFor?.src === src}
+                onChange={(on, found) => setFreeArchiveFor(on && found ? { src, game: found.game } : null)}
               />
             )}
           </OptionsCard>
@@ -1344,7 +1418,12 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
                     ? folderLz4Options(lz4Choice, packProfile)
                     : undefined,
                 build.kind === "folder" ? folderPackOptions(lz4Choice, packProfile) : undefined,
-                unpackOn,
+                build.kind === "pkg" ? pkgUnpackOn : unpackOn,
+                build.kind === "pkg" && pkgLeavesOutEmu,
+                // Checked here: the queue shows this game's own pack choices while it waits.
+                inspection && !noFiles && !isArchiveSource(source.trim()) && !inspection.ps4_game
+                  ? (inspection.packs ?? "none")
+                  : undefined,
               );
               if (r === "not-image" || r === "not-folder" || r === "later-part") setError(skippedText(r, 1));
               else if (!r) setError(tr("cq_already", undefined, "This game is already in the queue."));
@@ -1468,6 +1547,7 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
       <QueueCard
         items={queueItems}
         running={queueRunning}
+        stoppedByClose={queueStoppedByClose}
         paused={pipeline.phase === "running" && !!pipeline.paused}
         onOpenUpload={() => navigate("/send")}
         onStart={() => void useConvertQueue.getState().start()}
@@ -1522,9 +1602,9 @@ export default function WorkshopScreen({ headerRight }: { headerRight?: ReactNod
               </p>
               <p>
                 {tr(
-                  "fpkg.aboutFake_v2",
+                  "fpkg.aboutFake_v3",
                   undefined,
-                  "The result is a fake package, so the console needs fake-package support loaded before it will install: kstuff (the build with PS5 fake-package support), a53_ppr_install_fast.elf and shadowmountplus.elf, in that order. Upload & Install says the same next to its install buttons.",
+                "The result is a fake PS5 package with a plaintext game image, the kind the latest kstuff (fake-package support up to 13.60) and Kraken Mount both take. There are two ways to play it: install it with kstuff loaded, or copy it to a folder Kraken Mount scans to mount it. Upload & Install explains both next to its install buttons.",
                 )}
               </p>
               <details>

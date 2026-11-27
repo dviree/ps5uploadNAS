@@ -31,12 +31,19 @@ Endpoint: `wss://hub.phantomptr.com/ws`.
 
 | Name | Made by | Form |
 |------|---------|------|
-| `room` | the host (engine) | 22 base64url characters (`A-Z a-z 0-9 - _`): 16 random bytes, no padding |
+| `room` | the host (engine) | 22 base64url characters (`A-Z a-z 0-9 - _`), made from the secret: the first 21 characters of base64url(SHA-256(`ps5upload-hub room` + one zero byte + `secret`)), then `h`. Older apps: 16 random bytes, no padding (such an id never ends in `h`) |
 | `secret` | the host (engine) | 43 base64url characters: 32 random bytes, no padding |
 | `gid` | the hub | 12 base64url characters (9 random bytes), unique within the room |
 
 The invite link carries the `room` only. The `secret` never leaves the host; the hub keeps only
 its SHA-256 and uses it to let the same host take the room back after a reconnect.
+
+A room id that ends in `h` is **bound** to its secret: the hub opens it only for the secret it
+was made from, so nobody else with the link can open it, also on a hub that has just restarted
+and has no rooms. The id is the proof; the hub stores nothing for it. An id of any other form (an
+older app's) opens for any secret while it is free, as before: that host's room can be taken by
+a link holder after a hub restart until the app is updated. Hosts and hubs of either age work
+with each other.
 
 ## Messages
 
@@ -53,8 +60,10 @@ its SHA-256 and uses it to let the same host take the room back after a reconnec
   sends one `{"t":"guest","gid":...}` for every guest still in the room, so the new socket can
   pick their negotiation back up.
 - Existing room, different secret: `{"t":"error","why":"room_taken"}`, close.
+- A bound room id (ending in `h`) with a secret it was not made from: `room_taken`, close,
+  whether the room is open or not.
 - A room whose host is gone waits **2 minutes** for a reclaim, then is removed (its id is free
-  again, for any secret).
+  again: for any secret, or a bound id for its own only).
 
 Host receives:
 
@@ -76,6 +85,10 @@ Host receives:
 - No such room, or its host is away: `{"t":"error","why":"no_room"}`, close.
 - Room has 8 guests: `{"t":"error","why":"room_full"}`, close.
 - After `closed` the hub closes the socket (code 1000).
+- A guest leaves once its connection to the host is up. One still in the room **3 minutes**
+  after it joined is removed: `{"t":"error","why":"timeout"}`, close (4000); the host gets
+  `left` for it. (The guest page holds a place it took early for a minute at most and gives ICE
+  15 s, so no real guest stays that long; idle sockets cannot keep a room full.)
 
 ### Signal (both sides)
 
@@ -93,6 +106,12 @@ Forwarded as `{"t":"signal","from":"host"|"<gid>","data":<data unchanged>}`.
 - A guest may only address `"host"`; a host only a `gid`. Anything else: `bad_target`, close.
 - A host addressing a `gid` that has gone gets `{"t":"error","why":"no_peer"}`; this one error
   does **not** close the socket (the guest may have left a moment ago).
+- A host over its signal limit is not closed: the signals past it are dropped (not forwarded,
+  no error) until the minute is over. Guests make a host send (it answers each offer), so a
+  limit that closed the host let anyone with the link cut it off.
+- A guest over its own limit, or over its client's in the room (all that client's guests
+  there together, those that left included), gets `rate_limited`, close. Joining again does not
+  refill a client's: while it is used up, that client's `join` to the room gets `rate_limited`.
 
 ### Leave
 
@@ -126,21 +145,23 @@ Forwarded as `{"t":"signal","from":"host"|"<gid>","data":<data unchanged>}`.
 | `bad_state` | `host`/`join` on a socket that already has a role; `signal`/`leave` before one |
 | `bad_target` | a signal `to` the sender may not address |
 | `bad_data` | signal `data` missing, not an object, or over 12 KiB |
-| `room_taken` | `host` with the wrong secret |
+| `room_taken` | `host` with the wrong secret (for a bound room id: one it was not made from) |
 | `no_room` | `join` to a room that does not exist or has no host right now |
 | `room_full` | `join` to a room with 8 guests |
-| `rate_limited` | over a per-minute limit (below) |
+| `rate_limited` | over a per-minute limit (below; a host's signals past its limit are dropped instead) |
 | `server_full` | `host` when the hub has 5,000 rooms |
 | `too_many_rooms` | `host` from a client that already has 8 rooms |
 | `no_peer` | signal to a guest that has gone (not fatal) |
+| `timeout` | a guest still in its room 3 minutes after it joined |
 
 ## Limits (defaults)
 
 | Limit | Default |
 |-------|---------|
 | guests per room | 8 |
-| signals per guest | 20 per minute |
-| signals per host (all its guests together) | 200 per minute |
+| signals per guest | 60 per minute (was 20: one try of a browser that trickles each candidate went past it) |
+| signals per guest client in one room (its guests together, joins again included) | 300 per minute (was 60) |
+| signals per host (all its guests together) | 200 per minute (past it: dropped) |
 | `join` attempts per client | 30 per minute (found or not) |
 | rooms on the hub | 5,000 |
 | rooms per client | 8 (a room counts toward its creator until removed) |
@@ -149,10 +170,16 @@ Forwarded as `{"t":"signal","from":"host"|"<gid>","data":<data unchanged>}`.
 | open connections on the hub | 2,000 (HTTP 503 past it) |
 | time to send `host` or `join` | 10 s |
 | room without host | removed after 2 minutes |
+| guest in a room | removed 3 minutes after it joined |
 | STUN requests per client (if STUN is on) | 60 per minute (over that: no answer) |
 
 A *client* is an IPv4 address or an IPv6 /64. Behind a reverse proxy, the client address comes
 from the proxy's header (last entry) only when the proxy is configured as trusted.
+
+A guest's signals are its offer and each ICE candidate, one signal each, so a client should not
+send the candidates the host cannot use: the engine takes UDP candidates with an address and
+drops `.local` (mDNS) and TCP ones. The guest pages leave those out (Firefox on one network: 11
+signals a try instead of 21).
 
 ## Close codes
 
@@ -180,9 +207,16 @@ IPv6. It ignores every other message and does no TURN.
 ## Other endpoints
 
 - `GET /health`: `ok`.
-- `GET /metrics`: Prometheus text, counts only (rooms, guests, connections, hosts, reclaims,
-  joins, signals, expired rooms, STUN requests, errors by kind). Kept private: localhost only
-  behind Caddy, or a separate private port (`HUB_METRICS_LISTEN`) on Fly.
+- `/ws/` is `/ws`. A request to `/ws` that is not a WebSocket upgrade gets 400, 405 or 426.
+- `GET /robots.txt`: `User-agent: *` / `Disallow: /`.
+- Anything else: 404. The hub's name is public, so scanners and crawlers ask for `/`, `/.env`
+  and the like all day; these are counted by a fixed class of the path (`root`, `favicon`,
+  `robots`, `well_known`, `ws_not_websocket`, `other`) and never logged.
+- `GET /metrics`: Prometheus text, counts only (rooms, guests, connections, rooms opened,
+  reclaimed, closed and expired, joins, signals, dropped host signals, expired guests, STUN
+  requests, errors by kind, refusals by the limit that fired, stray HTTP requests by class).
+  Kept private: localhost only behind Caddy, or a separate private port (`HUB_METRICS_LISTEN`)
+  on Fly.
 
 ## Privacy
 
@@ -208,5 +242,5 @@ host  ← {"t":"left","gid":"G"}
 ```
 
 Who sends the offer is up to the engine and the page; the hub does not care. Once the WebRTC
-connection is up, both sides may stay connected to the hub (for renegotiation) or the guest may
-leave; the media does not depend on the hub.
+connection is up the guest leaves the hub (it would be removed 3 minutes after it joined anyway);
+the host stays for new guests. The media does not depend on the hub.

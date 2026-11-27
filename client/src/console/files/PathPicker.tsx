@@ -1,11 +1,28 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ArrowUp, Check, File as FileIcon, Folder, HardDrive } from "lucide-react";
+import { ArrowUp, Check, File as FileIcon, Folder, HardDrive, Network, RotateCw } from "lucide-react";
 import { isDrive, volumeLabel, type Volume } from "../home/Home";
 import { focusElement } from "../nav";
 import { t } from "../strings";
 import { Modal } from "../ui/Modal";
+import { filesErrorText } from "./Files";
 import { joinPath, upFrom } from "./move";
-import { useDir } from "./useDir";
+import { isSmbPath, smbSegments, smbUp, type SmbShare } from "./smb";
+import { useDir, type DirState } from "./useDir";
+
+/** A folder still being read, or why it could not be, with Retry (it said "Loading…" for good). */
+export function PickerWait({ dir, onRetry }: { dir: Pick<DirState, "error">; onRetry: () => void }) {
+  return dir.error ? (
+    <div className="cw-msg is-error" role="alert">
+      {filesErrorText(dir.error)}
+      <button type="button" className="cw-focusable cw-button cw-msg-action" data-action="retry" onClick={onRetry}>
+        <RotateCw aria-hidden />
+        <span>{t("cw_files_retry")}</span>
+      </button>
+    </div>
+  ) : (
+    <p className="cw-dim">{t("cw_home_loading")}</p>
+  );
+}
 
 /**
  * Copy to… / Move to…: drives, then folders; "Here" picks the folder shown.
@@ -21,6 +38,7 @@ export function PathPicker({
   onPick,
   onCancel,
   pickFile,
+  shares,
 }: {
   title: string;
   /** What is being copied or moved (a name, or "3 items"). */
@@ -32,6 +50,8 @@ export function PathPicker({
   onCancel: () => void;
   /** Files with a name it accepts are listed too, and picked (their path) when pressed. */
   pickFile?: (name: string) => boolean;
+  /** Saved network shares, offered after the drives (a copy or move to one: #953). */
+  shares?: SmbShare[];
 }) {
   const [path, setPath] = useState<string | null>(start);
   const dir = useDir(path);
@@ -43,11 +63,11 @@ export function PathPicker({
   // On open and after a level change, focus the first row (else "Here").
   const moved = useRef(true);
   useEffect(() => {
-    if (!moved.current || (path != null && !dir.loaded)) return;
+    if (!moved.current || (path != null && !dir.loaded && !dir.error)) return;
     moved.current = false;
-    const el = list.current?.querySelector<HTMLElement>("[data-pick]") ?? list.current?.querySelector<HTMLElement>("[data-pick-here]");
+    const el = list.current?.querySelector<HTMLElement>("[data-pick], [data-action=retry]") ?? list.current?.querySelector<HTMLElement>("[data-pick-here]");
     if (el) focusElement(el);
-  }, [path, dir.loaded]);
+  }, [path, dir.loaded, dir.error]);
 
   const go = (p: string | null) => {
     moved.current = true;
@@ -57,7 +77,7 @@ export function PathPicker({
     if (path == null) onCancel();
     else {
       moved.current = true;
-      setPath(upFrom(path, volumes));
+      setPath(isSmbPath(path) ? smbUp(path) : upFrom(path, volumes));
     }
   }, [path, volumes, onCancel]);
 
@@ -67,7 +87,7 @@ export function PathPicker({
       <p className="cw-dim">{subtitle}</p>
       <div ref={list}>
         <div className="cw-picker-bar">
-          <span className="cw-path cw-mono">{path ?? t("cw_files_pick_drive")}</span>
+          <span className="cw-path cw-mono">{path == null ? t("cw_files_pick_drive") : isSmbPath(path) ? smbSegments(path, shares ?? []).map((x) => x.label).join("/") : path}</span>
           {path != null ? (
             <button type="button" className="cw-focusable cw-button" onClick={back}>
               <ArrowUp aria-hidden />
@@ -91,7 +111,16 @@ export function PathPicker({
                     <span className="cw-dim cw-mono">{v.path}</span>
                   </button>
                 </li>
-              ))
+              )).concat(
+                (shares ?? []).map((s) => (
+                  <li key={s.id}>
+                    <button type="button" className="cw-focusable cw-sheet-item" data-pick={s.id} onClick={() => go(s.path)}>
+                      <Network aria-hidden />
+                      <span>{s.name}</span>
+                    </button>
+                  </li>
+                )),
+              )
             : folders.map((e) => (
                 <li key={e.name}>
                   <button
@@ -121,7 +150,7 @@ export function PathPicker({
               ))
             : null}
         </ul>
-        {path != null && !dir.loaded ? <p className="cw-dim">{t("cw_home_loading")}</p> : null}
+        {path != null && !dir.loaded ? <PickerWait dir={dir} onRetry={dir.refresh} /> : null}
         {path != null && dir.loaded && !folders.length && !files.length && !dir.more ? (
           <p className="cw-dim">
             {t("cw_files_no_folders")} {t("cw_files_no_folders_next")}

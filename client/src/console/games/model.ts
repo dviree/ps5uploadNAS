@@ -13,6 +13,7 @@
  * time come from appinfo.db (the same keys the PC app's game page reads).
  */
 import { compareNames } from "../../lib/collate";
+import { installedAppVersion } from "../../lib/versionNumbers";
 import { ApiError, call } from "../api";
 
 export const TILE_TITLE_ID = "PSUP00001";
@@ -122,6 +123,35 @@ export function parseDbPage(raw: unknown): { rows: [string, string][]; more: boo
   return { rows, more: r?.more === true, next: typeof r?.next === "number" ? r.next : 0, ok };
 }
 
+const appNames = new Map<string, Promise<string | null>>();
+
+/**
+ * An installed title's name, read from app.db a page at a time until it is found, once per title
+ * (the helper's /api/status sends "name": null, so Home said "Now running PPSA01650"). Null when
+ * app.db has none; a failed read is forgotten, so the next asks again.
+ */
+export function appName(titleId: string, callFn: CallFn = call): Promise<string | null> {
+  let found = appNames.get(titleId);
+  if (!found) {
+    found = (async () => {
+      try {
+        for (let offset = 0, page = 0; page < DB_PAGES_MAX; page++) {
+          const p = parseDbPage(await callFn<unknown>("/api/apps/db", { offset }));
+          const row = p.rows.find((r) => r[0] === titleId && r[1]);
+          if (row) return row[1];
+          if (!p.more || p.next <= offset) break;
+          offset = p.next;
+        }
+      } catch {
+        appNames.delete(titleId);
+      }
+      return null;
+    })();
+    appNames.set(titleId, found);
+  }
+  return found;
+}
+
 /** /api/apps/hidden: {"ok":true,"hidden":[..]}; null when it did not answer that. */
 export function parseHidden(raw: unknown): Set<string> | null {
   const r = raw as { ok?: unknown; hidden?: unknown } | null;
@@ -163,7 +193,7 @@ export function parseInfo(raw: unknown): AppInfo {
   }
   const size = Number(v.get("#_size"));
   return {
-    version: v.get("CONTENT_VERSION") ?? v.get("APP_VER") ?? null,
+    version: installedAppVersion((k) => v.get(k)),
     sizeBytes: Number.isFinite(size) && size > 0 ? size : null,
     lastPlayed: parseInfoTime(v.get("#_last_access_time")),
   };

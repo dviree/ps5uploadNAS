@@ -85,6 +85,11 @@ impl ReplacingFile {
         }
     }
 
+    /// Where the bytes go until `commit`, for a writer that opens the file by its path.
+    pub(super) fn path(&self) -> &Path {
+        &self.path
+    }
+
     /// All written: this is now the destination.
     pub(super) fn commit(mut self) -> std::io::Result<()> {
         if let Some(dest) = self.dest.take() {
@@ -247,8 +252,10 @@ mod replacing_tests {
     use super::*;
 
     fn scratch(name: &str) -> PathBuf {
-        let d =
-            std::env::temp_dir().join(format!("ps5upload-replacing-{name}-{}", std::process::id()));
+        let d = crate::test_tmp::temp_path(format!(
+            "ps5upload-replacing-{name}-{}",
+            std::process::id()
+        ));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d

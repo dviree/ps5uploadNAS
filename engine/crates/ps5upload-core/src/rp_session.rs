@@ -92,6 +92,8 @@ type Aes128CfbDec = cfb_mode::Decryptor<aes::Aes128>;
 pub(crate) const SESSION_PORT: u16 = 9295;
 pub(crate) const KEY_SIZE: usize = 16;
 pub(crate) const RP_VERSION: &str = "1.0";
+/// The most of a session start reply that is read: it is a few hundred bytes of headers.
+const RP_REPLY_MAX: u64 = 1024 * 1024;
 
 /// The two secrets a pairing produces, both needed to open a session.
 #[derive(Clone)]
@@ -116,6 +118,11 @@ fn hex16(s: &str) -> Result<[u8; KEY_SIZE]> {
     let s = s.trim();
     if s.len() != KEY_SIZE * 2 {
         bail!("expected {} hex chars, got {}", KEY_SIZE * 2, s.len());
+    }
+    // Before slicing: a non-ASCII character (a key typed into the API, or one a console sent)
+    // put a two-byte slice inside it, and the parse panicked instead of refusing it.
+    if !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        bail!("not hex");
     }
     let mut out = [0u8; KEY_SIZE];
     for (i, b) in out.iter_mut().enumerate() {
@@ -238,7 +245,9 @@ pub(crate) fn session_init_for_wake(
     let _ = stream.shutdown(Shutdown::Write);
 
     let mut raw = Vec::new();
-    stream.read_to_end(&mut raw).map_err(|e| {
+    // The console's answer is a few hundred bytes of headers: the cap keeps a peer that keeps
+    // sending from filling memory.
+    crate::net::read_to_end_capped_into(&mut stream, RP_REPLY_MAX, &mut raw).map_err(|e| {
         crate::core_debug!(
             "rp session init: {host}: reading the reply failed after {} ms ({} bytes in): {e}",
             t0.elapsed().as_millis(),
@@ -1455,5 +1464,15 @@ mod tests {
     fn creds_reject_mis_sized_hex() {
         assert!(SessionCreds::from_hex("00", "00").is_err());
         assert!(SessionCreds::from_hex(&"a".repeat(32), &"b".repeat(32)).is_ok());
+    }
+
+    /// 32 bytes that are not 32 hex digits are refused, not a panic (a slice inside `€`).
+    #[test]
+    fn creds_refuse_non_ascii_keys() {
+        let odd = format!("a€{}", "0".repeat(28));
+        assert_eq!(odd.len(), 32);
+        assert!(SessionCreds::from_hex(&odd, &"b".repeat(32)).is_err());
+        assert!(SessionCreds::from_hex(&"a".repeat(32), &odd).is_err());
+        assert!(SessionCreds::from_hex(&format!("+{}", "a".repeat(31)), &"b".repeat(32)).is_err());
     }
 }

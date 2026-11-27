@@ -8,6 +8,7 @@ import { create } from "zustand";
 
 import type { AmprLz4Options, FfpfscLevel, FpkgCompression, ImageFormat, ZstdPacks } from "../api/fpkg";
 import { safeGetItem, safeSetItem } from "../lib/safeStorage";
+import { isTarArchiveName } from "../lib/tarNames";
 import { useUploadSettingsStore } from "./uploadSettings";
 import type { AmprEmuBuild, ZstdRuntime } from "./convertPrefs";
 
@@ -19,9 +20,10 @@ export type ConvertStatus = "pending" | "running" | "installing" | "handed" | "d
  *  package). An image's `lz4`: pack the game's data into asset packs first (LZ4, or zstd with
  *  `zstdLevel`), in any format, compressed or not. A folder's `zstd` / `lz4`: its files in zstd
  *  or LZ4 packs (then a game folder can be the source too). `unpackPacks`: a game in asset
- *  packs written as plain files again (a game folder can then be a folder's source too). */
+ *  packs written as plain files again (a game folder can then be a folder's source too); a
+ *  package of it can also leave the AMPR emulator out (`leaveOutAmprEmu`, #933). */
 export type ConvertBuild =
-  | { kind: "pkg" }
+  | { kind: "pkg"; unpackPacks?: boolean; leaveOutAmprEmu?: boolean }
   | { kind: "image"; format: ImageFormat; compress: boolean; lz4?: AmprLz4Options; unpackPacks?: boolean }
   | { kind: "folder"; zstd?: ZstdPacks; lz4?: AmprLz4Options; unpackPacks?: boolean };
 
@@ -109,8 +111,25 @@ export type QueueTag =
   | { kind: "zstd"; level: number }
   | { kind: "lz4" }
   | { kind: "unpack" }
+  | { kind: "no-emulator" }
   | { kind: "level"; level: FfpfscLevel }
-  | { kind: "language"; code: string };
+  | { kind: "language"; code: string }
+  | { kind: "free-archive" };
+
+/** Whether a queued game's archive is deleted as it unpacks: asked for, and certain to be
+ *  unpacked (a package of it, or a tar; an image or folder may be made with nothing unpacked,
+ *  which is known only when it runs, so the choice is not offered there). */
+export function freesArchive(item: Pick<ConvertItem, "source" | "build" | "freeArchive">): boolean {
+  return !!item.freeArchive && archiveSurelyUnpacked(item.source, item.build?.kind ?? "pkg");
+}
+
+/** A local archive that this kind of build always unpacks first. */
+export function archiveSurelyUnpacked(source: string, kind: ConvertBuild["kind"]): boolean {
+  const path = source.trim();
+  if (/^(remote|ps5):\/\//i.test(path)) return false;
+  if (isTarArchiveName(path)) return kind !== "folder";
+  return kind === "pkg" && /\.(zip|7z|rar)$/i.test(path);
+}
 
 export function queueTags(item: ConvertItem): QueueTag[] {
   const tags: QueueTag[] = [];
@@ -118,9 +137,11 @@ export function queueTags(item: ConvertItem): QueueTag[] {
   const packs = packsOf(b);
   if (packs.kind === "zstd") tags.push({ kind: "zstd", level: packs.level ?? DEFAULT_ZSTD_LEVEL });
   if (packs.kind === "lz4") tags.push({ kind: "lz4" });
-  if ((b?.kind === "image" || b?.kind === "folder") && b.unpackPacks) tags.push({ kind: "unpack" });
+  if (b?.unpackPacks) tags.push({ kind: "unpack" });
+  if (b?.kind === "pkg" && b.unpackPacks && b.leaveOutAmprEmu) tags.push({ kind: "no-emulator" });
   if (b?.kind === "image" && b.compress && item.imageLevel) tags.push({ kind: "level", level: item.imageLevel });
   if ((!b || b.kind === "pkg") && item.language) tags.push({ kind: "language", code: item.language });
+  if (freesArchive(item)) tags.push({ kind: "free-archive" });
   return tags;
 }
 
@@ -139,6 +160,10 @@ export interface ConvertItem {
   isDir?: boolean;
   /** A .rar's password: in this window's memory only, never saved with the queue. */
   password?: string;
+  /** DELETE this archive as it unpacks, to free its space: turned on for this game after its
+   *  own warning, in this window's memory only. It is never saved with the queue (a queue
+   *  loaded again has it off), and it is off again once the game has had its turn. */
+  freeArchive?: boolean;
   outputDir?: string;
   /** The output goes next to its source (Workshop's "Save each next to its source"): a name
    *  already taken there is numbered, never overwritten or refused. */
@@ -149,8 +174,14 @@ export interface ConvertItem {
   /** An image sent to the PS5 once built (then = "upload"): where it goes. */
   imageDest?: { volume: string | null; subpath: string };
   firmware?: string;
-  /** The one PlayGo language the package declares; every language when absent. */
+  /** The PlayGo language the package declares: one code for that one alone, `all` for every
+   *  language; the game's own when absent. */
   language?: string;
+  /** The asset packs the game is in, when it was the game checked under ① as it was added
+   *  ("none": checked, and in none). Absent for a game added without being checked: a package
+   *  of it is looked at when its turn comes and, like one made from ①, gets its packs
+   *  unpacked. */
+  packs?: "lz4" | "zstd" | "none";
   /** What to do with the package: keep it, or install it (streamed / uploaded first). An image
    *  is kept, or ("upload") put in the Upload queue for the PS5. */
   then: ConvertThen;
@@ -196,13 +227,22 @@ export type ConvertItemChange = Partial<
     | "language"
     | "fullVerify"
     | "imageLevel"
+    | "freeArchive"
   >
 >;
 
 /** How the queue builds and installs; the app wires the real ones (see convertQueueRunner). */
 export interface ConvertRunner {
   /** `installed`: the build also installed it (a console dump's swap runs inside the build). */
-  build(item: ConvertItem): Promise<{ ok: boolean; packagePath?: string; message?: string; installed?: boolean; cancelled?: boolean }>;
+  build(item: ConvertItem): Promise<{
+    ok: boolean;
+    packagePath?: string;
+    message?: string;
+    installed?: boolean;
+    cancelled?: boolean;
+    /** `message` says where the game of a deleted archive was kept: shown even when stopped. */
+    archiveGone?: boolean;
+  }>;
   /** `unverified`: the PS5 took the install but it could not be confirmed (package kept);
    *  `message` says what to check. */
   handOff(item: ConvertItem, packagePath: string): Promise<{ ok: boolean; unverified?: true; message?: string }>;
@@ -232,18 +272,26 @@ export function hydrateConvertQueue(items: ConvertItem[]): ConvertItem[] {
   );
 }
 
-/** What is written to storage: everything but a .rar's password. */
-export function savedItems(items: ConvertItem[]): Omit<ConvertItem, "password">[] {
+/** What is written to storage: everything but a .rar's password and the choice to delete an
+ *  archive as it unpacks (which is asked again, with its warning, every time). */
+export function savedItems(items: ConvertItem[]): Omit<ConvertItem, "password" | "freeArchive">[] {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  return items.map(({ password, ...kept }) => kept);
+  return items.map(({ password, freeArchive, ...kept }) => kept);
 }
 
-function load(): ConvertItem[] {
+/** The saved queue, and whether it was making a game when its page went (#954). */
+function load(): { items: ConvertItem[]; stoppedByClose: boolean } {
   try {
     const raw = safeGetItem(KEY);
-    return raw ? hydrateConvertQueue(JSON.parse(raw) as ConvertItem[]) : [];
+    if (!raw) return { items: [], stoppedByClose: false };
+    const saved = JSON.parse(raw) as ConvertItem[];
+    // Whatever a saved queue says, no game comes back set to delete its archive.
+    return {
+      items: hydrateConvertQueue(savedItems(saved)),
+      stoppedByClose: saved.some((i) => i.status === "running"),
+    };
   } catch {
-    return [];
+    return { items: [], stoppedByClose: false };
   }
 }
 
@@ -255,6 +303,10 @@ interface ConvertQueueState {
    *  source), so the result's buttons stay until then; never after a build that failed. Start
    *  starts it at once. */
   armed: boolean;
+  /** The queue was making a game when its page was closed or reloaded (#954). The queue is run
+   *  by the page: the build itself goes on in the engine (and is picked up again when the page
+   *  opens), but the next game starts only once Start is pressed again. Cleared by Start. */
+  stoppedByClose: boolean;
   /** False (and nothing added) when this source is already waiting or building. */
   add: (item: NewConvertItem) => boolean;
   remove: (id: string) => void;
@@ -305,10 +357,12 @@ export const useConvertQueue = create<ConvertQueueState>((set, get) => {
     save();
   };
 
+  const loaded = typeof window === "undefined" ? { items: [], stoppedByClose: false } : load();
   return {
-    items: typeof window === "undefined" ? [] : load(),
+    items: loaded.items,
     running: false,
     armed: false,
+    stoppedByClose: loaded.stoppedByClose,
     add: (item) => {
       // The same game for the same console once; another console may have it too.
       const busy = get().items.some(
@@ -347,7 +401,7 @@ export const useConvertQueue = create<ConvertQueueState>((set, get) => {
       save();
     },
     start: async () => {
-      set({ armed: false });
+      set({ armed: false, stoppedByClose: false });
       if (get().running || !runner) return;
       const r0 = runner;
       stopRequested = false;
@@ -362,14 +416,21 @@ export const useConvertQueue = create<ConvertQueueState>((set, get) => {
           const next = get().items.find((i) => i.status === "pending");
           if (!next) break;
           patch(next.id, { status: "running", error: undefined });
-          let r: { ok: boolean; packagePath?: string; message?: string; installed?: boolean; cancelled?: boolean };
+          let r: Awaited<ReturnType<ConvertRunner["build"]>>;
           try {
             r = await r0.build(next);
           } catch (e) {
             r = { ok: false, message: e instanceof Error ? e.message : String(e) };
           }
+          // Its turn is over however it went: deleting an archive is asked for again each time.
+          if (next.freeArchive) patch(next.id, { freeArchive: undefined });
           if (r.cancelled) {
-            patch(next.id, { status: "cancelled", password: undefined });
+            patch(next.id, {
+              status: "cancelled",
+              password: undefined,
+              // Stopped with its archive already deleted: the row says where the game is.
+              ...(r.archiveGone && r.message ? { error: r.message } : {}),
+            });
             continue;
           }
           if (!r.ok || !r.packagePath) {

@@ -660,12 +660,18 @@ pub(crate) async fn store_verified_with(
         }
     }
     // The checksum beside it: a restore checks it again before the console is touched.
+    // The backup is on the server and checked by now, so a checksum file that can't be made
+    // (this computer's temporary folder is full) or sent is a warning, never a failed backup:
+    // failing here sent the same backup again, up to three times, each a copy beside this one.
     let sum_file = scratch.with_extension("sha256");
-    std::fs::write(&sum_file, format!("{sum}  {name}\n")).map_err(|e| format!("{e}"))?;
-    if let Err(e) = fs
-        .put_file(&sidecar(&target), &sum_file, &quiet_progress())
-        .await
-    {
+    let sent = match std::fs::write(&sum_file, format!("{sum}  {name}\n")) {
+        Ok(()) => fs
+            .put_file(&sidecar(&target), &sum_file, &quiet_progress())
+            .await
+            .map_err(|e| e.to_string()),
+        Err(e) => Err(e.to_string()),
+    };
+    if let Err(e) = sent {
         crate::log_warn!("save backup to server: no checksum file for {target}: {e}");
     }
     let _ = std::fs::remove_file(&sum_file);
@@ -1710,6 +1716,52 @@ mod tests {
     }
 
     #[test]
+    fn eglantine_close_and_running_do_not_select_edens_saves() {
+        let profile = "1F1E1D1C1B1A19181716151413121110";
+        let game = "0100F2C0115B6000";
+        let saves = [emulator_saves::ROOT, emulator_saves::EGLANTINE_ROOT].map(|root| SaveEntry {
+            kind: emulator_saves::KIND.into(),
+            ..save(&format!("{root}/{profile}/{game}"), game, 1, 1000)
+        });
+        let none = BTreeSet::new();
+        let pick = Pick {
+            users: &[1],
+            title: Some(emulator_saves::EGLANTINE_APP),
+            settle: false,
+            running: &none,
+            drive_done: None,
+        };
+        let due = due_saves("h", &saves, &Done::new(), 2000, &pick);
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].path, saves[1].path);
+        let running = [emulator_saves::EGLANTINE_APP.to_string()].into();
+        assert!(due_saves(
+            "h",
+            &saves,
+            &Done::new(),
+            2000,
+            &Pick {
+                running: &running,
+                ..pick
+            }
+        )
+        .is_empty());
+        let due = due_saves(
+            "h",
+            &saves,
+            &Done::new(),
+            2000,
+            &Pick {
+                title: None,
+                running: &running,
+                ..pick
+            },
+        );
+        assert_eq!(due.len(), 1);
+        assert_eq!(due[0].path, saves[0].path);
+    }
+
+    #[test]
     fn ps2_saves_go_with_their_emulator() {
         let ps2 = |path: &str, user| SaveEntry {
             kind: crate::ps2_saves::KIND.into(),
@@ -1754,7 +1806,7 @@ mod tests {
     }
 
     fn scratch(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!("ps5u-srvbk-{}-{name}", std::process::id()));
+        let d = crate::test_tmp::temp_path(format!("ps5u-srvbk-{}-{name}", std::process::id()));
         let _ = std::fs::remove_dir_all(&d);
         std::fs::create_dir_all(&d).unwrap();
         d
@@ -1964,6 +2016,34 @@ mod tests {
         let zip = make_zip(&dir, "PPSA01234", b"progress");
         let name = format!("{}2026-10-01_000000.zip", auto_backup_stem("PPSA01234", 1));
         fs.fail_next_lists(1);
+        let v = store_verified(
+            &fs,
+            &zip,
+            "/b",
+            "PPSA01234",
+            "PPSA01234",
+            1,
+            &name,
+            5,
+            &dir.join("rb"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(v.file, name);
+        assert!(fs.bytes(&format!("/b/PPSA01234/{name}")).is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The checksum file is made on this computer after the backup is on the server and
+    /// checked. Not being able to write it here failed the backup, which was then sent again.
+    #[tokio::test]
+    async fn a_checksum_file_that_cannot_be_made_here_does_not_fail_a_verified_backup() {
+        let dir = scratch("no-sum-file");
+        let fs = MemFs::new(&[]);
+        let zip = make_zip(&dir, "PPSA01234", b"progress");
+        let name = format!("{}2026-10-01_000000.zip", auto_backup_stem("PPSA01234", 1));
+        // A folder where the checksum file would be written.
+        std::fs::create_dir_all(dir.join("rb.sha256")).unwrap();
         let v = store_verified(
             &fs,
             &zip,

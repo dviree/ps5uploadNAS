@@ -761,6 +761,13 @@
               "host"
             ]
           },
+          "delete_source": {
+            "description": "Also delete what the title plays from: the `path` `GET /api/ps5/app/uninstall-source`\nnamed (a folder, or a disk image whose mount is taken down first). Refused with 409\nbefore anything is touched when that is no longer what the title plays from. The\nuninstall is then registration-only, and the path is deleted only once it succeeded:\n`source_deleted`, and `source_error` when it was kept.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "registration_only": {
             "description": "Only take off a folder or image registration (#884): a helper from 12.6.16 on then\nrefuses, before touching anything, a title the console's own installer has installed\n(`unregister_title_installed:<where>`), instead of uninstalling that game. Older helpers\nignore it. Default false: the game page's Uninstall of a package install.",
             "type": "boolean"
@@ -1339,6 +1346,17 @@
       },
       "BuildReq": {
         "properties": {
+          "add_ampr_emu": {
+            "description": "With `unpack_packs`: replace or add the game's AMPR emulator as an image build does.\nOn unless turned off.",
+            "type": "boolean"
+          },
+          "ampr_emu_build": {
+            "description": "With `unpack_packs`: which emulator, `ampr_emu` (the default) or `ampr-emu-ng`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "compression": {
             "description": "`fast`, `balanced` (the default) or `smallest`: how hard the Kraken encoder works.",
             "type": [
@@ -1369,11 +1387,15 @@
             "type": "boolean"
           },
           "language": {
-            "description": "A PlayGo language code (`fr-FR`, …) the package declares as its only one.",
+            "description": "The languages the package declares to PlayGo. Absent or empty: the game's own, read from\nits `sce_sys/playgo-scenario.json` or `playgo-chunk.dat`, and only its default language\n(`param.json`'s `localizedParameters.defaultLanguage`) when it has neither. A language\ncode (`fr-FR`, …): that one alone, as the default too. `all`: every language, starting\nin the game's default (what packages declared before they kept to the game's own).",
             "type": [
               "string",
               "null"
             ]
+          },
+          "leave_out_ampr_emu": {
+            "description": "With `unpack_packs`: leave the AMPR emulator out of the package (every\n`libSceAmpr.sprx` in `fakelib` and `fakelib2`, and a kept `.orig` copy), so the game\nreads its plain files through the console's own libSceAmpr. `add_ampr_emu` and\n`ampr_emu_build` then do nothing. A libSceAmpr game still gets a fresh `ampr_emu.index`.\nOff by default: one backported game played from a package without its emulator on FW\n5.10, which is not every game on every firmware. Refused (400) without `unpack_packs`:\npacks are read only through the emulator.",
+            "type": "boolean"
           },
           "name": {
             "description": "Output file stem; the content id by default.",
@@ -1396,6 +1418,10 @@
           },
           "source": {
             "type": "string"
+          },
+          "unpack_packs": {
+            "description": "For a game in LZ4 or zstd asset packs: package it as plain files, as an image build's\n`unpack_packs` writes them. Every packed file goes in under its own name, decoded as the\npackage is written (no copy on disk), the pack volumes and their indexes are left out,\nand the package's `ampr_emu.index` lists the files it carries. A libSceAmpr game whose\nemulator is ampr-emu-ng, an old ampr_emu or unknown gets the one `ampr_emu_build` names\n(`add_ampr_emu` off leaves it). Refused (400) for a game that is not in packs. Without\nit a packed game is packaged as it is, packs and all.",
+            "type": "boolean"
           },
           "update": {
             "description": "A PS4 update to merge into the PS4 game `source` first (`ps5upload_fpkg::ps4_merge`):\nthe package is the game at the update's version.",
@@ -1981,6 +2007,13 @@
       "Check": {
         "description": "One readiness finding: what was checked, whether it holds, and what was seen.",
         "properties": {
+          "applies_to": {
+            "description": "Set on a finding about a file of the source that not everything made from it carries:\nwhich outputs the finding matters for ([`applies`]). Absent: it matters whatever is\nmade.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "detail": {
             "type": "string"
           },
@@ -2978,6 +3011,49 @@
         "required": [
           "x",
           "y"
+        ],
+        "type": "object"
+      },
+      "Damage": {
+        "description": "What a package's problems add up to, for a screen to say in plain words. Counts that don't\nbelong to the `kind` are 0.",
+        "properties": {
+          "block_bytes": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "blocks_bad": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "blocks_total": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "bytes_have": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "bytes_need": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "checks_failed": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "kind": {
+            "description": "- `data`: `blocks_bad` of the `blocks_total` data blocks (`block_bytes` each) are not\n  the bytes the package's own digests say they are. The usual result of a copy or\n  download that was interrupted or went wrong.\n- `truncated`: the file ends early. It is `bytes_have` long and the package needs at\n  least `bytes_need`; both are 0 when only the very end of the file is missing.\n- `structure`: `checks_failed` checks of the image's own tables fail though no data\n  block was found bad.\n- `metadata`: only `checks_failed` checks of what the package says about itself fail;\n  every block of the game's data is right. Seen on packages edited after they were made.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "blocks_bad",
+          "blocks_total",
+          "block_bytes",
+          "bytes_have",
+          "bytes_need",
+          "checks_failed"
         ],
         "type": "object"
       },
@@ -4054,6 +4130,10 @@
       },
       "ExtractCleanupReq": {
         "properties": {
+          "kept": {
+            "description": "The folder is one an unpack with `free_archive` kept (`<archive>.unpacked`): removed\nonly when asked for by this, once what was made from the game in it is finished.",
+            "type": "boolean"
+          },
           "path": {
             "description": "The game path an unpack reported, or its unpack folder.",
             "type": "string"
@@ -4066,6 +4146,10 @@
       },
       "ExtractReq": {
         "properties": {
+          "free_archive": {
+            "description": "DESTROYS THE ARCHIVE: its own space is given back while it unpacks, so the job fits on\na drive with no room for both. A `.zip` is cut short behind each file as it is\nunpacked, a `.7z` of several blocks behind each block, and a multi-part `.rar` loses\neach part as it is finished; anything else is deleted the moment the unpack has\nfinished and been checked. Ask `/api/fpkg/extract/free-check` first. Off unless set.",
+            "type": "boolean"
+          },
           "output_dir": {
             "type": [
               "string",
@@ -4109,6 +4193,28 @@
           "dest_dir"
         ],
         "type": "object"
+      },
+      "FailReason": {
+        "enum": [
+          "loader_unreachable",
+          "no_bringup",
+          "no_image",
+          "source_gone",
+          "origin_changed",
+          "sony_refused",
+          "destructive_guard",
+          "bad_request",
+          "stalled",
+          "stream_unreachable",
+          "stream_proxy",
+          "staged_refused",
+          "cancelled",
+          "base_missing",
+          "busy",
+          "image_mounted",
+          "reply_lost"
+        ],
+        "type": "string"
       },
       "FanThresholdReq": {
         "properties": {
@@ -4289,6 +4395,17 @@
           "category",
           "root_entries",
           "warnings"
+        ],
+        "type": "object"
+      },
+      "FileBody": {
+        "properties": {
+          "file_name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "file_name"
         ],
         "type": "object"
       },
@@ -4755,6 +4872,31 @@
           "file_count",
           "skipped_paths",
           "meta_source"
+        ],
+        "type": "object"
+      },
+      "FreeCheckReq": {
+        "properties": {
+          "output_dir": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "password": {
+            "description": "RAR only; never logged.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "description": "A `.zip`, `.7z`, `.rar` (the first part of a multi-part set), tar or `.zst` on this\ncomputer.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "source"
         ],
         "type": "object"
       },
@@ -6105,49 +6247,60 @@
         "type": "object"
       },
       "HwStorage": {
-        "description": "\"Console Storage\" aggregate that matches what PS5 Settings shows.\nSums the three partitions Sony's UI counts (`/user effective +\n/system_data + /system_ex`) and accounts for the reserved-pool slice\nthe FS keeps for root. Per-partition fields are also surfaced for\nthe diagnostics card. Distinct from `fs_list_volumes`: that returns\nper-volume detail; this is the single-line summary.",
+        "description": "The console's internal storage as its filesystem counts it: `statfs` on `/user`,\n`/system_data` and `/system_ex`, nothing else.\n\n**These are not the figures of the PS5's own Settings > Storage screen** (#944). On one\n2 TB console this reported 175.5 GB in `user_free_bytes` and a 1.995 TB `/user`, while its\nStorage screen showed 71.35 GB free of 1.89 TB. How the console arrives at its figures is\nnot known to this API, and nothing here models it. Read these as what the filesystem says,\nand expect the console's screen to show less.\n\nWhat a copy can count on is `/api/ps5/volumes` (`allocatable_bytes`, `likely_fits_bytes`),\nwhich starts from the same `user_free_bytes`.\n\nDistinct from `fs_list_volumes`: that returns per-volume detail; this is the summary of the\ninternal drive with its partitions.",
         "properties": {
           "free_bytes": {
+            "description": "Free on the three partitions together. Includes the system partitions' own free space,\nwhich nothing can be copied into: for room on the drive read `user_free_bytes`.",
             "minimum": 0,
             "type": "integer"
           },
           "reserved_bytes": {
+            "description": "The same number as `user_reserved_bytes` (the system partitions' are not counted).",
             "minimum": 0,
             "type": "integer"
           },
           "system_data_free_bytes": {
+            "description": "Free on `/system_data` (`f_bavail`).",
             "minimum": 0,
             "type": "integer"
           },
           "system_data_total_bytes": {
+            "description": "Size of `/system_data`.",
             "minimum": 0,
             "type": "integer"
           },
           "system_ex_free_bytes": {
+            "description": "Free on `/system_ex` (`f_bavail`).",
             "minimum": 0,
             "type": "integer"
           },
           "system_ex_total_bytes": {
+            "description": "Size of `/system_ex`; 0 when the firmware has no such mount.",
             "minimum": 0,
             "type": "integer"
           },
           "total_bytes": {
+            "description": "Size of the three partitions together (`user` + `system_data` + `system_ex`).",
             "minimum": 0,
             "type": "integer"
           },
           "used_bytes": {
+            "description": "`total_bytes - free_bytes`. Includes what the filesystem holds back (`reserved_bytes`),\nnot only stored data.",
             "minimum": 0,
             "type": "integer"
           },
           "user_free_bytes": {
+            "description": "Free on `/user` for a writer (`f_bavail`); 0 once the drive is written into what it\nholds back. `user_reserved_bytes` is already left out of it: never subtract it again.",
             "minimum": 0,
             "type": "integer"
           },
           "user_reserved_bytes": {
+            "description": "What the filesystem holds back on `/user` (`f_bfree - f_bavail`): free blocks that are\nnot offered to a writer. Not a fixed pool: measured on two consoles it grows by about a\nfifth of what is written and comes back when data is deleted.",
             "minimum": 0,
             "type": "integer"
           },
           "user_total_bytes": {
+            "description": "Size of `/user`, the partition games and files are on (`/data` is a folder of it).",
             "minimum": 0,
             "type": "integer"
           }
@@ -7062,7 +7215,7 @@
             ]
           },
           "state": {
-            "description": "`installed`                 — these exact bytes are already on the console\n`different_version_installed` — the title has this kind of artifact, but not this build\n`base_missing`              — a patch/add-on with no base game to apply to\n`not_installed`             — nothing for this title in this category\n`unknown`                   — the console couldn't be read; never act on this",
+            "description": "`installed`                 — these exact bytes are already on the console\n`different_version_installed` — the title has this kind of artifact, but not this build\n`base_missing`              — an update with no base game to apply to (add-ons are not checked)\n`not_installed`             — nothing for this title in this category\n`unknown`                   — the console couldn't be read; never act on this",
             "type": "string"
           },
           "title_id": {
@@ -7200,6 +7353,177 @@
           "via",
           "may_not_launch",
           "package_type"
+        ],
+        "type": "object"
+      },
+      "InstallStatus": {
+        "properties": {
+          "app_ver_after": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "app_ver_before": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "code": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "content_id": {
+            "type": "string"
+          },
+          "hint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "job": {
+            "type": "string"
+          },
+          "metrics": {
+            "$ref": "#/components/schemas/Metrics"
+          },
+          "net_diag": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/NetDiag"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Windows only: which local adapter faces the console, what network category Windows gave it\nand whether the firewall lets this engine in on it. Set when the console could not reach\nthis computer; the UI offers the fixes it implies. Never set off Windows."
+          },
+          "package_type": {
+            "description": "The package's type as the engine came to know it (`PS4DP`, `PS5GD`…), for a check the\nclient goes on making after the job has ended.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "patch_verdict": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PatchVerdict"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "phase": {
+            "$ref": "#/components/schemas/Phase"
+          },
+          "ps5_addr": {
+            "type": "string"
+          },
+          "reach": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ReachFail"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "With `FailReason::StreamUnreachable` from the reach check or the no-request watchdog\n(#942): where the console was sent and how its connect ended, for the client to word."
+          },
+          "reason": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/FailReason"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "replaces": {
+            "description": "With `FailReason::DestructiveGuard`: what the install would replace, so the client can ask\nin the right words: \"game\" (Sony removes it first) or \"update\" (one already applied, which\nre-applying can undo).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "retry_with_stream": {
+            "description": "The failure is the console refusing a package from its own storage and the same\npackage can safely be sent through Stream: the client may offer \"Retry with Stream\".",
+            "type": "boolean"
+          },
+          "route": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Route"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "shortened": {
+            "type": "boolean"
+          },
+          "started_at": {
+            "description": "Epoch seconds (the engine has no date crate and stamps time this way\neverywhere, e.g. session `created_at_unix`); the client formats it.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "title_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "updated_at": {
+            "minimum": 0,
+            "type": "integer"
+          },
+          "verdict": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Verdict"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "waiting": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Waiting"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "On a running job: what it is waiting for before the console has moved a byte (an earlier\ninstall's call, the reach check, the console's first request). Absent otherwise."
+          }
+        },
+        "required": [
+          "job",
+          "ps5_addr",
+          "content_id",
+          "title_id",
+          "phase",
+          "route",
+          "verdict",
+          "code",
+          "hint",
+          "reason",
+          "metrics",
+          "app_ver_before",
+          "app_ver_after",
+          "patch_verdict",
+          "shortened",
+          "retry_with_stream",
+          "started_at",
+          "updated_at"
         ],
         "type": "object"
       },
@@ -9369,6 +9693,149 @@
         ],
         "type": "object"
       },
+      "NameEntry": {
+        "description": "One name a package holds: `key` is the language (`en-US`; empty for a PS5 package's\ntop-level `titleName`) or the `param.sfo` key (`TITLE`, `TITLE_03`).",
+        "properties": {
+          "key": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "key",
+          "name"
+        ],
+        "type": "object"
+      },
+      "NameResponse": {
+        "allOf": [
+          {
+            "properties": {
+              "max_bytes": {
+                "description": "The longest name accepted, in UTF-8 bytes.",
+                "minimum": 0,
+                "type": "integer"
+              }
+            },
+            "required": [
+              "max_bytes"
+            ],
+            "type": "object"
+          },
+          {
+            "$ref": "#/components/schemas/Names"
+          }
+        ],
+        "description": "What `GET /api/pkg/name` answers."
+      },
+      "Names": {
+        "description": "A package's names as it holds them.",
+        "properties": {
+          "content_id": {
+            "type": "string"
+          },
+          "entries": {
+            "items": {
+              "$ref": "#/components/schemas/NameEntry"
+            },
+            "type": "array"
+          },
+          "name": {
+            "description": "The name the console shows unless its language has another: the default language's\n(`TITLE` on PS4).",
+            "type": "string"
+          },
+          "other_names": {
+            "description": "How many entries hold a name other than `name`.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "platform": {
+            "$ref": "#/components/schemas/Platform"
+          },
+          "refusal": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Refusal"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Why the name can't be changed; `None` when it can."
+          },
+          "room": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Room"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "How long a new name may be; `None` when it can't be changed."
+          }
+        },
+        "required": [
+          "platform",
+          "content_id",
+          "name",
+          "entries",
+          "other_names",
+          "refusal",
+          "room"
+        ],
+        "type": "object"
+      },
+      "NetCategory": {
+        "description": "A Windows network category.",
+        "enum": [
+          "public",
+          "private",
+          "domain",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "NetDiag": {
+        "description": "What was found about the link to the console.",
+        "properties": {
+          "adapter": {
+            "description": "The local adapter on the console's subnet (\"Ethernet 3\").",
+            "type": "string"
+          },
+          "allowed_by_rule": {
+            "description": "Whether an enabled inbound Allow rule for this engine (by program, or by its port) covers\nthat category's profile (`None` = not read).",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "category": {
+            "$ref": "#/components/schemas/NetCategory"
+          },
+          "firewall_enabled": {
+            "description": "Whether Windows Firewall is on for that category's profile (`None` = not read).",
+            "type": [
+              "boolean",
+              "null"
+            ]
+          },
+          "local_ip": {
+            "description": "This computer's address on that adapter.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "adapter",
+          "local_ip",
+          "category",
+          "firewall_enabled",
+          "allowed_by_rule"
+        ],
+        "type": "object"
+      },
       "NetInterface": {
         "properties": {
           "flags": {
@@ -10116,6 +10583,15 @@
         ],
         "type": "object"
       },
+      "PatchVerdict": {
+        "enum": [
+          "applied",
+          "did_not_apply",
+          "regressed",
+          "inconclusive"
+        ],
+        "type": "string"
+      },
       "PathStat": {
         "description": "What `fs.stat` says about a path (a symbolic link is followed; a dangling one is `link`).",
         "properties": {
@@ -10238,6 +10714,17 @@
           "action"
         ],
         "type": "object"
+      },
+      "Phase": {
+        "enum": [
+          "resolve",
+          "deliver",
+          "install",
+          "verify",
+          "done",
+          "failed"
+        ],
+        "type": "string"
       },
       "PictureReq": {
         "properties": {
@@ -10425,6 +10912,14 @@
             "minimum": 0,
             "type": "integer"
           },
+          "declared_size": {
+            "description": "The least this package's file (every part of a split set together) has to be for its\nown header to be true: see [`declared_size_from`]. A file shorter than this is still\nbeing copied, or was cut short. `None` when the header declares nothing.",
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
           "fingerprint": {
             "description": "Stable, inexpensive identity for this exact package variant. This is a\nBLAKE3 digest over the file size plus bounded samples from the beginning\nand end of the pkg. It deliberately differs for two patches that share\nthe same ContentID/category/APP_VER (for example an optional fix and a\nbackport), without making the UI hash a multi-gigabyte pkg before an\nupload can start.",
             "type": "string"
@@ -10611,6 +11106,13 @@
           "finished_ms"
         ],
         "type": "object"
+      },
+      "Platform": {
+        "enum": [
+          "ps5",
+          "ps4"
+        ],
+        "type": "string"
       },
       "PlayerBody": {
         "properties": {
@@ -10856,6 +11358,17 @@
         ],
         "type": "object"
       },
+      "PreviewBody": {
+        "properties": {
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url"
+        ],
+        "type": "object"
+      },
       "Problem": {
         "properties": {
           "error": {
@@ -10863,6 +11376,10 @@
           },
           "file": {
             "description": "The file inside the copy, or empty for the copy as a whole.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "For a failed check of a package, what the check looks at: `data` (the game's data\nblocks), `structure` (the image's own tables), `metadata` (what the package says about\nitself: header, digests, install manifest) or `truncated` (the file ends early).\nAbsent for any other problem.",
             "type": "string"
           }
         },
@@ -11586,6 +12103,63 @@
         ],
         "type": "object"
       },
+      "ReachCause": {
+        "description": "How the console's connect ended.",
+        "enum": [
+          "timed_out",
+          "refused",
+          "other",
+          "unknown"
+        ],
+        "type": "string"
+      },
+      "ReachFail": {
+        "description": "A stream the console could not start, in facts: the app words it in the user's language.",
+        "properties": {
+          "cause": {
+            "$ref": "#/components/schemas/ReachCause"
+          },
+          "detail": {
+            "description": "What is known beyond the usual cause: Windows' own account of the network, or that the\nengine runs in a container. English.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "origin": {
+            "description": "`http://host:port` the console was (or would have been) sent to.",
+            "type": "string"
+          },
+          "source": {
+            "description": "The install's source kind (`host_file`, `remote`, …): only a file on this computer can\nbe uploaded instead.",
+            "type": "string"
+          },
+          "stage": {
+            "$ref": "#/components/schemas/ReachStage"
+          },
+          "waited_s": {
+            "description": "Seconds waited for a request (`NoFetch`), else 0.",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "stage",
+          "origin",
+          "cause",
+          "waited_s",
+          "source"
+        ],
+        "type": "object"
+      },
+      "ReachStage": {
+        "description": "Where a stream that never started was found out.",
+        "enum": [
+          "check",
+          "no_fetch"
+        ],
+        "type": "string"
+      },
       "ReaderMetadata": {
         "description": "The subset of [`PkgMetadata`] recoverable from ranged reads — enough to\nenrich a listing row without parsing the whole file.",
         "properties": {
@@ -11674,6 +12248,22 @@
           "refusal",
           "kind",
           "emulator_missing"
+        ],
+        "type": "object"
+      },
+      "Refusal": {
+        "description": "Why a package's name can't be changed. `code` is for the app to word: `retail` (signed by\nits publisher), `patch` (a delta update, which holds no name of its own to change),\n`no_name`, or `unsupported` (anything else; `reason` says what).",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "reason": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "code",
+          "reason"
         ],
         "type": "object"
       },
@@ -12004,6 +12594,68 @@
         ],
         "type": "object"
       },
+      "RenameRequest": {
+        "properties": {
+          "all_languages": {
+            "description": "Give every language this name. Otherwise only the entries that hold the package's\ncurrent default name change, and a language with its own name keeps it.",
+            "type": "boolean"
+          },
+          "name": {
+            "description": "The new name: at most 127 bytes of UTF-8, no line breaks.",
+            "type": "string"
+          },
+          "path": {
+            "description": "The package, on the engine's computer.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "path",
+          "name"
+        ],
+        "type": "object"
+      },
+      "RenameResponse": {
+        "description": "What `POST /api/pkg/name` answers.",
+        "properties": {
+          "changed": {
+            "description": "How many of its name entries changed (0: it already had this name).",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "name": {
+            "description": "The name it has now.",
+            "type": "string"
+          },
+          "platform": {
+            "$ref": "#/components/schemas/Platform"
+          },
+          "previous": {
+            "description": "The name it had.",
+            "type": "string"
+          },
+          "warning": {
+            "description": "Set when the change is in the package and checked, but the removal of its undo journal\ncould not be confirmed saved.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "written_bytes": {
+            "description": "Bytes written into the package.",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "platform",
+          "previous",
+          "name",
+          "changed",
+          "written_bytes"
+        ],
+        "type": "object"
+      },
       "ReplaceReq": {
         "properties": {
           "addr": {
@@ -12161,6 +12813,183 @@
         ],
         "type": "object"
       },
+      "RestoreFinish": {
+        "properties": {
+          "addr": {
+            "type": "string",
+            "x-aliases": [
+              "console",
+              "host",
+              "ps5_addr"
+            ]
+          },
+          "install_ended": {
+            "description": "The install has ended (the user saw the game on the home screen): the copy aside may go.",
+            "type": "boolean"
+          },
+          "rollback": {
+            "description": "Put the package and its update back where they were (when the game is not on the home\nscreen). Only once nothing installs on the console.",
+            "type": "boolean"
+          },
+          "title_id": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "addr",
+          "title_id"
+        ],
+        "type": "object"
+      },
+      "RestoreReply": {
+        "description": "What the helper answered. Fields a state does not use are absent.",
+        "properties": {
+          "aside": {
+            "description": "The folder the package is moved into while it is installed again.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "backup": {
+            "description": "The folder with the copies of app.db and appinfo.db taken before the move.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "err": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "free_internal": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "free_volume": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "install_path": {
+            "description": "prepare: the copy aside to install.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "installed": {
+            "description": "finish: where the console installed the game.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "installed_where": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kept": {
+            "description": "finish: the copy aside, kept.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "kind": {
+            "description": "fake | ps4 | unknown (a retail PS5 package is refused).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "ok": {
+            "type": "boolean"
+          },
+          "patch": {
+            "description": "The title's update, when one sits on the same drive.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "patch_aside": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "patch_kept": {
+            "description": "finish: the update kept aside because its place was taken.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "patch_size": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "pkg": {
+            "description": "The installed package's place: `<drive>/user/app/<id>/app.pkg`.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "reason": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "size": {
+            "minimum": 0,
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "state": {
+            "description": "check: restorable | registered | record_elsewhere | not_installed | pending |\nfolder_registration | ambiguous | retail | no_room | aside_cross_device | db_unreadable |\ninvalid_title | system_title. prepare: prepared. finish: restored | rolled_back |\nnothing_pending | waiting | unsettled.",
+            "type": "string"
+          },
+          "title_id": {
+            "type": "string"
+          },
+          "volume": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "where": {
+            "description": "internal | m2 | usb | extended: the drive the package is (or was) on.",
+            "type": [
+              "string",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "ok",
+          "title_id",
+          "state"
+        ],
+        "type": "object"
+      },
       "RestoreReq": {
         "properties": {
           "addr": {
@@ -12179,6 +13008,115 @@
         },
         "required": [
           "path"
+        ],
+        "type": "object"
+      },
+      "RestoreRun": {
+        "description": "One title's restore as this engine ran it.",
+        "properties": {
+          "addr": {
+            "type": "string"
+          },
+          "error": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "install_hint": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "install_verdict": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Verdict"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "job": {
+            "description": "The install job (`/api/pkg/install/status?job=`).",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "phase": {
+            "description": "queued | installing | finishing | restored | rolled_back | pending | failed",
+            "type": "string"
+          },
+          "prepared": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RestoreReply"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "result": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/RestoreReply"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The helper's last finish answer."
+          },
+          "title_id": {
+            "type": "string"
+          },
+          "updated_at": {
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "title_id",
+          "addr",
+          "phase",
+          "updated_at"
+        ],
+        "type": "object"
+      },
+      "RestoreStart": {
+        "properties": {
+          "addr": {
+            "type": "string",
+            "x-aliases": [
+              "console",
+              "host",
+              "ps5_addr"
+            ]
+          },
+          "title_id": {
+            "description": "One title.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "title_ids": {
+            "description": "Several, restored one after the other (\"Restore all\").",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "addr"
         ],
         "type": "object"
       },
@@ -12227,6 +13165,26 @@
         },
         "required": [
           "id"
+        ],
+        "type": "object"
+      },
+      "Room": {
+        "description": "How long a new name may be in this package, in UTF-8 bytes of plain text. A rename never\nmoves anything in the package, so the room is what the package itself has: the old names'\nown bytes and the whitespace its `param.json` and manifest can give up (PS5), or the fixed\nroom of its `param.sfo` strings (PS4); never more than [`MAX_NAME_BYTES`]. A character that\nhas to be written escaped (`\"` and `\\` in `param.json`; `&`, `<` and `>` in the manifest)\ntakes more than its own bytes, so such a name can still be refused a few bytes earlier.",
+        "properties": {
+          "all_languages": {
+            "description": "Giving every language the name.",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "default_name": {
+            "description": "Changing only the entries that hold the current default name.",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
+        "required": [
+          "default_name",
+          "all_languages"
         ],
         "type": "object"
       },
@@ -15261,6 +16219,10 @@
             "description": "\"file\" or \"folder\". The caller already knows from context\n(Library/FileSystem row) so we trust the hint and skip a\nstat round-trip just to classify.",
             "type": "string"
           },
+          "remove_source": {
+            "description": "A move to a saved server (`dest_dir` is `remote://…`): once the copy is complete and\nchecked on the server, the source is deleted on the console. A failed or cancelled copy\nleaves it (download_relay::finish_move). Refused with any other destination.",
+            "type": "boolean"
+          },
           "src_path": {
             "description": "Path on the PS5 to download. For `kind: \"folder\"` this is the\nroot of the tree; for `kind: \"file\"` it's the file itself.",
             "type": "string"
@@ -15687,6 +16649,81 @@
         },
         "type": "object"
       },
+      "UninstallPlan": {
+        "allOf": [
+          {
+            "properties": {
+              "bytes": {
+                "description": "What deleting frees (a folder's: everything below it the walk read).",
+                "minimum": 0,
+                "type": [
+                  "integer",
+                  "null"
+                ]
+              },
+              "offer": {
+                "description": "The Uninstall may ask about deleting `path`.",
+                "type": "boolean"
+              },
+              "reason": {
+                "description": "Why not: `not_registered` (a package install or a system title: Uninstall removes it\nall), `gone`, `shadowmount`, `image_not_mounted`, `image_unknown`, `unsafe_path`,\n`shared_image`, `shared_folder`, `not_a_game`, `holds_other_game`, `unreadable`.",
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "size_partial": {
+                "description": "The folder walk stopped early: `bytes` is at least that much.",
+                "type": "boolean"
+              },
+              "title_id": {
+                "type": "string"
+              }
+            },
+            "required": [
+              "title_id",
+              "offer"
+            ],
+            "type": "object"
+          },
+          {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/UninstallSource"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          }
+        ],
+        "description": "The answer of `GET /api/ps5/app/uninstall-source`."
+      },
+      "UninstallSource": {
+        "description": "What a game plays from, which an Uninstall may delete.",
+        "properties": {
+          "kind": {
+            "description": "`folder` or `image`.",
+            "type": "string"
+          },
+          "mount_point": {
+            "description": "An image's mount, unmounted before the image is deleted.",
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "path": {
+            "description": "The folder, or the image file.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "kind",
+          "path"
+        ],
+        "type": "object"
+      },
       "UnlinkReq": {
         "properties": {
           "addr": {
@@ -15875,6 +16912,15 @@
           "volumes"
         ],
         "type": "object"
+      },
+      "Waiting": {
+        "description": "What a job is waiting for before the console has moved a byte, for the app to say.",
+        "enum": [
+          "previous_install",
+          "reach_check",
+          "console_fetch"
+        ],
+        "type": "string"
       },
       "WrappedGameHint": {
         "description": "A game found one level down inside an otherwise-empty wrapper folder.",
@@ -16179,12 +17225,24 @@
       "engine.collection_check_api.CheckStatus": {
         "properties": {
           "bytes_done": {
+            "description": "Of every pass together: a package's full check reads it twice (its blocks, then the\nPlayGo chunk CRCs), and both count here, so `bytes_done` reaches `bytes_total` only at\nthe end (#951).",
             "minimum": 0,
             "type": "integer"
           },
           "bytes_total": {
             "minimum": 0,
             "type": "integer"
+          },
+          "damage": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/Damage"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "With `state` `problems`, for a package: what the problems add up to. Always there for\n`method` `package`; for `bytes` only when the file is shorter than its header says."
           },
           "error": {
             "type": [
@@ -16209,6 +17267,10 @@
             "type": "string"
           },
           "path": {
+            "type": "string"
+          },
+          "phase": {
+            "description": "For `method` `package` while it runs: `blocks` (every block against its digest) or\n`playgo` (the PlayGo chunk CRCs, a second read of the package). Absent otherwise.",
             "type": "string"
           },
           "problems": {
@@ -16763,6 +17825,21 @@
           "unknown"
         ],
         "type": "string"
+      },
+      "engine.payloads_api.AddBody": {
+        "properties": {
+          "file_name": {
+            "type": "string"
+          },
+          "url": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "url",
+          "file_name"
+        ],
+        "type": "object"
       },
       "engine.pldmgr_api.DeleteReq": {
         "properties": {
@@ -19361,7 +20438,7 @@
     },
     "/api/collection/organize/apply": {
       "post": {
-        "description": "POST /api/collection/organize/apply: runs the chosen moves of a preview. It does not plan\nagain: the preview already read every package, and over a network that took minutes. A move\nruns only if its file is as the preview saw it and its new name is still free.",
+        "description": "POST /api/collection/organize/apply: runs the chosen moves of a preview. It does not plan\nagain: the preview already read every package, and over a network that took minutes. A move\nruns only if its file is as the preview saw it and its new name is still free.\n\nAnswers `{moved, failed, dropped, kept_dirs, logs, undo_incomplete?}`. `moved` is what moved,\nwhatever happened afterwards: when a folder's undo log could not be saved once its moves were\nmade, the folder is listed in `undo_incomplete` (as \"folder: why\") and Undo may not put all of\nit back. `dropped` are moves that were left alone.",
         "requestBody": {
           "content": {
             "application/json": {
@@ -19556,7 +20633,7 @@
     },
     "/api/collection/organize/revert": {
       "post": {
-        "description": "POST /api/collection/organize/revert: undoes one run from its log.",
+        "description": "POST /api/collection/organize/revert: undoes one run from its log. Answers\n`{reverted, problems, note?}`: `reverted` is what went back, also when the run could not be\nmarked as undone afterwards (`note` then says so).",
         "requestBody": {
           "content": {
             "application/json": {
@@ -19996,6 +21073,7 @@
             "description": "Any other failure, in the same shape."
           }
         },
+        "summary": "Back up the chosen parts of a console (saves, captures, payload settings, homebrew) into a folder on this computer",
         "tags": [
           "console-backup"
         ],
@@ -20173,6 +21251,7 @@
             "description": "Any other failure, in the same shape."
           }
         },
+        "summary": "Put a console backup from this computer back onto a console",
         "tags": [
           "console-backup"
         ],
@@ -20289,6 +21368,7 @@
             "description": "Any other failure, in the same shape."
           }
         },
+        "summary": "How the running console backup or restore stands",
         "tags": [
           "console-backup"
         ],
@@ -21301,6 +22381,7 @@
     },
     "/api/drive/delete": {
       "post": {
+        "description": "Deletes the drive (its files stay). When the console does not answer and this device keeps a\nfolder of it, that folder stops syncing and the console deletes the drive once it answers:\nthe answer then has `later`, and a `note` saying so.",
         "requestBody": {
           "content": {
             "application/json": {
@@ -21461,6 +22542,7 @@
     },
     "/api/drive/leave": {
       "post": {
+        "description": "Takes a folder out of the drive. When the console does not answer, this device's own folder\nstops syncing anyway (its files stay) and the console drops it once it answers: the answer\nthen has `later`, and a `note` saying so.",
         "requestBody": {
           "content": {
             "application/json": {
@@ -23218,7 +24300,7 @@
     },
     "/api/fpkg/extract": {
       "post": {
-        "description": "POST /api/fpkg/extract — unpack a game archive into the output folder, as a job. Done's\n`dest` is the game found inside (a folder or an image), which the build then reads; the\nunpack folder is removed by `/api/fpkg/extract/cleanup`, on failure, or by a later run.",
+        "description": "POST /api/fpkg/extract — unpack a game archive into the output folder, as a job. Done's\n`dest` is the game found inside (a folder or an image), which the build then reads; the\nunpack folder is removed by `/api/fpkg/extract/cleanup`, on failure, or by a later run.\n\nWith `free_archive` the archive is deleted as it is unpacked (`archive_free`): everything\nthat can be checked is checked first and refused with nothing changed (400, or 409 while\nsomething else uses the archive). The game is unpacked into `<archive>.unpacked` in the\noutput folder, which nothing removes but `/api/fpkg/extract/cleanup` with `kept`. A job\nthat fails with part of the archive gone has `error_reason: \"archive_partly_deleted\"` and\nthe folder holding what was unpacked in `error_detail`.",
         "requestBody": {
           "content": {
             "application/json": {
@@ -23248,6 +24330,10 @@
             "$ref": "#/components/responses/Error",
             "description": "Refused by the engine's address, Origin or Host guards."
           },
+          "409": {
+            "$ref": "#/components/responses/Error",
+            "description": "Conflict"
+          },
           "500": {
             "$ref": "#/components/responses/Error",
             "description": "Engine error"
@@ -23274,7 +24360,7 @@
     },
     "/api/fpkg/extract/cleanup": {
       "post": {
-        "description": "POST /api/fpkg/extract/cleanup — remove an unpack folder once its build is over.",
+        "description": "POST /api/fpkg/extract/cleanup — remove an unpack folder once its build is over. A folder\nan unpack with `free_archive` made is removed only with `kept`, and only one this engine\nmade since it started; any other path is refused.",
         "requestBody": {
           "content": {
             "application/json": {
@@ -23319,6 +24405,67 @@
           }
         },
         "summary": "Remove an unpack folder once its build is over",
+        "tags": [
+          "workshop"
+        ],
+        "x-ps5upload": {
+          "access": "loopback",
+          "response_schema": "literal"
+        }
+      }
+    },
+    "/api/fpkg/extract/free-check": {
+      "post": {
+        "description": "POST /api/fpkg/extract/free-check — whether an archive can be unpacked with its space given\nback. Asks before `free_archive` on `/api/fpkg/extract`, and says how it would go: `mode` is\n`entries` (a `.zip`: freed file by file), `blocks` (a `.7z` of more than one block: block by\nblock), `parts` (a multi-part `.rar`: part by part) or `end` (anything else: deleted once the\nunpack is finished and checked). `parts` counts the blocks or parts (1 otherwise); `game` is\n`folder` or `image`. `archive_bytes` is the archive's size (every part), `unpacked` what it\nunpacks to, `same_drive` whether it sits on the output folder's drive (only then does its\nfreed space count), `needed` the free bytes the unpack and the build after it need, and\n`free` the output folder's free bytes (null when they could not be read). Changes nothing.\n400 with the plain reason when it can't be done, including too little room.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FreeCheckReq"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "archive_bytes": {},
+                    "free": {},
+                    "game": {},
+                    "mode": {},
+                    "needed": {},
+                    "parts": {},
+                    "same_drive": {},
+                    "unpacked": {}
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error",
+            "description": "Bad request"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error",
+            "description": "Refused by the engine's address, Origin or Host guards."
+          },
+          "500": {
+            "$ref": "#/components/responses/Error",
+            "description": "Engine error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error",
+            "description": "Any other failure, in the same shape."
+          }
+        },
+        "summary": "Whether an archive can be unpacked with its space given back",
         "tags": [
           "workshop"
         ],
@@ -24469,7 +25616,7 @@
           "play-together"
         ],
         "x-ps5upload": {
-          "access": "host-checked",
+          "access": "loopback",
           "console": {
             "aliases": [
               "console",
@@ -24519,7 +25666,7 @@
           "play-together"
         ],
         "x-ps5upload": {
-          "access": "host-checked",
+          "access": "loopback",
           "console": {
             "aliases": [
               "console",
@@ -24576,7 +25723,7 @@
           "play-together"
         ],
         "x-ps5upload": {
-          "access": "host-checked",
+          "access": "loopback",
           "response_schema": "literal"
         }
       }
@@ -24625,7 +25772,7 @@
           "play-together"
         ],
         "x-ps5upload": {
-          "access": "host-checked",
+          "access": "loopback",
           "console": {
             "aliases": [
               "console",
@@ -24682,7 +25829,7 @@
           "play-together"
         ],
         "x-ps5upload": {
-          "access": "host-checked",
+          "access": "loopback",
           "console": {
             "aliases": [
               "console",
@@ -24744,7 +25891,7 @@
           "play-together"
         ],
         "x-ps5upload": {
-          "access": "host-checked",
+          "access": "loopback",
           "console": {
             "aliases": [
               "console",
@@ -24799,7 +25946,7 @@
           "play-together"
         ],
         "x-ps5upload": {
-          "access": "host-checked",
+          "access": "loopback",
           "console": {
             "aliases": [
               "console",
@@ -24870,11 +26017,12 @@
             "description": "Any other failure, in the same shape."
           }
         },
+        "summary": "The profiles signed in on a console and which one each guest plays as",
         "tags": [
           "play-together"
         ],
         "x-ps5upload": {
-          "access": "host-checked",
+          "access": "loopback",
           "console": {
             "aliases": [
               "console",
@@ -24919,7 +26067,7 @@
           "play-together"
         ],
         "x-ps5upload": {
-          "access": "host-checked",
+          "access": "loopback",
           "response_schema": "websocket",
           "websocket": true
         }
@@ -24927,7 +26075,7 @@
     },
     "/api/join/settings": {
       "post": {
-        "description": "`POST /api/join/settings {block_system_buttons?, max_players?, stream_seat?,\ninvites?, internet_invites?, hub_url?, page_base?, stun?, reset?, upnp?, video_track?}`: the host's choices (every\nconsole). Fewer players lets nobody go; it only stops new ones. `stream_seat` off moves a friend\non the stream's controller to a pad of their own. `invites` is \"Invites work\": \"anywhere\" (the\none link, through the hub) or \"wifi\" (the home network's link only; 400 `invites` otherwise),\nthe same choice as `internet_invites` on or off, and the one setting kept across restarts.\n\"wifi\" closes the internet rooms (guests already in keep playing). `hub_url` is the signalling hub (`wss://…`; 400 `hub_url`\notherwise), `page_base` where the guest pages are (`https://play.example.com/`: links open\n`<page_base>join/`, `pad/` or `share/`; `http://` only to this computer, no query or fragment;\n400 `page_base` otherwise), `stun` the STUN servers (`host:port`, at most 8; empty: none),\n`reset` a list of `hub_url`, `page_base` and `stun` to put back to the default (an empty\n`hub_url` or `page_base` does the same; 400 `reset` for another name). The hub, page base and\nSTUN servers are kept across restarts while they differ from the default, which a self-hosted\nengine may take from `PS5UPLOAD_HUB_URL` and `PS5UPLOAD_PAGE_BASE`; `settings.sources` says\nwhich each is (\"custom\", \"environment\" or \"default\"). `upnp` is whether the\nrouter is asked for a port, `video_track` whether internet guests get the picture as a video\ntrack (new connections; the data channel otherwise).\n\n`guest_profiles` with `addr` (\"Guests play as\" on that console): each guest's player gets the\nprofile the host chose (`{player: 2-4, user, name, owner}`; a player left out: the TV asks).\nOnly signed-in profiles can be seated. The host's own profile (the one in front) needs `owner`\ntrue, the host's confirmation that the guest may use its saves and trophies (409\n`owner_confirm` otherwise; `owner_unknown` when the console does not say which one is in front,\nfor any profile newly chosen without `owner`); 400 `addr` without a console, 400 `player`, `user` or `duplicate`\nfor a list that is not one profile per player.",
+        "description": "`POST /api/join/settings {block_system_buttons?, max_players?, stream_seat?,\ninvites?, internet_invites?, hub_url?, page_base?, stun?, reset?, upnp?, video_track?}`: the host's choices (every\nconsole). Fewer players lets nobody go; it only stops new ones. `stream_seat` off moves a friend\non the stream's controller to a pad of their own. `invites` is \"Invites work\": \"anywhere\" (the\none link, through the hub) or \"wifi\" (the home network's link only; 400 `invites` otherwise),\nthe same choice as `internet_invites` on or off. Every setting here is kept across restarts\n(and for the next Play Together) except `guest_profiles`.\n\"wifi\" closes the internet rooms (guests already in keep playing). `hub_url` is the signalling hub (`wss://…`; 400 `hub_url`\notherwise), `page_base` where the guest pages are (`https://play.example.com/`: links open\n`<page_base>join/`, `pad/` or `share/`; `http://` only to this computer, no query or fragment;\n400 `page_base` otherwise), `stun` the STUN servers (`host:port`, at most 8; empty: none),\n`reset` a list of `hub_url`, `page_base` and `stun` to put back to the default (an empty\n`hub_url` or `page_base` does the same; 400 `reset` for another name). The hub, page base and\nSTUN servers are kept across restarts while they differ from the default, which a self-hosted\nengine may take from `PS5UPLOAD_HUB_URL` and `PS5UPLOAD_PAGE_BASE`; `settings.sources` says\nwhich each is (\"custom\", \"environment\" or \"default\"). `upnp` is whether the\nrouter is asked for a port, `video_track` whether internet guests get the picture as a video\ntrack (new connections; the data channel otherwise).\n\n`guest_profiles` with `addr` (\"Guests play as\" on that console): each guest's player gets the\nprofile the host chose (`{player: 2-4, user, name, owner}`; a player left out: the TV asks).\nOnly signed-in profiles can be seated. The host's own profile (the one in front) needs `owner`\ntrue, the host's confirmation that the guest may use its saves and trophies (409\n`owner_confirm` otherwise; `owner_unknown` when the console does not say which one is in front,\nfor any profile newly chosen without `owner`); 400 `addr` without a console, 400 `player`, `user` or `duplicate`\nfor a list that is not one profile per player.",
         "requestBody": {
           "content": {
             "application/json": {
@@ -24974,7 +26122,7 @@
           "play-together"
         ],
         "x-ps5upload": {
-          "access": "host-checked",
+          "access": "loopback",
           "console": {
             "aliases": [
               "console",
@@ -27973,8 +29121,32 @@
       }
     },
     "/api/payloads/repos": {
-      "post": {
-        "description": "POST /api/payloads/repos: refused (410 `payload_downloads_removed`). Repos added earlier stay\nlisted and can be removed.",
+      "get": {
+        "description": "GET /api/payloads/repos?check=1&force=1 → {sources}: the payload sources the user added.\nWithout `check`, nothing asks the network (a release list read in the last ten minutes is\nshown). With it, each source's releases are read (a list from the last ten minutes is used\nunless `force`).",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "check",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          },
+          {
+            "in": "query",
+            "name": "force",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            }
+          }
+        ],
         "responses": {
           "200": {
             "description": "Success. The handler builds this answer in a way the generator cannot read."
@@ -27983,35 +29155,82 @@
             "$ref": "#/components/responses/Error",
             "description": "Refused by the engine's address, Origin or Host guards."
           },
-          "410": {
-            "content": {
-              "application/json": {
-                "schema": {
-                  "anyOf": [
-                    {
-                      "$ref": "#/components/schemas/Error"
-                    },
-                    {
-                      "properties": {
-                        "code": {},
-                        "error": {
-                          "type": "string"
-                        }
-                      },
-                      "type": "object"
-                    }
-                  ]
-                }
+          "default": {
+            "$ref": "#/components/responses/Error",
+            "description": "Any other failure, in the same shape."
+          }
+        },
+        "summary": "{sources}: the payload sources the user added",
+        "tags": [
+          "payloads"
+        ],
+        "x-ps5upload": {
+          "access": "loopback",
+          "response_schema": "none"
+        }
+      },
+      "post": {
+        "description": "POST /api/payloads/repos {url, file_name} → the source: adds a project as a payload source\nwith the file picked from its releases (adding one again changes its file). Asks no network.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/engine.payloads_api.AddBody"
               }
-            },
-            "description": "Gone"
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Success. The handler builds this answer in a way the generator cannot read."
+          },
+          "403": {
+            "$ref": "#/components/responses/Error",
+            "description": "Refused by the engine's address, Origin or Host guards."
           },
           "default": {
             "$ref": "#/components/responses/Error",
             "description": "Any other failure, in the same shape."
           }
         },
-        "summary": "Refused (410 `payload_downloads_removed`)",
+        "summary": "The source: adds a project as a payload source with the file picked from its releases (adding one again changes its file)",
+        "tags": [
+          "payloads"
+        ],
+        "x-ps5upload": {
+          "access": "loopback",
+          "response_schema": "none"
+        }
+      }
+    },
+    "/api/payloads/repos/preview": {
+      "post": {
+        "description": "POST /api/payloads/repos/preview {url} → the project's newest releases with `.elf` and `.bin`\nfiles, for picking the file. Saves nothing.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/PreviewBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Success. The handler builds this answer in a way the generator cannot read."
+          },
+          "403": {
+            "$ref": "#/components/responses/Error",
+            "description": "Refused by the engine's address, Origin or Host guards."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error",
+            "description": "Any other failure, in the same shape."
+          }
+        },
+        "summary": "The project's newest releases with `.elf` and `.bin` files, for picking the file",
         "tags": [
           "payloads"
         ],
@@ -28023,7 +29242,7 @@
     },
     "/api/payloads/repos/{id}": {
       "delete": {
-        "description": "DELETE /api/payloads/repos/{id} → {removed}",
+        "description": "DELETE /api/payloads/repos/{id} → {removed}: the source and its downloaded file.",
         "parameters": [
           {
             "in": "path",
@@ -28047,7 +29266,88 @@
             "description": "Any other failure, in the same shape."
           }
         },
-        "summary": "{removed}",
+        "summary": "{removed}: the source and its downloaded file",
+        "tags": [
+          "payloads"
+        ],
+        "x-ps5upload": {
+          "access": "loopback",
+          "response_schema": "none"
+        }
+      }
+    },
+    "/api/payloads/repos/{id}/download": {
+      "post": {
+        "description": "POST /api/payloads/repos/{id}/download → the source: downloads the newest release's file into\nthe payload folder (through a temporary file, checked against its size and the release's\nchecksum file when there is one). The copy it replaces stays if anything fails.",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success. The handler builds this answer in a way the generator cannot read."
+          },
+          "403": {
+            "$ref": "#/components/responses/Error",
+            "description": "Refused by the engine's address, Origin or Host guards."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error",
+            "description": "Any other failure, in the same shape."
+          }
+        },
+        "tags": [
+          "payloads"
+        ],
+        "x-ps5upload": {
+          "access": "loopback",
+          "response_schema": "none"
+        }
+      }
+    },
+    "/api/payloads/repos/{id}/file": {
+      "put": {
+        "description": "PUT /api/payloads/repos/{id}/file {file_name} → the source: change the file it downloads, or\npick it for a source added before 12.6.0.",
+        "parameters": [
+          {
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/FileBody"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Success. The handler builds this answer in a way the generator cannot read."
+          },
+          "403": {
+            "$ref": "#/components/responses/Error",
+            "description": "Refused by the engine's address, Origin or Host guards."
+          },
+          "default": {
+            "$ref": "#/components/responses/Error",
+            "description": "Any other failure, in the same shape."
+          }
+        },
+        "summary": "The source: change the file it downloads, or pick it for a source added before 12.6.0",
         "tags": [
           "payloads"
         ],
@@ -28498,6 +29798,7 @@
             "description": "Any other failure, in the same shape."
           }
         },
+        "summary": "A payload's newest release",
         "tags": [
           "payloads"
         ],
@@ -28915,6 +30216,7 @@
     },
     "/api/pkg/install/status": {
       "get": {
+        "description": "`GET /api/pkg/install/status?job=`: how an install job stands. While it runs, `phase` says\nwhere it is, and `waiting` what it waits for before the console has moved a byte:\n`previous_install` (an earlier install's call has to end first), `reach_check` (asking the\nhelper whether the console reaches this computer) or `console_fetch` (the console has the\nlink and has not asked for the package yet). A failed job has `reason`: `stream_unreachable`\nwhen the console could not fetch from this computer, with `reach` saying where it was sent\n(`origin`), at which `stage` it was found (`check` before the link was handed over, or\n`no_fetch` after the console never asked for it), how its connect ended (`cause`) and how\nlong it was waited for (`waited_s`), and `hint` the message; `cancelled` when it was\nstopped. 404 for a job this engine does not know (finished ones are kept for a while).",
         "parameters": [
           {
             "in": "query",
@@ -28929,10 +30231,12 @@
           "200": {
             "content": {
               "application/json": {
-                "schema": {}
+                "schema": {
+                  "$ref": "#/components/schemas/InstallStatus"
+                }
               }
             },
-            "description": "Success: JSON the engine does not describe field by field, often what the console sent."
+            "description": "Success."
           },
           "403": {
             "$ref": "#/components/responses/Error",
@@ -28974,7 +30278,7 @@
         ],
         "x-ps5upload": {
           "access": "loopback",
-          "response_schema": "json-unknown"
+          "response_schema": "struct"
         }
       }
     },
@@ -29319,6 +30623,115 @@
         "x-ps5upload": {
           "access": "loopback",
           "response_schema": "literal"
+        }
+      }
+    },
+    "/api/pkg/name": {
+      "get": {
+        "description": "`GET /api/pkg/name?path=`: the names a package on this computer holds (one per language)\nand whether they can be changed. `room` is how long a new name may be in this package, in\nUTF-8 bytes (`default_name`: changing the default name only; `all_languages`). `refusal` is set when they can't: `code` is `retail` for an\nofficial package, `patch` for a delta update, `no_name`, or `unsupported` with the reason.",
+        "parameters": [
+          {
+            "description": "The package, on the engine's computer.",
+            "in": "query",
+            "name": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/NameResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error",
+            "description": "Bad request"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error",
+            "description": "Refused by the engine's address, Origin or Host guards."
+          },
+          "409": {
+            "$ref": "#/components/responses/Error",
+            "description": "Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error",
+            "description": "Engine error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error",
+            "description": "Any other failure, in the same shape."
+          }
+        },
+        "summary": "The names a package on this computer holds (one per language) and whether they can be changed",
+        "tags": [
+          "install"
+        ],
+        "x-ps5upload": {
+          "access": "loopback",
+          "response_schema": "struct"
+        }
+      },
+      "post": {
+        "description": "`POST /api/pkg/name` `{path, name, all_languages}`: gives a fake package on this computer\nanother name, in place. 409 while the package is in use (an install of it has not finished,\nhowever long ago the PS5 last read from it; an upload or a build reads it, or another program\nhas it open), with what holds it and how to free it; 400 with the reason when it can't be done (an\nofficial package, a name that does not fit). On any failure the file is as it was.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RenameRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RenameResponse"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error",
+            "description": "Bad request"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error",
+            "description": "Refused by the engine's address, Origin or Host guards."
+          },
+          "409": {
+            "$ref": "#/components/responses/Error",
+            "description": "Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error",
+            "description": "Engine error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error",
+            "description": "Any other failure, in the same shape."
+          }
+        },
+        "summary": "Gives a fake package on this computer another name, in place",
+        "tags": [
+          "install"
+        ],
+        "x-ps5upload": {
+          "access": "loopback",
+          "response_schema": "struct"
         }
       }
     },
@@ -31249,6 +32662,513 @@
         }
       }
     },
+    "/api/ps5/app/restore": {
+      "post": {
+        "description": "`POST /api/ps5/app/restore {addr, title_id | title_ids}`: put games installed from a package\nback on the home screen by installing the package already on the console again (no\ndownload). The first title is checked and prepared before this answers: a refusal is 409 with\nthe helper's `restore` answer and nothing changed; another install on the console is 409\n`busy`. Then `{ok, job, prepared, queued}`: `job` is the first title's install\n(`/api/pkg/install/status`); the others follow one after the other. Each title's progress:\n`GET /api/ps5/app/restore/status`.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RestoreStart"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "job": {},
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "prepared": {},
+                    "queued": {
+                      "items": {
+                        "type": "string"
+                      },
+                      "type": "array"
+                    }
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error",
+            "description": "Bad request"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error",
+            "description": "Refused by the engine's address, Origin or Host guards."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "properties": {
+                        "error": {
+                          "type": "string"
+                        },
+                        "ok": {
+                          "type": "boolean"
+                        },
+                        "reason": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    },
+                    {
+                      "properties": {
+                        "error": {},
+                        "ok": {
+                          "type": "boolean"
+                        },
+                        "restore": {}
+                      },
+                      "type": "object"
+                    },
+                    {
+                      "properties": {
+                        "error": {
+                          "type": "string"
+                        },
+                        "job": {},
+                        "ok": {
+                          "type": "boolean"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error",
+            "description": "Engine error"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error",
+            "description": "The console or remote end failed"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error",
+            "description": "Any other failure, in the same shape."
+          }
+        },
+        "summary": "Put games installed from a package back on the home screen by installing the package already on the console again (no download)",
+        "tags": [
+          "games"
+        ],
+        "x-ps5upload": {
+          "access": "loopback",
+          "console": {
+            "aliases": [
+              "console",
+              "host",
+              "ps5_addr"
+            ],
+            "in": "body",
+            "name": "addr",
+            "required": true
+          },
+          "response_schema": "literal"
+        }
+      }
+    },
+    "/api/ps5/app/restore/candidates": {
+      "get": {
+        "description": "`GET /api/ps5/app/restore/candidates?addr=`: every title with an app folder on the internal\ndrive, USB extended storage or M.2 that app.db does not list, with the helper's check of each\n(`check.state` `restorable` can be put back; `pending` has a restore to finish). Read-only.\napp.db must answer in full: a partial list could make a listed game look missing.",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "addr",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "x-aliases": [
+              "console",
+              "host",
+              "ps5_addr"
+            ]
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "properties": {
+                    "ok": {
+                      "type": "boolean"
+                    },
+                    "titles": {}
+                  },
+                  "type": "object"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error",
+            "description": "Bad request"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error",
+            "description": "Refused by the engine's address, Origin or Host guards."
+          },
+          "409": {
+            "$ref": "#/components/responses/Error",
+            "description": "Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error",
+            "description": "Engine error"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error",
+            "description": "The console or remote end failed"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error",
+            "description": "Any other failure, in the same shape."
+          }
+        },
+        "tags": [
+          "games"
+        ],
+        "x-ps5upload": {
+          "access": "loopback",
+          "console": {
+            "aliases": [
+              "console",
+              "host",
+              "ps5_addr"
+            ],
+            "in": "query",
+            "name": "addr",
+            "required": true
+          },
+          "response_schema": "literal"
+        }
+      }
+    },
+    "/api/ps5/app/restore/check": {
+      "get": {
+        "description": "`GET /api/ps5/app/restore/check?addr=&title_id=`: whether a game installed from a package can\nbe put back on the home screen, read-only. The helper's answer: `state` is `restorable`, or\nwhy not (`registered`: it is on the home screen; `record_elsewhere`: the console still has a\nrecord of it; `not_installed`, `pending` (an earlier restore did not finish),\n`folder_registration`, `ambiguous`, `retail`, `no_room`, `aside_cross_device`, `db_unreadable`,\n`invalid_title`, `system_title`), with `pkg`, `size`, `where`, `kind`, `patch` and the free\nspace. A helper without the method answers 409 `restore_unsupported`.",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "addr",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "x-aliases": [
+              "console",
+              "host",
+              "ps5_addr"
+            ]
+          },
+          {
+            "in": "query",
+            "name": "title_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestoreReply"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error",
+            "description": "Bad request"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error",
+            "description": "Refused by the engine's address, Origin or Host guards."
+          },
+          "409": {
+            "$ref": "#/components/responses/Error",
+            "description": "Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error",
+            "description": "Engine error"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error",
+            "description": "The console or remote end failed"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error",
+            "description": "Any other failure, in the same shape."
+          }
+        },
+        "summary": "Whether a game installed from a package can be put back on the home screen, read-only",
+        "tags": [
+          "games"
+        ],
+        "x-ps5upload": {
+          "access": "loopback",
+          "console": {
+            "aliases": [
+              "console",
+              "host",
+              "ps5_addr"
+            ],
+            "in": "query",
+            "name": "addr",
+            "required": true
+          },
+          "response_schema": "struct"
+        }
+      }
+    },
+    "/api/ps5/app/restore/finish": {
+      "post": {
+        "description": "`POST /api/ps5/app/restore/finish {addr, title_id, rollback, install_ended}`: finish a restore\nleft `pending` (an engine restart, a slow database). With `install_ended` the copy aside is\ndeleted once app.db lists the game and a package is in place; with `rollback` the package and\nupdate go back where they were, only while app.db does not list the game and the place is\nfree; with neither, nothing changes and the answer says where it stands. Refused (409 `busy`)\nwhile an install or a restore runs on that console. The helper's `finish` answer.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RestoreFinish"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestoreReply"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error",
+            "description": "Bad request"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error",
+            "description": "Refused by the engine's address, Origin or Host guards."
+          },
+          "409": {
+            "$ref": "#/components/responses/Error",
+            "description": "Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error",
+            "description": "Engine error"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error",
+            "description": "The console or remote end failed"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error",
+            "description": "Any other failure, in the same shape."
+          }
+        },
+        "summary": "Finish a restore left `pending` (an engine restart, a slow database)",
+        "tags": [
+          "games"
+        ],
+        "x-ps5upload": {
+          "access": "loopback",
+          "console": {
+            "aliases": [
+              "console",
+              "host",
+              "ps5_addr"
+            ],
+            "in": "body",
+            "name": "addr",
+            "required": true
+          },
+          "response_schema": "struct"
+        }
+      }
+    },
+    "/api/ps5/app/restore/status": {
+      "get": {
+        "description": "`GET /api/ps5/app/restore/status?addr=&title_id=`: how this engine's restore of a title stands.\n`phase`: `queued`, `installing` (with `job`, the install's id for `/api/pkg/install/status`;\n`install` is that status), `finishing`, `restored`, `rolled_back` (the install did not take, the\npackage is back where it was), `pending` (the console may still be working on it, or the\ndatabase did not list the game in time: nothing was deleted; finish it later), `failed`\n(refused before anything moved: `error`, and the helper's `result`). 404 when this engine ran\nnone (after a restart: the check's `pending` state says an unfinished one is on the console).",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "addr",
+            "required": true,
+            "schema": {
+              "type": "string"
+            },
+            "x-aliases": [
+              "console",
+              "host",
+              "ps5_addr"
+            ]
+          },
+          {
+            "in": "query",
+            "name": "title_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RestoreRun"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error",
+            "description": "Bad request"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error",
+            "description": "Refused by the engine's address, Origin or Host guards."
+          },
+          "404": {
+            "$ref": "#/components/responses/Error",
+            "description": "Not found"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error",
+            "description": "Any other failure, in the same shape."
+          }
+        },
+        "summary": "How this engine's restore of a title stands",
+        "tags": [
+          "games"
+        ],
+        "x-ps5upload": {
+          "access": "loopback",
+          "console": {
+            "aliases": [
+              "console",
+              "host",
+              "ps5_addr"
+            ],
+            "in": "query",
+            "name": "addr",
+            "required": true
+          },
+          "response_schema": "struct"
+        }
+      }
+    },
+    "/api/ps5/app/uninstall-source": {
+      "get": {
+        "description": "`GET /api/ps5/app/uninstall-source?addr=&title_id=`: whether Uninstall can also delete the\nfolder or disk image the title plays from, what that is and its size. Read-only. A folder's\nsize is walked (up to 90 s; `size_partial` past that). `offer: false` with a `reason` when\nthere is nothing to delete: a package install (Uninstall removes it all), a system title,\na ShadowMount+ title, a source already gone, or one that is not safe to delete.",
+        "parameters": [
+          {
+            "in": "query",
+            "name": "addr",
+            "required": false,
+            "schema": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "x-aliases": [
+              "console",
+              "host"
+            ]
+          },
+          {
+            "in": "query",
+            "name": "title_id",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/UninstallPlan"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error",
+            "description": "Bad request"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error",
+            "description": "Refused by the engine's address, Origin or Host guards."
+          },
+          "500": {
+            "$ref": "#/components/responses/Error",
+            "description": "Engine error"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error",
+            "description": "Any other failure, in the same shape."
+          }
+        },
+        "summary": "Whether Uninstall can also delete the folder or disk image the title plays from, what that is and its size",
+        "tags": [
+          "games"
+        ],
+        "x-ps5upload": {
+          "access": "loopback",
+          "console": {
+            "aliases": [
+              "console",
+              "host"
+            ],
+            "in": "query",
+            "name": "addr",
+            "required": true
+          },
+          "response_schema": "struct"
+        }
+      }
+    },
     "/api/ps5/app/unregister": {
       "post": {
         "requestBody": {
@@ -31294,6 +33214,29 @@
           "403": {
             "$ref": "#/components/responses/Error",
             "description": "Refused by the engine's address, Origin or Host guards."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "anyOf": [
+                    {
+                      "$ref": "#/components/schemas/Error"
+                    },
+                    {
+                      "properties": {
+                        "error": {},
+                        "reason": {
+                          "type": "string"
+                        }
+                      },
+                      "type": "object"
+                    }
+                  ]
+                }
+              }
+            },
+            "description": "Conflict"
           },
           "502": {
             "$ref": "#/components/responses/Error",
@@ -31986,10 +33929,13 @@
               "application/json": {
                 "schema": {
                   "properties": {
+                    "failed": {},
                     "ok": {
                       "type": "boolean"
                     },
+                    "partial": {},
                     "restored": {},
+                    "skipped": {},
                     "tag": {}
                   },
                   "type": "object"
@@ -33857,6 +35803,74 @@
             "required": true
           },
           "response_schema": "literal"
+        }
+      }
+    },
+    "/api/ps5/convert-ampr-emu": {
+      "post": {
+        "description": "POST /api/ps5/convert-ampr-emu {host} — put the AMPR emulator on the console for Convert on\nthe PS5. That is ampr_emu, the release the desktop app installs into games (digest checked,\nfrom this computer's cache or downloaded), written under\n/data/ps5upload/convert/runtime/ampr_emu-<version>/, so Convert on the PS5 can keep an\nemulator when it unpacks asset packs. Only on request, never on its own. Answers {version,\npath, written}; written is false when that version was already there. 502 when it could not\nbe downloaded or written; needs the helper up.",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConvertRuntimeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/engine.convert_runtime.Outcome"
+                }
+              }
+            },
+            "description": "Success."
+          },
+          "400": {
+            "$ref": "#/components/responses/Error",
+            "description": "Bad request"
+          },
+          "403": {
+            "$ref": "#/components/responses/Error",
+            "description": "Refused by the engine's address, Origin or Host guards."
+          },
+          "409": {
+            "$ref": "#/components/responses/Error",
+            "description": "Conflict"
+          },
+          "500": {
+            "$ref": "#/components/responses/Error",
+            "description": "Engine error"
+          },
+          "502": {
+            "$ref": "#/components/responses/Error",
+            "description": "The console or remote end failed"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error",
+            "description": "Any other failure, in the same shape."
+          }
+        },
+        "summary": "Put the AMPR emulator on the console for Convert on the PS5",
+        "tags": [
+          "console-tools"
+        ],
+        "x-ps5upload": {
+          "access": "loopback",
+          "console": {
+            "aliases": [
+              "console",
+              "addr"
+            ],
+            "in": "body",
+            "name": "host",
+            "required": true
+          },
+          "response_schema": "struct"
         }
       }
     },
@@ -37718,7 +39732,7 @@
     },
     "/api/ps5/hw/storage": {
       "get": {
-        "description": "\"Console Storage\" aggregate. Same shape PS5 Settings shows: total\nacross `/user effective + /system_data + /system_ex`, free across\nthe same set, plus the per-partition breakdown for diagnostics.",
+        "description": "`statfs` counters for `/user`, `/system_data` and `/system_ex`. These are not the figures of the PS5's Settings > Storage screen, which can show a smaller drive and less free space. `user_free_bytes` already leaves out `user_reserved_bytes`; do not subtract it again. For how much a copy can take, read `allocatable_bytes` and `likely_fits_bytes` in `/api/ps5/volumes`.",
         "parameters": [
           {
             "in": "query",
@@ -37760,7 +39774,7 @@
             "description": "Any other failure, in the same shape."
           }
         },
-        "summary": "The console's internal storage, as PS5 Settings counts it",
+        "summary": "The console's internal storage, as its filesystem counts it",
         "tags": [
           "hardware"
         ],
@@ -38107,6 +40121,7 @@
             "description": "Any other failure, in the same shape."
           }
         },
+        "summary": "Remove a game Kraken Mount mounts, deleting its source",
         "tags": [
           "console-tools"
         ],
@@ -39111,6 +41126,7 @@
             "description": "Any other failure, in the same shape."
           }
         },
+        "summary": "Set Payload Manager's boot autoload switch and list, and read it back",
         "tags": [
           "payloads"
         ],
@@ -40830,6 +42846,7 @@
             "description": "Any other failure, in the same shape."
           }
         },
+        "summary": "What Remote Play sends the console's controller, per controller",
         "tags": [
           "remote-play"
         ],
@@ -41945,7 +43962,7 @@
     },
     "/api/ps5/rp/pad-link/kick": {
       "post": {
-        "description": "`POST /api/ps5/rp/pad-link/kick {id}`: let a phone go, and keep it out until the link closes\n(the link's key alone would let it back in with one tap).",
+        "description": "`POST /api/ps5/rp/pad-link/kick {id}`: let a phone go, and keep it out until the link closes\n(the link's key alone would let it back in with one tap). One on the home network: the QR code\ngets a new key, since the phone has the old one and makes up its device id itself (a new one,\nor none, was a way back in). The other phones come back by their device ([`Link::allowed`]).",
         "requestBody": {
           "content": {
             "application/json": {
@@ -42105,6 +44122,7 @@
             "description": "Any other failure, in the same shape."
           }
         },
+        "summary": "The last Remote Play pairing tries and how each ended",
         "tags": [
           "remote-play"
         ],
@@ -44128,6 +46146,7 @@
             "description": "Any other failure, in the same shape."
           }
         },
+        "summary": "Ask the console's mounter to scan for games again now",
         "tags": [
           "shadowmount"
         ],
@@ -44405,6 +46424,7 @@
             "description": "Any other failure, in the same shape."
           }
         },
+        "summary": "The console's Tailscale node: state, address, peers and who may reach it",
         "tags": [
           "console-tools"
         ],
@@ -44505,6 +46525,7 @@
             "description": "Any other failure, in the same shape."
           }
         },
+        "summary": "Put the console on Tailscale, pause, sign out, rename it or change who may reach it",
         "tags": [
           "console-tools"
         ],
@@ -45511,7 +47532,7 @@
     },
     "/api/ps5/volumes": {
       "get": {
-        "description": "GET /api/ps5/volumes?addr=IP:PORT — enumerate mounted PS5 storage volumes.",
+        "description": "GET /api/ps5/volumes?addr=IP:PORT — enumerate mounted PS5 storage volumes.\n\n`total_bytes` and `free_bytes` are the filesystem's own counters (`statfs`), not the figures\nof the PS5's Settings > Storage screen, which can show less free space. On internal storage\n`free_bytes` already leaves out what the filesystem holds back (`user_reserved_bytes` in\n`/api/ps5/hw/storage`). For how much a copy can take, read `allocatable_bytes` and\n`likely_fits_bytes`.",
         "parameters": [
           {
             "in": "query",
@@ -45574,7 +47595,7 @@
     },
     "/api/queue": {
       "get": {
-        "description": "GET /api/queue?console= — one console's line, or every console's.",
+        "description": "GET /api/queue?console= — one console's line, or every console's. Answers `{items, consoles}`:\neach item is `{id, console, kind, label, status, request, stop_on_failure, added_at_ms,\nstarted_at_ms?, finished_at_ms?, job_id?, runs, error?, code?, verdict?, hint?, progress?,\nposition?}`, `status` one of `queued`, `running`, `paused`, `done`, `failed`, `cancelled`\n(stopped, not failed: `code` `cancelled`) or `interrupted`; `position` is a waiting item's\nplace in its console's line.",
         "parameters": [
           {
             "in": "query",
@@ -46015,7 +48036,7 @@
     },
     "/api/queue/{id}/remove": {
       "post": {
-        "description": "POST /api/queue/{id}/remove — drops an item that is not running. A running upload or download\nneeds `cancel: true`: it stops and goes (202). A running install is never removed: the console\ngoes on with it whatever the queue says.",
+        "description": "POST /api/queue/{id}/remove — drops an item that is not running. A running upload or download\nneeds `cancel: true`: it stops and goes (202). A running install is never removed: the console\ngoes on with it whatever the queue says. An install from a package on this computer that has\nended without its session (one the PS5 may resume) gives that session up as it goes: the\npackage is free to rename, and the PS5, should it come back for it, is told it is over.",
         "parameters": [
           {
             "in": "path",
@@ -47251,6 +49272,7 @@
             "description": "Any other failure, in the same shape."
           }
         },
+        "summary": "One game's save backups on the console's chosen drives",
         "tags": [
           "saves"
         ],
@@ -47598,6 +49620,7 @@
             "description": "Any other failure, in the same shape."
           }
         },
+        "summary": "Save a save backup as a file for a friend or another PS5",
         "tags": [
           "saves"
         ],
@@ -47671,6 +49694,7 @@
             "description": "Any other failure, in the same shape."
           }
         },
+        "summary": "The folder backups a console may be given back, per folder, newest first",
         "tags": [
           "saves"
         ],
@@ -47783,6 +49807,7 @@
             "description": "Any other failure, in the same shape."
           }
         },
+        "summary": "Put a folder backup back where it came from",
         "tags": [
           "saves"
         ],
@@ -48551,6 +50576,7 @@
             "description": "Any other failure, in the same shape."
           }
         },
+        "summary": "Continue the last save backup run, or retry some of its saves",
         "tags": [
           "saves"
         ],
@@ -50018,6 +52044,7 @@
             "description": "Any other failure, in the same shape."
           }
         },
+        "summary": "One incoming share and how it stands",
         "tags": [
           "share"
         ],
@@ -50361,6 +52388,7 @@
             "description": "Any other failure, in the same shape."
           }
         },
+        "summary": "One outgoing share and how it stands",
         "tags": [
           "share"
         ],
@@ -50765,7 +52793,7 @@
           "go-live"
         ],
         "x-ps5upload": {
-          "access": "host-checked",
+          "access": "loopback",
           "response_schema": "json-unknown"
         }
       }
@@ -50821,7 +52849,7 @@
           "go-live"
         ],
         "x-ps5upload": {
-          "access": "host-checked",
+          "access": "loopback",
           "response_schema": "literal"
         }
       },
@@ -50886,7 +52914,7 @@
           "go-live"
         ],
         "x-ps5upload": {
-          "access": "host-checked",
+          "access": "loopback",
           "response_schema": "json-unknown"
         }
       }
@@ -51003,7 +53031,7 @@
           "go-live"
         ],
         "x-ps5upload": {
-          "access": "host-checked",
+          "access": "loopback",
           "response_schema": "literal"
         }
       }
@@ -51066,7 +53094,7 @@
           "go-live"
         ],
         "x-ps5upload": {
-          "access": "host-checked",
+          "access": "loopback",
           "response_schema": "literal"
         }
       }
@@ -51119,7 +53147,7 @@
           "go-live"
         ],
         "x-ps5upload": {
-          "access": "host-checked",
+          "access": "loopback",
           "response_schema": "literal"
         }
       }
@@ -51174,7 +53202,7 @@
           "go-live"
         ],
         "x-ps5upload": {
-          "access": "host-checked",
+          "access": "loopback",
           "response_schema": "literal"
         }
       }
@@ -51221,6 +53249,7 @@
             "description": "Any other failure, in the same shape."
           }
         },
+        "summary": "This engine's own Tailscale node and the consoles it reaches through it",
         "tags": [
           "tailnet"
         ],
@@ -51305,6 +53334,7 @@
             "description": "Any other failure, in the same shape."
           }
         },
+        "summary": "Turn this engine's own Tailscale node on or off, or change it",
         "tags": [
           "tailnet"
         ],
@@ -51701,6 +53731,7 @@
             "description": "Any other failure, in the same shape."
           }
         },
+        "summary": "Why the engine reaches a console the way it does now",
         "tags": [
           "tailnet"
         ],
@@ -51762,6 +53793,7 @@
             "description": "Any other failure, in the same shape."
           }
         },
+        "summary": "How the engine reaches one console now: on the home network, or through Tailscale direct or relayed",
         "tags": [
           "tailnet"
         ],
@@ -53261,6 +55293,44 @@
         "summary": "Read a ZIP archive, with progress lines",
         "tags": [
           "transfer"
+        ],
+        "x-ps5upload": {
+          "access": "loopback",
+          "response_schema": "none"
+        }
+      }
+    },
+    "/app-icon/{name}": {
+      "get": {
+        "parameters": [
+          {
+            "in": "path",
+            "name": "name",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Success. The handler builds this answer in a way the generator cannot read."
+          },
+          "403": {
+            "$ref": "#/components/responses/Error",
+            "description": "Refused by the engine's address, Origin or Host guards."
+          },
+          "404": {
+            "$ref": "#/components/responses/Error",
+            "description": "Not found"
+          },
+          "default": {
+            "$ref": "#/components/responses/Error",
+            "description": "Any other failure, in the same shape."
+          }
+        },
+        "tags": [
+          "pages"
         ],
         "x-ps5upload": {
           "access": "loopback",

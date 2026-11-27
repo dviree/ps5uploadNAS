@@ -6,7 +6,7 @@ use super::*;
 use std::io::Write;
 
 fn temp_dir(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("p5tar-{tag}-{}", std::process::id()));
+    let d = crate::test_tmp::temp_path(format!("p5tar-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
@@ -338,6 +338,36 @@ fn a_sparse_file_and_case_clashes_are_refused_with_what_to_do() {
         "{e}"
     );
 
+    // The PAX form (bsdtar, `tar -S --format=posix`): a PAX header, then a plain file entry.
+    let mut b = tar::Builder::new(Vec::new());
+    let mut pax = Vec::new();
+    for (k, v) in [
+        ("GNU.sparse.major", "1"),
+        ("GNU.sparse.minor", "0"),
+        ("GNU.sparse.name", "hole.bin"),
+        ("GNU.sparse.realsize", "67112960"),
+    ] {
+        let rest = format!(" {k}={v}\n");
+        let mut n = rest.len() + 1;
+        while format!("{n}{rest}").len() != n {
+            n += 1;
+        }
+        pax.extend_from_slice(format!("{n}{rest}").as_bytes());
+    }
+    let mut h = header(tar::EntryType::XHeader, pax.len() as u64);
+    b.append_data(&mut h, "./PaxHeaders/hole.bin", &pax[..])
+        .unwrap();
+    let mut h = header(tar::EntryType::Regular, 3);
+    b.append_data(&mut h, "GNUSparseFile.0/hole.bin", &b"map"[..])
+        .unwrap();
+    let p = d.join("pax-sparse.tar");
+    std::fs::write(&p, b.into_inner().unwrap()).unwrap();
+    let e = tar_layout(&p).unwrap_err();
+    assert!(
+        matches!(tar_fault_of(&e), Some(TarFault::Unsupported(m)) if m.contains("--sparse")),
+        "{e}"
+    );
+
     let mut b = tar::Builder::new(Vec::new());
     for n in ["G/a.bin", "g/A.bin"] {
         let mut h = header(tar::EntryType::Regular, 1);
@@ -595,6 +625,77 @@ fn a_listing_stops_when_cancelled_and_reports_progress() {
     assert_eq!(live.phase.load(Ordering::Relaxed), 0);
 }
 
+/// A tar whose first member carries `meta` bytes of `kind` (a GNU long name, a PAX header, or
+/// a FIFO's data), then one small file. Compressed with zstd as it is written, so the test
+/// never holds the big part twice.
+fn tar_with_big_member(kind: tar::EntryType, meta: usize, path: &Path, codec: Codec) {
+    // Empty segments are dropped from a name, so this long one is still `game/f.bin`.
+    let name = format!("game/{}f.bin", "/".repeat(meta));
+    let body: Vec<u8> = match kind {
+        tar::EntryType::GNULongName => name.into_bytes(),
+        tar::EntryType::XHeader => {
+            // One record, `<len> path=<value>\n`, its length counting its own digits.
+            let tail = format!(" path={name}\n");
+            let mut len = tail.len();
+            while format!("{len}{tail}").len() != len {
+                len = format!("{len}{tail}").len();
+            }
+            format!("{len}{tail}").into_bytes()
+        }
+        _ => vec![b'a'; meta],
+    };
+    let mut raw = Vec::new();
+    let mut h = header(kind, body.len() as u64);
+    let own: &[u8] = match kind {
+        tar::EntryType::GNULongName => b"././@LongLink",
+        tar::EntryType::XHeader => b"PaxHeaders/x",
+        _ => b"fifo",
+    };
+    h.as_old_mut().name[..own.len()].copy_from_slice(own);
+    h.set_cksum();
+    raw.extend_from_slice(h.as_bytes());
+    raw.extend_from_slice(&body);
+    raw.resize(raw.len().div_ceil(512) * 512, 0);
+    let mut f = header(tar::EntryType::Regular, 2);
+    f.set_path("game/f.bin").unwrap();
+    f.set_cksum();
+    raw.extend_from_slice(f.as_bytes());
+    raw.extend_from_slice(b"ok");
+    raw.resize(raw.len().div_ceil(512) * 512 + 1024, 0);
+    std::fs::write(path, compress(codec, &raw)).unwrap();
+}
+
+/// A long name or PAX header is held whole in memory by the tar reader, as long as its header
+/// says: a compressed archive of a few KiB could ask for gigabytes of it while it was listed.
+/// Over [`MAX_MEMBER_HEADERS`] it is refused as damage; data the reader reads past (a FIFO's,
+/// however big) is not headers and still lists, and the walk reads it the same way.
+#[test]
+fn a_huge_long_name_or_pax_header_is_refused_while_listing() {
+    let d = temp_dir("bighead");
+    let over = (MAX_MEMBER_HEADERS + (1 << 20)) as usize;
+    for codec in [Codec::Zstd, Codec::None] {
+        for kind in [tar::EntryType::GNULongName, tar::EntryType::XHeader] {
+            let p = d.join(format!("h{}-{codec:?}.tar", kind.as_byte()));
+            tar_with_big_member(kind, over, &p, codec);
+            let e = tar_layout(&p).unwrap_err();
+            assert!(
+                matches!(tar_fault_of(&e), Some(TarFault::Corrupt(m)) if m.contains("headers")),
+                "{kind:?} {codec:?}: {e}"
+            );
+            // A real-sized one is fine.
+            tar_with_big_member(kind, 4096, &p, codec);
+            assert_eq!(tar_layout(&p).unwrap().files.len(), 1, "{kind:?} {codec:?}");
+        }
+        let p = d.join(format!("fifo-{codec:?}.tar"));
+        tar_with_big_member(tar::EntryType::Fifo, over, &p, codec);
+        let l = tar_layout(&p).unwrap();
+        assert_eq!(l.files.len(), 1);
+        let c = walk_all(&p, &l, 0, &[]);
+        assert_eq!(c.files["game/f.bin"], b"ok");
+    }
+    let _ = std::fs::remove_dir_all(&d);
+}
+
 #[test]
 fn a_walk_over_a_changed_archive_fails_instead_of_misnaming_bytes() {
     let d = temp_dir("drift");
@@ -712,6 +813,81 @@ fn convert_unpacks_tars_and_zstd_zips_and_the_zip_preview_reads_a_zstd_param_jso
         &AtomicBool::new(false)
     )
     .is_err());
+}
+
+/// A tar of `files` empty files under `folders` folders, compressed with `codec`.
+fn many_entries(path: &Path, folders: usize, files: usize, codec: Codec) {
+    let mut b = tar::Builder::new(Vec::new());
+    for i in 0..folders {
+        let mut h = header(tar::EntryType::Directory, 0);
+        b.append_data(&mut h, format!("game/d{i}/"), io::empty())
+            .unwrap();
+    }
+    for i in 0..files {
+        let mut h = header(tar::EntryType::Regular, 0);
+        b.append_data(&mut h, format!("game/f{i}.bin"), io::empty())
+            .unwrap();
+    }
+    let tar = b.into_inner().unwrap();
+    let bytes = match codec {
+        Codec::None => tar,
+        c => compress(c, &tar),
+    };
+    std::fs::write(path, bytes).unwrap();
+}
+
+#[test]
+fn a_listing_past_the_entry_or_name_cap_is_refused_in_plain_words() {
+    const {
+        assert!(
+            MAX_TAR_ENTRIES >= 2_000_000,
+            "far above a real game's 223 000 files"
+        )
+    };
+    let d = temp_dir("entry-cap");
+    let set = |c: Option<(usize, u64)>| TEST_CAPS.with(|t| t.set(c));
+    for codec in [Codec::None, Codec::Zstd] {
+        let tag = codec.name();
+        // Files and folders count together: 20 + 30 is at the cap, one more is past it.
+        set(Some((50, u64::MAX)));
+        let at = d.join(format!("at-{tag}.tar"));
+        many_entries(&at, 20, 30, codec);
+        let l = tar_layout(&at).unwrap();
+        assert_eq!((l.files.len(), l.dirs.len()), (30, 21), "{tag}");
+        let past = d.join(format!("past-{tag}.tar"));
+        many_entries(&past, 20, 31, codec);
+        let e = tar_layout(&past).unwrap_err();
+        assert!(
+            matches!(tar_fault_of(&e), Some(TarFault::Unsupported(m))
+                if m.contains("more than 50 files and folders")),
+            "{tag}: {e}"
+        );
+        // A folder past the cap is refused too.
+        let past = d.join(format!("past-dirs-{tag}.tar"));
+        many_entries(&past, 60, 0, codec);
+        assert!(tar_layout(&past).is_err(), "{tag}");
+        // The names' bytes have their own cap.
+        set(Some((usize::MAX, 1 << 20)));
+        let long = d.join(format!("long-{tag}.tar"));
+        let mut b = tar::Builder::new(Vec::new());
+        for i in 0..300 {
+            let mut h = header(tar::EntryType::Regular, 0);
+            let name = format!("game/{}/{i}.bin", "n".repeat(4000));
+            b.append_data(&mut h, name, io::empty()).unwrap();
+        }
+        let tar = b.into_inner().unwrap();
+        let bytes = match codec {
+            Codec::None => tar,
+            c => compress(c, &tar),
+        };
+        std::fs::write(&long, bytes).unwrap();
+        let e = tar_layout(&long).unwrap_err();
+        assert!(
+            matches!(tar_fault_of(&e), Some(TarFault::Unsupported(m)) if m.contains("1 MiB")),
+            "{tag}: {e}"
+        );
+    }
+    set(None);
 }
 
 /// Decode speed of real archives: the listing, then a full walk.

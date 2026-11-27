@@ -58,6 +58,37 @@ pub const ROOT_INODE: u64 = 2;
 // ponytail: 64 MiB per directory read whole (~250,000 maximal names), stream the entries block by block if a real image ever needs more
 pub const MAX_DIR_BYTES: u64 = 64 * 1024 * 1024;
 
+/// The most directory bytes one walk of an image reads in all, as the PFS reader bounds its
+/// walk. Each directory may hold [`MAX_DIR_BYTES`] and a walk may list a million entries, so a
+/// crafted image of directories that claim the most and share their blocks would otherwise have
+/// a walk read terabytes. A real game's directories are a few MiB together.
+pub const MAX_WALK_DIR_BYTES: u64 = 2 << 30;
+
+/// What one walk of an image has read of its directories, against [`MAX_WALK_DIR_BYTES`]: give
+/// each walk its own and list through [`Ufs2Image::list_dir_in_walk`].
+#[derive(Debug)]
+pub struct WalkBudget {
+    dir_bytes: u64,
+    max: u64,
+}
+
+impl Default for WalkBudget {
+    fn default() -> Self {
+        Self {
+            dir_bytes: 0,
+            max: MAX_WALK_DIR_BYTES,
+        }
+    }
+}
+
+impl WalkBudget {
+    /// A budget of `max` bytes, for a test that cannot make gigabytes of directories.
+    #[doc(hidden)]
+    pub fn with_max(max: u64) -> Self {
+        Self { dir_bytes: 0, max }
+    }
+}
+
 /// The most entries [`Ufs2Image::list_dir`] returns for one directory. The byte budget alone
 /// would allow five million twelve-byte records, each a [`DirEntry`] on the heap.
 pub const MAX_DIR_ENTRIES: usize = 1_000_000;
@@ -98,6 +129,10 @@ pub enum Ufs2Error {
     InodeOutOfRange { inode: u64, max: u64 },
     #[error("directory tree exceeds max depth {max} — refusing to recurse (possible cycle or pathological nesting in the image)")]
     WalkTooDeep { max: u32 },
+    /// A directory reached a second time on one walk: an entry names the directory itself or
+    /// one that was already walked (a cycle, or one directory linked twice).
+    #[error("directory inode {inode} is linked twice — refusing to walk it again (a directory cycle in the image)")]
+    DirectoryCycle { inode: u64 },
     #[error("inode {inode} would point at block {block} which is past the image's {total_blocks} blocks")]
     BlockOutOfRange {
         inode: u64,
@@ -114,12 +149,21 @@ pub enum Ufs2Error {
     InodeRunTooLong { count: u64, max: u64 },
     #[error("directory inode {inode} has more than {max} entries")]
     TooManyEntries { inode: u64, max: usize },
+    #[error("the image's directories add up to more than {max} bytes: the image is damaged")]
+    WalkTooLarge { max: u64 },
     #[error("directory inode {inode} holds a name that {why} (bytes {hex})")]
     BadName {
         inode: u64,
         why: &'static str,
         hex: String,
     },
+    /// A file's block map does not give the bytes its size says: an indirect block linked
+    /// twice (a cycle), or a size past what the map can hold. The file is refused, never
+    /// handed back shorter than it is listed.
+    #[error(
+        "inode {inode} is {size} bytes but its block map gives only {got}: the image is damaged"
+    )]
+    ShortBlockMap { inode: u64, size: u64, got: u64 },
 }
 
 /// Subset of the superblock we actually use for reading. The full
@@ -332,6 +376,14 @@ pub struct Ufs2Image<R: Read + Seek> {
     pub superblock: Superblock,
 }
 
+#[cfg(test)]
+impl<R: Read + Seek> Ufs2Image<R> {
+    /// An image over `reader` with `superblock` as it is, for fixtures that are not whole images.
+    pub(crate) fn from_parts(reader: R, superblock: Superblock) -> Self {
+        Self { reader, superblock }
+    }
+}
+
 impl Ufs2Image<File> {
     /// Open a `.ffpkg` (or any UFS2 image) by path. Cheap — only
     /// reads the superblock.
@@ -455,6 +507,22 @@ fn parse_inode(n: u64, buf: &[u8]) -> Inode {
 }
 
 impl<R: Read + Seek> Ufs2Image<R> {
+    /// [`Ufs2Image::list_dir`] as one step of a walk: the directory's bytes are charged to
+    /// `budget` before they are read, and a walk past it is refused.
+    pub fn list_dir_in_walk(
+        &mut self,
+        dir: &Inode,
+        budget: &mut WalkBudget,
+    ) -> Result<Vec<DirEntry>, Ufs2Error> {
+        if dir.is_dir() {
+            budget.dir_bytes = budget.dir_bytes.saturating_add(dir.size);
+            if budget.dir_bytes > budget.max {
+                return Err(Ufs2Error::WalkTooLarge { max: budget.max });
+            }
+        }
+        self.list_dir(dir)
+    }
+
     /// List entries in a directory inode.
     pub fn list_dir(&mut self, dir: &Inode) -> Result<Vec<DirEntry>, Ufs2Error> {
         if !dir.is_dir() {
@@ -586,7 +654,21 @@ impl<R: Read + Seek> Ufs2Image<R> {
                 &mut visited,
             )?;
         }
+        // Everything the size says, or an error: a walk that stopped early (an indirect block
+        // met twice) used to return the shorter data as the file.
+        if remaining != 0 {
+            return Err(Ufs2Error::ShortBlockMap {
+                inode: inode.number,
+                size: inode.size,
+                got: inode.size - remaining,
+            });
+        }
         Ok(out)
+    }
+
+    /// The image's real length in bytes: what its reader holds, whatever the superblock says.
+    pub fn image_len(&mut self) -> std::io::Result<u64> {
+        self.reader.seek(SeekFrom::End(0))
     }
 
     /// The `len` bytes at `offset` of a file, reading only the blocks
@@ -726,10 +808,14 @@ impl<R: Read + Seek> Ufs2Image<R> {
             });
         }
         if !visited.insert(block) {
-            // Cycle — same indirect block visited twice. Stop the
-            // walk; the file won't be fully reconstructed but the
-            // engine won't blow the stack either.
-            return Ok(());
+            // Cycle — same indirect block visited twice. The file is refused: stopping the
+            // walk here and returning `Ok` passed as a shorter file, or (with more pointers
+            // after it) as one whose later bytes had moved down.
+            return Err(Ufs2Error::ShortBlockMap {
+                inode: inode_num,
+                size: out.len() as u64 + *remaining,
+                got: out.len() as u64,
+            });
         }
         let off = self.superblock.frag_offset(block);
         self.reader.seek(SeekFrom::Start(off))?;
@@ -1080,6 +1166,35 @@ mod tests {
         );
     }
 
+    /// A file whose map names one indirect block twice, or whose size is past what its map
+    /// holds, is refused. It used to come back `Ok`, shorter than listed (and unlike what
+    /// `read_range` gives for the same file).
+    #[test]
+    fn a_block_map_that_does_not_cover_the_file_is_an_error() {
+        const BS: u64 = 4096;
+        let (mut img, mut inode, _) = block_data();
+        // The single-indirect block again as the double-indirect one.
+        inode.indirect = [20, 20, 0];
+        inode.size = (NDADDR as u64 + BS / 8 + 4) * BS;
+        let e = img.read_file(&inode, u64::MAX).unwrap_err();
+        assert!(
+            matches!(e, Ufs2Error::ShortBlockMap { inode: 3, .. }),
+            "{e}"
+        );
+
+        // The same block twice inside a double-indirect block: the second span would have
+        // been skipped and what follows moved down.
+        let (mut img, mut inode, _) = block_data();
+        let image = img.reader.get_mut();
+        let double = 28 * BS as usize;
+        image[double..double + 8].copy_from_slice(&20u64.to_le_bytes());
+        image[double + 8..double + 16].copy_from_slice(&20u64.to_le_bytes());
+        inode.indirect = [0, 28, 0];
+        inode.size = (NDADDR as u64 + BS / 8 + 2 * (BS / 8)) * BS;
+        let e = img.read_file(&inode, u64::MAX).unwrap_err();
+        assert!(matches!(e, Ufs2Error::ShortBlockMap { .. }), "{e}");
+    }
+
     /// A 4 KiB-block image holding one directory of `count` entries, each named `name_len`
     /// bytes long, in blocks from fragment 1 on (a single-indirect block after the twelfth).
     fn big_dir(count: usize, name_len: usize) -> (Ufs2Image<std::io::Cursor<Vec<u8>>>, Inode) {
@@ -1208,6 +1323,27 @@ mod tests {
             img.list_dir(&dir),
             Err(Ufs2Error::TooManyEntries { .. })
         ));
+    }
+
+    /// A walk charges every directory it lists: once their bytes add up to more than its budget
+    /// the next listing is refused, before that directory is read.
+    #[test]
+    fn a_walk_past_its_directory_budget_is_refused() {
+        let (mut img, dir) = big_dir(40, 8);
+        let mut walk = WalkBudget::with_max(3 * dir.size);
+        for _ in 0..3 {
+            assert_eq!(img.list_dir_in_walk(&dir, &mut walk).unwrap().len(), 40);
+        }
+        assert!(matches!(
+            img.list_dir_in_walk(&dir, &mut walk),
+            Err(Ufs2Error::WalkTooLarge { .. })
+        ));
+        // A real walk's budget is far above any real image's directories.
+        assert!(WalkBudget::default().max >= 1 << 30);
+        // A file is no directory, and costs nothing.
+        let mut file = dir.clone();
+        file.mode = 0o100644;
+        assert!(img.list_dir_in_walk(&file, &mut walk).unwrap().is_empty());
     }
 
     /// A directory inode claiming more than the budget is refused before anything is read.

@@ -309,6 +309,8 @@ fn pages_router() -> axum::Router {
             "/share/",
             get(|h: HeaderMap| async move { serve_page(&pages()[2], &h) }),
         )
+        // A phone's Home Screen icon and manifest for these pages (app_icon.rs).
+        .route("/app-icon/{name}", get(crate::app_icon::file))
         // The address without its slash (a link typed by hand); the #fragment stays.
         .route("/join", get(|| async { Redirect::permanent("/join/") }))
         .route("/pad", get(|| async { Redirect::permanent("/pad/") }))
@@ -658,6 +660,9 @@ mod tests {
         loop {
             let v = room.json("K", None, None);
             if v["state"] == "hosted" {
+                // The room id is made from the engine's secret: this hub opens it for that secret
+                // only (it refuses any other, also after a restart), and it took this one.
+                assert!(ps5upload_hub::hub::is_bound_room(&room.id()), "{v}");
                 // The link names the public hub, never the loopback one.
                 assert_eq!(v["hub"], "play.example.test", "{v}");
                 assert!(
@@ -730,6 +735,16 @@ mod tests {
         let (head, _) = http(addr, "GET", "/join", "").await;
         assert!(
             head.starts_with("http/1.1 308") && head.contains("location: /join/"),
+            "{head}"
+        );
+        // The pages' Home Screen icon and manifest (app_icon.rs).
+        let (head, body) = http(addr, "GET", "/app-icon/apple-touch-icon.png", "").await;
+        assert!(head.starts_with("http/1.1 200") && head.contains("content-type: image/png"));
+        assert!(body.starts_with(b"\x89PNG"));
+        let (head, _) = http(addr, "GET", "/app-icon/page.webmanifest", "").await;
+        assert!(head.starts_with("http/1.1 200"), "{head}");
+        assert!(
+            head.contains("content-type: application/manifest+json"),
             "{head}"
         );
         let (head, body) = http(addr, "GET", "/health", "").await;

@@ -66,6 +66,7 @@ jobs:
       # so HEAD^1..HEAD is exactly what the PR changes there.
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          persist-credentials: false
           fetch-depth: 2
           sparse-checkout: .github/scripts
 
@@ -115,6 +116,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          persist-credentials: false
           submodules: true
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
@@ -139,6 +141,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          persist-credentials: false
           submodules: true
 
       - name: Install Rust stable
@@ -271,6 +274,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          persist-credentials: false
           submodules: true
 
       - name: Install Rust stable
@@ -309,16 +313,28 @@ jobs:
         working-directory: engine
         run: cargo build -p ps5upload-unrar
 
+      # The tests run with the temp folder pointed at an empty folder of this job's own, and a
+      # step after them fails if they left anything there: tests that never removed their scratch
+      # folders once filled a developer's temp folder with 38 GB (scripts/check-test-tmp-leaks.sh).
+      - name: Empty temp folder for the tests
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/test-tmp"
+          echo "TEST_TMP=$RUNNER_TEMP/test-tmp" >> "$GITHUB_ENV"
+
       # nextest runs the test binaries side by side (cargo test runs them one at a time, and most
       # of these sit in network sleeps); doctests, which nextest does not run, follow separately.
       # Timing-sensitive binaries are serialized by engine/.config/nextest.toml.
       # Bounded per step: a hung test fails here in minutes instead of holding the job.
+      # Built first with the usual temp folder: only what the tests leave is checked.
       - name: cargo nextest
         working-directory: engine
         timeout-minutes: 25
         env:
           RUST_BACKTRACE: 1
-        run: cargo nextest run --profile ci ${{ matrix.select }}
+        run: |
+          cargo nextest run --profile ci --no-run ${{ matrix.select }}
+          TMPDIR="$TEST_TMP" cargo nextest run --profile ci ${{ matrix.select }}
 
       # After the main run and with its exact package set (matrix.select), so nothing recompiles:
       # a `cargo test -p ps5upload-engine` here first built the engine a second time. --no-capture
@@ -382,7 +398,11 @@ jobs:
       - name: cargo test --doc
         working-directory: engine
         timeout-minutes: 10
-        run: cargo test --doc ${{ matrix.select }}
+        run: TMPDIR="$TEST_TMP" cargo test --doc ${{ matrix.select }}
+
+      - name: Tests left nothing in the temp folder
+        shell: bash
+        run: scripts/check-test-tmp-leaks.sh --check "$TEST_TMP"
 
       # target/tmp is CARGO_TARGET_TMPDIR, test scratch space, not build output. The UFS2 writer
       # tests leave sparse images there, one of them 68 GB apparent (lastcg.ffpkg): tar stored it
@@ -418,6 +438,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          persist-credentials: false
           submodules: true
 
       - name: Install Rust stable
@@ -477,6 +498,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          persist-credentials: false
           submodules: true
 
       - name: Install Rust stable
@@ -559,6 +581,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          persist-credentials: false
           submodules: true
 
       - name: Install Rust stable
@@ -629,6 +652,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          persist-credentials: false
           submodules: true
 
       - name: Install Rust stable
@@ -666,6 +690,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          persist-credentials: false
           submodules: true
 
       - name: Install Rust stable
@@ -776,6 +801,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          persist-credentials: false
           submodules: true
 
       - name: Install Rust stable
@@ -862,6 +888,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          persist-credentials: false
           submodules: true
 
       - name: Install Rust stable
@@ -1017,6 +1044,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          persist-credentials: false
           submodules: true
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
@@ -1078,6 +1106,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          persist-credentials: false
           submodules: true
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
@@ -1133,6 +1162,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          persist-credentials: false
           submodules: true
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
@@ -1198,6 +1228,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          persist-credentials: false
           submodules: true
           # gitleaks reads every commit, not only the tip.
           fetch-depth: 0
@@ -1242,6 +1273,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          persist-credentials: false
           submodules: true
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
         with:
@@ -1290,6 +1322,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          persist-credentials: false
           submodules: true
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
@@ -1364,6 +1397,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          persist-credentials: false
           submodules: true
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
@@ -1507,6 +1541,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          persist-credentials: false
           submodules: true
 
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
@@ -1543,6 +1578,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          persist-credentials: false
           submodules: true
 
       - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7
@@ -1765,6 +1801,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
+          persist-credentials: false
           sparse-checkout: .github/scripts
 
       - name: Every job this change needed succeeded; the others were skipped on purpose

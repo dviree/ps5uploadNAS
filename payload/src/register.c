@@ -33,12 +33,15 @@
 #include "plog.h"
 #include "unregister_outcome.h"
 #include "install_guard.h"
+#include "json_key.h"
+#include "utf8_cut.h"
 #include "start_trace.h"
 #include "shell_builtin.h" /* mntinfo_snapshot */
 #include "content_db.h"
 #include "sony_api_lock.h"
 #include "proc_list.h"
 #include "shellui_rpc.h"
+#include "launch_route.h"
 #include "kernel_rw_lock.h"
 
 /* Serialization mutex `sony_api_lock` and the 200µs post-call grace
@@ -543,6 +546,9 @@ static int json_extract_string(const char *json, const char *key,
          * titles don't contain backslashes in any observed dataset. */
         out[i++] = *p++;
     }
+    /* A value cut at out_cap is cut on a character (utf8_cut.h): half of one is invalid UTF-8,
+     * and the registered list carrying it no longer parsed in the engine. */
+    i = utf8_whole_prefix(out, i);
     out[i] = '\0';
     return (i > 0) ? 0 : -1;
 }
@@ -787,9 +793,10 @@ static int parse_title_from_param_json(const char *path,
         return -1;
     }
 
-    /* Title -- prefer the en-US block if present, else top-level. */
+    /* Title -- prefer the en-US block if present, else top-level. The block's key, not
+     * "defaultLanguage": "en-US" (json_key.h). */
     out_name[0] = '\0';
-    const char *en = strstr(buf, "\"en-US\"");
+    const char *en = json_find_key(buf, "\"en-US\"");
     if (en) {
         (void)json_extract_string(en, "titleName", out_name, name_cap);
     }
@@ -1092,6 +1099,14 @@ int register_remount_nullfs(const char *title_id, const char *src_path,
         if (err_reason_out) *err_reason_out = "register_args_invalid";
         return -1;
     }
+    /* Not over one of the console's own apps, nor for an id that is no title id (install_guard.h). */
+    {
+        const char *refused = install_guard_register_id_refusal(title_id);
+        if (refused) {
+            if (err_reason_out) *err_reason_out = refused;
+            return -1;
+        }
+    }
     /* A bind over /system_ex/app/<id> of a title the console installed would hide its own (#884). */
     {
         install_guard_hit_t hit;
@@ -1324,6 +1339,16 @@ int register_title_from_path(const char *src_path,
     if (!is_safe_component(title_id)) {
         if (err_reason_out) *err_reason_out = "register_title_id_unsafe";
         return -1;
+    }
+    /* The id is whatever the folder's own param.json says. Only a title id goes on, and never one
+     * of the console's own apps (NPXS...): install_guard.h says what each did. Before ANY write. */
+    {
+        const char *refused = install_guard_register_id_refusal(title_id);
+        if (refused) {
+            fprintf(stderr, "[register] %s: title id refused (%s)\n", src_path, refused);
+            if (err_reason_out) *err_reason_out = refused;
+            return -1;
+        }
     }
 
     /* 0a -- never over an install of the console's own (#884). Staging /user/app/<id> and asking
@@ -2196,6 +2221,57 @@ int launch_title(const char *title_id, const char **err_reason_out,
     int rc_ss = launch_via_system_service(title_id, fg_user);
     if (launch_sys_ok(rc_ss)) return 0;
 
+    /* #961: a title app.db has no row for cannot be started by any route, and the routes below
+     * for a refused launch are the ShellUI ptrace call (twice) and three more launcher calls. For
+     * a game whose record Rebuild Database dropped (its package still on the drive), that ladder
+     * left the console unsettled: the system UI restarted back to the home screen and homebrew
+     * running inside it stopped (the #961 report). So when app.db, read successfully, does not
+     * know the title, and still does not after a short wait (a register that just ran may not be
+     * written yet), the launch ends here with launch_not_in_database: the app then offers to put
+     * the game back on the home screen instead. An unreadable app.db (-1) keeps the old ladder. */
+    if (register_appdb_has_title(title_id) == 0) {
+        int known = 0;
+        for (int i = 0; i < 6 && !known; i++) {
+            usleep(500 * 1000);
+            /* A refused-looking call that started the title after all (launch_took_effect). */
+            if (proc_find_pid_by_title_id(title_id) > 0) return 0;
+            known = register_appdb_has_title(title_id) != 0;
+        }
+        if (!known) {
+            fprintf(stderr,
+                    "[payload2] launch %s: not in app.db (launcher rc=0x%x): not trying the other "
+                    "routes\n",
+                    title_id, (unsigned)rc_ss);
+            if (reason_buf && reason_cap > 0) {
+                snprintf(reason_buf, reason_cap, "launch_not_in_database: rc=0x%08x", (unsigned int)rc_ss);
+                if (err_reason_out) *err_reason_out = reason_buf;
+            } else if (err_reason_out) {
+                *err_reason_out = "launch_not_in_database";
+            }
+            return -1;
+        }
+    }
+
+    /* A refusal no other route can change (launch_route.h): report it and stop. The ShellUI
+     * route below runs the launcher on SceShellUI's stack, and for a title the console itself
+     * will not start that only restarts the system UI and the homebrew inside it (a fake
+     * package refused with 0x80020016 on FW 13.60, 2026-11-27). A non-zero return can still
+     * be a launch that is proceeding, so look first. */
+    if (launch_refusal_is_final(rc_ss)) {
+        if (launch_took_effect(title_id)) return 0;
+        fprintf(stderr,
+                "[payload2] launch %s: launcher refused (0x%08x), a refusal the other routes "
+                "cannot change: not trying them\n",
+                title_id, (unsigned int)rc_ss);
+        if (reason_buf && reason_cap > 0) {
+            snprintf(reason_buf, reason_cap, "launch_sony_error_0x%08x", (unsigned int)rc_ss);
+            if (err_reason_out) *err_reason_out = reason_buf;
+        } else if (err_reason_out) {
+            *err_reason_out = "launch_sony_error";
+        }
+        return -1;
+    }
+
     (void)shellui_rpc_init();
     if (shellui_rpc_ready()) {
         /* rc > 0 means "Sony's function ran and refused"; the code it gave is
@@ -2206,8 +2282,8 @@ int launch_title(const char *title_id, const char **err_reason_out,
         if (rc == 0 || rc == -2) {
             /* 0 / -2 mean the ShellUI request was dispatched, not that the
              * title started. When the launcher above had already REFUSED it
-             * (a negative rc, e.g. 0x80940033 for a homebrew app on FW 13.60
-             * with no fake-package support), check before claiming success:
+             * (a negative rc; 0x80940033, measured here for a homebrew app on FW
+             * 13.60, now stops above), check before claiming success:
              * otherwise the UI says "launched" and nothing happens (measured
              * on the Pro, 2026-09-29). ~6 s covers a slow start; a normal
              * launch through the primary path never reaches here. -2 is

@@ -1605,6 +1605,9 @@ pub struct TransferDownloadReq {
     /// ops never honor this flag. Default false.
     #[serde(default)]
     pub unsafe_read: bool,
+    /// A move to a saved server: the engine deletes the source once the copy is checked there.
+    #[serde(default)]
+    pub remove_source: bool,
 }
 
 /// PS5 → host download streamed straight into a `.zip` (one pass, no scratch
@@ -1651,6 +1654,7 @@ pub async fn transfer_download(req: TransferDownloadReq) -> Result<JsonValue, St
         "addr": req.addr,
         "kind": req.kind,
         "unsafe_read": req.unsafe_read,
+        "remove_source": req.remove_source,
     });
     post_json(&url, &body).await
 }
@@ -1918,6 +1922,63 @@ pub struct AppUnregisterReq {
     /// same title id instead of uninstalling it (#884).
     #[serde(default)]
     pub registration_only: bool,
+}
+
+/// Restore to home screen (#961): one command for the engine's `/api/ps5/app/restore*` routes.
+/// `op` is `check`, `candidates` or `status` (GET, `addr` and `title_id` in the query), `start`
+/// or `finish` (POST, `req` is the body).
+#[derive(Debug, Deserialize)]
+pub struct AppRestoreReq {
+    pub addr: String,
+    #[serde(default)]
+    pub title_id: Option<String>,
+    #[serde(default)]
+    pub title_ids: Option<Vec<String>>,
+    #[serde(default)]
+    pub rollback: bool,
+    #[serde(default)]
+    pub install_ended: bool,
+}
+
+#[tauri::command]
+pub async fn ps5_app_restore(op: String, req: AppRestoreReq) -> Result<JsonValue, String> {
+    let base = engine::url();
+    let query = |path: &str| {
+        let mut url = format!("{base}{path}?addr={}", urlencoding(&req.addr));
+        if let Some(t) = &req.title_id {
+            url.push_str(&format!("&title_id={}", urlencoding(t)));
+        }
+        url
+    };
+    match op.as_str() {
+        "check" => get_json(&query("/api/ps5/app/restore/check")).await,
+        "candidates" => get_json(&query("/api/ps5/app/restore/candidates")).await,
+        "status" => get_json(&query("/api/ps5/app/restore/status")).await,
+        "start" => {
+            post_json_long(
+                &format!("{base}/api/ps5/app/restore"),
+                &serde_json::json!({
+                    "addr": req.addr,
+                    "title_id": req.title_id,
+                    "title_ids": req.title_ids,
+                }),
+            )
+            .await
+        }
+        "finish" => {
+            post_json(
+                &format!("{base}/api/ps5/app/restore/finish"),
+                &serde_json::json!({
+                    "addr": req.addr,
+                    "title_id": req.title_id,
+                    "rollback": req.rollback,
+                    "install_ended": req.install_ended,
+                }),
+            )
+            .await
+        }
+        other => Err(format!("unknown restore step {other:?}")),
+    }
 }
 
 #[tauri::command]
@@ -2419,6 +2480,13 @@ pub async fn fpkg_build(
     keep_both: Option<bool>,
     // A PS4 update merged into the PS4 game `source` first: a PS4 package of the merged game.
     update: Option<String>,
+    // A game in asset packs is packaged as plain files (#933).
+    unpack_packs: Option<bool>,
+    // With unpack_packs: the AMPR emulator choice, as an image build takes it.
+    add_ampr_emu: Option<bool>,
+    ampr_emu_build: Option<String>,
+    // With unpack_packs: the AMPR emulator is left out of the package.
+    leave_out_ampr_emu: Option<bool>,
 ) -> Result<JsonValue, String> {
     let base = engine::url();
     let url = format!("{base}/api/fpkg/build");
@@ -2436,6 +2504,10 @@ pub async fn fpkg_build(
             "full_verify": full_verify.unwrap_or(false),
             "keep_both": keep_both.unwrap_or(false),
             "update": update,
+            "unpack_packs": unpack_packs.unwrap_or(false),
+            "add_ampr_emu": add_ampr_emu.unwrap_or(true),
+            "ampr_emu_build": ampr_emu_build,
+            "leave_out_ampr_emu": leave_out_ampr_emu.unwrap_or(false),
         }),
     )
     .await
@@ -2527,15 +2599,39 @@ pub async fn fpkg_ampr_index(source: String) -> Result<JsonValue, String> {
 }
 
 /// Unpack a game archive into the output folder; runs as an engine job whose `dest` is the
-/// game found inside. POST /api/fpkg/extract.
+/// game found inside. With `free_archive` the archive is deleted as it unpacks (asked for
+/// and confirmed on the screen, never on by itself). POST /api/fpkg/extract.
 #[tauri::command]
 pub async fn fpkg_extract(
     source: String,
     output_dir: Option<String>,
     password: Option<String>,
+    free_archive: Option<bool>,
 ) -> Result<JsonValue, String> {
     let base = engine::url();
     let url = format!("{base}/api/fpkg/extract");
+    post_json(
+        &url,
+        &serde_json::json!({
+            "source": source,
+            "output_dir": output_dir,
+            "password": password,
+            "free_archive": free_archive.unwrap_or(false),
+        }),
+    )
+    .await
+}
+
+/// Whether an archive can be unpacked with its own space given back, and how; changes
+/// nothing. POST /api/fpkg/extract/free-check.
+#[tauri::command]
+pub async fn fpkg_extract_free_check(
+    source: String,
+    output_dir: Option<String>,
+    password: Option<String>,
+) -> Result<JsonValue, String> {
+    let base = engine::url();
+    let url = format!("{base}/api/fpkg/extract/free-check");
     post_json(
         &url,
         &serde_json::json!({
@@ -2547,12 +2643,17 @@ pub async fn fpkg_extract(
     .await
 }
 
-/// Remove an archive's unpack folder. POST /api/fpkg/extract/cleanup.
+/// Remove an archive's unpack folder; with `kept`, the folder an unpack that freed its archive
+/// kept. POST /api/fpkg/extract/cleanup.
 #[tauri::command]
-pub async fn fpkg_extract_cleanup(path: String) -> Result<JsonValue, String> {
+pub async fn fpkg_extract_cleanup(path: String, kept: Option<bool>) -> Result<JsonValue, String> {
     let base = engine::url();
     let url = format!("{base}/api/fpkg/extract/cleanup");
-    post_json(&url, &serde_json::json!({ "path": path })).await
+    post_json(
+        &url,
+        &serde_json::json!({ "path": path, "kept": kept.unwrap_or(false) }),
+    )
+    .await
 }
 
 /// Workshop jobs the engine is running now, whoever started them.

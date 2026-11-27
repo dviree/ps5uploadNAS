@@ -10,11 +10,12 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+use axum::extract::ws::rejection::WebSocketUpgradeRejection;
 use axum::extract::ws::{CloseFrame, Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{ConnectInfo, State as AxState};
-use axum::http::{header, HeaderMap, StatusCode};
+use axum::http::{header, HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{any, get};
 use axum::Router;
 use base64::Engine as _;
 use futures_util::{SinkExt, StreamExt};
@@ -27,13 +28,40 @@ use tokio::sync::{mpsc, Notify};
 
 use crate::config::Config;
 use crate::limits::{canonical_ip, v6_site, IpKey, RateTable, Window};
-use crate::metrics::{ErrorKind, Gauges, Metrics};
+use crate::metrics::{ErrorKind, Gauges, Limit, Metrics, Stray};
 use crate::{Field, Shared};
 
 pub const PROTOCOL_VERSION: u64 = 1;
 pub const ROOM_LEN: usize = 22;
 pub const SECRET_LEN: usize = 43;
 pub const GID_LEN: usize = 12;
+/// The last character of a room id made from its host's secret ([`room_for_secret`]). A room id
+/// of 16 random bytes (what older apps make) never ends in it: the last of its 22 base64url
+/// characters holds 2 bits only, so it is always `A`, `Q`, `g` or `w`.
+pub const BOUND_ROOM_MARK: char = 'h';
+/// What a bound room id hashes before the secret: the id is never a prefix of the hash the hub
+/// keeps for reclaims.
+const BOUND_ROOM_DOMAIN: &[u8] = b"ps5upload-hub room\0";
+
+/// The room id a host's secret gives: 21 base64url characters of a SHA-256 of the secret (126
+/// bits), then [`BOUND_ROOM_MARK`]. The hub opens a room with an id of this form only for the
+/// secret it was made from, so a link holder cannot open it with a secret of their own, also
+/// after a hub restart (when the hub has no rooms at all): the id is the proof, nothing is stored.
+pub fn room_for_secret(secret: &str) -> String {
+    let h = Sha256::new()
+        .chain_update(BOUND_ROOM_DOMAIN)
+        .chain_update(secret.as_bytes())
+        .finalize();
+    let mut id = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(h);
+    id.truncate(ROOM_LEN - 1);
+    id.push(BOUND_ROOM_MARK);
+    id
+}
+
+/// A room id of the bound form ([`room_for_secret`]): only its own secret may host it.
+pub fn is_bound_room(room: &str) -> bool {
+    room.len() == ROOM_LEN && room.ends_with(BOUND_ROOM_MARK)
+}
 /// Messages queued for one peer before it counts as too slow.
 const PEER_QUEUE: usize = 64;
 /// The hard frame cap given to the WebSocket layer. Frames between the protocol limit and this
@@ -93,11 +121,23 @@ struct Room {
     host_signals: Window,
     hostless_since: Option<Instant>,
     guests: HashMap<String, Guest>,
+    /// Each guest client's signals in this room ([`Config::max_signals_per_guest_client`]),
+    /// kept when its guest goes so that joining again does not refill them. Bounded: at most
+    /// [`GUEST_CLIENTS_PER_SEAT`] per seat, and windows that ran out are dropped.
+    guest_clients: HashMap<IpKey, Window>,
 }
+
+/// Guest clients a room keeps a signal budget for, per seat (8 seats: 32 clients a minute).
+const GUEST_CLIENTS_PER_SEAT: usize = 4;
 
 struct Guest {
     peer: Peer,
     signals: Window,
+    /// When it joined: a guest still here [`Config::guest_max_age`] later is removed.
+    joined: Instant,
+    /// Who it is (the address [`client_ip`] gave): its signals count toward that client's
+    /// budget in the room too.
+    client: IpKey,
 }
 
 #[derive(Clone)]
@@ -144,16 +184,44 @@ pub(crate) fn gauges(shared: &Shared) -> Gauges {
     }
 }
 
+/// What `/robots.txt` says: nothing here is for crawlers.
+pub const ROBOTS_TXT: &str = "User-agent: *\nDisallow: /\n";
+
+/// The public routes. `/ws/` is `/ws` (a hub address typed with a slash at the end). Everything
+/// else answers 404 and is counted by the class of its path ([`Stray`]), never logged: the hub's
+/// name is public (certificate logs list it), so scanners and crawlers ask for `/`, `/.env` and
+/// the like all day. `/robots.txt` tells well-behaved crawlers to stay away.
 pub(crate) fn router(shared: Arc<Shared>, with_metrics: bool) -> Router {
     let r = Router::new()
-        .route("/ws", get(ws_handler))
-        .route("/health", get(|| async { "ok\n" }));
+        // Every method reaches the handler, so a request that is not a WebSocket upgrade is
+        // counted; it gets the same answer as before (405, 400 or 426).
+        .route("/ws", any(ws_handler))
+        .route("/ws/", any(ws_handler))
+        .route("/health", get(|| async { "ok\n" }))
+        .route("/robots.txt", get(robots_handler));
     let r = if with_metrics {
         r.route("/metrics", get(metrics_handler))
     } else {
         r
     };
-    r.with_state(shared)
+    r.fallback(not_found).with_state(shared)
+}
+
+async fn robots_handler(AxState(shared): AxState<Arc<Shared>>) -> Response {
+    shared.metrics.stray(Stray::Robots);
+    (
+        [
+            (header::CONTENT_TYPE, "text/plain; charset=utf-8"),
+            (header::CACHE_CONTROL, "public, max-age=86400"),
+        ],
+        ROBOTS_TXT,
+    )
+        .into_response()
+}
+
+async fn not_found(AxState(shared): AxState<Arc<Shared>>, uri: Uri) -> Response {
+    shared.metrics.stray(Stray::of_path(uri.path()));
+    (StatusCode::NOT_FOUND, "not found\n").into_response()
 }
 
 /// The private metrics listener's routes.
@@ -192,8 +260,15 @@ async fn ws_handler(
     AxState(shared): AxState<Arc<Shared>>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     headers: HeaderMap,
-    ws: WebSocketUpgrade,
+    ws: Result<WebSocketUpgrade, WebSocketUpgradeRejection>,
 ) -> Response {
+    let ws = match ws {
+        Ok(ws) => ws,
+        Err(rejection) => {
+            shared.metrics.stray(Stray::WsNotWebSocket);
+            return rejection.into_response();
+        }
+    };
     if let Some(origin) = headers.get(header::ORIGIN) {
         let ok = origin
             .to_str()
@@ -237,16 +312,20 @@ impl ConnSlot {
     fn take(shared: &Arc<Shared>, ip: IpKey, site: Option<u64>) -> Result<ConnSlot, ErrorKind> {
         let cfg = &shared.config;
         let mut st = shared.state.lock().unwrap_or_else(|e| e.into_inner());
+        let m = &shared.metrics;
         if shared.connections.load(Ordering::Relaxed) >= cfg.max_connections {
+            m.limited(Limit::Connections);
             return Err(ErrorKind::ServerFull);
         }
         // Both limits are checked before either count moves, so a refusal leaves no entry.
         if st.conns_per_ip.get(&ip).copied().unwrap_or(0) >= cfg.max_connections_per_ip {
+            m.limited(Limit::ConnectionsPerClient);
             return Err(ErrorKind::TooManyConnections);
         }
         if let Some(site) = site {
             let open = st.conns_per_v6_site.get(&site).copied().unwrap_or(0);
             if open >= cfg.max_connections_per_v6_site {
+                m.limited(Limit::ConnectionsPerV6Site);
                 return Err(ErrorKind::TooManyConnections);
             }
             *st.conns_per_v6_site.entry(site).or_insert(0) += 1;
@@ -567,6 +646,12 @@ fn on_host(
     if !is_b64url(secret, SECRET_LEN) {
         return Err(ErrorKind::BadSecret);
     }
+    // A bound id opens for its own secret only. Before, the first `host` for an id after a hub
+    // restart took it with any secret: anyone with the link could open the room as theirs, its
+    // host got `room_taken` from then on, and the guests' offers went to them.
+    if is_bound_room(room_id) && room_for_secret(secret) != room_id {
+        return Err(ErrorKind::RoomTaken);
+    }
     let hash = hash_secret(secret);
     let now = Instant::now();
     let mut st = shared.state.lock().unwrap_or_else(|e| e.into_inner());
@@ -586,10 +671,12 @@ fn on_host(
         Metrics::inc(&shared.metrics.reclaims);
     } else {
         if st.rooms.len() >= cfg.max_rooms {
+            shared.metrics.limited(Limit::Rooms);
             return Err(ErrorKind::ServerFull);
         }
         let owned = st.rooms_per_ip.get(&ip).copied().unwrap_or(0);
         if owned >= cfg.max_rooms_per_ip {
+            shared.metrics.limited(Limit::RoomsPerClient);
             return Err(ErrorKind::TooManyRooms);
         }
         *st.rooms_per_ip.entry(ip).or_insert(0) += 1;
@@ -602,6 +689,7 @@ fn on_host(
                 host_signals: Window::new(now),
                 hostless_since: None,
                 guests: HashMap::new(),
+                guest_clients: HashMap::new(),
             },
         );
         Metrics::inc(&shared.metrics.hosts);
@@ -627,6 +715,7 @@ fn on_join(
     let mut st = shared.state.lock().unwrap_or_else(|e| e.into_inner());
     // Every attempt counts, found or not: this is what makes guessing room ids pointless.
     if !st.joins.hit(ip, now, cfg.rate_window, cfg.max_joins_per_ip) {
+        shared.metrics.limited(Limit::JoinRate);
         return Err(ErrorKind::RateLimited);
     }
     let room_id = str_field(msg, "room")?.unwrap_or_default();
@@ -643,6 +732,30 @@ fn on_join(
     if room.guests.len() >= cfg.max_guests_per_room {
         return Err(ErrorKind::RoomFull);
     }
+    // The client's signal budget here outlives its guests: before, each join came with a fresh
+    // one, so one client joining again and again (30 times a minute) sent the host 600 signals
+    // a minute where one guest may send 20. A client that has used it up is refused now rather
+    // than at its first signal. The table holds clients that joined within the window, at most
+    // a few per seat: past that, a new client waits for windows to run out.
+    let cap = cfg
+        .max_guests_per_room
+        .saturating_mul(GUEST_CLIENTS_PER_SEAT);
+    if !room.guest_clients.contains_key(&ip) && room.guest_clients.len() >= cap {
+        room.guest_clients
+            .retain(|_, w| !w.expired(now, cfg.rate_window));
+        if room.guest_clients.len() >= cap {
+            shared.metrics.limited(Limit::RoomClients);
+            return Err(ErrorKind::RateLimited);
+        }
+    }
+    let budget = room
+        .guest_clients
+        .entry(ip)
+        .or_insert_with(|| Window::new(now));
+    if budget.used_up(now, cfg.rate_window, cfg.max_signals_per_guest_client) {
+        shared.metrics.limited(Limit::ClientBudget);
+        return Err(ErrorKind::RateLimited);
+    }
     let gid = loop {
         let g = random_b64(GID_LEN * 3 / 4);
         if !room.guests.contains_key(&g) {
@@ -654,6 +767,8 @@ fn on_join(
         Guest {
             peer: me.clone(),
             signals: Window::new(now),
+            joined: now,
+            client: ip,
         },
     );
     host.send(
@@ -697,6 +812,17 @@ fn on_signal(shared: &Shared, role: &mut Role, msg: &Msg) -> Result<Action, Erro
                 .signals
                 .hit(now, cfg.rate_window, cfg.max_signals_per_guest)
             {
+                shared.metrics.limited(Limit::GuestSignals);
+                return Err(ErrorKind::RateLimited);
+            }
+            // (An entry the sweeper dropped as run out starts again: a guest in the room has a
+            // seat, so this adds at most one per seat past the join's bound.)
+            let client = r
+                .guest_clients
+                .entry(g.client)
+                .or_insert_with(|| Window::new(now));
+            if !client.hit(now, cfg.rate_window, cfg.max_signals_per_guest_client) {
+                shared.metrics.limited(Limit::ClientSignals);
                 return Err(ErrorKind::RateLimited);
             }
             let Some(h) = &r.host else {
@@ -713,11 +839,17 @@ fn on_signal(shared: &Shared, role: &mut Role, msg: &Msg) -> Result<Action, Erro
             let Some(r) = st.rooms.get_mut(room.as_str()) else {
                 return Err(ErrorKind::NoPeer);
             };
+            // Over the host's limit: the signal is dropped and the host stays. Before, the host
+            // was closed (and every guest with it, and again on each reconnect while the window
+            // lasted), and guests make a host send: it answers each offer. So anyone with the
+            // link could cut the host off by offering fast enough.
             if !r
                 .host_signals
                 .hit(now, cfg.rate_window, cfg.max_signals_per_host)
             {
-                return Err(ErrorKind::RateLimited);
+                Metrics::inc(&shared.metrics.host_signals_dropped);
+                shared.metrics.limited(Limit::HostSignals);
+                return Ok(Action::Reply(Vec::new()));
             }
             let Some(g) = r.guests.get(to) else {
                 return Err(ErrorKind::NoPeer);
@@ -790,6 +922,7 @@ fn on_leave(shared: &Shared, role: &mut Role, me: &Peer, msg: &Msg) -> Result<Ac
                 // Close the room for good.
                 None => {
                     if let Some(r) = st.remove_room(&room) {
+                        Metrics::inc(&shared.metrics.rooms_closed);
                         for g in r.guests.values() {
                             close_guest(&g.peer, &shared.metrics);
                         }
@@ -830,6 +963,11 @@ pub(crate) async fn sweeper(shared: Arc<Shared>, stun_table: Arc<Mutex<RateTable
                 st.remove_room(&id);
                 Metrics::inc(&shared.metrics.rooms_expired);
             }
+            expire_guests(&mut st, now, cfg.guest_max_age, &shared.metrics);
+            for r in st.rooms.values_mut() {
+                r.guest_clients
+                    .retain(|_, w| !w.expired(now, cfg.rate_window));
+            }
             st.joins.sweep(now, cfg.rate_window);
         }
         stun_table
@@ -856,8 +994,37 @@ pub(crate) async fn sweeper(shared: Arc<Shared>, stun_table: Arc<Mutex<RateTable
                         ("stun", Field::N(m.stun_requests.load(Ordering::Relaxed))),
                         ("errors", Field::N(m.errors_total())),
                         ("refused", Field::N(m.refused_total())),
+                        ("strays", Field::N(m.strays_total())),
                     ],
                 );
+            }
+        }
+    }
+}
+
+/// Removes the guests that joined `max_age` ago or more. The hub only introduces a guest: every
+/// client leaves its room once its connection to the host is up (the guest page and the share
+/// client from the start), well within a minute and a half, so one still here has not made a
+/// session and will not. Before, a few sockets that joined and then sat idle (answering pings)
+/// kept a room full for as long as they liked. The guest gets `timeout` (4000), its host `left`.
+fn expire_guests(st: &mut State, now: Instant, max_age: Duration, m: &Metrics) {
+    for r in st.rooms.values_mut() {
+        let old: Vec<String> = r
+            .guests
+            .iter()
+            .filter(|(_, g)| now.duration_since(g.joined) >= max_age)
+            .map(|(gid, _)| gid.clone())
+            .collect();
+        for gid in old {
+            let Some(g) = r.guests.remove(&gid) else {
+                continue;
+            };
+            m.error(ErrorKind::Timeout);
+            Metrics::inc(&m.guests_expired);
+            g.peer.send(Out::Text(error_text(ErrorKind::Timeout)), m);
+            g.peer.send(Out::Close(CLOSE_PROTOCOL, "timeout"), m);
+            if let Some(h) = &r.host {
+                h.send(Out::Text(json!({"t": "left", "gid": gid}).to_string()), m);
             }
         }
     }
@@ -1039,6 +1206,77 @@ mod tests {
         assert_eq!(got["data"], json!({"b": 2}));
     }
 
+    #[test]
+    fn a_bound_room_id_is_the_secrets_and_a_random_one_is_never_bound() {
+        let a = random_b64(32);
+        let b = random_b64(32);
+        let ra = room_for_secret(&a);
+        assert_eq!(ra, room_for_secret(&a));
+        assert_ne!(ra, room_for_secret(&b));
+        assert!(is_b64url(&ra, ROOM_LEN) && is_bound_room(&ra));
+        // Not a piece of the hash kept for reclaims.
+        let kept = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(hash_secret(&a));
+        assert!(!kept.starts_with(&ra[..ROOM_LEN - 1]));
+        // What older apps make: 16 random bytes. Never of the bound form.
+        for _ in 0..2_000 {
+            let old = random_b64(16);
+            assert_eq!(old.len(), ROOM_LEN);
+            assert!(!is_bound_room(&old), "{old}");
+        }
+        // In process: a bound id with another secret is refused, with its own taken.
+        let sh = shared(Config::default());
+        let (p, _rx) = peer(1);
+        let host = |room: &str, secret: &str| {
+            let msg = json!({"v": 1, "t": "host", "room": room, "secret": secret}).to_string();
+            handle_text(&sh, &mut Role::None, &p, ip(), &msg).map(|_| ())
+        };
+        assert!(matches!(host(&ra, &b), Err(ErrorKind::RoomTaken)));
+        assert!(host(&ra, &a).is_ok());
+    }
+
+    /// The per-client budgets a room keeps are bounded: past a few clients per seat in one window
+    /// a new client is refused (an old one is not) until windows run out.
+    #[test]
+    fn a_rooms_client_budgets_are_bounded() {
+        let window = Duration::from_millis(200);
+        let sh = shared(Config {
+            max_guests_per_room: 1,
+            rate_window: window,
+            ..Config::default()
+        });
+        let (hp, _hrx) = peer(1);
+        let room = "A".repeat(ROOM_LEN);
+        let host = json!({"v": 1, "t": "host", "room": room, "secret": "S".repeat(SECRET_LEN)});
+        assert!(handle_text(&sh, &mut Role::None, &hp, ip(), &host.to_string()).is_ok());
+        let join = json!({"v": 1, "t": "join", "room": room}).to_string();
+        let client = |n: u32| IpKey::V4(0xc633_6400 + n);
+        // Join and leave: one seat, one client at a time.
+        let visit = |n: u32| {
+            let (gp, _grx) = peer(10 + u64::from(n));
+            let mut role = Role::None;
+            let res = handle_text(&sh, &mut role, &gp, client(n), &join).map(|_| ());
+            if res.is_ok() {
+                let leave = json!({"t": "leave"}).to_string();
+                assert!(handle_text(&sh, &mut role, &gp, client(n), &leave).is_ok());
+            }
+            res
+        };
+        let cap = GUEST_CLIENTS_PER_SEAT as u32;
+        for n in 0..cap {
+            assert!(visit(n).is_ok(), "client {n}");
+        }
+        assert!(matches!(visit(cap), Err(ErrorKind::RateLimited)));
+        assert!(visit(0).is_ok(), "a client it has may come back");
+        let kept = |sh: &Shared| {
+            let st = sh.state.lock().unwrap();
+            st.rooms[&room].guest_clients.len()
+        };
+        assert_eq!(kept(&sh), GUEST_CLIENTS_PER_SEAT);
+        std::thread::sleep(window);
+        assert!(visit(cap).is_ok(), "windows ran out");
+        assert_eq!(kept(&sh), 1);
+    }
+
     /// `cargo test -p ps5upload-hub --release forward_cost -- --ignored --nocapture`: the time the
     /// hub spends on one forwarded offer (about 5 KB) and one ICE candidate, in process.
     #[test]
@@ -1046,6 +1284,7 @@ mod tests {
     fn forward_cost() {
         let c = Config {
             max_signals_per_guest: u32::MAX,
+            max_signals_per_guest_client: u32::MAX,
             max_signals_per_host: u32::MAX,
             ..Config::default()
         };

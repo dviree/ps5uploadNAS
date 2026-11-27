@@ -1,6 +1,6 @@
 # SNAPSHOT
 
-Last updated: 2026-11-23. Upstream phantomptr/ps5upload v12.6.24 / 4bfce98e.
+Last updated: 2026-11-27. Upstream phantomptr/ps5upload v12.6.42 / c35ad94f.
 
 The Rust engine and React client retain this fork's PKG output folder and installer.
 Convert Games now opens the Zstd NAS converter; Workshop remains alongside it.

@@ -70,48 +70,49 @@ describe("CompressionTiles", () => {
 describe("MakeCard", () => {
   it("does not ask to check an archive, which is looked at when it is unpacked", () => {
     const html = renderToStaticMarkup(
-      <MakeCard make="pkg" onMake={() => {}} kernel="11.00" contentId={null} checked={false} archive />,
+      <MakeCard make="pkg" onMake={() => {}} checked={false} archive />,
     );
     expect(html).not.toContain("Check a game");
     expect(html).toContain("after it is unpacked");
   });
 
-  it("explains both, and marks the image for a PS5 game the firmware will not play as a package", () => {
-    const fw = renderToStaticMarkup(
-      <MakeCard make="pkg" onMake={() => {}} kernel="r229358/releases/13.60" contentId="UP9000-PPSA03671_00-X" checked />,
-    );
-    expect(fw).toContain("A package (.pkg)");
+  it("explains both, and marks the package once a game is checked", () => {
+    const fw = renderToStaticMarkup(<MakeCard make="pkg" onMake={() => {}} checked />);
+    expect(fw).toContain("A fake package (FPKG, .pkg)");
+    // It says in words what a .pkg is, and the two ways to play it: install, or Kraken Mount.
+    expect(fw).toContain("A fake package (FPKG). There are two ways to play a PS5 one: install it");
+    expect(fw).toContain("or mount it with Kraken Mount");
     expect(fw).toContain("A game image");
-    expect(fw).toContain("Recommended on FW 13.60");
-    expect(fw).toContain("not play on FW 13.60");
+    expect(fw.match(/Recommended/g)).toHaveLength(1);
+    expect(fw).toContain("needs the latest kstuff (with fake-package support up to 13.60)");
     const ps4 = renderToStaticMarkup(
-      <MakeCard make="pkg" onMake={() => {}} kernel="r229358/releases/13.60" contentId="UP9000-CUSA01234_00-X" checked />,
+      <MakeCard make="pkg" onMake={() => {}} checked />,
     );
     expect(ps4).not.toContain("Recommended on FW");
     expect(ps4.match(/Recommended/g)).toHaveLength(1);
-    const none = renderToStaticMarkup(<MakeCard make="pkg" onMake={() => {}} kernel={null} contentId={null} checked={false} />);
+    const none = renderToStaticMarkup(<MakeCard make="pkg" onMake={() => {}} checked={false} />);
     expect(none).not.toContain("Recommended");
     expect(none).toContain("Check a game under");
   });
 
   it("with Kraken Mount running, marks the package (mounted, not installed) and says images aren't mounted", () => {
     const k = renderToStaticMarkup(
-      <MakeCard make="pkg" onMake={() => {}} kernel="r229358/releases/13.60" contentId="UP9000-PPSA03671_00-X" checked kraken />,
+      <MakeCard make="pkg" onMake={() => {}} checked kraken />,
     );
     expect(k).not.toContain("Recommended on FW");
     expect(k.match(/Recommended/g)).toHaveLength(1);
-    expect(k).toMatch(/A package \(\.pkg\)[\s\S]*?Recommended/);
+    expect(k).toMatch(/A fake package \(FPKG, \.pkg\)[\s\S]*?Recommended/);
     expect(k).toContain("a package made here is mounted from a drive, not installed");
     expect(k).toContain("Kraken Mount, running on this PS5, mounts it");
     const img = renderToStaticMarkup(
-      <MakeCard make="image" onMake={() => {}} kernel={null} contentId={null} checked={false} kraken />,
+      <MakeCard make="image" onMake={() => {}} checked={false} kraken />,
     );
     expect(img).toContain("does not mount images");
   });
 
   it("offers a game folder as a third choice, never marked as recommended", () => {
     const out = renderToStaticMarkup(
-      <MakeCard make="folder" onMake={() => {}} kernel="r229358/releases/9.60" contentId="UP9000-PPSA03671_00-X" checked />,
+      <MakeCard make="folder" onMake={() => {}} checked />,
     );
     expect((out.match(/role="radio"/g) ?? []).length).toBe(3);
     expect(out).toContain("A game folder");
@@ -151,11 +152,11 @@ describe("OptionsCard for a folder", () => {
 describe("A PS4 game's package", () => {
   it("is offered as a PS4 package under ②", () => {
     const out = renderToStaticMarkup(
-      <MakeCard make="pkg" onMake={() => {}} kernel="r229358/releases/13.60" contentId="UP9000-CUSA01234_00-X" checked ps4 />,
+      <MakeCard make="pkg" onMake={() => {}} checked ps4 />,
     );
-    expect(out).toContain("A PS4 package (.pkg)");
+    expect(out).toContain("A PS4 fake package (FPKG, .pkg)");
     expect(out).toContain("A PS4 fake package the PS5 installs");
-    expect(out).not.toContain("A package (.pkg)");
+    expect(out).not.toContain("A fake package (FPKG, .pkg)");
     expect((out.match(/role="radio"/g) ?? []).length).toBe(3);
   });
 
@@ -240,6 +241,22 @@ describe("OptionsCard for an image", () => {
     expect(pkg).toContain("fpkg-language");
   });
 
+  it("offers the game's own languages first, then every language, then each one (#939)", () => {
+    const render = (language: string) =>
+      renderToStaticMarkup(<OptionsCard {...props} make="pkg" language={language} onLanguage={() => {}} />);
+    const own = render("");
+    expect(own).toMatch(/<option value="" selected="">The game&#x27;s own languages<\/option>/);
+    expect(own).toContain('<option value="all">Every language</option>');
+    // 31 languages after the two.
+    expect((own.match(/<option /g) ?? []).length).toBe(33);
+    // Every language is the one choice that can fill the console's list: it says so.
+    expect(own).not.toContain("language-every-hint");
+    expect(render("fr-FR")).not.toContain("language-every-hint");
+    const every = render("all");
+    expect(every).toContain("language-every-hint");
+    expect(every).toContain("all 31 languages");
+  });
+
   it("offers the .ffpfsc levels only when compressing", () => {
     const render = (compress: boolean) =>
       renderToStaticMarkup(
@@ -257,6 +274,98 @@ describe("OptionsCard for an image", () => {
     for (const label of ["Fast", "Balanced", "Smallest", "Recommended"]) expect(on).toContain(label);
     // Balanced is the default.
     expect(on).toMatch(/aria-checked="true"[^>]*>(<[^>]+>)*Balanced/);
+  });
+});
+
+describe("OptionsCard for a package of a game in asset packs (#933)", () => {
+  const props = {
+    outputDir: "/out",
+    onChangeOutput: () => {},
+    onOutputTyped: () => {},
+    canBrowse: true,
+    compression: "balanced" as const,
+    onCompression: () => {},
+    estimates: undefined,
+    locked: false,
+  };
+  const pkgUnpack = (on: boolean, leaveOut = false) => ({
+    kind: "zstd" as const,
+    on,
+    onToggle: () => {},
+    leaveOutEmulator: { on: leaveOut, onToggle: () => {} },
+  });
+  it("offers the plain files beside the compression, and leaving the emulator out only under them", () => {
+    const on = renderToStaticMarkup(<OptionsCard {...props} make="pkg" unpack={pkgUnpack(true)} />);
+    expect(on).toMatch(/data-testid="unpack-option"[^>]*>\s*<input[^>]*checked/);
+    expect(on).toContain("the package holds every file as a plain file");
+    expect(on).toContain('role="radiogroup"');
+    expect(on).toContain('data-testid="leave-out-ampr-emu"');
+    expect(on).toContain("Leave out the AMPR emulator");
+    expect(on).not.toMatch(/data-testid="leave-out-ampr-emu"[^>]*>\s*<input[^>]*checked/);
+    const left = renderToStaticMarkup(<OptionsCard {...props} make="pkg" unpack={pkgUnpack(true, true)} />);
+    expect(left).toMatch(/data-testid="leave-out-ampr-emu"[^>]*>\s*<input[^>]*checked/);
+    // Unticked, the packs go in as they are and the emulator has to stay.
+    const off = renderToStaticMarkup(<OptionsCard {...props} make="pkg" unpack={pkgUnpack(false, true)} />);
+    expect(off).toContain('data-testid="unpack-option"');
+    expect(off).not.toMatch(/data-testid="unpack-option"[^>]*>\s*<input[^>]*checked/);
+    expect(off).not.toContain("leave-out-ampr-emu");
+  });
+  it("offers no emulator choice for an image, and nothing for a PS4 package", () => {
+    const image = renderToStaticMarkup(
+      <OptionsCard
+        {...props}
+        make="image"
+        image={{ format: "ffpkg", compress: false, onChoice: () => {} }}
+        unpack={{ kind: "lz4", on: true, onToggle: () => {} }}
+      />,
+    );
+    expect(image).toContain('data-testid="unpack-option"');
+    expect(image).toContain("no longer needs ShadowMount+ to read packs");
+    expect(image).not.toContain("leave-out-ampr-emu");
+    const ps4 = renderToStaticMarkup(<OptionsCard {...props} make="pkg" ps4 unpack={pkgUnpack(true)} />);
+    expect(ps4).not.toContain("unpack-option");
+  });
+
+  // Someone looked for "create fpkg without ampr" and found nothing: the two options only
+  // showed for a checked game in packs, under the output folder and the compression tiles.
+  it("puts them first under ③, in a group named for asset packs and AMPR", () => {
+    const html = renderToStaticMarkup(<OptionsCard {...props} make="pkg" gameChecked unpack={pkgUnpack(true)} />);
+    expect(html).toMatch(/role="group" aria-label="Asset packs and AMPR"[^>]*data-testid="pkg-packs"/);
+    const at = (needle: string) => html.indexOf(needle);
+    expect(at("pkg-packs")).toBeGreaterThan(0);
+    expect(at("pkg-packs")).toBeLessThan(at("Output folder"));
+    expect(at("unpack-option")).toBeLessThan(at('role="radiogroup"'));
+    expect(at("leave-out-ampr-emu")).toBeLessThan(at("Output folder"));
+    // The note is for a game with nothing to choose.
+    expect(html).not.toContain("pkg-packs-note");
+  });
+
+  it("says where the options are before a game is checked, and why there are none for a plain game", () => {
+    const pending = renderToStaticMarkup(<OptionsCard {...props} make="pkg" />);
+    expect(pending).toMatch(/data-testid="pkg-packs-note" data-state="pending"/);
+    expect(pending).toContain("Asset packs and AMPR");
+    expect(pending).toContain(
+      "Check a game under ① first. If it is in asset packs, the options to unpack them and to leave out the AMPR emulator appear here.",
+    );
+    expect(pending).not.toContain("unpack-option");
+    const plain = renderToStaticMarkup(<OptionsCard {...props} make="pkg" gameChecked />);
+    expect(plain).toMatch(/data-testid="pkg-packs-note" data-state="none"/);
+    expect(plain).toContain("This game has no asset packs, so there is nothing to unpack.");
+    expect(plain).not.toContain("Check a game under ① first");
+    // One line each, in the same place the options take.
+    for (const html of [pending, plain]) expect(html.indexOf("pkg-packs-note")).toBeLessThan(html.indexOf("Output folder"));
+  });
+
+  it("says nothing of a package's packs for an image, a folder or a PS4 package", () => {
+    const image = renderToStaticMarkup(
+      <OptionsCard {...props} make="image" image={{ format: "ffpkg", compress: false, onChoice: () => {} }} />,
+    );
+    const folder = renderToStaticMarkup(<OptionsCard {...props} make="folder" />);
+    const ps4 = renderToStaticMarkup(<OptionsCard {...props} make="pkg" ps4 gameChecked />);
+    for (const html of [image, folder, ps4]) {
+      expect(html).not.toContain("pkg-packs");
+      expect(html).not.toContain("Asset packs and AMPR");
+    }
   });
 });
 
@@ -295,7 +404,7 @@ describe("OptionsCard free space", () => {
   it("offers every PlayGo language, by its own name", () => {
     const out = renderToStaticMarkup(<OptionsCard {...props} language="de-DE" onLanguage={() => {}} />);
     expect(out).toContain("Game language");
-    expect(out).toMatch(/<option value="">[^<]*As the game ships/);
+    expect(out).toMatch(/<option value="">[^<]*The game&#x27;s own languages/);
     expect(out).toMatch(/<option value="de-DE" selected="">Deutsch/);
     expect((out.match(/<option value="[a-z]{2}-/g) ?? []).length).toBe(31);
   });
@@ -414,6 +523,50 @@ describe("GameCard archive source", () => {
     // The game being made stays put.
     expect(html).toMatch(/id="fpkg-source"[^>]*disabled|disabled[^>]*id="fpkg-source"/);
   });
+
+  // The check under ① is of the source as it is. A packed game's own ampr_emu.index goes into
+  // what keeps the packs, and a fresh one into anything else: the finding is a warning only for
+  // the first (a .ffpkg in zstd packs made into a .pkg warned although the package was fine).
+  it("warns about the game's stale index only when what is made carries it", () => {
+    const stale = "the folder's ampr_emu.index is stale (7 listed missing, 0 unlisted, 10 sizes differ)";
+    const inspection = (applies_to?: string): FpkgInspection =>
+      ({
+        source: "image /games/Packed.ffpkg",
+        files: 3,
+        bytes: 3 << 20,
+        content_id: "UP9000-PPSA01234_00-PACKEDGAME000000",
+        title: "Packed Game",
+        planned_size: 3 << 20,
+        output_free: 1 << 40,
+        packs: "zstd",
+        checks: [
+          { name: "eboot.bin present", ok: true, detail: "the title module" },
+          { name: "ampr_emu.index for a libSceAmpr title", ok: false, detail: stale, applies_to },
+        ],
+      }) as FpkgInspection;
+    const render = (applies_to: string | undefined, packsKept: boolean) =>
+      renderToStaticMarkup(
+        <MemoryRouter>
+          <GameCard {...props("/games/Packed.ffpkg")} inspection={inspection(applies_to)} packsKept={packsKept} />
+        </MemoryRouter>,
+      );
+    const warned = (html: string) => html.includes("text-[var(--color-warn)]") && html.includes("⚠");
+    // The packs stay: the stale index ships, and it is a warning.
+    const kept = render("packs_kept", true);
+    expect(warned(kept)).toBe(true);
+    expect(kept).not.toContain("check-replaced");
+    // Unpacked (or packed again): a fresh index is written. No warning; the finding is still
+    // there to read with the other checks.
+    const unpacked = render("packs_kept", false);
+    expect(warned(unpacked)).toBe(false);
+    expect(unpacked).toContain("✓");
+    expect(unpacked).toContain("Checks passed: 1");
+    expect(unpacked).toMatch(/data-testid="check-replaced"[^>]*>[^<]*is stale \(7 listed missing/);
+    // A game in no packs gets a fresh index in everything made from it.
+    expect(warned(render("source_as_is", false))).toBe(false);
+    // A finding with no scope (an older engine, or any other check) warns as before.
+    expect(warned(render(undefined, false))).toBe(true);
+  });
 });
 
 describe("unfinished swaps", () => {
@@ -495,6 +648,32 @@ describe("QueueCard adding", () => {
   it("offers Upload & Install once a made game has been handed to its queue", () => {
     expect(card([waiting()])).not.toContain("Open Upload &amp; Install");
     expect(card([waiting("handed")])).toContain("Open Upload &amp; Install");
+  });
+
+  it("says what closing the page does while the queue runs, and that it waits after one (#954)", () => {
+    const props = {
+      items: [waiting()],
+      onOpenUpload: noop,
+      onStart: noop,
+      onStop: noop,
+      onRemove: noop,
+      onUpdate: noop,
+      canInstall: true,
+      host: "192.168.1.20",
+      onMove: noop,
+      onClearFinished: noop,
+    };
+    const runningHtml = renderToStaticMarkup(<QueueCard {...props} running />);
+    expect(runningHtml).toContain("Closing this page does not stop the game being made");
+    expect(runningHtml).not.toContain("cq-stopped-by-close");
+    const stopped = renderToStaticMarkup(<QueueCard {...props} running={false} stoppedByClose />);
+    expect(stopped).toContain("The queue stopped when this page was closed");
+    expect(stopped).not.toContain("Closing this page does not stop");
+    // Nothing left to start: nothing to say.
+    expect(renderToStaticMarkup(<QueueCard {...props} items={[waiting("done")]} running={false} stoppedByClose />)).not.toContain(
+      "cq-stopped-by-close",
+    );
+    expect(card([waiting()])).not.toContain("cq-stopped-by-close");
   });
 
   it("a game with a plain % in its name does not break the card", async () => {
@@ -646,6 +825,67 @@ describe("a waiting game's own options (#669)", () => {
     expect(await options(waitingItem({ build: { kind: "pkg" } }))).not.toContain("cq-packs");
   });
 
+  // The same two choices while a package waits in the queue: shown for a game known to be in
+  // packs, with one line otherwise.
+  it("shows a waiting package's asset-pack choices, or says why it has none", async () => {
+    const packed = await options(waitingItem({ build: { kind: "pkg", unpackPacks: true }, packs: "zstd" }));
+    expect(packed).toMatch(/aria-label="Asset packs and AMPR"[^>]*data-testid="pkg-packs"/);
+    expect(packed).toMatch(/data-testid="unpack-option"[^>]*>\s*<input[^>]*checked/);
+    expect(packed).toContain("Unpack the asset packs");
+    expect(packed).toContain("Leave out the AMPR emulator");
+    expect(packed).not.toMatch(/data-testid="leave-out-ampr-emu"[^>]*>\s*<input[^>]*checked/);
+    expect(packed.indexOf("pkg-packs")).toBeLessThan(packed.indexOf("Compression"));
+    const left = await options(
+      waitingItem({ build: { kind: "pkg", unpackPacks: true, leaveOutAmprEmu: true }, packs: "lz4" }),
+    );
+    expect(left).toMatch(/data-testid="leave-out-ampr-emu"[^>]*>\s*<input[^>]*checked/);
+    // Checked under ① and unticked there: still its choice to make.
+    const kept = await options(waitingItem({ build: { kind: "pkg" }, packs: "zstd" }));
+    expect(kept).toContain('data-testid="unpack-option"');
+    expect(kept).not.toMatch(/data-testid="unpack-option"[^>]*>\s*<input[^>]*checked/);
+    expect(kept).not.toContain("leave-out-ampr-emu");
+    // Queued with its packs unpacked before the queue remembered what the game is in.
+    expect(await options(waitingItem({ build: { kind: "pkg", unpackPacks: true } }))).toContain(
+      'data-testid="unpack-option"',
+    );
+
+    const plain = await options(waitingItem({ build: { kind: "pkg" }, packs: "none" }));
+    expect(plain).toMatch(/data-testid="pkg-packs-note" data-state="none"/);
+    expect(plain).toContain("This game has no asset packs, so there is nothing to unpack.");
+    const unchecked = await options(waitingItem({ build: { kind: "pkg" } }));
+    expect(unchecked).toMatch(/data-testid="pkg-packs-note" data-state="unchecked"/);
+    expect(unchecked).toContain("If it is in asset packs, the package gets them unpacked.");
+    expect(unchecked).toContain("check the game under ① and add it from there");
+    // An image or a folder has its own packs row, not the package's.
+    expect(await options(waitingItem({ build: { kind: "image", format: "exfat", compress: false } }))).not.toContain(
+      "pkg-packs",
+    );
+  });
+
+  it("changes a waiting package's asset-pack choices, and keeps what was unticked by hand", async () => {
+    const { pkgUnpackChoice } = await import("./QueueItemOptions");
+    const changes: unknown[] = [];
+    const choice = (item: ConvertItem) => pkgUnpackChoice(item, (c) => changes.push(c))!;
+    const packed = waitingItem({ build: { kind: "pkg", unpackPacks: true }, packs: "zstd" });
+    choice(packed).leaveOutEmulator!.onToggle(true);
+    choice(packed).onToggle(false);
+    choice(waitingItem({ build: { kind: "pkg", unpackPacks: true, leaveOutAmprEmu: true }, packs: "zstd" })).onToggle(
+      false,
+    );
+    choice(waitingItem({ build: { kind: "pkg" }, packs: "lz4" })).onToggle(true);
+    expect(changes).toEqual([
+      { build: { kind: "pkg", unpackPacks: true, leaveOutAmprEmu: true } },
+      // Unticked: said outright, so the queue doesn't look again and unpack it after all.
+      { build: { kind: "pkg", unpackPacks: false } },
+      // Leaving the emulator out goes with unpacking.
+      { build: { kind: "pkg", unpackPacks: false } },
+      { build: { kind: "pkg", unpackPacks: true } },
+    ]);
+    // A game nobody checked, or one in no packs, has nothing to choose.
+    expect(pkgUnpackChoice(waitingItem({ build: { kind: "pkg" } }), () => {})).toBeUndefined();
+    expect(pkgUnpackChoice(waitingItem({ build: { kind: "pkg" }, packs: "none" }), () => {})).toBeUndefined();
+  });
+
   it("changing packs, format or kind keeps the rest of the game's build (#905)", async () => {
     const { changeForPacks, changeForKind } = await import("./QueueItemOptions");
     const packed: ConvertBuild = {
@@ -672,6 +912,17 @@ describe("a waiting game's own options (#669)", () => {
     expect(changeForKind(waitingItem({ build: folder }), "folder", true, null).build).toEqual(folder);
     const unpacked: ConvertBuild = { kind: "folder", unpackPacks: true };
     expect(changeForKind(waitingItem({ build: unpacked }), "folder", true, null).build).toEqual(unpacked);
+    // #933: plain files go along into another kind; leaving the emulator out is a package's own.
+    const pkg: ConvertBuild = { kind: "pkg", unpackPacks: true, leaveOutAmprEmu: true };
+    expect(changeForKind(waitingItem({ source: "/dl/game.exfat", build: pkg }), "folder", true, null).build).toEqual({
+      kind: "folder",
+      unpackPacks: true,
+    });
+    expect(changeForKind(waitingItem({ source: "/dl/game.exfat", build: unpacked }), "pkg", true, null).build).toEqual({
+      kind: "pkg",
+      unpackPacks: true,
+    });
+    expect(changeForKind(waitingItem({ build: pkg }), "pkg", true, null).build).toEqual(pkg);
   });
 
   it("a game on a server or the PS5 has no folder here to be saved next to", async () => {
@@ -690,7 +941,7 @@ describe("a waiting game's own options (#669)", () => {
 
   it("while a game is being made, ② and ③ are open and say they are for the next game", () => {
     const make = renderToStaticMarkup(
-      <MakeCard make="folder" onMake={() => {}} kernel={null} contentId={null} checked={false} forNext />,
+      <MakeCard make="folder" onMake={() => {}} checked={false} forNext />,
     );
     expect(make).toContain('data-testid="next-game-note"');
     expect(make).not.toMatch(/<button[^>]* disabled=""/);

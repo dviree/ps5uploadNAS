@@ -17,7 +17,9 @@ import {
   RowActionsMenu,
   RowActionsTrigger,
   RowMenu,
+  SelectionMoreMenu,
   type RowActionsContext,
+  type RowMenuItem,
 } from "./RowActions";
 import { SELECTION_ACTION, SelectionBar } from "./SelectionBar";
 import { FilesViewFrame } from "./FilesViewFrame";
@@ -27,8 +29,7 @@ import { fileSystemTargetFor } from "../Search/searchLink";
 import { isMeshInternal, MESH_MARKER } from "../../lib/meshFiles";
 import { DiskUsagePanel } from "../DiskUsage";
 import { SnapshotsPanel, type SnapshotPrefill } from "../Backup";
-import { useC2cRoutes } from "../../state/c2cRoutes";
-import { useUploadQueueStore } from "../../state/uploadQueue";
+import { queueConsoleSend } from "../../state/consoleSendQueue";
 import type { SendItem } from "../../lib/consoleSend";
 import { queueLinkFor } from "../../lib/gamePage";
 import {
@@ -76,7 +77,13 @@ import {
   KeyRound,
   Send,
   Network,
+  ListChecks,
+  Server,
+  Columns2,
 } from "lucide-react";
+import { TwoPanesFrame, type PsSide } from "./TwoPanes";
+import { readTwoPanes, TWO_PANES_QUERY, writeTwoPanes, type CopyOutcome } from "./panePlan";
+import { useMediaQuery } from "../../lib/phoneLayout";
 import type { Connection } from "../../api/remote";
 import { useConnectionsStore } from "../../state/connections";
 import { pickLocalPath } from "../../state/localPicker";
@@ -100,7 +107,7 @@ import {
 } from "./fsGuards";
 import { pickSaveDest as saveDialog } from "../../lib/pickSaveDest";
 import { isTauriEnv } from "../../lib/tauriEnv";
-import { isWindows } from "../../lib/platform";
+import { isIOS, isWindows } from "../../lib/platform";
 import {
   PageHeader,
   Button,
@@ -133,14 +140,13 @@ import {
   jobStatus,
   startTransferDownload,
   startTransferDownloadZip,
-  fetchVolumes,
   generateTxIdHex,
   pathKind,
   loadConsolePayload,
   type SearchHit,
   type Volume,
 } from "../../api/ps5";
-import { baseNameOf, kindsOf, namesPreview, planFsUpload } from "../../state/fsUploadPlan";
+import { baseNameOf, kindsOf, namesPreview, planFsUpload, type FsPickedItem } from "../../state/fsUploadPlan";
 import { useConflictAsk } from "./ConflictAsk";
 import {
   loadFsLastPath,
@@ -197,6 +203,7 @@ import {
 import { enqueueFsUpload, fsUploadReservations, pauseFsUpload, pauseFsUploadQueue, resumeFsUploadItem, resumeFsUploadQueue, removeFsUploadQueued, sendFsUploadNow, useFsUploadQueue } from "../../state/fsUploadQueue";
 import { nameKey, type FsExistingEntry } from "../../state/fsUploadPlan";
 import { fsUploadDeps } from "../../state/fsUploadRuntime";
+import { refreshVolumes, refreshVolumesAfterChange, useConsoleVolumes } from "../../state/volumes";
 import { useScrollLock } from "../../lib/useScrollLock";
 import { runBulkDelete as runBulkDeleteLoop } from "../../lib/bulkDelete";
 import { krakenKeptPaths } from "../../lib/krakenGuard";
@@ -273,6 +280,13 @@ import { useMeshDriveShortcuts } from "./useMeshDriveShortcuts";
 import { formatNumber, formatDuration } from "../../lib/formatDate";
 import { Modal } from "../../components/Modal";
 import { childToReveal, REVEAL_MS } from "../../lib/revealChild";
+import { useBackDismiss, useScreenBack } from "../../lib/systemBack";
+import { usePhoneLayout } from "../../lib/phoneLayout";
+import { ltr } from "../../i18n";
+import NotificationInbox from "../../layout/NotificationInbox";
+import { createLongPress } from "../../lib/longPress";
+import { backUpTarget, filesBackStep, folderTitle, revealAboveKeyboard } from "./phoneFiles";
+import { FilesColumn, PhoneFolderRow, PhoneSelectionActions, PhoneSelectionRow, PhoneStagedBar } from "./PhoneBars";
 
 function parent(p: string): string {
   if (p === "/" || p === "") return "/";
@@ -412,6 +426,12 @@ export function isSinglePathName(name: string): boolean {
   );
 }
 
+/** How long a reading of the drives counts as recent while folders are browsed. Refresh, and
+ *  anything done here that changes free space, reads them again whatever their age. */
+const DRIVES_FRESH_MS = 30_000;
+/** The same for a dialog that says whether something fits on a drive. */
+const DIALOG_FRESH_MS = 5_000;
+
 /** The in-app drag of rows to move them (the row names, as JSON). */
 const FS_DRAG_MIME = "application/x-ps5upload-fs-move";
 
@@ -454,17 +474,21 @@ export default function FileSystemScreen() {
   // are handled by the effect below.
   const [searchParams, setSearchParams] = useSearchParams();
   const [path, setPath] = useState<string>(() => loadFsLastPath(host));
-  // Refetched whenever host or payloadStatus changes. Drives the
-  // volume picker dropdown — same shape Library's Move modal uses.
-  // null while loading or before the first probe completes; an empty
-  // array means the probe ran but the PS5 has no writable volumes
-  // (rare on stock PS5, but possible after a user mounts and then
-  // unmounts everything). Errors are swallowed silently — the picker
-  // just hides itself, which is less noisy than yet another red
-  // banner for what's a degraded-but-functional state.
-  const [volumes, setVolumes] = useState<Volume[] | null>(null);
-  // Bumped after a USB eject so the drive bar lists the drives again.
-  const [volumesEpoch, setVolumesEpoch] = useState(0);
+  // The console's drives, for the drive chips, the phone's drive menu and the Move/Extract
+  // dialogs: the slot every screen shares (state/volumes), so the free space here is the
+  // free space Volumes shows. null while not read (or with the helper not answering); an
+  // empty array means the console reports no writable drive. A read that fails says nothing
+  // here (the last list stays): another red banner would be noise for a state that works.
+  const drives = useConsoleVolumes(host, payloadStatus === "up");
+  const volumes = useMemo<Volume[] | null>(
+    () =>
+      payloadStatus === "up" && drives.volumes
+        ? // Writable, real drives only: the chips are for going there, and a placeholder
+          // ("nothing mounted here yet") would jump to a path that does not exist.
+          drives.volumes.filter((v) => v.writable && !v.is_placeholder)
+        : null,
+    [drives.volumes, payloadStatus],
+  );
   const [entries, setEntries] = useState<DirEntry[] | null>(null);
   // The folder on screen is a Mesh Drive's (its marker file is in it, hidden from the list).
   const [meshHome, setMeshHome] = useState(false);
@@ -484,6 +508,9 @@ export default function FileSystemScreen() {
   /** The folder a "Download from a link" was opened for, while its card is up (#872). */
   const [linkInto, setLinkInto] = useState<string | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
+  // Selection mode on a phone with nothing ticked yet: "Select" in the ⋮ menu, the way in for a
+  // keyboard or a D-pad (a finger long-presses a row). Ends with the selection (#936).
+  const [selectMode, setSelectMode] = useState(false);
   const [localBusy, setBusyEntry] = useState<{
     name: string;
     op: "rename" | "mkdir";
@@ -595,8 +622,8 @@ export default function FileSystemScreen() {
   // Eject next to each USB drive, as the console's own Files page has (#496). Browsing inside
   // the drive that went away returns to /data.
   const { eject: ejectUsb, ejectingPath, dialog: ejectDialogNode } = useUsbEject({
-    onEjected: (_host, mountPoint) => {
-      setVolumesEpoch((n) => n + 1);
+    onEjected: (ejectedOn, mountPoint) => {
+      void refreshVolumesAfterChange(ejectedOn);
       setPath((p) => (p === mountPoint || p.startsWith(`${mountPoint}/`) ? "/data" : p));
     },
     onError: setError,
@@ -612,7 +639,7 @@ export default function FileSystemScreen() {
   // mid-run is harmless. The runner loops keep going (writing to
   // the store), the screen re-mount sees the in-flight progress.
 
-  const refresh = useCallback(async () => {
+  const listFolder = useCallback(async () => {
     if (!host?.trim()) return;
     // Stale-result guard (2.9.0). The user can navigate (changes
     // `path`) or switch PS5 (changes `host`) faster than ps5_list_dir
@@ -736,46 +763,28 @@ export default function FileSystemScreen() {
       setLoading(false);
     }
   }, [host, path, tr]);
+  // Refresh, and the listing after anything done here (a delete, a paste, an extract, an
+  // upload that ended): the folder AND the drives. The drive chips used to keep the free
+  // space read when the screen opened, whatever was deleted or copied since (#944).
+  const refresh = useCallback(async () => {
+    void refreshVolumesAfterChange(host);
+    await listFolder();
+  }, [host, listFolder]);
   // Layout effects run before the passive ones below, so the listing effect of the same
   // commit already sees the new place.
   useLayoutEffect(() => {
     placeRef.current = { host, path };
-    refreshRef.current = refresh;
-  }, [host, path, refresh]);
+    refreshRef.current = listFolder;
+  }, [host, path, listFolder]);
 
+  // Opening a folder lists it. The drives are read again only if their reading is not
+  // recent: a job running from another screen moves free space while folders are browsed,
+  // but one more console call per folder opened would be waste.
   useEffect(() => {
-    if (payloadStatus === "up") refresh();
-  }, [payloadStatus, refresh]);
-
-  // Fetch writable volumes whenever the connection becomes healthy or
-  // the host changes. Same data the Library Move modal uses — listing
-  // volumes on the FileSystem screen lets users jump between mounts
-  // (/data → /mnt/ext1 → /mnt/usb0) with one click instead of
-  // navigating up to / and clicking down. Errors swallow silently;
-  // the picker just won't render.
-  useEffect(() => {
-    if (payloadStatus !== "up" || !host?.trim()) {
-      setVolumes(null);
-      return;
-    }
-    let cancelled = false;
-    (async () => {
-      try {
-        const vols = await fetchVolumes(consoleAddr(host));
-        if (!cancelled) {
-          // Only show writable, non-placeholder volumes — the picker
-          // is for navigation, and a placeholder ("disk not yet
-          // mounted") would jump to a nonexistent path.
-          setVolumes(vols.filter((v) => v.writable && !v.is_placeholder));
-        }
-      } catch {
-        if (!cancelled) setVolumes([]);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, [host, payloadStatus, volumesEpoch]);
+    if (payloadStatus !== "up") return;
+    void refreshVolumes(host, { maxAgeMs: DRIVES_FRESH_MS });
+    void listFolder();
+  }, [payloadStatus, listFolder, host]);
 
   // An "Add files" run ended (here, or while another screen was open): list the folder
   // again so what landed shows. The count is per console, so a console switch is not a run.
@@ -915,9 +924,20 @@ export default function FileSystemScreen() {
   // under the new path, and their actions join that path with their names.
   useEffect(() => {
     setSelected(new Set());
+    setSelectMode(false);
     setEntries(null);
     setMeshHome(false);
   }, [host, path]);
+  // Selection mode ends with the selection: the last row unticked, or an action that used it
+  // (Copy, Move…). It stays only while nothing was ticked yet since "Select" opened it.
+  const hadSelection = useRef(false);
+  useEffect(() => {
+    if (selected.size > 0) hadSelection.current = true;
+    else if (hadSelection.current) {
+      hadSelection.current = false;
+      setSelectMode(false);
+    }
+  }, [selected]);
 
   const toggleSelected = (name: string) => {
     setSelected((s) => {
@@ -1693,7 +1713,12 @@ export default function FileSystemScreen() {
    *  Two or more local files then go up as ONE job, a folder as its own job, all of it one
    *  run (one task, one progress bar, one Cancel). `kind`: what the picker returned, when it
    *  only returns one kind (a drop is asked about). */
-  const addPicked = async (picked: string[], kind?: "file" | "folder") => {
+  const addPicked = async (
+    picked: string[],
+    kind?: "file" | "folder",
+    // What each pick is, when the caller has listed it already (the two panes, #952).
+    known?: FsPickedItem[],
+  ) => {
     if (picked.length === 0) return;
     setError(null);
     // The console can change while this waits on the listing or on the user: the plan is
@@ -1701,7 +1726,7 @@ export default function FileSystemScreen() {
     const probe = guard.capture();
     const addr = consoleAddr(host);
     const destDir = path;
-    const items = await kindsOf(picked, pathKind, kind);
+    const items = known ?? (await kindsOf(picked, pathKind, kind));
     let existing: Awaited<ReturnType<typeof fsListDir>>;
     try {
       existing = await fsListDir(addr, destDir);
@@ -1939,9 +1964,17 @@ export default function FileSystemScreen() {
   );
   // A folder can hold 100,000 entries: only those near the screen are rendered.
   const rowsListRef = useRef<HTMLUListElement | null>(null);
+  // The phone layout (#936).
+  const phone = usePhoneLayout();
+  // Two panes (#952): a wide window with a mouse only; a phone or a tablet keeps the one list.
+  const wideEnough = useMediaQuery(TWO_PANES_QUERY);
+  const [twoPanesWanted, setTwoPanesWanted] = useState(readTwoPanes);
+  const twoPanes = wideEnough && twoPanesWanted && !phone;
   const { start: rowsStart, end: rowsEnd, before: rowsBefore, after: rowsAfter, scrollToRow } = useWindowedRows(
     sortedEntries.length,
     rowsListRef,
+    // On a phone the list scrolls by itself under the header (FilesColumn).
+    phone && view === null,
   );
   useEffect(() => {
     scrollToEntry.current = (name) => scrollToRow(sortedEntries.findIndex((e) => e.name === name));
@@ -1967,31 +2000,10 @@ export default function FileSystemScreen() {
   };
   const confirmSend = (target: string, _destDir: string, dests: string[]) => {
     const items = sendItems ?? [];
-    const route = useC2cRoutes.getState().routeFor(hostOf(host), target);
     setSendItems(null);
     if (items.length === 0) return;
     setSelected(new Set());
-    const q = useUploadQueueStore.getState();
-    const ids = items.map((it, i) =>
-      q.add({
-        sourceKind: "ps5",
-        fromConsole: hostOf(host),
-        route: route.mode,
-        directAddr: route.directAddr || null,
-        sourcePath: it.path,
-        displayName: it.name,
-        resolvedDest: dests[i],
-        addr: target,
-        strategy: "overwrite",
-        reconcileMode: "fast",
-        excludes: [],
-        mountAfterUpload: false,
-        mountReadOnly: true,
-        registerAfterUpload: false,
-        estimatedBytes: it.size,
-      }),
-    );
-    q.startAdded(target, ids);
+    queueConsoleSend(host, target, items, dests);
     const name = profileNameForAddr(target, useRosterStore.getState().profiles) || target;
     pushNotification(
       "info",
@@ -2201,6 +2213,12 @@ export default function FileSystemScreen() {
     choice: ExtractChoice | null;
     after?: ExtractAfter;
   } | null>(null);
+  // Move to and Extract show each drive's free space and say whether the items fit: they open
+  // on a reading of now, not one from before a job running elsewhere filled the drive.
+  const spaceDialogOpen = moveItems !== null || extractAsk !== null;
+  useEffect(() => {
+    if (spaceDialogOpen) void refreshVolumes(host, { maxAgeMs: DIALOG_FRESH_MS });
+  }, [spaceDialogOpen, host]);
   const extractNameTaken = (n: string) => !!entries?.some((e) => e.name === n);
   const runExtract = async (
     entry: DirEntry,
@@ -2416,7 +2434,9 @@ export default function FileSystemScreen() {
     }));
     if (items.length === 0) return;
     clipboard.set(op, items, path);
+    // Selecting is done: on a phone the staged items' bar takes the selection's place.
     setSelected(new Set());
+    setSelectMode(false);
   };
 
   // Paste: apply clipboard.op to every item, pasting into `path`.
@@ -2520,6 +2540,8 @@ export default function FileSystemScreen() {
     const addr = consoleAddr(host);
     const errors: string[] = [...refused];
     const duplicated: string[] = [];
+    // The items that went through cleanly: they leave the clipboard afterwards.
+    const done: ClipboardItem[] = [];
     try {
       for (let i = 0; i < items.length; i++) {
         // Between-items cancel check. We *also* drive in-flight
@@ -2639,6 +2661,8 @@ export default function FileSystemScreen() {
                       delErr instanceof Error ? delErr.message : String(delErr)
                     })`,
                   );
+                  // Still where it was, so still staged.
+                  continue;
                 }
               } else {
                 throw e;
@@ -2647,6 +2671,7 @@ export default function FileSystemScreen() {
           } else {
             await fsCopy(addr, item.path, target, opId, overwrite);
           }
+          done.push(item);
         } catch (e) {
           const msg = e instanceof Error ? e.message : String(e);
           // The engine maps the payload's "fs_copy_cancelled" error
@@ -2692,14 +2717,31 @@ export default function FileSystemScreen() {
     if (problemMsgs.length > 0) {
       setError(problemMsgs.join(" · "));
     }
-    // Only clear the clipboard when every cut succeeded cleanly — a
-    // partial failure means the user might want to retry the leftover
-    // items. Copies always keep the clipboard (same-items-many-places
-    // is the usual copy workflow).
-    // This console's clipboard, and only if it still holds what was pasted. The store's
-    // live half belongs to the SELECTED console, which this one may no longer be.
-    if (!staged && op === "cut" && problemMsgs.length === 0)
-      useFsClipboardStore.getState().clearFor(host, pasted);
+    // What went through leaves the clipboard, a copy as well as a cut (#936): the bar used to
+    // stay after a copy had finished, as if there were still something to do. What failed, was
+    // refused or was not reached before Stop stays staged, to try again. This console's
+    // clipboard: the store's live half belongs to the SELECTED console, which this one may no
+    // longer be. (A moved source has left it already: lib/fsPathsGone.)
+    if (!staged)
+      useFsClipboardStore.getState().drop(
+        host,
+        done.map((i) => i.path),
+      );
+    // A word that it is done, which goes by itself (#936).
+    const notPasted = pasted.length - done.length;
+    if (problemMsgs.length > 0)
+      toast({
+        tone: "warn",
+        message: tr("fs_paste_failed", { count: notPasted }, `Items not pasted: ${notPasted}`),
+      });
+    else if (done.length > 0)
+      toast({
+        tone: "success",
+        message:
+          op === "cut"
+            ? tr("fs_paste_done_move", { count: done.length }, `Items moved: ${done.length}`)
+            : tr("fs_paste_done_copy", { count: done.length }, `Items copied: ${done.length}`),
+      });
     await refresh();
   };
 
@@ -2861,13 +2903,22 @@ export default function FileSystemScreen() {
   /** Save a file or folder under the current dir to the host. Same
    *  flow as Library's per-row Download — pick a host folder, kick
    *  off `transfer_download`, poll jobStatus to terminal. Single-
-   *  flight at the screen level: only one download at a time. */
-  const runDownload = async (entry: DirEntry, asZip = false, server?: Connection) => {
+   *  flight at the screen level: only one download at a time.
+   *  `to`: a folder already picked (on `server`, or on this computer for the two panes), and
+   *  `move` to delete the source once the engine checked the copy on the server (#953); `from`
+   *  is the PS5 folder the entry is in when it is not the one shown (the two panes, #952).
+   *  How it ended: done, failed, or stopped (also a cancelled picker). */
+  const runDownload = async (
+    entry: DirEntry,
+    asZip = false,
+    server?: Connection,
+    to?: { dir: string; move?: boolean; from?: string },
+  ): Promise<CopyOutcome> => {
     // Single-flight per console: only one download at a time on THIS
     // console (others download concurrently into their own slots).
-    if (fsDownload.active) return;
+    if (fsDownload.active) return "failed";
     const addr = consoleAddr(host);
-    const remote = joinPath(path, entry.name);
+    const remote = joinPath(to?.from ?? path, entry.name);
     const kind: "file" | "folder" = entry.kind === "dir" ? "folder" : "file";
 
     // asZip: pick a .zip save path and stream-zip into it (no scratch dir).
@@ -2885,14 +2936,16 @@ export default function FileSystemScreen() {
           'Save "{name}" as a .zip',
         ),
       });
-      if (!destZip || typeof destZip !== "string") return;
+      if (!destZip || typeof destZip !== "string") return "stopped";
       dest = destZip;
       rootName = destZip.split(/[\\/]/).pop() || `${entry.name}.zip`;
       start = () =>
         startTransferDownloadZip(remote, destZip, addr, kind, systemFileRead);
     } else {
       // A saved server (8.0.0): the engine pulls it off the console and writes it there.
-      const picked = server
+      const picked = to
+        ? to.dir
+        : server
         ? await pickLocalPath({
             mode: "folder",
             source: { connectionId: server.id },
@@ -2916,11 +2969,11 @@ export default function FileSystemScreen() {
               'Pick a destination folder for "{name}"',
             ),
           });
-      if (typeof picked !== "string") return;
+      if (typeof picked !== "string") return "stopped";
       dest = picked;
       rootName = entry.name;
       start = () =>
-        startTransferDownload(remote, picked, addr, kind, systemFileRead);
+        startTransferDownload(remote, picked, addr, kind, systemFileRead, !!to?.move);
     }
     setError(null);
     let jobId: string;
@@ -2943,7 +2996,7 @@ export default function FileSystemScreen() {
         { body: friendly },
       );
       fsDownload.end(friendly);
-      return;
+      return "failed";
     }
     labelEngineJob(jobId, "download", rootName);
     const myRunId = fsDownload.begin({
@@ -2976,20 +3029,53 @@ export default function FileSystemScreen() {
     };
     // A failed status read keeps polling (the engine is still downloading);
     // the banner says contact is lost and its Cancel still stops the job.
+    let outcome: CopyOutcome = "stopped";
     await pollFsDownload(
       jobId,
       {
         isLive,
         onProgress: (p) => fsDownload.setProgress(p),
         onLostContact: (e) => fsDownload.setLostContact(e),
-        onDone: () => fsDownload.end(null),
-        onFailed: (error) =>
+        onDone: () => {
+          outcome = "done";
+          fsDownload.end(null);
+        },
+        onFailed: (error) => {
+          outcome = "failed";
           fail(
             tr("fs_download_failed", { error }, "Download failed: {error}"),
-          ),
+          );
+        },
       },
       { jobStatus: (id) => jobStatus(id) },
     );
+    return outcome;
+  };
+
+  /** Copy or move `list` into one folder picked on `server` (#953), one item after another: a
+   *  failed, cancelled or refused item stops the rest. A move deletes each source on the PS5
+   *  only after the engine checked its copy on the server. */
+  const runServerTransfer = async (list: DirEntry[], server: Connection, move: boolean) => {
+    if (list.length === 0 || fsDownload.active) return;
+    const what =
+      list.length === 1
+        ? list[0].name
+        : tr("fs_move_n_items", { count: list.length }, `${list.length} items`);
+    const dir = await pickLocalPath({
+      mode: "folder",
+      source: { connectionId: server.id },
+      title: tr(
+        "fs_download_server_title",
+        { name: what, server: server.name },
+        'Pick a folder on {server} for "{name}"',
+      ),
+    });
+    if (typeof dir !== "string") return;
+    setSelected(new Set());
+    for (const entry of list) {
+      if ((await runDownload(entry, false, server, { dir, move })) !== "done") break;
+    }
+    if (move) void refresh();
   };
 
   const selectionActive = selected.size > 0;
@@ -3090,6 +3176,103 @@ export default function FileSystemScreen() {
     return best;
   }, [volumes, path]);
 
+  // ── The phone layout (#936) and system Back (#932) ─────────────────────────────────────
+  // (`phone` is with the windowed list, which needs it first.)
+  const selecting = selectMode || selectionActive;
+  /** Selection mode as the phone shows it: checkboxes, the selection row, the bottom bar. */
+  const phoneSelecting = phone && selecting && view === null;
+  /** Something staged to copy or move, shown in a bar where the bottom navigation is (#936):
+   *  not while selecting, whose actions have that place. */
+  const phoneStaged = phone && clipboardActive && !selecting && view === null;
+  const endSelection = () => {
+    setSelected(new Set());
+    setSelectMode(false);
+  };
+  // The header's menus on a phone: ⋮ (the page's actions), the drives, where "Add files" reads
+  // from, and the bottom bar's More.
+  const [phoneMenu, setPhoneMenu] = useState<{
+    kind: "more" | "drives" | "add-file" | "add-folder" | "selection";
+    anchor: DOMRect;
+  } | null>(null);
+  const togglePhoneMenu = (kind: NonNullable<typeof phoneMenu>["kind"], anchor: DOMRect) =>
+    setPhoneMenu((cur) => (cur?.kind === kind ? null : { kind, anchor }));
+  // Back on the listing once nothing covers it: selection mode first, then the staged items'
+  // bar, then up one folder; from the drive's root it leaves Files. Menus, dialogs and the inline
+  // editors close before that.
+  const backState = {
+    view: view !== null,
+    selecting,
+    staged: phoneStaged,
+    path,
+    driveRoot: currentVolumePath,
+  };
+  useScreenBack(filesBackStep(backState) !== null, () => {
+    const step = filesBackStep(backState);
+    if (step === "end-selection") endSelection();
+    else if (step === "cancel-staged") clipboard.clear();
+    else if (step === "up") {
+      const to = backUpTarget(path, currentVolumePath);
+      if (to !== null) setPath(to);
+    }
+  });
+  useBackDismiss(renaming !== null, () => setRenaming(null));
+  useBackDismiss(mkdirDraft !== null, () => setMkdirDraft(null));
+  useBackDismiss(pathDraft !== null, () => setPathDraft(null));
+  useBackDismiss(linkInto !== null, () => setLinkInto(null));
+  // The selection's actions take the bottom navigation's place (index.css hides it). Only while
+  // Files is on show: a kept, hidden screen has its effects torn down.
+  // The staged items' bar the same way.
+  const phoneBottomBar = phoneSelecting || phoneStaged;
+  useEffect(() => {
+    if (!phoneBottomBar) return;
+    const root = document.documentElement;
+    root.setAttribute("data-selection-bar", "");
+    return () => root.removeAttribute("data-selection-bar");
+  }, [phoneBottomBar]);
+  // One bar at the top, not two (#936): on a phone the compact header carries the bell, and the
+  // app's top bar gives it its place (`html[data-screen-bar]`, index.css). Held sideways too,
+  // where the row beside the sidebar gives way and only its console tabs stay: two rows left
+  // room for about two files. Not over a view, which has no such header. An iPhone keeps the
+  // app's bar: its arrows are the only way back there.
+  const ownTopBar = phone && view === null && !isIOS();
+  useEffect(() => {
+    if (!ownTopBar) return;
+    const root = document.documentElement;
+    root.setAttribute("data-screen-bar", "");
+    return () => root.removeAttribute("data-screen-bar");
+  }, [ownTopBar]);
+  // A long press on a row starts selection mode with that row (a finger, in the phone layout);
+  // in selection mode it ticks or unticks the row, as a tap does.
+  const [longPress] = useState(() =>
+    createLongPress<string>((name) =>
+      setSelected((s) => {
+        const next = new Set(s);
+        if (next.has(name)) next.delete(name);
+        else next.add(name);
+        return next;
+      }),
+    ),
+  );
+  useEffect(() => {
+    const end = () => longPress.end();
+    // The finger lifting after a long press is not a tap on whatever is under it now (the row,
+    // or the bar of actions that selecting just put there).
+    const onClick = (ev: MouseEvent) => {
+      if (!longPress.takeClick()) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+    };
+    window.addEventListener("pointerup", end, true);
+    window.addEventListener("pointercancel", end, true);
+    window.addEventListener("click", onClick, true);
+    return () => {
+      window.removeEventListener("pointerup", end, true);
+      window.removeEventListener("pointercancel", end, true);
+      window.removeEventListener("click", onClick, true);
+      longPress.dispose();
+    };
+  }, [longPress]);
+
   // What the row actions (desktop buttons and the phone ⋮ menu) need.
   const [properties, setProperties] = useState<{
     host: string;
@@ -3147,24 +3330,249 @@ export default function FileSystemScreen() {
   // A const, so the menu items' closures keep the non-null narrowing.
   const menuEntry = rowMenu?.entry ?? null;
 
-  /** The open folder's own view items, in its right-click menu and the page's ⋯ menu. */
-  const folderViewItems = () => [
+  /** The open folder's own view items, in its right-click menu and the page's ⋯ menu. A group
+   *  of their own, named for this folder; the drive's items further down say "drive", and the
+   *  snapshot pair says which one makes a snapshot and which one shows them (they read as twins:
+   *  "What takes space here?" beside "What takes space?", "Snapshot this folder" beside
+   *  "Snapshots"). */
+  const folderViewItems = (): RowMenuItem[] => [
     {
       icon: PieChart,
-      label: tr("fs_space_here", undefined, "What takes space here?"),
+      label: tr("fs_space_here_v2", undefined, "What takes space in this folder?"),
       run: () => openSpace(path),
       disabled: !host?.trim(),
+      separator: true,
     },
     {
       icon: Archive,
-      label: tr("fs_snapshot_folder", undefined, "Snapshot this folder"),
+      label: tr("fs_snapshot_folder_v2", undefined, "Make a snapshot of this folder"),
       run: () => snapshotPaths([path]),
       disabled: !host?.trim() || path === "/",
     },
   ];
 
+  /** The page's ⋯ menu: the folder's views, a link download, the drive's tools and search. */
+  const pageMoreItems = (): RowMenuItem[] => [
+    ...folderViewItems(),
+    {
+      icon: Link2,
+      label: tr("fs_link_download", undefined, "Download from a link"),
+      run: () => setLinkInto(path),
+      separator: true,
+    },
+    // The size map of the drive you are on (Disk usage, a Files view). With the other
+    // whole-drive tools here, not among the drive chips, which only pick a drive.
+    {
+      icon: PieChart,
+      label: tr("fs_space_drive", undefined, "What takes space on this drive?"),
+      run: () => openSpace(currentVolumePath ?? path),
+      separator: true,
+    },
+    {
+      icon: Archive,
+      label: tr("fs_snapshots_see", undefined, "See snapshots"),
+      run: () => openView("snapshots"),
+    },
+    {
+      icon: SearchIcon,
+      label: tr("fs_search_all_drives", undefined, "Search all drives"),
+      run: () => {
+        // An empty box only opens the view: what was typed there stays.
+        if (searchDraft.trim()) askSearch(searchDraft.trim(), undefined, false);
+        openView("search");
+      },
+    },
+    ...(searchFolder
+      ? [
+          {
+            icon: SearchIcon,
+            label: tr("fs_search_this_folder", undefined, "Search this folder"),
+            run: () => {
+              askSearch(searchDraft.trim(), undefined, true);
+              openView("search");
+            },
+          },
+        ]
+      : []),
+  ];
+
+  /** Web UI: the device's own picker (the hidden inputs in the page header). */
+  function pickOnDevice(mode: "file" | "folder") {
+    if (mode === "file") deviceFilesInput.current?.click();
+    else deviceFolderInput.current?.click();
+  }
+  /** Where "Add files" / "Add folder" read from on a phone: what the desktop's ▾ beside each
+   *  button offers (BrowseButton), in the same order. The app reads this device; the web UI the
+   *  server or the device the browser runs on. Files can come from a saved server too. */
+  const app = isTauriEnv();
+  const addSources: Record<"file" | "folder", RowMenuItem[]> = {
+    file: [
+      ...(app
+        ? []
+        : [{ icon: Server, label: tr("browse_on_server", undefined, "On the server…"), run: () => void addFilesHere() }]),
+      {
+        icon: HardDrive,
+        label: tr("browse_this_device", undefined, "This device…"),
+        run: app ? () => void addFilesHere() : () => pickOnDevice("file"),
+      },
+      ...savedServers.map((c) => ({
+        icon: Network,
+        label: c.name,
+        run: () =>
+          void pickPath({
+            mode: "file",
+            title: tr("fs_add_files_dialog_title", undefined, "Pick files to copy onto the PS5"),
+            source: { connectionId: c.id },
+          }).then((p) => {
+            if (typeof p === "string") void addPicked([p], "file");
+          }),
+      })),
+    ],
+    folder: [
+      ...(app
+        ? []
+        : [{ icon: Server, label: tr("browse_on_server", undefined, "On the server…"), run: () => void addFolderHere() }]),
+      {
+        icon: HardDrive,
+        label: tr("browse_this_device", undefined, "This device…"),
+        run: app ? () => void addFolderHere() : () => pickOnDevice("folder"),
+      },
+    ],
+  };
+  /** "Add files" / "Add folder" in the phone's ⋮: straight to the picker when there is only one
+   *  place to read from, else a menu of them at the same button. */
+  const startPhoneAdd = (mode: "file" | "folder") => {
+    const sources = addSources[mode];
+    if (sources.length === 1) sources[0].run();
+    else if (phoneMenu)
+      setPhoneMenu({ kind: mode === "file" ? "add-file" : "add-folder", anchor: phoneMenu.anchor });
+  };
+  const addBusy = loading || !host?.trim() || localBusy !== null;
+
+  /** The phone's menus, by the button that opened them. */
+  const phoneMenus: Record<Exclude<NonNullable<typeof phoneMenu>["kind"], "selection">, RowMenuItem[]> = {
+    more: [
+      {
+        icon: Upload,
+        label: tr("fs_add_files", "Add files"),
+        run: () => startPhoneAdd("file"),
+        disabled: addBusy,
+      },
+      {
+        icon: FolderUp,
+        label: tr("fs_add_folder", undefined, "Add folder"),
+        run: () => startPhoneAdd("folder"),
+        disabled: addBusy,
+      },
+      {
+        icon: FolderPlus,
+        label: tr("fs_new_folder", "New folder"),
+        run: () => setMkdirDraft(""),
+        disabled: loading || !host?.trim(),
+      },
+      {
+        icon: RefreshCw,
+        label: tr("fs_refresh", "Refresh"),
+        run: () => void refresh(),
+        disabled: loading || !host?.trim(),
+      },
+      // The way into selection mode without a long press (a keyboard, a D-pad).
+      {
+        icon: ListChecks,
+        label: tr("fs_select_items", undefined, "Select"),
+        run: () => setSelectMode(true),
+        disabled: !entries?.length,
+      },
+      ...pageMoreItems(),
+    ],
+    drives: [
+      ...(volumes ?? []).map((v) => {
+        const external = v.path.startsWith("/mnt/usb") || v.path.startsWith("/mnt/ext");
+        return {
+          icon: external ? Usb : HardDrive,
+          // The path and the size keep their order in a right-to-left language ("/data", not "data/").
+          label: `${ltr(v.path)} · ${ltr(formatBytes(v.free_bytes))} ${tr("fs_free", "free")}`,
+          run: () => setPath(v.path),
+          current: currentVolumePath === v.path,
+        };
+      }),
+      ...meshDrives.map((d) => ({
+        icon: FolderSync,
+        label: d.name,
+        run: () => setPath(d.hub),
+        current: path === d.hub || path.startsWith(`${d.hub}/`),
+      })),
+      ...(volumes ?? [])
+        .filter((v) => canEjectUsb(v.path))
+        .map((v) => ({
+          icon: Eject,
+          label: `${tr("volumes_eject", undefined, "Eject")} ${v.path}`,
+          run: () => void ejectUsb(v.path),
+          disabled: ejectingPath !== null,
+        })),
+    ],
+    "add-file": addSources.file,
+    "add-folder": addSources.folder,
+  };
+  /** More in the bar of selection actions: `always` for any selection, `several` unless exactly
+   *  one item is selected (then its row's own actions are there instead, SelectionMoreMenu). */
+  const selectionMenu: { always: RowMenuItem[]; several: RowMenuItem[] } = {
+    always: [
+      {
+        icon: Scissors,
+        label: tr("fs_cut", undefined, "Cut"),
+        run: () => stageClipboard("cut"),
+        disabled: bulkOp.op !== null,
+      },
+      ...(otherConsoles > 0
+        ? [
+            {
+              icon: Send,
+              label: tr("fs_send_action", undefined, "Send to another console…"),
+              run: () => startSend(),
+            },
+          ]
+        : []),
+      {
+        icon: KeyRound,
+        label: tr("fs_chmod_777", undefined, "Set permissions (777)"),
+        run: () => void runChmod777(),
+        disabled: bulkOp.op !== null || chmodBusy,
+      },
+    ],
+    several: [
+      {
+        icon: Archive,
+        label: tr("fs_snapshot_action", undefined, "Snapshot…"),
+        run: () => snapshotPaths(selectedEntries.map((x) => joinPath(path, x.name))),
+        disabled: !host?.trim(),
+      },
+    ],
+  };
+
+  // What the two panes (#952) use of this screen: its ticks, and its own Download and Add files.
+  const psSide: PsSide = {
+    host,
+    path,
+    selected: selectedEntries
+      .filter((e) => e.kind === "file" || e.kind === "dir")
+      .map((e) => ({
+        name: e.name,
+        path: joinPath(path, e.name),
+        isDir: e.kind === "dir",
+        size: e.kind === "dir" ? 0 : e.size,
+      })),
+    names: (entries ?? []).map((e) => e.name),
+    downloadBusy: downloadOp.active,
+    download: (item, into, server) =>
+      runDownload({ name: item.name, kind: item.isDir ? "dir" : "file", size: item.size }, false, server, into),
+    upload: (paths, known) => addPicked(paths, undefined, known),
+    clearSelection: () => setSelected(new Set()),
+    refresh: () => void refresh(),
+  };
+
   return (
-    <div className="app-page" {...browserDrop}>
+    <div className="app-page" data-files-page="" {...browserDrop}>
       {properties && (
         <FileProperties
           key={`${properties.host}:${properties.path}`}
@@ -3202,6 +3610,19 @@ export default function FileSystemScreen() {
           startPath={parent(moveItems[0]?.path ?? path)}
           onCancel={() => setMoveItems(null)}
           onConfirm={confirmMove}
+          servers={savedServers}
+          onServer={(id, move) => {
+            const server = savedServers.find((c) => c.id === id);
+            const names = new Set(moveItems.map((i) => i.name));
+            setMoveItems(null);
+            if (server) {
+              void runServerTransfer(
+                (entries ?? []).filter((e) => names.has(e.name)),
+                server,
+                move,
+              );
+            }
+          }}
         />
       )}
       {rowMenu && menuEntry && (
@@ -3400,47 +3821,29 @@ export default function FileSystemScreen() {
           y={moreMenu.bottom}
           anchor={moreMenu}
           onClose={() => setMoreMenu(null)}
-          items={[
-            ...folderViewItems(),
-            {
-              icon: Link2,
-              label: tr("fs_link_download", undefined, "Download from a link"),
-              run: () => setLinkInto(path),
-            },
-            // The size map of the drive you are on (Disk usage, a Files view). With the other
-            // whole-drive tools here, not among the drive chips, which only pick a drive.
-            {
-              icon: PieChart,
-              label: tr("fs_space_title", undefined, "What takes space?"),
-              run: () => openSpace(currentVolumePath ?? path),
-            },
-            {
-              icon: Archive,
-              label: tr("fs_snapshots_open", undefined, "Snapshots"),
-              run: () => openView("snapshots"),
-            },
-            {
-              icon: SearchIcon,
-              label: tr("fs_search_all_drives", undefined, "Search all drives"),
-              run: () => {
-                // An empty box only opens the view: what was typed there stays.
-                if (searchDraft.trim()) askSearch(searchDraft.trim(), undefined, false);
-                openView("search");
-              },
-            },
-            ...(searchFolder
-              ? [
-                  {
-                    icon: SearchIcon,
-                    label: tr("fs_search_this_folder", undefined, "Search this folder"),
-                    run: () => {
-                      askSearch(searchDraft.trim(), undefined, true);
-                      openView("search");
-                    },
-                  },
-                ]
-              : []),
-          ]}
+          items={pageMoreItems()}
+        />
+      )}
+      {phoneMenu?.kind === "selection" && (
+        <SelectionMoreMenu
+          {...selectionMenu}
+          // One item selected: what its own ⋮ offers, so nothing is out of reach of a long press.
+          sole={selectedEntries.length === 1 ? selectedEntries[0] : null}
+          ctx={rowActionsCtx}
+          done={endSelection}
+          anchor={phoneMenu.anchor}
+          onClose={() => setPhoneMenu(null)}
+        />
+      )}
+      {phoneMenu && phoneMenu.kind !== "selection" && (
+        <RowMenu
+          // A new menu at the same button (⋮, then where to add from) measures itself again.
+          key={phoneMenu.kind}
+          x={phoneMenu.anchor.right}
+          y={phoneMenu.anchor.bottom}
+          anchor={phoneMenu.anchor}
+          onClose={() => setPhoneMenu(null)}
+          items={phoneMenus[phoneMenu.kind]}
         />
       )}
       {confirmDialogNode}
@@ -3472,6 +3875,8 @@ export default function FileSystemScreen() {
         icon={FolderTree}
         title={tr("file_system", undefined, "Files")}
         loading={loading}
+        // A phone has the compact header pinned over the list instead (#936).
+        className="phone:hidden"
         right={
           // On a phone, Add folder / New folder / Refresh / ⋯ show their icon alone
           // so they fit one line under the title, and the search box takes the
@@ -3611,6 +4016,26 @@ export default function FileSystemScreen() {
             >
               {tr("fs_refresh", "Refresh")}
             </Button>
+            {wideEnough && (
+              <Button
+                variant={twoPanes ? "primary" : "secondary"}
+                size="sm"
+                leftIcon={<Columns2 size={12} />}
+                aria-pressed={twoPanes}
+                onClick={() => {
+                  writeTwoPanes(!twoPanesWanted);
+                  setTwoPanesWanted(!twoPanesWanted);
+                }}
+                title={tr(
+                  "two_panes_toggle_title",
+                  undefined,
+                  "Show another place beside the PS5, to copy or move between them",
+                )}
+                data-testid="fs-two-panes-toggle"
+              >
+                {tr("two_panes_toggle", undefined, "Two panes")}
+              </Button>
+            )}
             <Button
               variant="secondary"
               size="sm"
@@ -3710,7 +4135,8 @@ export default function FileSystemScreen() {
           </FilesViewFrame>
         )}
 
-        <div hidden={view !== null}>
+        <TwoPanesFrame on={twoPanes} ps={psSide} servers={savedServers} hidden={view !== null}>
+        <div hidden={view !== null} data-files-main="">
 
           {/* Volume picker. Renders only when we have at least one
             writable volume — otherwise it's clutter. Selecting a
@@ -3723,7 +4149,8 @@ export default function FileSystemScreen() {
               chip jumps to that drive's root; external/USB drives get a USB icon
               + accent border so they stand out. The active drive is highlighted. */}
           {volumes && volumes.length > 0 && (
-            <div className="mb-2 flex items-center gap-1 text-xs max-sm:overflow-x-auto sm:flex-wrap sm:gap-1.5">
+            // A phone picks the drive from the header's drive button instead.
+            <div className="mb-2 flex items-center gap-1 text-xs max-sm:overflow-x-auto sm:flex-wrap sm:gap-1.5 phone:hidden">
               <span className="me-0.5 inline-flex items-center gap-1 text-[var(--color-muted)] max-sm:sr-only">
                 <HardDrive size={12} />
                 {tr("fs_drives_label", undefined, "Drives")}
@@ -3739,6 +4166,8 @@ export default function FileSystemScreen() {
                     key={v.path}
                     type="button"
                     onClick={() => setPath(v.path)}
+                    // A path and a size: left to right in every language ("250 GiB", not "GiB 250").
+                    dir="ltr"
                     title={`${v.path} · ${formatBytes(v.free_bytes)} ${tr("fs_free", "free")}`}
                     aria-current={active ? "true" : undefined}
                     // Exactly ONE thing is highlighted: the drive you are
@@ -3826,112 +4255,172 @@ export default function FileSystemScreen() {
               `overflow-y` compute to `auto` too (CSS spec), which would clip the
               dropdown's absolutely-positioned panel to the thin breadcrumb bar
               — the cramped/scrollbar'd overlay users saw. Keeping the dropdown
-              out of the scrolling row lets its panel open freely. */}
-          <div className="mb-2 flex items-center gap-1 rounded-full border border-[var(--glass-edge)] bg-[var(--color-surface-raised)] px-1.5 py-0.5 text-xs sm:mb-4 sm:px-2.5 sm:py-1.5 shadow-[var(--edge-highlight),var(--shadow-1)]">
-            <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
-              <button
-                type="button"
-                onClick={() => setPath(parent(path))}
-                disabled={path === "/"}
-                title={tr("fs_parent_dir", undefined, "Parent directory")}
-                className="shrink-0 rounded-full p-1.5 text-[var(--color-muted)] hover:bg-[var(--color-surface-3)] hover:text-[var(--color-text)] disabled:opacity-30"
-              >
-                <ArrowUp size={14} />
-              </button>
-              {pathDraft !== null ? (
-                <input
-                  autoFocus
-                  value={pathDraft}
-                  onChange={(ev) => setPathDraft(ev.target.value)}
-                  onKeyDown={(ev) => {
-                    if (ev.key === "Enter") {
-                      const next = normalizeTypedPath(pathDraft);
-                      if (next) {
-                        setPath(next);
-                        setPathDraft(null);
-                      }
-                    }
-                    if (ev.key === "Escape") setPathDraft(null);
-                  }}
-                  onBlur={() => setPathDraft(null)}
-                  spellCheck={false}
-                  aria-label={tr("fs_go_to_path", undefined, "Go to path")}
-                  className="input input-sm min-w-0 flex-1 font-mono text-xs"
-                />
-              ) : (
-                <>
-                  {crumbs(path).map((c, i, arr) => (
-                    <span
-                      key={c.path}
-                      className="flex shrink-0 items-center gap-1"
-                    >
-                      <button
-                        type="button"
-                        onClick={() => setPath(c.path)}
-                        {...(i < arr.length - 1 ? dropProps(c.path) : {})}
-                        className={
-                          (dropTarget === c.path ? "ring-2 ring-[var(--color-accent)] " : "") +
-                          "rounded px-1.5 py-0.5 font-mono " +
-                          (i === arr.length - 1
-                            ? "font-medium text-[var(--color-text)]"
-                            : "text-[var(--color-muted)] hover:bg-[var(--color-surface-3)] hover:text-[var(--color-text)]")
+              out of the scrolling row lets its panel open freely.
+
+              On a phone this sits in a compact header pinned over the list (#936): the open
+              folder with search, the drive and ⋮ on top (or the selection, while selecting),
+              the path under it (beside it on a phone held sideways, where height is short).
+              Wider windows keep the page header and the drive chips.
+
+              Pinned by sitting outside what scrolls: on a phone the list under it is the only
+              scroller (FilesColumn). As a sticky header inside the page's scroller it moved and
+              stretched with the list when Android's overscroll pulled the list past its ends. */}
+          <div
+            data-testid="fs-header"
+            className={
+              "phone:relative phone:z-30 phone:mb-2 phone:shrink-0 phone:rounded-[var(--radius-card)] phone:border phone:border-[var(--glass-edge)] phone:bg-[var(--color-float)] phone:p-1 phone:shadow-[var(--edge-highlight),var(--shadow-2)] phone:backdrop-blur-xl phone:landscape:flex phone:landscape:items-center phone:landscape:gap-2" +
+              // Typing a path, a phone held sideways gives the path row a line of its own (#936).
+              (pathDraft !== null ? " phone:landscape:flex-wrap" : "")
+            }
+          >
+            {phoneSelecting ? (
+              <PhoneSelectionRow
+                countLabel={tr("fs_selected_count", { count: selected.size }, `${selected.size} selected`)}
+                cancelLabel={tr("fs_clear_selection", undefined, "Clear selection")}
+                onCancel={endSelection}
+                selectAllLabel={tr("fs_select_all", undefined, "Select all")}
+                allSelected={!!entries?.length && selected.size === entries.length}
+                onSelectAll={toggleAll}
+              />
+            ) : (
+              <PhoneFolderRow
+                title={folderTitle(path) ?? tr("file_system", undefined, "Files")}
+                loading={loading}
+                searchLabel={tr("search", undefined, "Search")}
+                onSearch={runToolbarSearch}
+                driveIcon={
+                  volumes?.length || meshDrives.length
+                    ? currentVolumePath?.startsWith("/mnt/usb") || currentVolumePath?.startsWith("/mnt/ext")
+                      ? Usb
+                      : HardDrive
+                    : null
+                }
+                driveLabel={tr("fs_drives_label", undefined, "Drives")}
+                drivesOpen={phoneMenu?.kind === "drives"}
+                onDrives={(box) => togglePhoneMenu("drives", box)}
+                moreLabel={tr("fs_more", undefined, "More")}
+                moreOpen={phoneMenu?.kind === "more" || phoneMenu?.kind === "add-file" || phoneMenu?.kind === "add-folder"}
+                onMore={(box) => togglePhoneMenu("more", box)}
+                bell={ownTopBar ? <NotificationInbox variant="row" /> : undefined}
+                disabled={!host?.trim()}
+              />
+            )}
+            <div className={"mb-2 flex items-center gap-1 rounded-full border border-[var(--glass-edge)] bg-[var(--color-surface-raised)] px-1.5 py-0.5 text-xs sm:mb-4 sm:px-2.5 sm:py-1.5 shadow-[var(--edge-highlight),var(--shadow-1)] phone:mb-0! phone:landscape:min-w-0 phone:landscape:flex-1 phone:landscape:py-0.5!" + (pathDraft !== null ? " phone:landscape:basis-full" : "")}>
+              <div className="flex min-w-0 flex-1 items-center gap-1 overflow-x-auto">
+                <button
+                  type="button"
+                  onClick={() => setPath(parent(path))}
+                  disabled={path === "/"}
+                  title={tr("fs_parent_dir", undefined, "Parent directory")}
+                  className="shrink-0 rounded-full p-1.5 text-[var(--color-muted)] hover:bg-[var(--color-surface-3)] hover:text-[var(--color-text)] disabled:opacity-30"
+                >
+                  <ArrowUp size={14} />
+                </button>
+                {pathDraft !== null ? (
+                  <input
+                    autoFocus
+                    value={pathDraft}
+                    onChange={(ev) => setPathDraft(ev.target.value)}
+                    onKeyDown={(ev) => {
+                      if (ev.key === "Enter") {
+                        const next = normalizeTypedPath(pathDraft);
+                        if (next) {
+                          setPath(next);
+                          setPathDraft(null);
                         }
+                      }
+                      if (ev.key === "Escape") setPathDraft(null);
+                    }}
+                    onBlur={() => setPathDraft(null)}
+                    spellCheck={false}
+                    aria-label={tr("fs_go_to_path", undefined, "Go to path")}
+                    onFocus={(ev) => revealAboveKeyboard(ev.currentTarget, phone)}
+                    enterKeyHint="go"
+                    data-testid="fs-path-input"
+                    className="input input-sm min-w-0 flex-1 font-mono text-xs phone:text-sm"
+                  />
+                ) : (
+                  <>
+                    {crumbs(path).map((c, i, arr) => (
+                      <span
+                        key={c.path}
+                        className="flex shrink-0 items-center gap-1"
                       >
-                        {i === 0 ? (
-                          <Home size={12} className="inline -translate-y-[1px]" />
-                        ) : (
-                          c.label
+                        <button
+                          type="button"
+                          onClick={() => setPath(c.path)}
+                          // The first crumb is only an icon: its name is the path it opens.
+                          aria-label={i === 0 ? c.path : undefined}
+                          title={i === 0 ? c.path : undefined}
+                          {...(i < arr.length - 1 ? dropProps(c.path) : {})}
+                          className={
+                            (dropTarget === c.path ? "ring-2 ring-[var(--color-accent)] " : "") +
+                            "rounded px-1.5 py-0.5 font-mono " +
+                            (i === arr.length - 1
+                              ? "font-medium text-[var(--color-text)]"
+                              : "text-[var(--color-muted)] hover:bg-[var(--color-surface-3)] hover:text-[var(--color-text)]")
+                          }
+                        >
+                          {i === 0 ? (
+                            <Home size={12} className="inline -translate-y-[1px]" />
+                          ) : (
+                            c.label
+                          )}
+                        </button>
+                        {i < arr.length - 1 && (
+                          <ChevronRight
+                            size={12}
+                            className="text-[var(--color-muted)] rtl:rotate-180"
+                          />
                         )}
-                      </button>
-                      {i < arr.length - 1 && (
-                        <ChevronRight
-                          size={12}
-                          className="text-[var(--color-muted)] rtl:rotate-180"
-                        />
-                      )}
-                    </span>
-                  ))}
-                  <button
-                    type="button"
-                    onClick={() => setPathDraft(path)}
-                    title={tr("fs_go_to_path", undefined, "Go to path")}
-                    className="ms-1 shrink-0 rounded-full p-1.5 text-[var(--color-muted)] hover:bg-[var(--color-surface-3)] hover:text-[var(--color-text)]"
-                  >
-                    <Pencil size={12} />
-                  </button>
-                </>
-              )}
+                      </span>
+                    ))}
+                    <button
+                      type="button"
+                      onClick={() => setPathDraft(path)}
+                      title={tr("fs_go_to_path", undefined, "Go to path")}
+                      data-testid="fs-path-edit"
+                      className="ms-1 shrink-0 rounded-full p-1.5 text-[var(--color-muted)] hover:bg-[var(--color-surface-3)] hover:text-[var(--color-text)]"
+                    >
+                      <Pencil size={12} />
+                    </button>
+                  </>
+                )}
+              </div>
+              <RecentPathsDropdown
+                onPick={(p) => setPath(p)}
+                currentPath={path}
+                onOpen={consolePins.refresh}
+                console={
+                  consolePins.pins
+                    ? {
+                        pins: consolePins.pins,
+                        pinned: consolePins.isPinned(path),
+                        onTogglePin: () =>
+                          void consolePins.toggle(path).catch((e: unknown) =>
+                            toast({
+                              tone: "warn",
+                              message: tr(
+                                "fs_console_pin_failed",
+                                { error: humanizeCaught(e) },
+                                `Couldn't change the console's pinned folders: ${e instanceof Error ? e.message : String(e)}`,
+                              ),
+                            }),
+                          ),
+                      }
+                    : undefined
+                }
+              />
             </div>
-            <RecentPathsDropdown
-              onPick={(p) => setPath(p)}
-              currentPath={path}
-              onOpen={consolePins.refresh}
-              console={
-                consolePins.pins
-                  ? {
-                      pins: consolePins.pins,
-                      pinned: consolePins.isPinned(path),
-                      onTogglePin: () =>
-                        void consolePins.toggle(path).catch((e: unknown) =>
-                          toast({
-                            tone: "warn",
-                            message: tr(
-                              "fs_console_pin_failed",
-                              { error: humanizeCaught(e) },
-                              `Couldn't change the console's pinned folders: ${e instanceof Error ? e.message : String(e)}`,
-                            ),
-                          }),
-                        ),
-                    }
-                  : undefined
-              }
-            />
           </div>
 
+          {/* Everything under the header: on a phone, the one part that scrolls. */}
+          <div data-files-scroll="" data-scroll-inner="">
           {/* Clipboard banner: non-empty clipboard shows what's staged and
-            where it came from; paste target is always the current path. */}
+            where it came from; paste target is always the current path. A phone has a bar
+            at the bottom instead (PhoneStagedBar). */}
           {clipboardActive && (
-            <div className="mb-3 flex items-center gap-2 rounded-[var(--radius-card)] border border-[color-mix(in_srgb,var(--color-accent)_35%,transparent)] bg-[var(--color-accent-soft)] p-2 text-xs">
+            <div data-testid="fs-staged-banner" className="mb-3 phone:hidden flex items-center gap-2 rounded-[var(--radius-card)] border border-[color-mix(in_srgb,var(--color-accent)_35%,transparent)] bg-[var(--color-accent-soft)] p-2 text-xs">
               <ClipboardPaste size={14} className="text-[var(--color-accent)]" />
               <span>
                 <span className="font-medium">
@@ -3979,6 +4468,8 @@ export default function FileSystemScreen() {
               )}
               clearLabel={tr("fs_clear_selection", undefined, "Clear selection")}
               onClear={() => setSelected(new Set())}
+              // A phone has the count in the header and the actions at the bottom (#936).
+              className="phone:hidden"
             >
               <button
                 type="button"
@@ -4064,9 +4555,15 @@ export default function FileSystemScreen() {
           )}
 
           {mkdirDraft !== null && (
-            <div className="rounded-[var(--radius-card)] border border-[var(--glass-edge)] bg-[var(--color-surface)] mb-3 flex items-center gap-2 p-2 text-sm">
-              <FolderPlus size={14} className="text-[var(--color-muted)]" />
-              <span className="text-xs text-[var(--color-muted)]">
+            // On a phone (#936) the name gets a line of its own across the card, under where it
+            // goes, and Create and Cancel a line under it: in one row the field was a few pixels
+            // wide and the buttons broke their words.
+            <div
+              data-testid="fs-mkdir"
+              className="rounded-[var(--radius-card)] border border-[var(--glass-edge)] bg-[var(--color-surface)] mb-3 flex items-center gap-2 p-2 text-sm phone:flex-wrap"
+            >
+              <FolderPlus size={14} className="shrink-0 text-[var(--color-muted)]" />
+              <span className="text-xs text-[var(--color-muted)] phone:min-w-0 phone:flex-1 phone:[overflow-wrap:anywhere]">
                 {tr("fs_create_in", undefined, "Create in")}{" "}
                 <span className="font-mono">{path}</span>
               </span>
@@ -4074,24 +4571,29 @@ export default function FileSystemScreen() {
                 autoFocus
                 value={mkdirDraft}
                 placeholder={tr("fs_folder_name", undefined, "folder name")}
+                aria-label={tr("fs_folder_name", undefined, "folder name")}
+                enterKeyHint="done"
+                spellCheck={false}
                 onChange={(e) => setMkdirDraft(e.target.value)}
+                onFocus={(e) => revealAboveKeyboard(e.currentTarget.parentElement, phone)}
                 onKeyDown={(e) => {
                   if (e.key === "Enter") runMkdir();
                   if (e.key === "Escape") setMkdirDraft(null);
                 }}
-                className="input input-sm flex-1 text-xs"
+                data-testid="fs-mkdir-name"
+                className="input input-sm min-w-0 flex-1 text-xs phone:basis-full phone:text-base"
               />
               <button
                 type="button"
                 onClick={runMkdir}
-                className="rounded-full bg-[image:var(--accent-fill)] shadow-[var(--accent-glow)] px-3 py-1 text-xs font-medium text-[var(--color-accent-contrast)]"
+                className="shrink-0 whitespace-nowrap rounded-full bg-[image:var(--accent-fill)] shadow-[var(--accent-glow)] px-3 py-1 text-xs font-medium text-[var(--color-accent-contrast)] phone:flex-1 phone:text-sm"
               >
                 {tr("fs_create", undefined, "Create")}
               </button>
               <button
                 type="button"
                 onClick={() => setMkdirDraft(null)}
-                className="rounded-full border shadow-[var(--edge-highlight),var(--shadow-1)] hover:bg-[var(--color-float)] border-[var(--glass-edge)] bg-[var(--color-surface-raised)] px-3 py-1 text-xs"
+                className="shrink-0 whitespace-nowrap rounded-full border shadow-[var(--edge-highlight),var(--shadow-1)] hover:bg-[var(--color-float)] border-[var(--glass-edge)] bg-[var(--color-surface-raised)] px-3 py-1 text-xs phone:flex-1 phone:text-sm"
               >
                 {tr("cancel", undefined, "Cancel")}
               </button>
@@ -4438,8 +4940,10 @@ export default function FileSystemScreen() {
                         selected.size > 0 && selected.size < entries.length;
                   }}
                   onChange={toggleAll}
-                  className="h-3.5 w-3.5 rounded border-[var(--color-border)]"
+                  // A phone has Select all in the header while selecting.
+                  className="h-3.5 w-3.5 rounded border-[var(--color-border)] phone:hidden"
                   title={tr("fs_select_all", undefined, "Select all")}
+                  aria-label={tr("fs_select_all", undefined, "Select all")}
                 />
                 <span>
                   {tr("fs_item_count", { count: entries.length }, "Items: {count}")}
@@ -4492,6 +4996,18 @@ export default function FileSystemScreen() {
                 const isSelected = selected.has(e.name);
                 const isRevealed =
                   revealed !== null && revealed.dir === path && revealed.name === e.name;
+                // The row's box. A wide window has it before the icon, always. A phone shows it
+                // only while selecting, at the end of the row where ⋮ was, so the icon and the
+                // name stay where they are when selection mode starts (#936).
+                const rowBox = (
+                  <input
+                    type="checkbox"
+                    checked={isSelected}
+                    onChange={() => toggleSelected(e.name)}
+                    aria-label={e.name}
+                    className="h-3.5 w-3.5! shrink-0 phone:h-5 phone:w-5!"
+                  />
+                );
                 return (
                   <li
                     key={e.name}
@@ -4504,25 +5020,47 @@ export default function FileSystemScreen() {
                       if (ev.key !== "Enter" || ev.target !== ev.currentTarget || isRenaming) return;
                       ev.preventDefault();
                       ev.stopPropagation();
-                      openEntry(e);
+                      // Selecting on a phone, Enter ticks the row as a tap does.
+                      if (phoneSelecting) toggleSelected(e.name);
+                      else openEntry(e);
                     }}
                     // Drag rows out of the window onto this computer (desktop app), or onto
-                    // another folder here to move them (Alt/Option in the desktop app).
-                    draggable={canDragOut || dragMoveWorks}
+                    // another folder here to move them (Alt/Option in the desktop app). Not in
+                    // the phone layout: there a held finger selects, and a draggable row turns
+                    // the hold into a drag that cancels it (#936).
+                    draggable={!phone && (canDragOut || dragMoveWorks)}
                     {...(isDir ? dropProps(joinPath(path, e.name)) : {})}
                     onDragStart={dragStart(e, isSelected)}
                     onDoubleClick={(ev) => {
                       if ((ev.target as HTMLElement).closest("input,button"))
                         return;
+                      // Selecting on a phone, two quick taps tick and untick the row.
+                      if (phoneSelecting) return;
                       openEntry(e);
                     }}
                     onContextMenu={(ev) => {
                       ev.preventDefault();
                       ev.stopPropagation();
+                      // A finger's long press selects on a phone: the browser's own long press
+                      // (this event, on Android) opens no menu there.
+                      if (phone && longPress.contextMenu()) return;
                       setRowMenu({ x: ev.clientX, y: ev.clientY, entry: e });
                     }}
+                    // A long press with a finger starts selection mode on a phone (#936).
+                    onPointerDown={(ev) => {
+                      if (phone && !isRenaming) longPress.down(e.name, ev.clientX, ev.clientY, ev.pointerType);
+                    }}
+                    onPointerMove={(ev) => longPress.move(ev.clientX, ev.clientY)}
+                    onClickCapture={(ev) => {
+                      // Selecting on a phone, a tap anywhere on the row ticks it; the checkbox
+                      // and a rename field keep their own clicks.
+                      if (!phoneSelecting || (ev.target as HTMLElement).closest("input")) return;
+                      ev.preventDefault();
+                      ev.stopPropagation();
+                      toggleSelected(e.name);
+                    }}
                     className={
-                      "list-row-contain-sm flex items-center gap-2 rounded-[var(--radius-card)] border px-2.5 py-1 text-sm transition-colors focus-visible:outline-2 focus-visible:outline-[var(--color-accent)] sm:gap-3 sm:px-3.5 sm:py-2.5 " +
+                      "list-row-contain-sm flex items-center gap-2 rounded-[var(--radius-card)] border px-2.5 py-1 text-sm transition-colors focus-visible:outline-2 focus-visible:outline-[var(--color-accent)] sm:gap-3 sm:px-3.5 sm:py-2.5 phone:select-none phone:[-webkit-touch-callout:none] " +
                       (isRevealed ? "fs-reveal " : "") +
                       (isDir && dropTarget === joinPath(path, e.name)
                         ? "ring-2 ring-[var(--color-accent)] "
@@ -4532,12 +5070,7 @@ export default function FileSystemScreen() {
                         : "border-[var(--glass-edge)] bg-[var(--color-surface-raised)] hover:bg-[var(--color-float)]")
                     }
                   >
-                    <input
-                      type="checkbox"
-                      checked={isSelected}
-                      onChange={() => toggleSelected(e.name)}
-                      className="h-3.5 w-3.5! shrink-0"
-                    />
+                    {!phone && rowBox}
                     <Icon
                       size={16}
                       className={
@@ -4557,69 +5090,104 @@ export default function FileSystemScreen() {
                           if (ev.key === "Escape") setRenaming(null);
                         }}
                         onBlur={() => setRenaming(null)}
-                        className="input input-sm flex-1"
+                        onFocus={(ev) => revealAboveKeyboard(ev.currentTarget, phone)}
+                        enterKeyHint="done"
+                        spellCheck={false}
+                        data-testid="fs-rename-input"
+                        className="input input-sm min-w-0 flex-1 phone:text-base"
                       />
                     ) : (
-                      <button
-                        type="button"
-                        data-fs-open=""
-                        onClick={() => {
-                          if (isDir) setPath(joinPath(path, e.name));
-                        }}
-                        title={e.name}
-                        className={
-                          "min-w-0 flex-1 truncate text-start text-sm " +
-                          (isDir ? "font-medium hover:text-[var(--color-accent)]" : "")
-                        }
-                        disabled={!isDir}
-                      >
-                        {e.name}
-                      </button>
-                    )}
-                    {(() => {
-                      const tag = gameFormatTag(e.name, isDir);
-                      if (!tag) return null;
-                      return (
-                        <span
-                          data-testid="fs-format-tag"
+                      <div className="flex min-w-0 flex-1 flex-col roomy:flex-row roomy:items-center roomy:gap-3">
+                        <button
+                          type="button"
+                          data-fs-open=""
+                          onClick={() => {
+                            if (isDir) setPath(joinPath(path, e.name));
+                          }}
+                          title={e.name}
                           className={
-                            "shrink-0 rounded border border-[var(--glass-edge)] px-1 text-[10px] leading-4 font-medium text-[var(--color-muted)] sm:text-[11px] " +
-                            // A folder already shows its icon: the word only where there is room.
-                            (tag === "folder" ? "hidden sm:inline" : "")
+                            // On a phone a long name wraps (up to three lines) instead of being cut off
+                            // early, with the tag and size on the line below (#923); a phone held
+                            // sideways too (#931). A file's name (a disabled button) lets a phone's
+                            // taps and long presses through to the row (#936): a disabled button
+                            // swallows them.
+                            "min-w-0 truncate text-start text-sm phone:line-clamp-3 phone:whitespace-normal phone:[overflow-wrap:anywhere] phone:disabled:pointer-events-none roomy:flex-1 " +
+                            (isDir ? "font-medium hover:text-[var(--color-accent)]" : "")
                           }
+                          disabled={!isDir}
                         >
-                          {gameFormatLabel(tag, tr("fs_tag_folder", undefined, "Folder"))}
-                        </span>
-                      );
-                    })()}
-                    <span className="shrink-0 text-xs text-[var(--color-muted)] tabular-nums">
-                      {isDir ? "—" : formatBytes(e.size)}
-                    </span>
+                          {/* A name keeps its own order in a right-to-left language ("(1).pkg"). */}
+                          <bdi>{e.name}</bdi>
+                        </button>
+                        <div className="flex items-center gap-2 roomy:contents" data-testid="fs-row-meta">
+                          {(() => {
+                            const tag = gameFormatTag(e.name, isDir);
+                            if (!tag) return null;
+                            return (
+                              <span
+                                data-testid="fs-format-tag"
+                                className={
+                                  "shrink-0 rounded border border-[var(--glass-edge)] px-1 text-[10px] leading-4 font-medium text-[var(--color-muted)] sm:text-[11px] " +
+                                  // A folder already shows its icon: the word only where there is room.
+                                  (tag === "folder" ? "hidden roomy:inline" : "")
+                                }
+                              >
+                                {gameFormatLabel(tag, tr("fs_tag_folder", undefined, "Folder"))}
+                              </span>
+                            );
+                          })()}
+                          <span
+                            className={
+                              "shrink-0 text-xs text-[var(--color-muted)] tabular-nums " +
+                              // A folder's dash would be a line of its own on a phone.
+                              (isDir ? "phone:hidden" : "")
+                            }
+                          >
+                            {isDir ? "—" : formatBytes(e.size)}
+                          </span>
+                        </div>
+                      </div>
+                    )}
                     <RowActionButtons entry={e} ctx={rowActionsCtx} />
-                    <RowActionsTrigger
-                      label={tr(
-                        "fs_row_actions",
-                        { name: e.name },
-                        `Actions for ${e.name}`,
-                      )}
-                      open={actionsMenuEntry?.name === e.name}
-                      onToggle={(r) =>
-                        setActionsMenu((cur) =>
-                          cur && cur.path === path && cur.name === e.name
-                            ? null
-                            : {
-                                path,
-                                name: e.name,
-                                anchor: {
-                                  left: r.left,
-                                  right: r.right,
-                                  top: r.top,
-                                  bottom: r.bottom,
-                                },
-                              },
-                        )
+                    {/* On a phone ⋮ and the box share one place: selecting, ⋮ keeps its room but
+                        is not shown, and the box sits over it. Renaming, the name has its room (#936). */}
+                    <span
+                      className={
+                        phone
+                          ? isRenaming
+                            ? "hidden"
+                            : "grid shrink-0 place-items-center *:col-start-1 *:row-start-1"
+                          : "contents"
                       }
-                    />
+                      data-testid="fs-row-end"
+                    >
+                      <RowActionsTrigger
+                        label={tr(
+                          "fs_row_actions",
+                          { name: e.name },
+                          `Actions for ${e.name}`,
+                        )}
+                        open={actionsMenuEntry?.name === e.name}
+                        hidden={phoneSelecting}
+                        onToggle={(r) =>
+                          setActionsMenu((cur) =>
+                            cur && cur.path === path && cur.name === e.name
+                              ? null
+                              : {
+                                  path,
+                                  name: e.name,
+                                  anchor: {
+                                    left: r.left,
+                                    right: r.right,
+                                    top: r.top,
+                                    bottom: r.bottom,
+                                  },
+                                },
+                          )
+                        }
+                      />
+                      {phone && selecting && rowBox}
+                    </span>
                   </li>
                 );
               })}
@@ -4640,6 +5208,86 @@ export default function FileSystemScreen() {
               </p>
             )}
           </div>
+          {phoneSelecting && (
+            <>
+              {/* Room under the last row: the bar floats over the bottom of the list. */}
+              <div aria-hidden className="h-20 roomy:hidden" />
+              <PhoneSelectionActions
+                label={tr("fs_selection_actions", undefined, "Actions for the selected items")}
+                actions={[
+                  {
+                    id: "copy",
+                    icon: Copy,
+                    label: tr("copy", undefined, "Copy"),
+                    run: () => stageClipboard("copy"),
+                    disabled: bulkOp.op !== null || selected.size === 0,
+                  },
+                  {
+                    id: "move",
+                    icon: FolderInput,
+                    label: tr("fs_move_to", undefined, "Move to…"),
+                    run: () => startMove(),
+                    disabled: bulkOp.op !== null || !volumes?.length || selected.size === 0,
+                  },
+                  {
+                    id: "rename",
+                    icon: Pencil,
+                    label: tr("fs_rename", "Rename"),
+                    // One item: its name in place, as the row's own Rename. Several: the pattern.
+                    run: () => {
+                      const names = Array.from(selected);
+                      if (names.length === 1) {
+                        endSelection();
+                        startRename(names[0]);
+                      } else void runBulkRename(names);
+                    },
+                    disabled: bulkOp.op !== null || selected.size === 0,
+                  },
+                  {
+                    id: "delete",
+                    icon: Trash2,
+                    label: tr("library_delete", undefined, "Delete"),
+                    run: () => void runBulkDelete(),
+                    disabled: bulkOp.op !== null || selected.size === 0,
+                    tone: "bad",
+                  },
+                  {
+                    id: "more",
+                    icon: MoreHorizontal,
+                    label: tr("fs_more", undefined, "More"),
+                    run: (box) => togglePhoneMenu("selection", box),
+                    disabled: selected.size === 0,
+                    menu: phoneMenu?.kind === "selection",
+                  },
+                ]}
+              />
+            </>
+          )}
+          {phoneStaged && (
+            <>
+              <div aria-hidden className="h-20 roomy:hidden" />
+              <PhoneStagedBar
+                label={tr("fs_staged_bar", undefined, "Items to paste")}
+                countLabel={
+                  clipboard.op === "cut"
+                    ? tr("fs_staged_move", { count: clipboard.items.length }, `Items to move: ${clipboard.items.length}`)
+                    : tr("fs_staged_copy", { count: clipboard.items.length }, `Items to copy: ${clipboard.items.length}`)
+                }
+                fromLabel={
+                  clipboard.sourceLabel
+                    ? tr("fs_staged_from", { path: clipboard.sourceLabel }, `From ${clipboard.sourceLabel}`)
+                    : null
+                }
+                pasteLabel={tr("fs_paste_here", undefined, "Paste here")}
+                onPaste={() => void runPaste()}
+                pasteDisabled={bulkOp.op !== null || !host?.trim()}
+                cancelLabel={tr("cancel", undefined, "Cancel")}
+                onCancel={() => clipboard.clear()}
+              />
+            </>
+          )}
+          </div>
+          <FilesColumn on={phone && view === null} />
           {preview && (
             <Modal
               open
@@ -4665,6 +5313,7 @@ export default function FileSystemScreen() {
             </Modal>
           )}
         </div>
+        </TwoPanesFrame>
       </ConnectionGate>
     </div>
   );

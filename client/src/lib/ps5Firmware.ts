@@ -41,11 +41,10 @@ export function parsePS5Firmware(kernel: string | null | undefined): string | nu
   return null;
 }
 
-/** The newest firmware on which a PS5 fake (FPKG) GAME is playable. Above it
- *  the package still installs, but the game does not start. Measured by the
- *  maintainer on real hardware. PS4 fake packages and PS5 homebrew apps are
- *  not affected. */
-export const LAST_PS5_FAKE_GAME_FIRMWARE = "11.60";
+/** The newest firmware a PS5 fake (FPKG) GAME is known to play on: 13.60, since a kstuff build
+ *  with fake-package support up to it exists: kstuff 1.15 (11.61 to 13.60 need 1.15 or
+ *  newer). No public jailbreak goes above it, so nothing warns about firmware past it. */
+export const LAST_PS5_FAKE_GAME_FIRMWARE = "13.60";
 
 /** True when `id` (a content id such as `UP4433-PPSA17221_00-MINECRAFTPS50000`
  *  or a bare title id) names a PS5 GAME: it carries a `PPSAnnnnn` title id.
@@ -56,11 +55,15 @@ export function isPs5GameId(id: string | null | undefined): boolean {
   return !!id && /(?:^|[^A-Z0-9])PPSA\d{5}(?![0-9])/.test(id.toUpperCase());
 }
 
-/** The console's firmware ("13.60") when a PS5 fake GAME package with this id
- *  would install but not be playable there, else null. That needs all of:
- *  a PS5 game id (not PS4, not homebrew) AND a parseable firmware strictly
- *  above 11.60. An unparseable kernel string never produces a warning. */
-export function ps5FakeGameUnplayableFirmware(
+/** The newest firmware where a PS5 fake GAME played with any kstuff that loads fake packages.
+ *  Above it, up to LAST_PS5_FAKE_GAME_FIRMWARE, the game starts only with a kstuff build that
+ *  supports fake packages on that firmware (kstuff 1.15 or newer). */
+export const LAST_PS5_FAKE_GAME_FIRMWARE_OLD_KSTUFF = "11.60";
+
+/** The console's firmware when a PS5 fake GAME there needs kstuff 1.15 (or newer)
+ *  to start: a PS5 game id and a firmware above 11.60, up to LAST_PS5_FAKE_GAME_FIRMWARE. Else
+ *  null (also for an unknown firmware). Used to explain a launch that failed. */
+export function ps5FakeGameNeedsNewKstuff(
   kernel: string | null | undefined,
   contentOrTitleId: string | null | undefined,
 ): string | null {
@@ -71,5 +74,8 @@ export function ps5FakeGameUnplayableFirmware(
     const [maj, min] = v.split(".");
     return Number(maj) * 100 + Number(min);
   };
-  return toNum(fw) > toNum(LAST_PS5_FAKE_GAME_FIRMWARE) ? fw : null;
+  const n = toNum(fw);
+  return n > toNum(LAST_PS5_FAKE_GAME_FIRMWARE_OLD_KSTUFF) && n <= toNum(LAST_PS5_FAKE_GAME_FIRMWARE)
+    ? fw
+    : null;
 }

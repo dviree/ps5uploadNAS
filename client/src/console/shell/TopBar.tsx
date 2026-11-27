@@ -1,4 +1,5 @@
-import logo from "../../../public/logo-square.png?inline";
+// public/logo-square.png at 96 px, 64 colours (1.2 KB, not 6.7 KB): drawn at 1.8rem, at most ~90 px.
+import logo from "./logo.png?inline";
 
 /** What /api/status answers (payload/src/webui_api.c r_status). */
 export interface ConsoleStatus {
@@ -7,6 +8,9 @@ export interface ConsoleStatus {
   model: string | null;
   temp_c: number | null;
   running: { title_id: string; app_id: number; name: string | null } | null;
+  /** The console's time zone, minutes ahead of UTC (summer time included); null when it cannot
+   *  tell, absent from an older helper. The console's own browser has no zone (time.ts). */
+  tz_min?: number | null;
 }
 
 const BRAND = "PS5Upload Minion";

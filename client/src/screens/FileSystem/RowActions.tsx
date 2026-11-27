@@ -1,4 +1,5 @@
 import {
+  Fragment,
   type ComponentType,
   type KeyboardEvent as ReactKeyboardEvent,
   useEffect,
@@ -10,6 +11,7 @@ import { createPortal } from "react-dom";
 import {
   Archive,
   BadgeCheck,
+  Check,
   Download,
   Eye,
   EyeOff,
@@ -29,6 +31,7 @@ import {
 
 import { Spinner } from "../../components";
 import { menuKeyAction } from "../../lib/menuKeys";
+import { useBackDismiss } from "../../lib/systemBack";
 import { isInstallPackagePath } from "../../lib/pkgDropDedupe";
 import { isExtractableArchive } from "../../lib/archiveName";
 import type { Translator } from "../../state/lang";
@@ -39,7 +42,7 @@ const GAME_FILE = /\.(pkg|exfat|ffpkg|ffpfs|ffpfsc)$/i;
 type IconType = ComponentType<{ size?: number; className?: string }>;
 
 /** One action of a Files row. The desktop layout draws it as an icon button;
- *  below `sm` (a phone) the same list sits behind the row's ⋮ menu, in the
+ *  in the phone layout (below `sm`, or a phone held sideways) the same list sits behind the row's ⋮ menu, in the
  *  same order, so both run the very same handler. */
 export interface RowAction {
   id: string;
@@ -63,6 +66,10 @@ export interface RowMenuItem {
   run: () => void;
   disabled?: boolean;
   destructive?: boolean;
+  /** The one in use among several (the drive you are on): marked, and read out as current. */
+  current?: boolean;
+  /** Starts a group: a line before it (never before the first item). */
+  separator?: boolean;
 }
 
 export function rowActionMenuItems(actions: RowAction[]): RowMenuItem[] {
@@ -73,6 +80,48 @@ export function rowActionMenuItems(actions: RowAction[]): RowMenuItem[] {
     disabled: a.disabled || a.busy,
     destructive: a.tone === "bad",
   }));
+}
+
+/** The row actions the phone's bar of selection actions shows as its own buttons. */
+const IN_SELECTION_BAR: ReadonlySet<string> = new Set(["rename", "delete"]);
+
+/**
+ * The More menu of the phone's bar of selection actions (#936).
+ *
+ * With exactly one item selected it lists what that row's ⋮ lists (`sole`: its actions), less
+ * the ones the bar already has as buttons, so a long press reaches everything ⋮ does. Each of
+ * them leaves selection mode first (`done`), as the bar's own Rename does: it acts on the one
+ * item, and what it does (a rename, a dialog) is not about a selection any more. With several
+ * selected, the actions for one item are not there: `several` is what takes their place.
+ */
+export function selectionMoreItems({
+  always,
+  several,
+  sole,
+  done,
+}: {
+  /** For any selection (Cut, permissions). */
+  always: RowMenuItem[];
+  /** Only without `sole`: what a single row's own actions cover otherwise. */
+  several: RowMenuItem[];
+  /** The one selected row's actions (buildRowActions), or null for none or several. */
+  sole: RowAction[] | null;
+  done: () => void;
+}): RowMenuItem[] {
+  if (!sole) return [...always, ...several];
+  const taken = new Set(always.map((it) => it.label));
+  return [
+    ...always,
+    ...rowActionMenuItems(sole.filter((a) => !IN_SELECTION_BAR.has(a.id)))
+      .filter((it) => !taken.has(it.label))
+      .map((it) => ({
+        ...it,
+        run: () => {
+          done();
+          it.run();
+        },
+      })),
+  ];
 }
 
 const BUTTON =
@@ -338,7 +387,7 @@ export function buildRowActions(e: RowEntry, ctx: RowActionsContext): RowAction[
   return actions;
 }
 
-/** A row's desktop action buttons (hidden below `sm`). */
+/** A row's desktop action buttons (hidden in the phone layout). */
 export function RowActionButtons({
   entry,
   ctx,
@@ -372,13 +421,44 @@ export function RowActionsMenu({
   );
 }
 
-/** The row's actions as the desktop icon buttons. Hidden below `sm`, where
- *  `RowActionsTrigger` stands in for them. */
+/** More in the phone's bar of selection actions, against that button's box (see
+ *  selectionMoreItems). `sole` is the one selected row, or null for none or several. */
+export function SelectionMoreMenu({
+  always,
+  several,
+  sole,
+  ctx,
+  done,
+  anchor,
+  onClose,
+}: {
+  always: RowMenuItem[];
+  several: RowMenuItem[];
+  sole: RowEntry | null;
+  ctx: RowActionsContext;
+  done: () => void;
+  anchor: { left: number; right: number; top: number; bottom: number };
+  onClose: () => void;
+}) {
+  return (
+    <RowMenu
+      x={anchor.right}
+      y={anchor.bottom}
+      anchor={anchor}
+      onClose={onClose}
+      items={selectionMoreItems({ always, several, sole: sole ? buildRowActions(sole, ctx) : null, done })}
+    />
+  );
+}
+
+/** The row's actions as the desktop icon buttons. Hidden in the phone layout
+ *  (below `sm`, or a phone held sideways: the `phone:` variant in index.css),
+ *  where `RowActionsTrigger` stands in for them. */
 export function RowActionButtonList({ actions }: { actions: RowAction[] }) {
   return (
     <div
       data-testid="fs-row-actions"
-      className="ms-2 hidden shrink-0 items-center gap-1 sm:flex"
+      className="ms-2 hidden shrink-0 items-center gap-1 roomy:flex"
     >
       {actions.filter((a) => !a.menuOnly).map((a) => (
         <button
@@ -401,16 +481,21 @@ export function RowActionButtonList({ actions }: { actions: RowAction[] }) {
   );
 }
 
-/** The ⋮ that opens a row's actions on a phone (below `sm` only). */
+/** The ⋮ that opens a row's actions in the phone layout (`phone:` in index.css). */
 export function RowActionsTrigger({
   label,
   open,
   onToggle,
+  hidden = false,
 }: {
   label: string;
   open: boolean;
   /** Called with the trigger's box, for the menu to sit against. */
   onToggle: (anchor: DOMRect) => void;
+  /** Selection mode on a phone: a tap selects the row, the bar at the bottom has the actions.
+   *  Not shown, and out of reach of a tap or the keyboard, but it keeps its room: the row's
+   *  box sits there meanwhile, and nothing in the row moves. */
+  hidden?: boolean;
 }) {
   return (
     <button
@@ -424,7 +509,7 @@ export function RowActionsTrigger({
       // tap that should close it would close it and the click reopen it.
       onMouseDown={(ev) => ev.stopPropagation()}
       onClick={(ev) => onToggle(ev.currentTarget.getBoundingClientRect())}
-      className="-me-1 shrink-0 rounded-full p-1.5 text-[var(--color-muted)] hover:bg-[var(--color-surface-3)] hover:text-[var(--color-text)] sm:hidden"
+      className={`-me-1 shrink-0 rounded-full p-1.5 text-[var(--color-muted)] hover:bg-[var(--color-surface-3)] hover:text-[var(--color-text)] roomy:hidden ${hidden ? "invisible" : ""}`}
     >
       <MoreVertical size={16} />
     </button>
@@ -498,6 +583,8 @@ export function RowMenu({
   onClose: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  // System Back closes the menu and stays in the folder (#932): before, it left the Files tab.
+  useBackDismiss(true, onClose);
   const [pos, setPos] = useState<{ left: number; top: number; maxHeight?: number }>({ left: x, top: y });
   useLayoutEffect(() => {
     const el = ref.current;
@@ -589,10 +676,12 @@ export function RowMenu({
       data-testid="fs-row-menu"
       onKeyDown={onMenuKeyDown}
       style={{ left: pos.left, top: pos.top, maxHeight: pos.maxHeight }}
+      // As wide as its longest item (up to the screen's width), then placed: sized by where
+      // it was put first, a ⋮ menu near the right edge wrapped its items to two lines.
       // The same floating glass as the app's other menus (components/Menu).
       // `--color-surface` is the translucent page tint: with it the rows under
       // the menu read straight through the items.
-      className="glass-float elev-2 fixed z-50 max-h-[calc(100dvh-0.5rem-var(--safe-top)-var(--safe-bottom,0px))] min-w-[12rem] max-w-[calc(100vw-0.5rem)] overflow-y-auto rounded-[var(--radius-card)] p-1.5 text-sm"
+      className="glass-float elev-2 fixed z-50 max-h-[calc(100dvh-0.5rem-var(--safe-top)-var(--safe-bottom,0px))] w-max min-w-[12rem] max-w-[calc(100vw-0.5rem)] overflow-y-auto rounded-[var(--radius-card)] p-1.5 text-sm"
     >
       <RowMenuList
         items={items}
@@ -617,21 +706,28 @@ export function RowMenuList({
   items: RowMenuItem[];
   onPick: (item: RowMenuItem) => void;
 }) {
-  return items.map((it) => (
-    <button
-      key={it.label}
-      type="button"
-      role="menuitem"
-      tabIndex={-1}
-      disabled={it.disabled}
-      onClick={() => onPick(it)}
-      className={
-        "flex w-full items-center gap-2 rounded-full px-3 py-1.5 text-start hover:bg-[var(--color-surface-3)] focus:bg-[var(--color-surface-3)] disabled:opacity-40 " +
-        (it.destructive ? "text-[var(--color-bad)]" : "")
-      }
-    >
-      <it.icon size={14} className="shrink-0" />
-      {it.label}
-    </button>
+  return items.map((it, i) => (
+    <Fragment key={it.label}>
+      {it.separator && i > 0 && (
+        <div role="separator" className="mx-2 my-1 h-px bg-[var(--color-border)]" data-testid="fs-menu-separator" />
+      )}
+      <button
+        type="button"
+        role="menuitem"
+        tabIndex={-1}
+        disabled={it.disabled}
+        aria-current={it.current ? "true" : undefined}
+        onClick={() => onPick(it)}
+        className={
+          "flex w-full items-center gap-2 rounded-full px-3 py-1.5 text-start hover:bg-[var(--color-surface-3)] focus:bg-[var(--color-surface-3)] disabled:opacity-40 " +
+          (it.destructive ? "text-[var(--color-bad)] " : "") +
+          (it.current ? "font-medium text-[var(--color-accent-bright)]" : "")
+        }
+      >
+        <it.icon size={14} className="shrink-0" />
+        {it.label}
+        {it.current && <Check size={14} className="ms-auto shrink-0" aria-hidden />}
+      </button>
+    </Fragment>
   ));
 }

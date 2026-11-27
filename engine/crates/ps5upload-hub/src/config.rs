@@ -101,6 +101,12 @@ pub struct Config {
 
     pub max_guests_per_room: usize,
     pub max_signals_per_guest: u32,
+    /// Signals one guest client (an address, see `limits.rs`) may send in one room per window,
+    /// all its guests there together, those that left included: joining again does not refill
+    /// it. Room for a few guests from one home (or behind one carrier-grade NAT).
+    pub max_signals_per_guest_client: u32,
+    /// Signals a host may send per window, to all its guests together. Past it they are
+    /// dropped, not forwarded; the host stays.
     pub max_signals_per_host: u32,
     pub max_joins_per_ip: u32,
     pub max_rooms: usize,
@@ -119,6 +125,11 @@ pub struct Config {
     pub rate_window: Duration,
     /// A room with no host for this long is removed.
     pub room_idle_ttl: Duration,
+    /// A guest still in its room this long after it joined is removed (it gets `timeout`). A
+    /// client leaves the hub once its connection to the host is up, within a minute and a half
+    /// at most (a page holds the place it took early for a minute, ICE gets 15 seconds), so a
+    /// guest past this has not made a session: idle sockets cannot keep a room full.
+    pub guest_max_age: Duration,
     /// WebSocket ping cadence. A peer heard from within the last interval is not pinged (the
     /// engine pings the hub itself), so a quiet peer is pinged at most every two intervals.
     pub ping_interval: Duration,
@@ -151,7 +162,15 @@ impl Default for Config {
             trusted_proxies: Vec::new(),
             client_ip_header: "x-forwarded-for".to_string(),
             max_guests_per_room: 8,
-            max_signals_per_guest: 20,
+            // One try of a guest: its offer, then every ICE candidate its browser finds, one
+            // signal each. Firefox on one network found 20 for the Play Together page as it was
+            // (a data channel, a video and an audio track: a set of candidates for each), so with
+            // the offer it went past the old 20 and was closed before it could connect; a home
+            // with IPv6 or a VPN finds twice as many. The pages now leave out the candidates the
+            // engine cannot use (about half); older pages stay in use.
+            max_signals_per_guest: 60,
+            // Room for a home of three or four, each trying twice in the minute with such a page.
+            max_signals_per_guest_client: 300,
             max_signals_per_host: 200,
             max_joins_per_ip: 30,
             max_rooms: 5_000,
@@ -168,6 +187,8 @@ impl Default for Config {
             hello_timeout: Duration::from_secs(10),
             rate_window: Duration::from_secs(60),
             room_idle_ttl: Duration::from_secs(120),
+            // Twice the longest a real guest stays (about 75 s), with room for a slow network.
+            guest_max_age: Duration::from_secs(180),
             ping_interval: Duration::from_secs(20),
             peer_timeout: Duration::from_secs(60),
             sweep_interval: Duration::from_secs(30),
@@ -252,6 +273,11 @@ impl Config {
             "HUB_MAX_SIGNALS_PER_GUEST",
             &mut c.max_signals_per_guest,
         )?;
+        num(
+            get,
+            "HUB_MAX_SIGNALS_PER_GUEST_CLIENT",
+            &mut c.max_signals_per_guest_client,
+        )?;
         num(get, "HUB_MAX_SIGNALS_PER_HOST", &mut c.max_signals_per_host)?;
         num(get, "HUB_MAX_JOINS_PER_IP", &mut c.max_joins_per_ip)?;
         num(get, "HUB_MAX_ROOMS", &mut c.max_rooms)?;
@@ -272,6 +298,7 @@ impl Config {
         secs(get, "HUB_HELLO_SECS", &mut c.hello_timeout)?;
         secs(get, "HUB_RATE_WINDOW_SECS", &mut c.rate_window)?;
         secs(get, "HUB_ROOM_IDLE_SECS", &mut c.room_idle_ttl)?;
+        secs(get, "HUB_GUEST_MAX_SECS", &mut c.guest_max_age)?;
         secs(get, "HUB_PING_SECS", &mut c.ping_interval)?;
         secs(get, "HUB_PEER_TIMEOUT_SECS", &mut c.peer_timeout)?;
         secs(get, "HUB_SUMMARY_SECS", &mut c.summary_interval)?;
@@ -283,6 +310,9 @@ impl Config {
         }
         if c.rate_window.is_zero() {
             return Err("HUB_RATE_WINDOW_SECS must be above zero".into());
+        }
+        if c.guest_max_age.is_zero() {
+            return Err("HUB_GUEST_MAX_SECS must be above zero".into());
         }
         Ok(c)
     }

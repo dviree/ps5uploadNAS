@@ -2,6 +2,23 @@
 
 ## >RESUME HERE
 
+- 2026-11-27: merged PS5Upload 12.6.42 (c35ad94f; 12.6.25-12.6.42: Go live from the Docker web
+  UI with ffmpeg in the images, Play Together full screen on iPhone/iPad and on a TV, two-pane
+  and phone Files, fake packages, put games back after Rebuild Database, password-protected
+  RAR on the console, FTP resume, AVA1 1.0.13, many audit fixes).
+  Conflicts:
+  - README stays the fork's; i18n allowlist regenerated.
+  - Convert keeps packKind "zstd" and takes upstream's package unpack choices.
+  - api_surface_tests keeps the fork's LZ4 refusal test.
+  - fpkg mounts test keeps the fork's top-level look test next to upstream's test_tmp.
+  - fpkgConversion tests keep the resume tests next to upstream's archive tests.
+  - ava1 takes upstream's ed06b8c (checked out before staging).
+  Checks: engine 2476, core 977, fpkg 432, 7441 vitest tests, tsc, i18n and the NAS checks
+  pass.
+- Waiting for the owner's OK: Forge (now v0.6.0; pinned 0.5.5) and ampr-emu-ng (now v0.5.1;
+  pinned 0.4.0) for the NAS converter.
+- Next: verify the Docker build (publishing jobs ran), then run the NAS updater.
+
 - 2026-11-23: merged PS5Upload 12.6.24 (4bfce98e; 12.6.19-12.6.24: save-backup progress and
   continue, folder backups, Extract here, Kraken-safe cleanup, capture card, Android TV,
   clearer AMPR choices, Clear all in the bell, the url advisory fix, queue fixes).

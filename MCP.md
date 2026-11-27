@@ -23,10 +23,11 @@ More than 120 tools, all of them thin layers over [the engine's API](API.md):
 | Consoles | `consoles_*`, `tailnet_consoles` | The known ones, find them on the network or on Tailscale, how one stands and how its last status checks went, make sure the helper runs |
 | Files | `files_*` | List, read, write, copy, move, delete, hash, extract, mount, eject |
 | Moving things | `upload_*`, `queue_*`, `files_download`, `sources_*`, `jobs_*` | Send a file or folder or archive, line work up per console, follow it, pause or stop it, fetch from a NAS |
-| Installs | `install_*` | Install a package by the best route, check first, wait for it |
+| Installs | `install_*` | Install a package by the best route, check first, wait for it; read or change a fake package's name before it goes |
+| Convert | `convert_*` | Whether an archive can give its space back while it unpacks; put the AMPR emulator on a console for Convert on the PS5 (a conversion itself goes through `api_request`) |
 | Games | `games_*`, `processes_*`, `saves_*`, `cheats_*` | Installed titles, launch and stop, back up saves, cheats |
 | Hardware | `hw_*`, `power_*`, `notifications_*`, `health_*`, `disk_usage_*`, `cleanup_*`, `shell_run` | Temperatures, rest and wake, health checks and repairs, what fills the drive |
-| Payloads | `payloads_*` | Catalogue, new-version checks and rollback, send (a file, or a copy already on the computer: ps5upload never downloads payloads), store, autoload, Payload Manager sync |
+| Payloads | `payloads_*` | Catalogue, the payload sources you added (list, check for a new release, download its file), new-version checks and rollback, send (a file, or a copy already on the computer), store, autoload, Payload Manager sync. Built-in catalogue payloads are never downloaded, and only you can add a source, in the app |
 | Remote Play | `rp_*` | Start and stop a session, see the picture, press buttons, type, answer a passcode; see what the controller sends and how pairing went |
 | Friends and viewers | `together_*`, `golive_*`, `share_*` | Open Play Together and invite; go live; share an app's things with a friend |
 | Everything else | `settings_*`, `devices_list`, `drive_*`, `api_catalog`, `api_describe`, `api_request` | Settings, Mesh Drive, and any route of the API |
@@ -273,12 +274,15 @@ clients let you allow tools one by one, so keep these on "ask".
 | `files_extract` | Unpack over what's already there |
 | `files_unmount`, `files_eject` | Pull a drive out from under a running game |
 | `upload_file`, `upload_dir`, `upload_archive`, `queue_add` | Overwrite what's at the destination |
+| `install_pkg_rename` | Change the name inside a package file on this computer |
+| `convert_ampr_emu_to_console` | Write the AMPR emulator onto the console |
 | `saves_restore` | Replace save data with a backup |
-| `games_unregister` | Remove a title from the console |
+| `games_unregister` | Remove a title from the console, and with `delete_source` the game folder or disk image it plays from |
 | `games_stop`, `processes_kill` | End a game, losing what isn't saved |
 | `power_control` | Rest, reboot or shut down |
 | `shell_run` | Run any command on the console, and read any file there, sign-in keys included |
 | `payloads_send` | Run a program on the console, with the same reach as a shell |
+| `payloads_source_download` | Replace the copy of a payload source's file on this computer with its newest release |
 | `payloads_store`, `payloads_delete`, `payloads_autoload`, `payloads_pm_sync` | Change what the console keeps and runs at boot |
 | `cleanup_apply`, `health_fix` | Delete what a scan found, and apply repairs |
 | `rp_stop` | End the Remote Play session someone may be playing |
@@ -290,7 +294,8 @@ clients let you allow tools one by one, so keep these on "ask".
 | `share_cancel` | Stop a share and its transfers |
 | `api_request` | Anything the API can do |
 
-Some tools aren't marked destructive but still matter: `install_pkg`, `games_launch`,
+Some tools aren't marked destructive but still matter: `install_pkg`, `games_launch`, `games_restore`,
+`games_restore_finish`,
 `rp_input`, `rp_start`, `together_invite`, `together_decide`, `settings_set`,
 `console_settings_set`.
 

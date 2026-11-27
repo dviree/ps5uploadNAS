@@ -7,7 +7,7 @@ import { avcDescription, lengthPrefixed, opusInit, opusSamples, opusSegment, vid
 import { avcCodecString, isKeyframe, supportedHevc } from "../lib/rpCodec";
 import { type AudioCodecs, OpusPipe } from "../lib/rpAudioPipe";
 import { wasmOpusCodecs } from "../lib/rpOpusWasm";
-import { hevcCodecString, spsVisibleRect } from "../lib/rpSps";
+import { hevcCodecString, spsVisibleRect, visibleFix, type VisibleRect } from "../lib/rpSps";
 
 export type WatchProblem = "no_hevc" | "decode";
 
@@ -344,8 +344,17 @@ export class WatchPlayer {
   private ctx = this.canvas.getContext("2d", { alpha: false });
   private hevc = false;
   private header: Uint8Array | null = null;
+  /** The visible picture the stream's SPS describes, to put right a decoder that reports a
+   *  smaller one (rpSps.ts visibleFix; the host's player does the same, #538/#575). */
+  private spsRect: VisibleRect | null = null;
+  /** The hardware decoder gave a picture that could not be put right: software from now on. */
+  private software = false;
   private video: VideoDecoder | null = null;
   private opening = false;
+  /** `stop` ran: nothing new is opened. A message already on its way, a rebuild for a closed
+   *  decoder, or an H.265 codec lookup still running made a decoder that nothing closed, and a
+   *  phone has few hardware decoders to spare for the next join. */
+  private stopped = false;
   private sawKey = false;
   private keyAsk: KeyAsker;
   private readonly ownStats = new PictureStats("webcodecs");
@@ -402,6 +411,7 @@ export class WatchPlayer {
   /** The engine said which codec the session uses. */
   setHevc(hevc: boolean): void {
     this.hevc = hevc;
+    if (this.header) this.spsRect = spsVisibleRect(this.header, hevc);
     this.mse?.setHevc(hevc);
   }
 
@@ -520,7 +530,7 @@ export class WatchPlayer {
   /** One binary message from the engine. */
   onMessage(buf: ArrayBuffer): void {
     const b = new Uint8Array(buf);
-    if (b.length < 1) return;
+    if (b.length < 1 || this.stopped) return;
     const kind = b[0];
     const payload = b.subarray(1);
     // The media player took the picture over: the video is its, the sound stays here.
@@ -536,12 +546,13 @@ export class WatchPlayer {
 
   private async openVideo(header: Uint8Array): Promise<void> {
     this.header = header;
+    this.spsRect = spsVisibleRect(header, this.hevc);
     if (this.opening) return;
     this.opening = true;
     try {
       const codec = this.hevc ? await hevcFor(header) : avcCodecString(header);
-      // The media player took over while this was looked up.
-      if (this.mse) return;
+      // The media player took over, or the player was stopped, while this was looked up.
+      if (this.mse || this.stopped) return;
       if (!codec) {
         this.problemShown = true;
         this.onProblem("no_hevc");
@@ -556,7 +567,8 @@ export class WatchPlayer {
         // Already closed.
       }
       const v = new VideoDecoder({
-        output: (frame) => {
+        output: (decoded) => {
+          const frame = this.realVisible(decoded);
           const c = this.canvas;
           if (c.width !== frame.displayWidth || c.height !== frame.displayHeight) {
             c.width = frame.displayWidth;
@@ -577,7 +589,10 @@ export class WatchPlayer {
           if (!this.decodeFailed()) this.rebuild();
         },
       });
-      v.configure(description ? { codec, description, optimizeForLatency: true } : { codec, optimizeForLatency: true });
+      const cfg: VideoDecoderConfig = { codec, optimizeForLatency: true };
+      if (description) cfg.description = description;
+      if (this.software) cfg.hardwareAcceleration = "prefer-software";
+      v.configure(cfg);
       this.video = v;
       this.sawKey = false;
     } catch {
@@ -590,10 +605,49 @@ export class WatchPlayer {
     }
   }
 
+  /** The frame with the stream's own visible picture where the decoder reported a smaller one:
+   *  Chromium's hardware decoder on Windows (the Windows app's WebView2, Edge) says a 1080p
+   *  frame shows only its top-left part, which was drawn enlarged and cut off (#929, as #538 on
+   *  the host). The new frame shares the decoded pixels; the original is closed. Where the coded
+   *  frame is small too (nothing to put right), the decoder starts over in software. */
+  private realVisible(frame: VideoFrame): VideoFrame {
+    const sps = this.spsRect;
+    const fix = visibleFix(frame, sps);
+    if (fix) {
+      try {
+        const fixed = new VideoFrame(frame, {
+          visibleRect: { x: fix.x, y: fix.y, width: fix.w, height: fix.h },
+          displayWidth: fix.w,
+          displayHeight: fix.h,
+        });
+        frame.close();
+        return fixed;
+      } catch {
+        return frame;
+      }
+    }
+    const r = frame.visibleRect;
+    if (sps && r && !this.software && (r.width < sps.w - 16 || r.height < sps.h - 16)) {
+      this.software = true;
+      const bad = this.video;
+      queueMicrotask(() => {
+        if (this.video !== bad) return;
+        try {
+          bad?.close();
+        } catch {
+          // Already closed.
+        }
+        this.rebuild();
+        this.onNeedKey?.();
+      });
+    }
+    return frame;
+  }
+
   /** The decoder failed, or the browser took it back (a hidden page's hardware decoder): a new one
    *  from the header, and the next keyframe. Without this the picture stays frozen for good. */
   private rebuild(): void {
-    if (this.mse) return;
+    if (this.mse || this.stopped) return;
     this.video = null;
     this.sawKey = false;
     if (!this.header) return;
@@ -719,6 +773,7 @@ export class WatchPlayer {
   }
 
   stop(): void {
+    this.stopped = true;
     try {
       this.video?.close();
     } catch {

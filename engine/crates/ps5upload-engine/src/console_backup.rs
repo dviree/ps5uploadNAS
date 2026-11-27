@@ -441,10 +441,13 @@ fn scan(host: &str) -> Result<(), String> {
 // ── backup ──────────────────────────────────────────────────────────────
 
 /// Where a console folder sits in a backup: its path under `files/`. None for a path that could
-/// climb out of the backup, which a manifest edited by hand might hold.
+/// climb out of the backup, which a manifest edited by hand might hold, or a folder on the
+/// console named to do it. A backslash is one: on Windows it separates folders too, so
+/// `/data/..\..\x` (one name on the console) was a path out of the backup there.
 pub fn local_path(root: &Path, console_path: &str) -> Option<PathBuf> {
     let rel = console_path.strip_prefix('/')?;
     if rel.is_empty()
+        || rel.contains('\\')
         || rel
             .split('/')
             .any(|p| p.is_empty() || p == "." || p == "..")
@@ -456,7 +459,7 @@ pub fn local_path(root: &Path, console_path: &str) -> Option<PathBuf> {
 
 /// A path a backup may put things in on the console: only what a backup can hold.
 pub fn restorable(console_path: &str) -> bool {
-    if console_path.split('/').any(|p| p == "..") {
+    if console_path.contains('\\') || console_path.split('/').any(|p| p == "..") {
         return false;
     }
     if console_path == CAPTURES_DIR {
@@ -929,6 +932,10 @@ mod tests {
         assert_eq!(local_path(root, "/data/../../x"), None);
         assert_eq!(local_path(root, "data/x"), None);
         assert_eq!(local_path(root, "/"), None);
+        // One name on the console, a path out of the backup on Windows.
+        assert_eq!(local_path(root, "/data/..\\..\\x"), None);
+        assert!(!restorable("/data/..\\..\\x"));
+        assert!(!restorable("/data/a\\b"));
     }
 
     #[test]
@@ -951,7 +958,7 @@ mod tests {
 
     #[test]
     fn logs_and_temporary_files_are_left_out_and_the_rest_kept() {
-        let dir = std::env::temp_dir().join(format!("cb-prune-{}", std::process::id()));
+        let dir = crate::test_tmp::temp_path(format!("cb-prune-{}", std::process::id()));
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         for f in ["config.ini", "debug.log", "sub/x.tmp", "sub/keep.bin"] {
             std::fs::write(dir.join(f), b"x").unwrap();
@@ -1007,7 +1014,7 @@ mod tests {
 
     #[test]
     fn a_manifest_comes_back_as_written_and_a_newer_one_is_refused() {
-        let dir = std::env::temp_dir().join(format!("cb-manifest-{}", std::process::id()));
+        let dir = crate::test_tmp::temp_path(format!("cb-manifest-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let m = Manifest {
             format: FORMAT,

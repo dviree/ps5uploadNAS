@@ -27,7 +27,7 @@ const JOB_CANCEL: ps5upload_core::mgmt::Method = ps5upload_core::mgmt::Method {
 };
 
 fn temp(tag: &str) -> PathBuf {
-    let d = std::env::temp_dir().join(format!("p5a-mgmt-{tag}-{}", std::process::id()));
+    let d = crate::test_tmp::temp_path(format!("p5a-mgmt-{tag}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
     std::fs::create_dir_all(&d).unwrap();
     d
@@ -446,6 +446,33 @@ async fn a_read_stops_at_eof_and_continues_after_a_short_read() {
         .unwrap();
     assert_eq!(r, file, "eof ended the loop at the file's end");
     assert_eq!(calls.lock().unwrap().len(), 3);
+}
+
+/// A node that answers with more bytes than asked: the read is still the bytes asked for. The
+/// count of what was left underflowed (a panic in a debug build; in a release one the loop read
+/// on to the end of the file).
+#[tokio::test(flavor = "multi_thread")]
+async fn a_reply_over_the_ask_is_cut_to_it() {
+    let file = file_bytes(4096);
+    let f = file.clone();
+    let server: RpcHandler = Box::new(move |_, body| {
+        let q = gen::FsRead::decode(body).unwrap();
+        let lo = (q.offset as usize).min(f.len());
+        let hi = (lo + q.len as usize + 100).min(f.len());
+        ok(gen::FsReadResult {
+            data: f[lo..hi].to_vec(),
+            eof: (hi == f.len()) as u8,
+        }
+        .to_bytes()
+        .unwrap())
+    });
+    let (t, _p, c) = console("over", server).await;
+    let body = br#"{"path":"/f","offset":0,"limit":1000}"#;
+    let r = call(&t, &c, m::FS_READ, "FS_READ(/f)", body, T)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(r, &file[..1000]);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -1128,3 +1155,7 @@ async fn a_call_longer_than_the_session_default_gets_its_callers_bound() {
     .unwrap();
     assert_eq!(r.unwrap(), b"done");
 }
+
+// Test scratch paths removed when the test process exits (engine/test-support/test_tmp.rs).
+#[path = "../../../test-support/test_tmp.rs"]
+mod test_tmp;

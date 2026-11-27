@@ -701,6 +701,94 @@ pub struct Opened {
     base: u64,
     read: Arc<AtomicU64>,
     failure: Arc<Mutex<Option<(io::ErrorKind, String)>>>,
+    /// What the tar reader may still read before it hands over the next entry
+    /// ([`HeaderBudget`]); `u64::MAX` while no entry is being looked for.
+    budget: Arc<AtomicU64>,
+}
+
+/// What one step of the tar reader (`Entries::next`) may read besides the data the entry before
+/// it left unread: the 512-byte headers of one member, its GNU long name or link and its PAX
+/// header. The tar reader holds a long name and a PAX header whole in memory, as long as the
+/// header says they are, so a compressed archive of a few KiB could ask for gigabytes of them
+/// while it was listed. A real one is a few hundred bytes (a PAX header with extended
+/// attributes some KiB).
+pub const MAX_MEMBER_HEADERS: u64 = 16 << 20;
+
+/// Bounds what the tar reader reads while it looks for the next entry ([`MAX_MEMBER_HEADERS`]).
+#[derive(Clone)]
+struct HeaderBudget(Arc<AtomicU64>);
+
+impl HeaderBudget {
+    /// From now until [`Self::off`]: `unread` (what the entry before left of its data, which
+    /// the reader reads past) and one member's headers.
+    fn on(&self, unread: u64) {
+        self.0
+            .store(unread.saturating_add(MAX_MEMBER_HEADERS), Ordering::Relaxed);
+    }
+
+    fn off(&self) {
+        self.0.store(u64::MAX, Ordering::Relaxed);
+    }
+}
+
+/// What an entry of `kind` leaves of its data for the tar reader to read past: the listing and
+/// the walk read every file's data themselves (or seek past it), nothing else's.
+fn unread_after(kind: &Kind, size: u64) -> u64 {
+    match kind {
+        Kind::File => 0,
+        _ => size,
+    }
+}
+
+/// The most entries (files and folders) one listing keeps. The listing holds a record per
+/// entry (about 100 bytes plus its name), so an archive of millions of empty members would
+/// otherwise grow it without end. The largest known game has about 223 000 files and 19 000
+/// folders; this is eight times that, and a listing this long holds about 400 MiB.
+pub const MAX_TAR_ENTRIES: usize = 2_000_000;
+
+/// The most name bytes (every kept path added up) one listing holds: a real game's names come
+/// to some tens of MiB, long names on millions of entries to far more.
+pub const MAX_TAR_NAME_BYTES: u64 = 512 << 20;
+
+#[cfg(test)]
+thread_local! {
+    /// Lower caps for one test thread, so a test archive needs not two million members.
+    static TEST_CAPS: std::cell::Cell<Option<(usize, u64)>> = const { std::cell::Cell::new(None) };
+}
+
+fn listing_caps() -> (usize, u64) {
+    #[cfg(test)]
+    if let Some(c) = TEST_CAPS.with(|c| c.get()) {
+        return c;
+    }
+    (MAX_TAR_ENTRIES, MAX_TAR_NAME_BYTES)
+}
+
+/// Refuses a listing that has grown past [`MAX_TAR_ENTRIES`] or [`MAX_TAR_NAME_BYTES`].
+fn check_listing_size(entries: usize, name_bytes: u64) -> io::Result<()> {
+    let (max_entries, max_bytes) = listing_caps();
+    if entries > max_entries {
+        return Err(fault(TarFault::Unsupported(format!(
+            "the archive has more than {max_entries} files and folders, more than any game: \
+             it is not opened"
+        ))));
+    }
+    if name_bytes > max_bytes {
+        return Err(fault(TarFault::Unsupported(format!(
+            "the archive's file names add up to more than {} MiB, more than any game: it is \
+             not opened",
+            max_bytes >> 20
+        ))));
+    }
+    Ok(())
+}
+
+fn headers_too_big() -> io::Error {
+    corrupt(format!(
+        "one entry's headers (its long name or PAX header) are over {} MiB, which no real \
+         archive has",
+        MAX_MEMBER_HEADERS >> 20
+    ))
 }
 
 enum Inner {
@@ -709,6 +797,10 @@ enum Inner {
 }
 
 impl Opened {
+    fn header_budget(&self) -> HeaderBudget {
+        HeaderBudget(self.budget.clone())
+    }
+
     /// Compressed bytes read from the file so far.
     pub fn file_bytes_read(&self) -> u64 {
         self.read.load(Ordering::Relaxed)
@@ -731,10 +823,24 @@ impl Opened {
 
 impl Read for Opened {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        match &mut self.inner {
-            Inner::Plain(r) => r.read(buf),
-            Inner::Decoded(r) => r.read(buf),
+        let left = self.budget.load(Ordering::Relaxed);
+        // Never more than the budget and one byte: the byte past it is the refusal.
+        let want = buf.len().min(
+            usize::try_from(left)
+                .unwrap_or(usize::MAX)
+                .saturating_add(1),
+        );
+        let n = match &mut self.inner {
+            Inner::Plain(r) => r.read(&mut buf[..want])?,
+            Inner::Decoded(r) => r.read(&mut buf[..want])?,
+        };
+        if left != u64::MAX {
+            if n as u64 > left {
+                return Err(headers_too_big());
+            }
+            self.budget.store(left - n as u64, Ordering::Relaxed);
         }
+        Ok(n)
     }
 }
 
@@ -816,6 +922,7 @@ pub fn open_decoded(path: &Path, offset: u64) -> io::Result<Opened> {
                 base: offset,
                 read,
                 failure,
+                budget: Arc::new(AtomicU64::new(u64::MAX)),
             })
         }
         Codec::Zstd => Box::new(ZstdReader::new(src)),
@@ -833,6 +940,7 @@ pub fn open_decoded(path: &Path, offset: u64) -> io::Result<Opened> {
         base: 0,
         read,
         failure,
+        budget: Arc::new(AtomicU64::new(u64::MAX)),
     })
 }
 
@@ -1007,6 +1115,7 @@ fn list(path: &Path, watch: TarWatch<'_>) -> io::Result<TarLayout> {
         l.phase.store(LIVE_PHASE_LISTING, Ordering::Relaxed);
     }
     let read = opened.read.clone();
+    let budget = opened.header_budget();
     let cancelled = || watch.cancel.is_some_and(|c| c.load(Ordering::Relaxed));
     let report = |n: u64| {
         if let Some(l) = watch.live {
@@ -1022,21 +1131,27 @@ fn list(path: &Path, watch: TarWatch<'_>) -> io::Result<TarLayout> {
     let mut dirs: BTreeSet<String> = BTreeSet::new();
     let (mut links, mut special) = (0u64, 0u64);
     let mut param: Option<(usize, String, Vec<u8>)> = None;
+    let mut name_bytes = 0u64;
     let result = (|| -> io::Result<()> {
         let mut ar = tar::Archive::new(&mut opened);
         let mut entries = entries(&mut ar, codec == Codec::None).map_err(classify)?;
         let mut next_header = 0u64;
         let mut buf = vec![0u8; 256 << 10];
+        let mut unread = 0u64;
         loop {
             if cancelled() {
                 return Err(io::Error::other(TAR_LISTING_CANCELLED));
             }
-            let Some(entry) = entries.next() else { break };
+            budget.on(unread);
+            let next = entries.next();
+            budget.off();
+            let Some(entry) = next else { break };
             let mut entry = entry.map_err(classify)?;
             // An entry's headers start where the one before it ends: its data, padded to 512.
             let header_offset = next_header;
             next_header = align512(entry.raw_file_position().saturating_add(entry.size()));
-            let what = Kind::of(&entry)?;
+            let what = Kind::of(&mut entry)?;
+            unread = unread_after(&what, entry.size());
             let raw = entry.path_bytes().into_owned();
             let name = String::from_utf8(raw)
                 .unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned());
@@ -1048,13 +1163,19 @@ fn list(path: &Path, watch: TarWatch<'_>) -> io::Result<TarLayout> {
                     // `./` (the archive's own root) carries nothing; an unsafe folder name is
                     // ignored, its files are refused by name.
                     if let Some(rel) = sanitize_zip_entry(&name) {
-                        dirs.insert(rel);
+                        let len = rel.len() as u64;
+                        if dirs.insert(rel) {
+                            name_bytes = name_bytes.saturating_add(len);
+                            check_listing_size(files.len() + dirs.len(), name_bytes)?;
+                        }
                     }
                 }
                 Kind::File => {
                     let Some(rel) = sanitize_zip_entry(&name) else {
                         return Err(fault(TarFault::UnsafePath(format!("{name:?}"))));
                     };
+                    name_bytes = name_bytes.saturating_add(rel.len() as u64);
+                    check_listing_size(files.len() + dirs.len() + 1, name_bytes)?;
                     let size = entry.size();
                     let mtime = entry.header().mtime().unwrap_or(0);
                     let mode = match entry.header().mode().unwrap_or(0) & 0o777 {
@@ -1323,11 +1444,29 @@ enum Kind {
     Skip,
 }
 
+/// The entry's PAX keys say it is a sparse file (`GNU.sparse.*`, every version of the format).
+fn pax_sparse<R: Read>(e: &mut tar::Entry<'_, R>) -> io::Result<bool> {
+    Ok(e.pax_extensions()?.is_some_and(|mut keys| {
+        keys.any(|k| k.is_ok_and(|k| k.key_bytes().starts_with(b"GNU.sparse.")))
+    }))
+}
+
 impl Kind {
-    fn of<R: Read>(e: &tar::Entry<'_, R>) -> io::Result<Kind> {
+    fn of<R: Read>(e: &mut tar::Entry<'_, R>) -> io::Result<Kind> {
         use tar::EntryType as T;
         let t = e.header().entry_type();
         Ok(match t {
+            // A sparse file in the PAX form (bsdtar, which macOS's tar is, and `tar -S
+            // --format=posix`) is an ordinary file entry whose data starts with the map of its
+            // holes, named `GNUSparseFile.<n>/<name>`: only its PAX keys say so. Taken as it was,
+            // it went to the console as the map and the parts, under that name.
+            T::Regular | T::Continuous if pax_sparse(e)? => {
+                return Err(fault(TarFault::Unsupported(format!(
+                    "{} is a sparse file, which this app does not unpack; create the archive \
+                     again without --sparse (-S)",
+                    String::from_utf8_lossy(&e.path_bytes())
+                ))))
+            }
             T::Regular | T::Continuous => Kind::File,
             T::Directory => Kind::Dir,
             T::Symlink | T::Link => Kind::Link,
@@ -1437,17 +1576,24 @@ pub fn tar_walk(
         return r.map_err(|e| Tagged::finish(e, &opened));
     }
     let seq = layout.sequential();
+    let budget = opened.header_budget();
     let r = (|| -> io::Result<()> {
         let mut ar = tar::Archive::new(&mut opened);
         let mut entries = entries(&mut ar, !seq).map_err(Tagged::decode)?;
         let mut i = start;
+        let mut unread = 0u64;
         loop {
             if cancel.load(Ordering::Relaxed) {
                 return Err(stopped());
             }
-            let Some(entry) = entries.next() else { break };
+            budget.on(unread);
+            let next = entries.next();
+            budget.off();
+            let Some(entry) = next else { break };
             let mut entry = entry.map_err(Tagged::decode)?;
-            if !matches!(Kind::of(&entry)?, Kind::File) {
+            let kind = Kind::of(&mut entry)?;
+            unread = unread_after(&kind, entry.size());
+            if !matches!(kind, Kind::File) {
                 continue;
             }
             let Some(f) = layout.files.get(i) else {

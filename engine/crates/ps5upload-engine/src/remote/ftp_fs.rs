@@ -161,6 +161,34 @@ fn plain_dos_line(line: &str) -> Option<Entry> {
     })
 }
 
+/// The most links of one folder whose real size is asked for (one command each).
+const MAX_LINKS_SIZED: usize = 64;
+
+/// The names in a listing that are symbolic links. A link's listed size is the link's own (the
+/// length of the path it holds), not its file's: an upload planned with it sent that many bytes
+/// of the file and ended as done.
+fn listed_links(lines: &[String], mlsd: bool) -> Vec<String> {
+    let is_link = |line: &str| {
+        if mlsd {
+            let facts = line.split_once(' ').map_or(line, |(facts, _)| facts);
+            facts.split(';').any(|f| {
+                let f = f.to_ascii_lowercase();
+                f.starts_with("type=") && (f.contains("symlink") || f.contains("slink"))
+            })
+        } else {
+            let mode = line.split_whitespace().next().unwrap_or("");
+            mode.len() >= 10 && mode.starts_with('l')
+        }
+    };
+    lines
+        .iter()
+        .filter(|l| is_link(l))
+        // The name as the listing's entry has it.
+        .filter_map(|l| parse_listing(std::slice::from_ref(l), mlsd).pop())
+        .map(|e| e.name)
+        .collect()
+}
+
 /// Turn a directory listing into entries: MLSD lines when the server speaks it, else the
 /// Unix `ls -l` or Windows `DIR` lines `LIST` returns. `.` and `..` are dropped.
 pub fn parse_listing(lines: &[String], mlsd: bool) -> Vec<Entry> {
@@ -421,6 +449,9 @@ async fn sign_in(t: &Target) -> Result<Ftp, RemoteError> {
     // A NAS behind a router often names its private address for passive data; use the one
     // we connected to instead.
     ftp.set_passive_nat_workaround(true);
+    // Names go both ways as the server's bytes: one that is not UTF-8 (Latin-1 from an older
+    // system) read as lossy UTF-8 could not be asked for again, so the file failed to open.
+    ftp.set_encoding(super::name_bytes::Lossless).await;
     if implicit {
         // The library secures only the control connection here; the data connections want this.
         for command in ["PBSZ 0", "PROT P"] {
@@ -636,6 +667,15 @@ impl FtpFs {
         self.list_on(&mut s, dir).await
     }
 
+    /// Whether the server path `full` is a folder, asked by entering it. CWD names one exact
+    /// folder: no server reads its argument as a pattern, so a folder that is not there cannot
+    /// answer as an empty one (which LIST of its path can, on a server that globs). `None` when
+    /// the answer says neither (no answer, or one other than success and 550).
+    async fn folder_there(&self, full: &str) -> Option<bool> {
+        let mut s = self.session.lock().await;
+        cwd_says(&mut s, full).await
+    }
+
     /// A read session with no transfer open, or a new sign-in.
     async fn side_session(&self) -> Result<Session, RemoteError> {
         {
@@ -663,15 +703,46 @@ impl FtpFs {
             // folder named "[PS5] Hellblade [RUS text, …]" listed by its path matched nothing
             // and showed empty (Discord: its .ffpfsc showed over SMB, not FTP). Every
             // other command here names an absolute path, so the working folder is free to move.
-            let here = s.cwd(dir).await.is_ok();
-            let arg = if here { None } else { Some(dir) };
+            //
+            // A folder the server won't enter is listed by its path, for a server that takes
+            // CWD badly. But a server that globs answers a missing path with an empty listing
+            // and success: from that alone a folder that is not there read as there and empty
+            // (and a failed MKD as made). So once CWD has said 550, only a listing with
+            // something in it shows the folder is there, and a path that is a pattern (`*`,
+            // `?`, `[`) is not listed at all: it could match some other name.
+            let here = cwd_says(s, dir).await;
+            let not_there = || RemoteError::NotFound(format!("{dir} not found"));
+            if here == Some(false) && dir.contains(['*', '?', '[']) {
+                return Err(not_there());
+            }
+            let arg = if here == Some(true) { None } else { Some(dir) };
             let listed = if mlsd {
                 s.mlsd(arg).await
             } else {
                 s.list(arg).await
             };
             match listed {
-                Ok(lines) => Ok(parse_listing(&lines, mlsd)),
+                Ok(lines) => {
+                    let mut entries = parse_listing(&lines, mlsd);
+                    if here == Some(false) && entries.is_empty() {
+                        return Err(not_there());
+                    }
+                    // A link to a file is listed with the file's size, which SIZE gives (it
+                    // follows the link). A link to a folder, or a server without SIZE, stays
+                    // as listed.
+                    let links = listed_links(&lines, mlsd);
+                    for name in links.iter().take(MAX_LINKS_SIZED) {
+                        let full = format!("{}/{name}", dir.trim_end_matches('/'));
+                        let Ok(size) = s.size(full.as_str()).await else {
+                            continue;
+                        };
+                        let link = entries.iter_mut().find(|e| !e.is_dir && &e.name == name);
+                        if let Some(e) = link {
+                            e.size = size as u64;
+                        }
+                    }
+                    Ok(entries)
+                }
                 Err(FtpError::UnexpectedResponse(r)) if r.status.code() == 550 => {
                     Err(RemoteError::NotFound(format!("{dir} not found")))
                 }
@@ -679,6 +750,16 @@ impl FtpFs {
             }
         })
         .await
+    }
+}
+
+/// What CWD into the server path `full` says over `s`: `Some(true)` it is a folder,
+/// `Some(false)` the server answered 550 (no such folder, or not one), `None` anything else.
+async fn cwd_says(s: &mut Ftp, full: &str) -> Option<bool> {
+    match tokio::time::timeout(STEP, s.cwd(full)).await {
+        Ok(Ok(())) => Some(true),
+        Ok(Err(FtpError::UnexpectedResponse(r))) if r.status.code() == 550 => Some(false),
+        _ => None,
     }
 }
 
@@ -849,6 +930,10 @@ impl RemoteFile for FtpFile {
             if !matches!(tokio::time::timeout(STEP, stream.finish()).await, Ok(Ok(_))) {
                 return Ok(out);
             }
+        } else if (got as u64) < len {
+            // The data connection ended before the file did (dropped by the server or a router):
+            // it has nothing more to give, so the next read starts a fresh transfer from `at`.
+            return Ok(out);
         } else {
             s.open = Some((stream, self.path.clone(), at));
         }
@@ -981,18 +1066,39 @@ impl RemoteFs for FtpFs {
             })
             .await
         };
+        // Whether the folder is there is asked by entering it, never by listing it: a server
+        // that reads a LIST argument as a pattern lists a folder that is not there as empty,
+        // which made a failed MKD read as success.
         match made {
-            Ok(()) => Ok(()),
+            // Made, the server says: there, as far as anyone can tell, unless entering it says
+            // it is not.
+            Ok(()) => match self.folder_there(&full).await {
+                Some(false) => Err(RemoteError::Io(format!(
+                    "the server said it made the folder {path}, but it is not there"
+                ))),
+                _ => Ok(()),
+            },
             // MKD answers 550 (or 521) for a name already taken; whether that is a folder
             // (fine) or a file (not) only a look can tell.
-            Err(e @ (RemoteError::NotFound(_) | RemoteError::Io(_))) => match self.stat(path).await
-            {
-                Ok(st) if st.is_dir => Ok(()),
-                Ok(_) => Err(RemoteError::Exists(format!("{path} is a file"))),
-                // LIST hides dot-folders on many servers: one that lists is there.
-                Err(_) if self.entries(path).await.is_ok() => Ok(()),
-                Err(_) => Err(e),
-            },
+            Err(e @ (RemoteError::NotFound(_) | RemoteError::Io(_))) => {
+                match self.folder_there(&full).await {
+                    Some(true) => Ok(()),
+                    // Not a folder: a file by that name, or nothing (the MKD failed).
+                    Some(false) => match self.stat(path).await {
+                        Ok(st) if !st.is_dir => {
+                            Err(RemoteError::Exists(format!("{path} is a file")))
+                        }
+                        _ => Err(e),
+                    },
+                    // A server that answers CWD neither way: the parent's listing, which shows
+                    // a folder only when it really holds one (a missing one is not in it).
+                    None => match self.stat(path).await {
+                        Ok(st) if st.is_dir => Ok(()),
+                        Ok(_) => Err(RemoteError::Exists(format!("{path} is a file"))),
+                        Err(_) => Err(e),
+                    },
+                }
+            }
             Err(e) => Err(e),
         }
     }
@@ -1163,6 +1269,27 @@ mod tests {
             "{got:?}"
         );
         assert!(got.contains(&("folder name", true, 0)), "{got:?}");
+    }
+
+    /// A link is told from the listing (its size there is the link's own), under the name its
+    /// entry has, so its file's size can be asked for.
+    #[test]
+    fn the_links_of_a_listing_are_named() {
+        let ls = lines(&[
+            "-rw-r--r--    1 1000     1000     53687091200 Nov 06 12:00 game.pkg",
+            "lrwxrwxrwx    1 1000     1000           17 Nov 06 12:00 latest.pkg -> /pool/game v2.pkg",
+            "drwxr-xr-x    2 1000     1000         4096 Nov 06 12:00 lib",
+        ]);
+        assert_eq!(listed_links(&ls, false), ["latest.pkg"]);
+        let listed = parse_listing(&ls, false);
+        assert!(triples(&listed).contains(&("latest.pkg", false, 17)));
+        let mlsd = lines(&[
+            "type=file;size=10; a.bin",
+            "type=OS.unix=symlink;size=9; link to a.bin",
+            "type=OS.unix=slink:/pool/a.bin;size=11; other",
+            "type=dir; lib",
+        ]);
+        assert_eq!(listed_links(&mlsd, true), ["link to a.bin", "other"]);
     }
 
     fn triples(got: &[Entry]) -> Vec<(&str, bool, u64)> {
@@ -1485,6 +1612,109 @@ mod tests {
     const GLOB_FILE: &str = "PPSA00000_Game_v01.003.000_FW10.ffpfsc";
     const GLOB_SIZE: u64 = 13_851_336_704;
 
+    /// A file named in Latin-1 (not UTF-8), as an older NAS keeps it.
+    const LATIN1_PATH: &[u8] = b"/caf\xE9.bin";
+    const LATIN1_BODY: &[u8] = b"hello";
+
+    /// A server whose root holds [`LATIN1_PATH`]: it answers SIZE and RETR only for those exact
+    /// bytes, as a real one does.
+    async fn latin1_server() -> u16 {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let ctl = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = ctl.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((sock, _)) = ctl.accept().await {
+                tokio::spawn(async move {
+                    let (rd, mut wr) = sock.into_split();
+                    let mut rd = BufReader::new(rd);
+                    let mut data: Option<tokio::net::TcpListener> = None;
+                    wr.write_all(b"220 ready\r\n").await.ok();
+                    let mut line = Vec::new();
+                    while matches!(rd.read_until(b'\n', &mut line).await, Ok(n) if n > 0) {
+                        let l = line.strip_suffix(b"\r\n").unwrap_or(&line).to_vec();
+                        line.clear();
+                        let sp = l.iter().position(|&b| b == b' ').unwrap_or(l.len());
+                        let cmd = String::from_utf8_lossy(&l[..sp]).to_ascii_uppercase();
+                        let arg = l.get(sp + 1..).unwrap_or_default();
+                        let ours = arg == LATIN1_PATH;
+                        let reply = match cmd.as_str() {
+                            "USER" => "331 Password required".to_string(),
+                            "PASS" => "230 OK".into(),
+                            "TYPE" => "200 OK".into(),
+                            "PWD" => "257 \"/\" is the current folder".into(),
+                            "CWD" if arg == b"/" => "250 OK".into(),
+                            "SIZE" if ours => format!("213 {}", LATIN1_BODY.len()),
+                            "REST" => "350 Restarting".into(),
+                            "PASV" => {
+                                let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                                let p = l.local_addr().unwrap().port();
+                                data = Some(l);
+                                format!(
+                                    "227 Entering Passive Mode (127,0,0,1,{},{})",
+                                    p / 256,
+                                    p % 256
+                                )
+                            }
+                            "LIST" | "RETR" if cmd == "LIST" || ours => {
+                                let Some(l) = data.take() else {
+                                    wr.write_all(b"425 No data connection\r\n").await.ok();
+                                    continue;
+                                };
+                                wr.write_all(b"150 Opening data connection\r\n").await.ok();
+                                let (mut d, _) = l.accept().await.unwrap();
+                                if cmd == "LIST" {
+                                    let mut row =
+                                        b"-rw-r--r--    1 1000  1000  5 Nov  8 04:11 ".to_vec();
+                                    row.extend_from_slice(&LATIN1_PATH[1..]);
+                                    row.extend_from_slice(b"\r\n");
+                                    d.write_all(&row).await.ok();
+                                } else {
+                                    d.write_all(LATIN1_BODY).await.ok();
+                                }
+                                drop(d);
+                                "226 Transfer complete".into()
+                            }
+                            "QUIT" => {
+                                wr.write_all(b"221 Goodbye\r\n").await.ok();
+                                break;
+                            }
+                            "SIZE" | "MDTM" | "RETR" | "CWD" => "550 No such file".into(),
+                            _ => "500 Unknown command".into(),
+                        };
+                        wr.write_all(format!("{reply}\r\n").as_bytes()).await.ok();
+                    }
+                });
+            }
+        });
+        port
+    }
+
+    /// A file named in Latin-1 listed as lossy UTF-8 (`caf\u{FFFD}.bin`), which no server has:
+    /// opening it failed. The name keeps its bytes, and the file opens and reads by it.
+    #[tokio::test]
+    async fn a_name_that_is_not_utf8_lists_and_opens() {
+        let port = latin1_server().await;
+        let mut conn = crate::remote::store::conn("t", crate::remote::store::Protocol::Ftp);
+        conn.host = "127.0.0.1".into();
+        conn.port = port;
+        conn.user = "t".into();
+        let secret = Secret::Password {
+            password: "t".into(),
+        };
+        let fs = FtpFs::connect(&conn, &secret, false).await.unwrap();
+        let page = fs.list("/", None).await.unwrap();
+        assert_eq!(page.entries.len(), 1, "{:?}", triples(&page.entries));
+        let name = page.entries[0].name.clone();
+        assert!(!name.contains('\u{FFFD}'), "{name:?}");
+        assert_eq!(
+            super::super::name_bytes::encode(&format!("/{name}")),
+            LATIN1_PATH
+        );
+        let f = fs.open(&format!("/{name}")).await.unwrap();
+        assert_eq!(f.size(), LATIN1_BODY.len() as u64);
+        assert_eq!(f.read_at(0, f.size()).await.unwrap(), LATIN1_BODY);
+    }
+
     /// A server that, like Pure-FTPd (and the Keenetic router's FTP server of the report), reads a
     /// LIST argument as a glob: `[PS5]` is a character class, so listing the folder by its path
     /// matches nothing and answers an empty listing with success. Speaks no FEAT, so no MLSD.
@@ -1492,8 +1722,16 @@ mod tests {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
         let ctl = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = ctl.local_addr().unwrap().port();
+        // The folders it holds, shared by its sessions.
+        let folders: Arc<std::sync::Mutex<std::collections::HashSet<String>>> =
+            Arc::new(std::sync::Mutex::new(
+                ["/", GLOB_DIR, "/torrents", "/liar"]
+                    .map(str::to_string)
+                    .into(),
+            ));
         tokio::spawn(async move {
             while let Ok((sock, _)) = ctl.accept().await {
+                let folders = Arc::clone(&folders);
                 tokio::spawn(async move {
                     let (rd, mut wr) = sock.into_split();
                     let mut rd = BufReader::new(rd);
@@ -1510,11 +1748,30 @@ mod tests {
                             "PASS" => "230 OK".into(),
                             "TYPE" => "200 TYPE is now 8-bit binary".into(),
                             "PWD" => format!("257 \"{cwd}\" is your current location"),
-                            "CWD" if arg == GLOB_DIR || arg == "/" || arg == "/torrents" => {
+                            "CWD" if folders.lock().unwrap().contains(arg) => {
                                 cwd = arg.to_string();
                                 "250 OK".into()
                             }
                             "CWD" => "550 No such directory".into(),
+                            // Made only inside a folder that is there; a folder under
+                            // `/liar` is said to be made and is not, as a broken server can.
+                            "MKD" if arg.starts_with("/liar/") => format!("257 \"{arg}\" created"),
+                            "MKD" => {
+                                let parent = arg.rsplit_once('/').map_or("/", |(p, _)| {
+                                    if p.is_empty() {
+                                        "/"
+                                    } else {
+                                        p
+                                    }
+                                });
+                                let mut f = folders.lock().unwrap();
+                                if f.contains(arg) || !f.contains(parent) {
+                                    "550 Can't create the directory".into()
+                                } else {
+                                    f.insert(arg.to_string());
+                                    format!("257 \"{arg}\" created")
+                                }
+                            }
                             "PASV" => {
                                 let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
                                 let p = l.local_addr().unwrap().port();
@@ -1580,8 +1837,12 @@ mod tests {
         );
         let e = fs.stat(&format!("{GLOB_DIR}/{GLOB_FILE}")).await.unwrap();
         assert_eq!((e.is_dir, e.size), (false, GLOB_SIZE));
-        // A folder the server won't enter falls back to listing by its path.
-        assert!(fs.list("/nope", None).await.unwrap().entries.is_empty());
+        // A folder the server won't enter, listed by its path: this server answers an empty
+        // listing, which is no folder. It used to list as there and empty.
+        assert!(matches!(
+            fs.list("/nope", None).await,
+            Err(RemoteError::NotFound(_))
+        ));
     }
 
     /// An upload holds the session for its whole file; browsing meanwhile is answered over
@@ -1612,6 +1873,103 @@ mod tests {
         drop(held);
     }
 
+    /// A server whose first RETR sends only the first `cut` bytes of `body` and closes the data
+    /// connection (a NAS or router dropping it mid-file); every later RETR (with REST) is whole.
+    async fn dropping_server(body: &'static [u8], cut: usize) -> u16 {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let ctl = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = ctl.local_addr().unwrap().port();
+        let retrs = Arc::new(AtomicUsize::new(0));
+        tokio::spawn(async move {
+            while let Ok((sock, _)) = ctl.accept().await {
+                let retrs = Arc::clone(&retrs);
+                tokio::spawn(async move {
+                    let (rd, mut wr) = sock.into_split();
+                    let mut rd = BufReader::new(rd);
+                    let mut data: Option<tokio::net::TcpListener> = None;
+                    let mut rest = 0usize;
+                    wr.write_all(b"220 ready\r\n").await.ok();
+                    let mut line = String::new();
+                    while matches!(rd.read_line(&mut line).await, Ok(n) if n > 0) {
+                        let l = line.trim_end_matches(['\r', '\n']).to_string();
+                        line.clear();
+                        let (cmd, arg) = l.split_once(' ').unwrap_or((l.as_str(), ""));
+                        let reply = match cmd.to_ascii_uppercase().as_str() {
+                            "USER" => "331 Password required".to_string(),
+                            "PASS" => "230 OK".into(),
+                            "TYPE" => "200 OK".into(),
+                            "PWD" => "257 \"/\" is the current folder".into(),
+                            "SIZE" => format!("213 {}", body.len()),
+                            "REST" => {
+                                rest = arg.parse().unwrap();
+                                "350 Restarting".into()
+                            }
+                            "PASV" => {
+                                let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+                                let p = l.local_addr().unwrap().port();
+                                data = Some(l);
+                                format!(
+                                    "227 Entering Passive Mode (127,0,0,1,{},{})",
+                                    p / 256,
+                                    p % 256
+                                )
+                            }
+                            "RETR" => {
+                                let Some(l) = data.take() else {
+                                    wr.write_all(b"425 No data connection\r\n").await.ok();
+                                    continue;
+                                };
+                                wr.write_all(b"150 Opening data connection\r\n").await.ok();
+                                let (mut d, _) = l.accept().await.unwrap();
+                                let first = retrs.fetch_add(1, Ordering::SeqCst) == 0;
+                                let end = if first { cut } else { body.len() };
+                                d.write_all(&body[rest.min(end)..end]).await.ok();
+                                drop(d);
+                                rest = 0;
+                                if first {
+                                    "426 Connection closed; transfer aborted".into()
+                                } else {
+                                    "226 Transfer complete".into()
+                                }
+                            }
+                            "QUIT" => {
+                                wr.write_all(b"221 Goodbye\r\n").await.ok();
+                                break;
+                            }
+                            _ => "500 Unknown command".into(),
+                        };
+                        wr.write_all(format!("{reply}\r\n").as_bytes()).await.ok();
+                    }
+                });
+            }
+        });
+        port
+    }
+
+    /// A data connection the server dropped part way gave a short read, and was then kept to
+    /// read on from: every later read of the file came back empty, and a copy failed with the
+    /// file "ended early" where a fresh transfer from that byte would have finished it.
+    #[tokio::test]
+    async fn a_transfer_cut_short_is_not_read_on_from() {
+        static BODY: &[u8] = b"0123456789abcdefghijklmnopqrstuvwxyz";
+        let port = dropping_server(BODY, 10).await;
+        let mut conn = crate::remote::store::conn("t", crate::remote::store::Protocol::Ftp);
+        conn.host = "127.0.0.1".into();
+        conn.port = port;
+        conn.user = "t".into();
+        let secret = Secret::Password {
+            password: "t".into(),
+        };
+        let fs = FtpFs::connect(&conn, &secret, false).await.unwrap();
+        let f = fs.open("/f.bin").await.unwrap();
+        assert_eq!(f.size(), BODY.len() as u64);
+        let first = f.read_at(0, BODY.len() as u64).await.unwrap();
+        assert_eq!(first, &BODY[..10]);
+        let rest = f.read_at(10, BODY.len() as u64 - 10).await.unwrap();
+        assert_eq!(rest, &BODY[10..], "the rest of the file came back empty");
+    }
+
     /// The same against a real Pure-FTPd: in `<dir>`, make the report's folder
     /// ([`GLOB_DIR`]) holding a sparse [`GLOB_FILE`] of [`GLOB_SIZE`] bytes (`truncate -s`), then
     /// `docker run -d -p 2122:21 -p 30000-30009:30000-30009 -v <dir>:/home/t alpine:3.20 sh -c
@@ -1639,5 +1997,46 @@ mod tests {
         assert_eq!(f.size(), GLOB_SIZE);
         let tail = f.read_at(GLOB_SIZE - 4096, 4096).await.unwrap();
         assert_eq!(tail.len(), 4096);
+    }
+
+    /// The audit's case: on a server that reads a LIST argument as a pattern, a folder that is
+    /// not there listed as there and empty, so a MKD the server refused was reported as made.
+    /// Whether a folder is there is now asked by entering it.
+    #[tokio::test]
+    async fn a_folder_that_is_not_there_is_never_made_or_listed_as_empty() {
+        let port = globbing_server().await;
+        let mut conn = crate::remote::store::conn("t", crate::remote::store::Protocol::Ftp);
+        conn.host = "127.0.0.1".into();
+        conn.port = port;
+        conn.user = "t".into();
+        let secret = Secret::Password {
+            password: "t".into(),
+        };
+        let fs = FtpFs::connect(&conn, &secret, false).await.unwrap();
+        // Its parent is not there: the MKD fails, and that is what is said.
+        assert!(fs.create_dir("/missing/new").await.is_err());
+        assert!(matches!(
+            fs.list("/missing", None).await,
+            Err(RemoteError::NotFound(_))
+        ));
+        assert!(fs.stat("/missing/new").await.is_err());
+        // A folder that can be made is, and lists (empty) once it is.
+        fs.create_dir("/torrents/new").await.unwrap();
+        assert!(fs
+            .list("/torrents/new", None)
+            .await
+            .unwrap()
+            .entries
+            .is_empty());
+        // Made again: already there, which is fine.
+        fs.create_dir("/torrents/new").await.unwrap();
+        // A server that says it made a folder it did not.
+        let e = fs.create_dir("/liar/new").await.unwrap_err();
+        assert!(e.to_string().contains("not there"), "{e}");
+        // A missing folder whose name is a pattern is not listed by its path at all.
+        assert!(matches!(
+            fs.list("/torrents/[PS5] gone", None).await,
+            Err(RemoteError::NotFound(_))
+        ));
     }
 }

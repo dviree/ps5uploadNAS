@@ -192,7 +192,11 @@ pub(crate) struct BuildReq {
     /// `fast`, `balanced` (the default) or `smallest`: how hard the Kraken encoder works.
     #[serde(default)]
     compression: Option<String>,
-    /// A PlayGo language code (`fr-FR`, …) the package declares as its only one.
+    /// The languages the package declares to PlayGo. Absent or empty: the game's own, read from
+    /// its `sce_sys/playgo-scenario.json` or `playgo-chunk.dat`, and only its default language
+    /// (`param.json`'s `localizedParameters.defaultLanguage`) when it has neither. A language
+    /// code (`fr-FR`, …): that one alone, as the default too. `all`: every language, starting
+    /// in the game's default (what packages declared before they kept to the game's own).
     #[serde(default)]
     language: Option<String>,
     /// Read the whole package back to verify it. Off (the default): the structure is checked
@@ -208,6 +212,53 @@ pub(crate) struct BuildReq {
     /// the package is the game at the update's version.
     #[serde(default)]
     update: Option<String>,
+    /// For a game in LZ4 or zstd asset packs: package it as plain files, as an image build's
+    /// `unpack_packs` writes them. Every packed file goes in under its own name, decoded as the
+    /// package is written (no copy on disk), the pack volumes and their indexes are left out,
+    /// and the package's `ampr_emu.index` lists the files it carries. A libSceAmpr game whose
+    /// emulator is ampr-emu-ng, an old ampr_emu or unknown gets the one `ampr_emu_build` names
+    /// (`add_ampr_emu` off leaves it). Refused (400) for a game that is not in packs. Without
+    /// it a packed game is packaged as it is, packs and all.
+    #[serde(default)]
+    unpack_packs: bool,
+    /// With `unpack_packs`: replace or add the game's AMPR emulator as an image build does.
+    /// On unless turned off.
+    #[serde(default = "default_add_ampr_emu")]
+    add_ampr_emu: bool,
+    /// With `unpack_packs`: which emulator, `ampr_emu` (the default) or `ampr-emu-ng`.
+    #[serde(default)]
+    ampr_emu_build: Option<String>,
+    /// With `unpack_packs`: leave the AMPR emulator out of the package (every
+    /// `libSceAmpr.sprx` in `fakelib` and `fakelib2`, and a kept `.orig` copy), so the game
+    /// reads its plain files through the console's own libSceAmpr. `add_ampr_emu` and
+    /// `ampr_emu_build` then do nothing. A libSceAmpr game still gets a fresh `ampr_emu.index`.
+    /// Off by default: one backported game played from a package without its emulator on FW
+    /// 5.10, which is not every game on every firmware. Refused (400) without `unpack_packs`:
+    /// packs are read only through the emulator.
+    #[serde(default)]
+    leave_out_ampr_emu: bool,
+}
+
+/// Why a package build's `unpack_packs` / `leave_out_ampr_emu` can't go ahead for a game in
+/// `packs` (the inspection's, `None` for a plain game), in a sentence; `None` when it can.
+fn package_unpack_refusal(
+    unpack: bool,
+    leave_out_emulator: bool,
+    packs: Option<&str>,
+) -> Option<&'static str> {
+    if leave_out_emulator && !unpack {
+        return Some(
+            "leaving out the AMPR emulator goes with unpacking the asset packs: a game in packs \
+             reads them only through its emulator",
+        );
+    }
+    if unpack && packs.is_none() {
+        return Some(
+            "this game is not in asset packs (it has no ampr_assets.index or ampr_zstd.index \
+             pack set): there is nothing to unpack",
+        );
+    }
+    None
 }
 
 /// The language a build asked for, trimmed; none when blank.
@@ -280,7 +331,7 @@ pub(crate) fn resolve_engine_path(raw: &str) -> PathBuf {
     }
 }
 
-fn output_dir(requested: Option<&str>) -> PathBuf {
+pub(crate) fn output_dir(requested: Option<&str>) -> PathBuf {
     match requested {
         Some(dir) if !dir.trim().is_empty() => resolve_engine_path(dir),
         _ => default_output_dir(),
@@ -509,6 +560,21 @@ pub(crate) async fn fpkg_build_handler(
         }
     };
 
+    if let Some(why) =
+        package_unpack_refusal(req.unpack_packs, req.leave_out_ampr_emu, inspection.packs)
+    {
+        return json_err(StatusCode::BAD_REQUEST, why).into_response();
+    }
+    // A packed game read as plain files: decoded as the package is written, its emulator
+    // replaced or left out as asked.
+    let reader = req.unpack_packs.then(|| {
+        build::SourceReader(if req.leave_out_ampr_emu {
+            open_unpacked_without_emulator()
+        } else {
+            open_unpacked(req.add_ampr_emu, req.ampr_emu_build.clone())
+        })
+    });
+
     // A PS4 game (or one with its update merged in) becomes a PS4 package; without param.json
     // there is no PS5 title to package (#596).
     if inspection.ps4_game || inspection.ps4_kind.is_some() || update.is_some() {
@@ -534,7 +600,13 @@ pub(crate) async fn fpkg_build_handler(
         .clone()
         .filter(|n| !n.trim().is_empty())
         .or_else(|| req.content_id.clone().filter(|c| !c.trim().is_empty()))
-        .or_else(|| inspection.content_id.clone());
+        // The game's own id names the file only when it is a plain name (never `../x`).
+        .or_else(|| {
+            inspection
+                .content_id
+                .clone()
+                .filter(|c| build::content_id_is_plain(c))
+        });
     let stem = match stem {
         Some(s) if req.keep_both => Some(
             crate::folder_build::keep_both_stem(&s, |c| {
@@ -668,6 +740,7 @@ pub(crate) async fn fpkg_build_handler(
         if let Some(level) = req.compression.as_deref().and_then(|v| v.parse().ok()) {
             request.level = level;
         }
+        request.reader = reader;
         // Each stage reports its own bytes; a new one starts from nothing.
         let mut on_stage = |s: build::Stage| {
             bytes.store(0, Ordering::Relaxed);
@@ -829,7 +902,13 @@ async fn ps4_package_build(
         .name
         .clone()
         .filter(|n| !n.trim().is_empty())
-        .or_else(|| inspection.content_id.clone())
+        // The param.sfo's id names the file only when it is a plain name (never `../x`).
+        .or_else(|| {
+            inspection
+                .content_id
+                .clone()
+                .filter(|c| build::content_id_is_plain(c))
+        })
         .or_else(|| {
             source_path
                 .file_stem()
@@ -1104,6 +1183,12 @@ mod path_tests {
         assert_eq!(language_of(req.language), None);
         let req: BuildReq = serde_json::from_str(r#"{"source":"/g"}"#).unwrap();
         assert_eq!(language_of(req.language), None);
+        // Every language is asked for by name; the package builder knows the word.
+        let req: BuildReq = serde_json::from_str(r#"{"source":"/g","language":"all"}"#).unwrap();
+        assert_eq!(
+            language_of(req.language).as_deref(),
+            Some(ps5upload_fpkg::cnt_write::ALL_LANGUAGES)
+        );
     }
 
     #[test]
@@ -1723,6 +1808,13 @@ fn open_unpacked(add: bool, build: Option<String>) -> OpenUnpacked {
         });
         crate::unpack_packs::open(tree, emulator.as_ref(), mtime)
     })
+}
+
+/// [`OpenUnpacked`] for a package that leaves the AMPR emulator out (`leave_out_ampr_emu`):
+/// nothing is fetched.
+fn open_unpacked_without_emulator() -> OpenUnpacked {
+    let mtime = now_ms() as i64 / 1000;
+    Arc::new(move |tree| crate::unpack_packs::open_without_emulator(tree, mtime))
 }
 
 /// One change for an edited copy of an image: `{"op":"delete","path":…}` removes a file or
@@ -3999,13 +4091,19 @@ pub(crate) async fn claim_off_thread(path: PathBuf) -> Option<Writing> {
         .flatten()
 }
 
-/// The 409 for a build whose output another running build is writing.
+/// The 409 for a build whose output another running build is writing, or whose output of an
+/// earlier build is finished and kept under that name (its rename failed).
 fn already_building(path: &Path) -> axum::response::Response {
-    json_err(
-        StatusCode::CONFLICT,
-        format!("{} is already being built", path.display()),
-    )
-    .into_response()
+    let why = if ps5upload_fpkg::finish::is_kept(path) && path.symlink_metadata().is_ok() {
+        format!(
+            "{} is a finished output that could not be given its name. Rename it by hand (drop \
+             the .partial), or move it, then build again",
+            path.display()
+        )
+    } else {
+        format!("{} is already being built", path.display())
+    };
+    json_err(StatusCode::CONFLICT, why).into_response()
 }
 
 /// Removes a file, trying again for a few seconds while something holds it: on Windows an
@@ -4194,11 +4292,25 @@ pub(crate) struct ExtractReq {
     /// RAR only; never logged.
     #[serde(default)]
     password: Option<String>,
+    /// DESTROYS THE ARCHIVE: its own space is given back while it unpacks, so the job fits on
+    /// a drive with no room for both. A `.zip` is cut short behind each file as it is
+    /// unpacked, a `.7z` of several blocks behind each block, and a multi-part `.rar` loses
+    /// each part as it is finished; anything else is deleted the moment the unpack has
+    /// finished and been checked. Ask `/api/fpkg/extract/free-check` first. Off unless set.
+    #[serde(default)]
+    free_archive: bool,
 }
 
 /// POST /api/fpkg/extract — unpack a game archive into the output folder, as a job. Done's
 /// `dest` is the game found inside (a folder or an image), which the build then reads; the
 /// unpack folder is removed by `/api/fpkg/extract/cleanup`, on failure, or by a later run.
+///
+/// With `free_archive` the archive is deleted as it is unpacked (`archive_free`): everything
+/// that can be checked is checked first and refused with nothing changed (400, or 409 while
+/// something else uses the archive). The game is unpacked into `<archive>.unpacked` in the
+/// output folder, which nothing removes but `/api/fpkg/extract/cleanup` with `kept`. A job
+/// that fails with part of the archive gone has `error_reason: "archive_partly_deleted"` and
+/// the folder holding what was unpacked in `error_detail`.
 pub(crate) async fn fpkg_extract_handler(
     State(state): State<AppState>,
     Json(req): Json<ExtractReq>,
@@ -4218,35 +4330,82 @@ pub(crate) async fn fpkg_extract_handler(
             .into_response();
     }
     let password = req.password.filter(|p| !p.is_empty());
-    let size = {
+    // The archive given up as it unpacks: checked and claimed whole before anything starts.
+    let freeing = if req.free_archive {
         let (source, password, out) = (source.clone(), password.clone(), out.clone());
-        tokio::task::spawn_blocking(move || {
+        let prepared = tokio::task::spawn_blocking(move || {
             sweep_output_leftovers(&out);
-            archive_extract::unpacked_size(&source, password.as_deref())
+            crate::archive_free::Freeing::prepare(&source, password.as_deref(), &out)
         })
-        .await
-    };
-    let total = match size {
-        Ok(Ok(total)) => total,
-        Ok(Err(e)) => return json_err(StatusCode::BAD_REQUEST, format!("{e:#}")).into_response(),
-        Err(join) => {
-            return json_err(
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("the archive listing failed: {join}"),
-            )
-            .into_response()
+        .await;
+        match prepared {
+            Ok(Ok(freeing)) => Some(freeing),
+            Ok(Err((status, why))) => return json_err(status, why).into_response(),
+            Err(join) => {
+                return json_err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("the archive check failed: {join}"),
+                )
+                .into_response()
+            }
         }
+    } else {
+        None
     };
-    if let Some(message) = build::free_bytes(&out).and_then(|free| extract_shortfall(free, total)) {
-        return json_err(StatusCode::BAD_REQUEST, message).into_response();
-    }
+    // Read until the unpack ends: nothing may start freeing it (or editing it) meanwhile.
+    let reading = if freeing.is_none() {
+        match crate::image_edit_in_place::Reading::take(&source) {
+            Ok(r) => Some(r),
+            Err(why) => return json_err(StatusCode::CONFLICT, why).into_response(),
+        }
+    } else {
+        None
+    };
+    let total = if let Some(freeing) = &freeing {
+        freeing.total()
+    } else {
+        let size = {
+            let (source, password, out) = (source.clone(), password.clone(), out.clone());
+            tokio::task::spawn_blocking(move || {
+                sweep_output_leftovers(&out);
+                archive_extract::unpacked_size(&source, password.as_deref())
+            })
+            .await
+        };
+        let total = match size {
+            Ok(Ok(total)) => total,
+            Ok(Err(e)) => {
+                return json_err(StatusCode::BAD_REQUEST, format!("{e:#}")).into_response()
+            }
+            Err(join) => {
+                return json_err(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("the archive listing failed: {join}"),
+                )
+                .into_response()
+            }
+        };
+        if let Some(message) =
+            build::free_bytes(&out).and_then(|free| extract_shortfall(free, total))
+        {
+            return json_err(StatusCode::BAD_REQUEST, message).into_response();
+        }
+        total
+    };
 
     let job_id = Uuid::new_v4();
-    let dest = out.join(format!("{EXTRACT_PREFIX}{job_id}"));
-    active_extracts()
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .insert(dest.clone());
+    let dest = match &freeing {
+        // A folder that stays: once the archive is gone it holds the only copy of the game.
+        Some(freeing) => freeing.dest_in(&out),
+        None => {
+            let dest = out.join(format!("{EXTRACT_PREFIX}{job_id}"));
+            active_extracts()
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(dest.clone());
+            dest
+        }
+    };
     crate::workshop_api::note_run(job_id, "extract", &source);
     crate::workshop_api::note_unpack(&dest, &source);
     let cancel = register_workshop_job(job_id);
@@ -4306,17 +4465,44 @@ pub(crate) async fn fpkg_extract_handler(
             job_id,
             started_at_ms,
         );
-        // Until the game is found, the folder is this job's to remove (a panic included).
-        let mut unpacking = Unpacking(Some(dest.clone()));
+        let _reading = reading;
+        // Until the game is found, the folder is this job's to remove (a panic included). Not
+        // one unpacked with the archive given up: what is in it may be all there is.
+        let mut unpacking = Unpacking(freeing.is_none().then(|| dest.clone()));
         let mut progress = |done: u64, _total: u64| {
             bytes.store(done, Ordering::Relaxed);
             // Called every MiB on the unpacking thread: a pause holds it here, and a RAR's
             // helper process, its pipe full, waits with it (#631). A cancel is seen just after.
             ps5upload_fpkg::workshop::checkpoint(&cancel);
         };
-        let outcome =
-            archive_extract::extract(&source, &dest, password.as_deref(), &mut progress, &cancel)
-                .and_then(|()| archive_extract::find_game(&dest));
+        let outcome = match &freeing {
+            Some(freeing) => {
+                crate::engine_log::record(
+                    "warn",
+                    format!(
+                        "fpkg: unpacking {} with its space given back ({}): the archive is deleted",
+                        source.display(),
+                        freeing.mode()
+                    ),
+                );
+                freeing.run(&dest, password.as_deref(), &mut progress, &cancel)
+            }
+            None => archive_extract::extract(
+                &source,
+                &dest,
+                password.as_deref(),
+                &mut progress,
+                &cancel,
+            )
+            .and_then(|()| archive_extract::find_game(&dest))
+            .map_err(|error| crate::archive_free::Failure {
+                error: format!("{error:#}"),
+                reason: None,
+                detail: None,
+            }),
+        };
+        // The claims on the archive end with the unpack.
+        drop(freeing);
         let completed_at_ms = now_ms();
         drop(ticker);
         match outcome {
@@ -4349,9 +4535,12 @@ pub(crate) async fn fpkg_extract_handler(
                     },
                 );
             }
-            Err(error) => {
+            Err(failure) => {
                 drop(unpacking);
-                crate::engine_log::record("warn", format!("fpkg: unpack failed: {error:#}"));
+                crate::engine_log::record(
+                    "warn",
+                    format!("fpkg: unpack failed: {}", failure.error),
+                );
                 set_job(
                     &state_for_job.jobs,
                     &state_for_job.events_tx,
@@ -4360,9 +4549,9 @@ pub(crate) async fn fpkg_extract_handler(
                         started_at_ms,
                         completed_at_ms,
                         elapsed_ms: completed_at_ms.saturating_sub(started_at_ms),
-                        error: format!("{error:#}"),
-                        error_reason: None,
-                        error_detail: None,
+                        error: failure.error,
+                        error_reason: failure.reason,
+                        error_detail: failure.detail,
                         error_console: None,
                         error_space: None,
                     },
@@ -4385,13 +4574,39 @@ pub(crate) async fn fpkg_extract_handler(
 pub(crate) struct ExtractCleanupReq {
     /// The game path an unpack reported, or its unpack folder.
     path: String,
+    /// The folder is one an unpack with `free_archive` kept (`<archive>.unpacked`): removed
+    /// only when asked for by this, once what was made from the game in it is finished.
+    #[serde(default)]
+    kept: bool,
 }
 
-/// POST /api/fpkg/extract/cleanup — remove an unpack folder once its build is over.
+/// POST /api/fpkg/extract/cleanup — remove an unpack folder once its build is over. A folder
+/// an unpack with `free_archive` made is removed only with `kept`, and only one this engine
+/// made since it started; any other path is refused.
 pub(crate) async fn fpkg_extract_cleanup_handler(
     Json(req): Json<ExtractCleanupReq>,
 ) -> impl IntoResponse {
     let path = resolve_engine_path(&req.path);
+    if req.kept {
+        let Some(root) = crate::archive_free::kept_root_of(&path) else {
+            return json_err(
+                StatusCode::BAD_REQUEST,
+                format!("{} is not a kept unpack folder", path.display()),
+            )
+            .into_response();
+        };
+        return match tokio::task::spawn_blocking(move || {
+            crate::archive_free::release(&root).map_err(|e| format!("{}: {e}", root.display()))
+        })
+        .await
+        {
+            Ok(Ok(())) => Json(serde_json::json!({ "ok": true })).into_response(),
+            Ok(Err(e)) => json_err(StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+            Err(join) => {
+                json_err(StatusCode::INTERNAL_SERVER_ERROR, join.to_string()).into_response()
+            }
+        };
+    }
     let Some(root) = extract_root_of(&path) else {
         return json_err(
             StatusCode::BAD_REQUEST,
@@ -4426,7 +4641,7 @@ mod extract_tests {
     /// folder of that name, or nothing there, counts for none.
     #[test]
     fn a_stopped_builds_partial_counts_as_room() {
-        let base = std::env::temp_dir().join(format!("fpkg-leftover-{}", Uuid::new_v4()));
+        let base = crate::test_tmp::temp_path(format!("fpkg-leftover-{}", Uuid::new_v4()));
         std::fs::create_dir_all(base.join("dir.exfat.partial")).unwrap();
         std::fs::write(base.join("game.exfat.partial"), vec![0u8; 4096]).unwrap();
         assert_eq!(leftover_bytes(&base.join("game.exfat.partial")), 4096);
@@ -4440,7 +4655,7 @@ mod extract_tests {
     #[test]
     fn a_failed_unpack_leaves_no_files_behind() {
         use std::io::Write;
-        let base = std::env::temp_dir().join(format!("fpkg-failed-unpack-{}", Uuid::new_v4()));
+        let base = crate::test_tmp::temp_path(format!("fpkg-failed-unpack-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&base).unwrap();
         let zip_path = base.join("game.zip");
         {
@@ -4487,7 +4702,7 @@ mod extract_tests {
     /// anywhere else is never touched.
     #[test]
     fn a_build_removes_the_unpack_folder_it_read_from() {
-        let base = std::env::temp_dir().join(format!("ps5upload-scaffold-{}", std::process::id()));
+        let base = crate::test_tmp::temp_path(format!("ps5upload-scaffold-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&base);
         let root = base.join(format!("{EXTRACT_PREFIX}run"));
         let game = root.join("Game");
@@ -4505,7 +4720,7 @@ mod extract_tests {
 
     #[test]
     fn a_leftover_partial_goes_but_a_second_build_of_the_same_output_is_refused() {
-        let out = std::env::temp_dir().join(format!("ps5upload-partial-{}", std::process::id()));
+        let out = crate::test_tmp::temp_path(format!("ps5upload-partial-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&out);
         std::fs::create_dir_all(&out).unwrap();
         std::fs::write(out.join("A.pkg.partial"), b"x").unwrap();
@@ -4556,7 +4771,7 @@ mod extract_tests {
     fn a_failed_or_interrupted_conversion_leaves_nothing_behind() {
         // #432: a failed image build kept its `.partial` (as large as the image) in the output
         // folder, and an interrupted one was never cleared.
-        let out = std::env::temp_dir().join(format!("ps5upload-leftovers-{}", std::process::id()));
+        let out = crate::test_tmp::temp_path(format!("ps5upload-leftovers-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&out);
         std::fs::create_dir_all(out.join(format!("{EXTRACT_PREFIX}old"))).unwrap();
         for n in [
@@ -4615,7 +4830,7 @@ mod extract_tests {
     fn another_process_s_unfinished_output_is_never_swept() {
         use ps5upload_convert_core::writing::ClaimLock;
         let out =
-            std::env::temp_dir().join(format!("ps5upload-other-claim-{}", std::process::id()));
+            crate::test_tmp::temp_path(format!("ps5upload-other-claim-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&out);
         std::fs::create_dir_all(&out).unwrap();
         let theirs = out.join("A.exfat.partial");
@@ -4756,7 +4971,7 @@ mod extract_tests {
 
     #[test]
     fn stale_unpacks_go_but_active_ones_stay() {
-        let out = std::env::temp_dir().join(format!("ps5upload-stale-{}", std::process::id()));
+        let out = crate::test_tmp::temp_path(format!("ps5upload-stale-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&out);
         let (old, live, keep) = (
             out.join(".ps5upload-extract-old"),
@@ -4781,7 +4996,7 @@ mod delete_tests {
     /// Delete package removes only what this engine built, once.
     #[test]
     fn only_a_package_this_engine_built_can_be_deleted() {
-        let dir = std::env::temp_dir().join(format!("fpkg-del-{}", std::process::id()));
+        let dir = crate::test_tmp::temp_path(format!("fpkg-del-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let ours = dir.join("ours.pkg");
         let theirs = dir.join("theirs.pkg");
@@ -4832,7 +5047,7 @@ mod panic_tests {
                 bytes_finalized: 0,
             },
         );
-        let dest = std::env::temp_dir().join(format!("fpkg-panic-{job_id}"));
+        let dest = crate::test_tmp::temp_path(format!("fpkg-panic-{job_id}"));
         std::fs::create_dir_all(&dest).unwrap();
         active_extracts().lock().unwrap().insert(dest.clone());
         let spinning = tokio::spawn(async {
@@ -4869,7 +5084,7 @@ mod panic_tests {
     /// A finished unpack keeps its folder.
     #[test]
     fn a_found_game_keeps_its_folder() {
-        let dest = std::env::temp_dir().join(format!("fpkg-keep-{}", Uuid::new_v4()));
+        let dest = crate::test_tmp::temp_path(format!("fpkg-keep-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dest).unwrap();
         let mut unpacking = Unpacking(Some(dest.clone()));
         unpacking.0 = None;
@@ -4887,7 +5102,7 @@ mod title_param_tests {
     /// param.sfo in sce_sys.
     #[tokio::test]
     async fn a_folder_needs_param_json_or_param_sfo() {
-        let dir = std::env::temp_dir().join(format!("fpkg-param-{}", std::process::id()));
+        let dir = crate::test_tmp::temp_path(format!("fpkg-param-{}", std::process::id()));
         let sys = dir.join("sce_sys");
         std::fs::create_dir_all(&sys).unwrap();
         std::fs::write(dir.join("eboot.bin"), b"x").unwrap();
@@ -5043,7 +5258,7 @@ mod source_option_tests {
 
     /// A game folder `<root>/PPSA01234` and a small exFAT image of it beside it.
     fn game(tag: &str) -> (PathBuf, PathBuf, PathBuf) {
-        let root = std::env::temp_dir().join(format!("fpkg-srcopt-{tag}-{}", std::process::id()));
+        let root = crate::test_tmp::temp_path(format!("fpkg-srcopt-{tag}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let dir = root.join("PPSA01234");
         std::fs::create_dir_all(dir.join("sce_sys")).unwrap();
@@ -5326,7 +5541,7 @@ mod source_option_tests {
     /// same archive with the game alone does go.
     #[tokio::test(flavor = "multi_thread")]
     async fn delete_source_keeps_a_source_the_conversion_left_something_of() {
-        let root = std::env::temp_dir().join(format!("fpkg-leftout-{}", std::process::id()));
+        let root = crate::test_tmp::temp_path(format!("fpkg-leftout-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let root = std::fs::canonicalize(&root).unwrap();

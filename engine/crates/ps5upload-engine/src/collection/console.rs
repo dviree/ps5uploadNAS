@@ -11,9 +11,14 @@ use super::{Game, Location};
 /// What the console has for one Game ID.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct ConsoleTitle {
-    /// The console knows the title (it has `/user/app/<id>`).
+    /// The console has the title installed: app.db or `/user/appmeta` records it. An app folder
+    /// alone (left behind by an uninstall) does not count.
     pub installed: bool,
-    /// Its installed version (`APP_VER`), when it could be read.
+    /// Whether it is installed could not be told (the console's record was not read in full):
+    /// nothing here means anything, and the last answer stands.
+    pub installed_unread: bool,
+    /// Its installed version (`CONTENT_VERSION`, else the higher of `VERSION` and `APP_VER`),
+    /// when it could be read.
     pub version: Option<String>,
     /// An update is installed (`/user/patch/<id>`).
     pub patch_installed: bool,
@@ -107,7 +112,7 @@ pub fn state_for(game: &Game, t: &ConsoleTitle) -> GameConsoleState {
         }
         let v = l.pkg.as_ref().map(|p| p.version.as_str()).unwrap_or("");
         match t.version.as_deref() {
-            Some(have) if !v.is_empty() => {
+            Some(have) if !v.is_empty() && !have.trim().is_empty() => {
                 (version_cmp(v, have) == std::cmp::Ordering::Greater).then(|| offer(l, "gp"))
             }
             // Without the console's version, offer it only when no update is installed.

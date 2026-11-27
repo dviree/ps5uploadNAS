@@ -46,6 +46,10 @@ const SIMPLE: Record<string, [key: string, fallback: string]> = {
     "update_err_bad_checksum",
     "The release lists a broken checksum for this file, so nothing was downloaded.",
   ],
+  update_no_checksum: [
+    "update_err_no_checksum",
+    "This release lists no checksum for this file, so nothing was downloaded.",
+  ],
   update_too_large: ["update_err_too_large", "The file is too large to be a PS5Upload release, so it wasn't downloaded."],
   update_interrupted: [
     "update_err_interrupted",
@@ -63,10 +67,6 @@ const SIMPLE: Record<string, [key: string, fallback: string]> = {
   update_cannot_self_install: [
     "update_err_cannot_self_install",
     "This copy can't install updates by itself. Install the download by hand.",
-  ],
-  engine_restart_in_app: [
-    "engine_err_restart_in_app",
-    "On this device the engine runs inside the app. Close the app fully and open it again.",
   ],
   keep_awake_unsupported: ["keep_awake_unsupported", "Not supported on this OS yet."],
   screenshot_unsupported: ["screenshot_err_unsupported", "Screenshot conversion isn't available on this device."],
@@ -137,6 +137,20 @@ function codedText(e: Coded, tr: Tr): string | null {
         say("engine_err_details", { error: str(e.error), log: str(e.log) }, "Last error: {error}. Log: {log}"),
       ].join(" ");
     }
+    // The engine inside a phone app (src-tauri engine_in_app.rs): it did not start, or it runs
+    // and the device refused the app's own connection to it (#950).
+    case "engine_in_app_failed":
+      return say(
+        "engine_err_in_app_failed",
+        { detail: str(e.detail) },
+        "The engine inside the app didn't start: {detail}",
+      );
+    case "engine_in_app_blocked":
+      return say(
+        "engine_err_in_app_blocked",
+        { detail: str(e.detail) },
+        "The engine inside the app is running, but this device blocked the app's connection to it ({detail}). A VPN, ad blocker or content filter can do this: turn it off, then press Try again. Restarting the device can help too.",
+      );
     case "engine_remote_unreachable":
       return say(
         "engine_err_remote",

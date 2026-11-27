@@ -312,6 +312,8 @@ struct CopyPlan {
     dest_dir: PathBuf,
     dest: PathBuf,
     made_dir: bool,
+    /// The names this copy writes, held as its own until the job ends.
+    targets: Targets,
 }
 
 /// The refusals: too many files, sizes that do not add up, no room, a name already taken.
@@ -387,11 +389,24 @@ fn plan_copy(
             format!("{} already exists", taken.display()),
         ));
     }
+    // A name is free only if no copy running now is on its way to it: its file is not there
+    // until the copy ends. Two copies of one file into one folder both passed the look above,
+    // wrote the same `.partial`, and the one that lost deleted the finished file of the other.
+    let wanted = std::iter::once(dest.clone())
+        .chain(siblings.iter().map(|(_, e)| dest_dir.join(&e.name)))
+        .collect();
+    let targets = Targets::claim(wanted).map_err(|taken| {
+        (
+            StatusCode::CONFLICT,
+            format!("{} is already being copied", taken.display()),
+        )
+    })?;
     Ok(CopyPlan {
         total,
         dest_dir,
         dest,
         made_dir,
+        targets,
     })
 }
 
@@ -431,6 +446,7 @@ async fn run_copy(run: RunCopy) {
         dest_dir,
         dest,
         made_dir,
+        targets: _targets,
     } = plan;
     // A RAR set's other volumes land beside the first.
     let sibling_copies: Vec<(String, Entry, PathBuf)> = siblings
@@ -624,6 +640,10 @@ async fn copy_all(job: CopyJob<'_>) -> Result<(u64, u64), String> {
         work.push((remote.clone(), local.clone(), entry));
     }
     for (remote, local, entry) in work {
+        // Checked per file too: a folder of empty files never enters the read loop below.
+        if job.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err("cancelled".into());
+        }
         let file = job
             .pool
             .with_fs(&job.store, &job.id, |fs| {
@@ -788,6 +808,36 @@ fn copying() -> &'static Mutex<std::collections::HashSet<PathBuf>> {
     COPYING.get_or_init(Default::default)
 }
 
+/// The names (files or folders) the copies running now will write.
+fn targets() -> &'static Mutex<std::collections::HashSet<PathBuf>> {
+    static TARGETS: OnceLock<Mutex<std::collections::HashSet<PathBuf>>> = OnceLock::new();
+    TARGETS.get_or_init(Default::default)
+}
+
+/// The names one copy writes, its own until dropped: no other copy takes one of them.
+struct Targets(Vec<PathBuf>);
+
+impl Targets {
+    /// All of `wanted`, or the first of them another running copy already has.
+    fn claim(wanted: Vec<PathBuf>) -> Result<Self, PathBuf> {
+        let mut held = targets().lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(taken) = wanted.iter().find(|p| held.contains(*p)) {
+            return Err(taken.clone());
+        }
+        held.extend(wanted.iter().cloned());
+        Ok(Targets(wanted))
+    }
+}
+
+impl Drop for Targets {
+    fn drop(&mut self) {
+        let mut held = targets().lock().unwrap_or_else(|e| e.into_inner());
+        for p in &self.0 {
+            held.remove(p);
+        }
+    }
+}
+
 /// Marks a folder as being copied into, for as long as it lives.
 struct Copying(PathBuf);
 
@@ -868,6 +918,12 @@ pub fn sweep_stale_copies() {
 /// Where a server folder's metadata files are mirrored for a look at it. The answer points at the
 /// mirror's icon, so a mirror outlives the request; it goes once it is an hour old.
 fn inspect_root() -> PathBuf {
+    if cfg!(test) {
+        // A folder of the test process's own, removed when it exits.
+        return crate::test_scratch(
+            std::env::temp_dir().join(format!("ps5upload-inspect-root-{}", std::process::id())),
+        );
+    }
     std::env::temp_dir().join("ps5upload-inspect")
 }
 
@@ -936,7 +992,10 @@ pub(crate) async fn inspect_folder(r: &Remote, remote: &str) -> Response {
                 .map_err(|e| e.to_string())?
                 .map_err(|e| format!("{e:#}"))?;
         inspected.path = remote.to_string();
-        inspected.total_size = walked.iter().map(|(_, e)| e.size).sum();
+        // Saturating: a server reporting absurd sizes must not panic the engine.
+        inspected.total_size = walked
+            .iter()
+            .fold(0u64, |t, (_, e)| t.saturating_add(e.size));
         inspected.file_count = walked.len() as u64;
         inspected.skipped_paths = Vec::new();
         Ok(json!({ "ok": true, "result": inspected, "wrapped_hint": null }))
@@ -980,7 +1039,7 @@ mod tests {
     /// not put over the first (on a drive that folds case, `README.TXT` after `Readme.txt`).
     #[test]
     fn a_second_file_under_one_name_does_not_replace_the_first() {
-        let dir = std::env::temp_dir().join(format!("ps5upload-twins-{}", Uuid::new_v4()));
+        let dir = crate::test_tmp::temp_path(format!("ps5upload-twins-{}", Uuid::new_v4()));
         std::fs::create_dir_all(&dir).unwrap();
         let local = dir.join("Readme.txt");
         let partial = dir.join("Readme.txt.partial");
@@ -1001,7 +1060,7 @@ mod tests {
     /// goes once nothing is left in it.
     #[test]
     fn the_output_sweep_takes_only_what_no_build_is_using() {
-        let out = std::env::temp_dir().join(format!("ps5upload-source-{}", Uuid::new_v4()));
+        let out = crate::test_tmp::temp_path(format!("ps5upload-source-{}", Uuid::new_v4()));
         let root = out.join(OUTPUT_COPY_DIR);
         let (left, writing, held) = (root.join("left"), root.join("writing"), root.join("held"));
         for d in [&left, &writing, &held] {
@@ -1314,6 +1373,43 @@ mod tests {
         for ok in ["Game.pkg", "ゲーム", "a b (1).rar", "..hidden"] {
             assert!(unsafe_leaf(ok).is_none(), "{ok}");
         }
+    }
+
+    /// Two copies of one file into one folder: the second is refused while the first runs (its
+    /// file is not there yet, so "already exists" could not tell). Both used to write the same
+    /// partial, and the one that lost deleted the finished file of the other.
+    #[tokio::test]
+    async fn a_second_copy_to_a_name_still_being_copied_is_refused() {
+        let dest_dir = crate::remote::store::test_dir();
+        let entry = Entry {
+            name: "a.pkg".into(),
+            is_dir: false,
+            size: 1,
+            mtime: None,
+        };
+        let plan = |d: &FetchDeps| {
+            plan_copy(
+                d,
+                &FetchBody {
+                    path: String::new(),
+                    dest_dir: Some(dest_dir.display().to_string()),
+                },
+                "/dl/a.pkg",
+                &[(String::new(), entry.clone())],
+                &[],
+            )
+        };
+        let (d, _jobs) = deps(plenty);
+        let first = plan(&d)
+            .map_err(|e| e.1)
+            .expect("the first copy is planned");
+        let second = plan(&d).err().expect("the second is refused");
+        assert_eq!(second.0, StatusCode::CONFLICT);
+        assert!(second.1.contains("already being copied"), "{}", second.1);
+        // Once the first has ended the name is free again (nothing was written here).
+        drop(first);
+        assert!(plan(&d).is_ok());
+        let _ = std::fs::remove_dir_all(&dest_dir);
     }
 
     /// A file or a RAR volume whose name starts with a backslash is refused before anything is

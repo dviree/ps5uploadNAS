@@ -24,7 +24,7 @@ impl TempDir {
     fn new(tag: &str) -> Self {
         static N: AtomicU32 = AtomicU32::new(0);
         let n = N.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
+        let dir = crate::test_tmp::temp_path(format!(
             "ps5-dump-forge-pfs-{tag}-{}-{n}",
             std::process::id()
         ));
@@ -667,6 +667,27 @@ fn damaged_images_are_refused() {
     let e = open(cut).err().unwrap().to_string();
     assert!(e.contains("pointer layout"), "{e}");
 
+    // An image that ends at its last data byte, its last block short, reads; one byte less
+    // cuts the data and is refused.
+    let end = (0..u64_at(&img, 0x30) as usize)
+        .map(|n| inode(&img, n))
+        .filter(|i| u32_at(i, 0x64) > 0)
+        .map(|i| u32_at(i, 0x64) as usize * B + u64_at(i, 8) as usize)
+        .max()
+        .unwrap();
+    assert!(
+        end < img.len() && end > img.len() - B,
+        "ends inside the last block"
+    );
+    let mut short = img.clone();
+    short.truncate(end);
+    let mut back = open(short.clone()).unwrap();
+    assert_eq!(back.read("eboot.bin").unwrap().len(), 2 * B + 5);
+    assert_eq!(back.read("a/b/c.bin").unwrap().len(), 40);
+    short.truncate(end - 1);
+    let e = open(short).err().unwrap().to_string();
+    assert!(e.contains("pointer layout"), "{e}");
+
     // eboot.bin is inode 7 (after SR, FPT, uroot, a, a/b, sce_sys, a/b/c.bin): point it
     // far away.
     let mut far = img.clone();
@@ -1089,3 +1110,7 @@ fn real_game_sample_round_trips_at_every_level() {
         );
     }
 }
+
+// Test scratch paths removed when the test process exits (engine/test-support/test_tmp.rs).
+#[path = "../../../test-support/test_tmp.rs"]
+mod test_tmp;

@@ -20,8 +20,10 @@
  *
  * Persistence: active + recently-finished tasks persist to localStorage
  * so the Tasks tab survives reloads. On reload, any task still in a
- * non-terminal state is marked "interrupted" (a flavor of failed) — the
- * underlying engine op didn't actually keep running.
+ * non-terminal state is marked "interrupted" (a flavor of failed). An
+ * engine job can outlive the page (the web UI's tab, a reloaded window):
+ * its owner asks the engine and `reopenTask`s one that is still going or
+ * ended while the page was away (#954: Convert).
  */
 
 import { create } from "zustand";
@@ -447,6 +449,11 @@ interface TaskState {
   /** Look up a task by id. Returns undefined if not found (including
    *  terminal history evicted by MAX_TASK_HISTORY). */
   getTask: (id: string) => Task | undefined;
+
+  /** A task this start-up marked interrupted whose engine job turned out to be still running,
+   *  or to have ended while the page was away (#954): it is running again, so its owner can
+   *  follow the job and finish it as it ends. False (nothing changed) for any other task. */
+  reopenTask: (id: string) => boolean;
 }
 
 export const useTaskStore = create<TaskState>((set, get) => ({
@@ -496,7 +503,14 @@ export const useTaskStore = create<TaskState>((set, get) => ({
       const tasks = [...s.tasks];
       tasks[idx] = updated;
       const trimmed = trimTaskHistory(tasks);
-      persistProgress(trimmed);
+      // What a reopened page needs to find the job again (its engine job, what it is, its
+      // state) is written now; only progress waits for the next batched write (#954).
+      const mustKeep =
+        (patch.engineJobId !== undefined && patch.engineJobId !== existing.engineJobId) ||
+        (patch.status !== undefined && patch.status !== existing.status) ||
+        patch.payload !== undefined;
+      if (mustKeep) persist(trimmed);
+      else persistProgress(trimmed);
       return { tasks: trimmed };
     });
   },
@@ -543,4 +557,19 @@ export const useTaskStore = create<TaskState>((set, get) => ({
   },
 
   getTask: (id) => get().tasks.find((t) => t.id === id),
+
+  reopenTask: (id) => {
+    const existing = get().tasks.find((t) => t.id === id);
+    if (!existing || existing.status !== "interrupted" || !interruptedAtLoad.has(id)) return false;
+    interruptedAtLoad.delete(id);
+    set((s) => {
+      const now = Date.now();
+      const tasks = s.tasks.map((t) =>
+        t.id === id ? { ...t, status: "running" as TaskStatus, endedAtMs: null, updatedAtMs: now } : t,
+      );
+      persist(tasks);
+      return { tasks };
+    });
+    return true;
+  },
 }));

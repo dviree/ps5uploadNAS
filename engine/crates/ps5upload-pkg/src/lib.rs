@@ -107,12 +107,19 @@ pub fn extract_from_ffpkg(
     inner_path: &str,
     dest_dir: &Path,
 ) -> Result<FfpkgExtractResult, Ufs2Error> {
-    let mut img = Ufs2Image::open(ffpkg_path)?;
     let components: Vec<&str> = inner_path
         .trim_matches('/')
         .split('/')
         .filter(|s| !s.is_empty())
         .collect();
+    // The last component names what is written under `dest_dir`, and the image has real "."
+    // and ".." entries: "sce_sys/.." would resolve and then write beside `dest_dir`, not in it.
+    if let Some(bad) = components.iter().find(|c| !is_safe_child_name(c)) {
+        return Err(Ufs2Error::NotFound {
+            component: format!("{bad} (not a name inside the image)"),
+        });
+    }
+    let mut img = Ufs2Image::open(ffpkg_path)?;
     let inode = if components.is_empty() {
         img.read_inode(ufs2::ROOT_INODE)?
     } else {
@@ -134,7 +141,16 @@ pub fn extract_from_ffpkg(
     } else if inode.is_dir() {
         let target = dest_dir.join(leaf_name);
         create_dir_all(&target).map_err(Ufs2Error::Io)?;
-        extract_dir_recursive(&mut img, &inode, &target, &mut result, 0)?;
+        let mut walked = std::collections::HashSet::from([inode.number]);
+        extract_dir_recursive(
+            &mut img,
+            &inode,
+            &target,
+            &mut result,
+            0,
+            &mut walked,
+            &mut ufs2::WalkBudget::default(),
+        )?;
     } else {
         return Err(Ufs2Error::NotFound {
             component: format!("{leaf_name} (not a file or directory)"),
@@ -184,23 +200,25 @@ fn is_safe_child_name(name: &str) -> bool {
     )
 }
 
-fn extract_dir_recursive(
-    img: &mut Ufs2Image<std::fs::File>,
+fn extract_dir_recursive<R: Read + Seek>(
+    img: &mut Ufs2Image<R>,
     dir: &ufs2::Inode,
     dest: &Path,
     result: &mut FfpkgExtractResult,
     depth: u32,
+    walked: &mut std::collections::HashSet<u64>,
+    budget: &mut ufs2::WalkBudget,
 ) -> Result<(), Ufs2Error> {
-    // Bound recursion against a hostile image with a directory cycle or
-    // pathological nesting (the block-pointer walk has cycle detection, but
-    // the directory tree didn't). "." / ".." are already skipped by
-    // is_safe_child_name, so a cycle requires a crafted non-dotdot entry.
+    // Bound recursion against pathological nesting. A directory cycle is refused on its own
+    // (`walked`): an entry naming its own directory or an ancestor is not stopped by the depth
+    // cap alone, as two such entries in one directory double the work at every level. "." / ".."
+    // are already skipped by is_safe_child_name, so a cycle requires a crafted non-dotdot entry.
     if depth > FFPKG_EXTRACT_MAX_DEPTH {
         return Err(Ufs2Error::WalkTooDeep {
             max: FFPKG_EXTRACT_MAX_DEPTH,
         });
     }
-    let entries = img.list_dir(dir)?;
+    let entries = img.list_dir_in_walk(dir, budget)?;
     for e in entries {
         if !is_safe_child_name(&e.name) {
             // Skip but don't fail the whole extract — a hostile
@@ -212,8 +230,23 @@ fn extract_dir_recursive(
         let child_path = dest.join(&e.name);
         let child_inode = img.read_inode(e.inode)?;
         if child_inode.is_dir() {
+            // Every directory is walked once: one reached again is a cycle (or a directory
+            // linked twice), refused before anything more is written.
+            if !walked.insert(child_inode.number) {
+                return Err(Ufs2Error::DirectoryCycle {
+                    inode: child_inode.number,
+                });
+            }
             create_dir_all(&child_path).map_err(Ufs2Error::Io)?;
-            extract_dir_recursive(img, &child_inode, &child_path, result, depth + 1)?;
+            extract_dir_recursive(
+                img,
+                &child_inode,
+                &child_path,
+                result,
+                depth + 1,
+                walked,
+                budget,
+            )?;
         } else if child_inode.is_file() {
             let written = extract_file(img, &child_inode, &child_path)?;
             result.file_count += 1;
@@ -241,10 +274,14 @@ fn extract_file<R: Read + Seek>(
     inode: &ufs2::Inode,
     path: &Path,
 ) -> Result<u64, Ufs2Error> {
+    // No file is larger than the image it is in. The image's real length, not the size its
+    // superblock claims: a few KiB of image that claimed a terabyte, holding one file of holes
+    // that size, was written out as zeros until the disk was full.
     let sb = &img.superblock;
-    let cap = sb
+    let claimed = sb
         .size_fragments
         .saturating_mul(u64::from(sb.fragment_size));
+    let cap = claimed.min(img.image_len().map_err(Ufs2Error::Io)?);
     if inode.size > cap {
         return Err(Ufs2Error::FileTooLarge {
             size: inode.size,
@@ -345,6 +382,9 @@ pub fn inspect_ffpkg(path: &Path) -> Result<FfpkgInspection, Ufs2Error> {
     })
 }
 
+/// The most entries a `param.sfo` is read with (a real one has a few dozen).
+pub const MAX_SFO_ENTRIES: usize = 256;
+
 /// Parse the string keys from a PARAM.SFO blob. Reuses the same
 /// layout the PKG parser already understands (PSF magic at +0,
 /// key/data tables, entries with format codes).
@@ -364,6 +404,11 @@ fn parse_sfo_string_keys(
     let key_table_off = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]) as usize;
     let data_table_off = u32::from_le_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]) as usize;
     let entry_count = u32::from_le_bytes([bytes[16], bytes[17], bytes[18], bytes[19]]) as usize;
+    // A real param.sfo has a few dozen entries. Each entry's value is copied out, and an entry
+    // may claim the whole file as its value: thousands of them made gigabytes of copies.
+    if entry_count > MAX_SFO_ENTRIES {
+        return Err("SFO entry count out of range".into());
+    }
     let mut out = std::collections::HashMap::new();
     let table_off: usize = 20;
     for i in 0..entry_count {
@@ -581,6 +626,11 @@ pub struct PkgMetadata {
     /// Non-fatal warnings raised during parse — surfaced in the UI as
     /// a yellow caution row. Empty for a clean stock PKG.
     pub warnings: Vec<String>,
+    /// The least this package's file (every part of a split set together) has to be for its
+    /// own header to be true: see [`declared_size_from`]. A file shorter than this is still
+    /// being copied, or was cut short. `None` when the header declares nothing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub declared_size: Option<u64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -606,6 +656,72 @@ pub fn parse_pkg(path: &Path) -> Result<PkgMetadata, PkgError> {
     parse_pkg_from(&mut f, size, path)
 }
 
+/// `len` bytes at `at`, when the `size`-byte file holds them all.
+fn bytes_at<R: Read + Seek>(f: &mut R, size: u64, at: u64, len: usize) -> Option<Vec<u8>> {
+    if at.checked_add(len as u64)? > size {
+        return None;
+    }
+    f.seek(SeekFrom::Start(at)).ok()?;
+    let mut buf = vec![0u8; len];
+    f.read_exact(&mut buf).ok()?;
+    Some(buf)
+}
+
+/// The least a package's file has to be for its own header to be true, read from the header
+/// alone. `None` when it is not a `\x7FCNT` / `\x7FFIH` package or its header declares nothing.
+///
+/// - PS4 (`\x7FCNT`): the end of the container's body (`0x20` + `0x28`), the end of its image
+///   (`0x410` + `0x418`) and the package size the header records (`0x430`), whichever is most.
+///   A `\x7FCNT` whose content type is a PS5 one is judged by its body alone: what its
+///   `0x400` block means outside a finalized image is not measured.
+/// - PS5 (`\x7FFIH`): the end of the embedded container (at `0x58`: its header, and its body
+///   when the header can be read), and for a debug image the end of the outer image
+///   (`0x10` + `0x18`). The install information that follows the container records no length
+///   in a header, so a file that lacks only part of that is not seen here.
+///
+/// `size` only says which header bytes can be read. The answer is for the whole package:
+/// compare it with every part of a split set together, which may be more than `size`.
+pub fn declared_size_from<R: Read + Seek>(f: &mut R, size: u64) -> Option<u64> {
+    let be64 = |b: &[u8], o: usize| u64::from_be_bytes(b[o..o + 8].try_into().unwrap());
+    let le64 = |b: &[u8], o: usize| u64::from_le_bytes(b[o..o + 8].try_into().unwrap());
+    let head = bytes_at(f, size, 0, 0xA0)?;
+    let magic = u32::from_be_bytes([head[0], head[1], head[2], head[3]]);
+    let mut need = 0u64;
+    // An end that overflows is a header that says nothing usable, not a longer package.
+    let mut at_least = |end: Option<u64>| need = need.max(end.unwrap_or(0));
+    if magic == PKG_MAGIC {
+        at_least(be64(&head, 0x20).checked_add(be64(&head, 0x28)));
+        let content_type = u32::from_be_bytes([head[0x74], head[0x75], head[0x76], head[0x77]]);
+        if kind::content_type_platform(content_type) != Some("PS5") {
+            if let Some(image) = bytes_at(f, size, 0x400, 0x38) {
+                if u32::from_be_bytes([image[0], image[1], image[2], image[3]]) >= 1 {
+                    at_least(be64(&image, 0x10).checked_add(be64(&image, 0x18)));
+                }
+                at_least(Some(be64(&image, 0x30)));
+            }
+        }
+    } else if magic == PKG_MAGIC_FIH {
+        let cnt_at = le64(&head, 0x58);
+        if cnt_at != 0 {
+            at_least(cnt_at.checked_add(0xA0));
+            if let Some(cnt) = bytes_at(f, size, cnt_at, 0xA0) {
+                if cnt[0..4] == PKG_MAGIC.to_be_bytes() {
+                    at_least(
+                        cnt_at
+                            .checked_add(be64(&cnt, 0x20))
+                            .and_then(|at| at.checked_add(be64(&cnt, 0x28))),
+                    );
+                }
+            }
+        }
+        // 0x00 marks a debug image, whose outer image sits where these two fields say.
+        if head[0x05] == 0 {
+            at_least(le64(&head, 0x10).checked_add(le64(&head, 0x18)));
+        }
+    }
+    (need > 0).then_some(need)
+}
+
 /// [`parse_pkg`] over any seekable bytes of `size` (a package on a server or the console);
 /// `path` is only recorded in the result.
 pub fn parse_pkg_from<R: Read + Seek>(
@@ -625,6 +741,7 @@ pub fn parse_pkg_from<R: Read + Seek>(
         Some(buf)
     })
     .unwrap_or_default();
+    let declared_size = declared_size_from(f, size);
 
     f.seek(SeekFrom::Start(0))?;
     let mut head = [0u8; 0xA0];
@@ -650,6 +767,7 @@ pub fn parse_pkg_from<R: Read + Seek>(
         content_flags: 0,
         icon_png_base64: None,
         warnings: Vec::new(),
+        declared_size,
     };
 
     let (container_base, container_head) = if magic == PKG_MAGIC_FIH {
@@ -766,7 +884,15 @@ pub fn parse_pkg_from<R: Read + Seek>(
             meta.category =
                 kind::category_from_header(meta.content_type, content_flags).to_string();
         }
-        meta.package_type = Some(if is_patch { "PS5DP" } else { "PS5GD" }.to_string());
+        // An add-on is `PS5AC`, as the same bytes read through ranges give it
+        // (`package_type_for_category_and_platform`): `PS5GD` here made the type depend on
+        // where the package was read from.
+        let package_type = match meta.category.as_str() {
+            _ if is_patch => "PS5DP",
+            "ac" => "PS5AC",
+            _ => "PS5GD",
+        };
+        meta.package_type = Some(package_type.to_string());
     } else {
         meta.package_type = derive_package_type(&meta.category);
         meta.platform = derive_platform(magic, &meta.content_id, &meta.title_id);
@@ -1056,7 +1182,7 @@ pub fn sfo_params(buf: &[u8]) -> Result<Vec<(String, SfoValue)>, &'static str> {
     let keys_off = u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]) as usize;
     let data_off = u32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]) as usize;
     let n = u32::from_le_bytes([buf[16], buf[17], buf[18], buf[19]]) as usize;
-    if keys_off > buf.len() || data_off > buf.len() || n > 256 {
+    if keys_off > buf.len() || data_off > buf.len() || n > MAX_SFO_ENTRIES {
         return Err("SFO offsets / count out of range");
     }
     if 0x14 + n * 0x10 > buf.len() {
@@ -1897,6 +2023,40 @@ mod tests {
         assert_eq!(fih(0x20).category, "gd");
     }
 
+    /// The same add-on read as a file on this computer is an add-on by its package type too
+    /// (it said `PS5GD`, a game, while the ranged read above said add-on).
+    #[test]
+    fn a_local_fih_add_on_has_the_add_on_package_type() {
+        let local = |content_type: u32, flags: u32| {
+            let cnt_base = 0x10000usize;
+            let mut cnt = build_pkg_multi(
+                "UP0000-PPSA01234_00-DELUXEUPGRADE000",
+                &[("TITLE", "Deluxe Upgrade")],
+            );
+            cnt[0x74..0x78].copy_from_slice(&content_type.to_be_bytes());
+            cnt[0x78..0x7c].copy_from_slice(&flags.to_be_bytes());
+            let mut pkg = vec![0u8; cnt_base];
+            pkg[0..4].copy_from_slice(&PKG_MAGIC_FIH.to_be_bytes());
+            pkg[0x06..0x08].copy_from_slice(&3u16.to_le_bytes());
+            pkg[0x58..0x60].copy_from_slice(&(cnt_base as u64).to_le_bytes());
+            pkg.extend_from_slice(&cnt);
+            let size = pkg.len() as u64;
+            parse_pkg_from(&mut std::io::Cursor::new(pkg), size, Path::new("a.pkg"))
+                .expect("should parse embedded CNT")
+        };
+        let add_on = local(0x21, 0x0a02_0000);
+        assert_eq!(add_on.category, "ac");
+        assert_eq!(add_on.package_type.as_deref(), Some("PS5AC"));
+        assert_eq!(
+            local(0x20, 0x0a02_0000).package_type.as_deref(),
+            Some("PS5GD")
+        );
+        assert_eq!(
+            local(0x20, 0x0a12_0000).package_type.as_deref(),
+            Some("PS5DP")
+        );
+    }
+
     #[test]
     fn package_type_mapping_is_platform_specific() {
         assert_eq!(
@@ -1936,6 +2096,7 @@ mod tests {
             content_flags: 0,
             icon_png_base64: None,
             warnings: Vec::new(),
+            declared_size: None,
         };
         parse_sfo_into(&sfo, &mut meta).expect("SFO should parse");
         assert_eq!(meta.app_ver, "01.04");
@@ -1961,6 +2122,7 @@ mod tests {
             content_flags: 0,
             icon_png_base64: None,
             warnings: Vec::new(),
+            declared_size: None,
         };
         let mut json = br#"{"contentId":"UP0000-PPSA01234_00-TESTGAME00000000","titleId":"PPSA01234","contentVersion":"01.002.000","localizedParameters":{"defaultLanguage":"en-US","en-US":{"titleName":"Test Game"}}}"#.to_vec();
         json.extend_from_slice(&[0, 0]);
@@ -2086,6 +2248,93 @@ mod tests {
         assert_eq!(b64_encode(b"foob"), "Zm9vYg==");
         assert_eq!(b64_encode(b"fooba"), "Zm9vYmE=");
         assert_eq!(b64_encode(b"foobar"), "Zm9vYmFy");
+    }
+
+    /// A PS4 package header of `total` declared bytes: a body after the header, then an image.
+    fn ps4_declaring(total: u64) -> Vec<u8> {
+        let mut pkg = build_pkg_multi(
+            "UP0000-CUSA01234_00-TESTGAME00000000",
+            &[("CATEGORY", "gd")],
+        );
+        pkg.resize(0x2000, 0);
+        pkg[0x74..0x78].copy_from_slice(&0x1Au32.to_be_bytes());
+        pkg[0x20..0x28].copy_from_slice(&0x1000u64.to_be_bytes());
+        pkg[0x28..0x30].copy_from_slice(&0x1000u64.to_be_bytes());
+        pkg[0x400..0x404].copy_from_slice(&1u32.to_be_bytes());
+        pkg[0x410..0x418].copy_from_slice(&0x2000u64.to_be_bytes());
+        pkg[0x418..0x420].copy_from_slice(&(total - 0x2000).to_be_bytes());
+        pkg[0x430..0x438].copy_from_slice(&total.to_be_bytes());
+        pkg
+    }
+
+    #[test]
+    fn a_ps4_package_says_how_long_it_has_to_be() {
+        let whole = 0x9000u64;
+        let mut pkg = ps4_declaring(whole);
+        let declared =
+            |bytes: &[u8]| declared_size_from(&mut std::io::Cursor::new(bytes), bytes.len() as u64);
+        // Still being copied: the header is there, most of the image is not.
+        assert_eq!(declared(&pkg), Some(whole));
+        let meta = parse_pkg_from(
+            &mut std::io::Cursor::new(&pkg),
+            pkg.len() as u64,
+            Path::new("a.pkg"),
+        )
+        .unwrap();
+        assert_eq!(meta.declared_size, Some(whole));
+        assert!(meta.size < whole);
+        assert_eq!(meta.content_id, "UP0000-CUSA01234_00-TESTGAME00000000");
+        // The whole file says the same, and is that long.
+        pkg.resize(whole as usize, 0);
+        assert_eq!(declared(&pkg), Some(whole));
+
+        // The package size field left empty: the image's end still says it.
+        let mut no_total = ps4_declaring(whole);
+        no_total[0x430..0x438].fill(0);
+        assert_eq!(declared(&no_total), Some(whole));
+        // No image either: the body's end.
+        no_total[0x400..0x420].fill(0);
+        assert_eq!(declared(&no_total), Some(0x2000));
+        // Cut inside the header: only the fields that are there count.
+        assert_eq!(declared(&no_total[..0x200]), Some(0x2000));
+        // Sizes that overflow say nothing, they do not make the package endless.
+        let mut wild = ps4_declaring(whole);
+        wild[0x410..0x418].copy_from_slice(&u64::MAX.to_be_bytes());
+        assert_eq!(declared(&wild), Some(whole));
+        // A header that declares nothing, and a file that is no package.
+        let plain = build_pkg_multi("UP0000-CUSA01234_00-TESTGAME00000000", &[]);
+        assert_eq!(declared(&plain), None);
+        assert_eq!(declared(&[0u8; 0x1000]), None);
+        assert_eq!(declared(&[0x7F, b'C', b'N', b'T']), None);
+    }
+
+    #[test]
+    fn a_ps5_package_says_how_long_it_has_to_be() {
+        let block = 0x10000usize;
+        let mut cnt = build_pkg_multi("UP0000-PPSA01234_00-TESTGAME00000000", &[]);
+        cnt.resize(0x3000, 0);
+        cnt[0x20..0x28].copy_from_slice(&0x2000u64.to_be_bytes());
+        cnt[0x28..0x30].copy_from_slice(&0x1000u64.to_be_bytes());
+        // Header block, three blocks of image, then the container.
+        let cnt_at = 4 * block;
+        let mut pkg = vec![0u8; cnt_at];
+        pkg[0..4].copy_from_slice(&PKG_MAGIC_FIH.to_be_bytes());
+        pkg[0x06..0x08].copy_from_slice(&3u16.to_le_bytes());
+        pkg[0x10..0x18].copy_from_slice(&(block as u64).to_le_bytes());
+        pkg[0x18..0x20].copy_from_slice(&(3 * block as u64).to_le_bytes());
+        pkg[0x58..0x60].copy_from_slice(&(cnt_at as u64).to_le_bytes());
+        pkg.extend_from_slice(&cnt);
+        let whole = (cnt_at + 0x3000) as u64;
+        let declared =
+            |bytes: &[u8]| declared_size_from(&mut std::io::Cursor::new(bytes), bytes.len() as u64);
+        assert_eq!(declared(&pkg), Some(whole));
+        // Cut inside the image: the container can't be read, but its place is known.
+        assert_eq!(declared(&pkg[..2 * block]), Some(cnt_at as u64 + 0xA0));
+        // A retail image (0x80) is judged by its container only.
+        let mut retail = pkg.clone();
+        retail[0x05] = 0x80;
+        retail[0x18..0x20].copy_from_slice(&u64::MAX.to_le_bytes());
+        assert_eq!(declared(&retail), Some(whole));
     }
 
     #[test]
@@ -2231,6 +2480,22 @@ mod tests {
         sfo
     }
 
+    /// A param.sfo that counts more entries than any real one is refused before its values are
+    /// copied out: each entry may claim the whole file, so thousands of them were gigabytes.
+    #[test]
+    fn an_sfo_with_too_many_entries_is_refused() {
+        let entries = MAX_SFO_ENTRIES + 1;
+        let mut sfo = vec![0u8; 20 + entries * 16 + 16];
+        sfo[..4].copy_from_slice(b"\0PSF");
+        let tables = (20 + entries * 16) as u32;
+        sfo[8..12].copy_from_slice(&tables.to_le_bytes());
+        sfo[12..16].copy_from_slice(&tables.to_le_bytes());
+        sfo[16..20].copy_from_slice(&(entries as u32).to_le_bytes());
+        assert!(parse_sfo_string_keys(&sfo).is_err());
+        sfo[16..20].copy_from_slice(&(MAX_SFO_ENTRIES as u32).to_le_bytes());
+        assert!(parse_sfo_string_keys(&sfo).is_ok());
+    }
+
     #[test]
     fn sfo_params_decodes_text_and_integers() {
         let sfo = build_sfo_typed(
@@ -2281,7 +2546,140 @@ mod tests {
         let mut d = std::env::temp_dir();
         d.push(format!("ps5upload-pkg-test-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&d);
-        d
+        crate::test_tmp::remove_at_exit(d)
+    }
+
+    /// A 4 KiB-block image whose root directory (inode 2) lists, besides `.` and `..`, the entries
+    /// `names`, each a directory entry pointing back at inode 2 itself.
+    fn looping_root(names: &[&str]) -> ufs2::Ufs2Image<std::io::Cursor<Vec<u8>>> {
+        const BS: usize = 4096;
+        // Inode table in fragments 1..5 (64 inodes of 256 bytes), the root's entries in 5.
+        let mut image = vec![0u8; 6 * BS];
+        let root = BS + 2 * 256;
+        image[root..root + 2].copy_from_slice(&0x41edu16.to_le_bytes());
+        image[root + 16..root + 24].copy_from_slice(&(BS as u64).to_le_bytes());
+        image[root + 112..root + 120].copy_from_slice(&5u64.to_le_bytes());
+        let mut entries: Vec<&str> = vec![".", ".."];
+        entries.extend(names);
+        let mut at = 5 * BS;
+        for (i, name) in entries.iter().enumerate() {
+            let len = if i + 1 == entries.len() {
+                6 * BS - at
+            } else {
+                (8 + name.len() + 1).next_multiple_of(4)
+            };
+            image[at..at + 4].copy_from_slice(&2u32.to_le_bytes());
+            image[at + 4..at + 6].copy_from_slice(&(len as u16).to_le_bytes());
+            image[at + 6] = 4; // DT_DIR
+            image[at + 7] = name.len() as u8;
+            image[at + 8..at + 8 + name.len()].copy_from_slice(name.as_bytes());
+            at += len;
+        }
+        let sb = ufs2::Superblock {
+            block_size: BS as u32,
+            fragment_size: BS as u32,
+            size_fragments: 6,
+            cg_count: 1,
+            inodes_per_cg: 64,
+            fragments_per_cg: 6,
+            iblkno: 1,
+            volume_name: String::new(),
+        };
+        ufs2::Ufs2Image::from_parts(std::io::Cursor::new(image), sb)
+    }
+
+    /// A file is never larger than the image it is in, whatever the superblock says the image
+    /// is: one of holes "a terabyte long" in a 24 KiB image is refused, not written out.
+    #[test]
+    fn a_file_larger_than_the_image_is_not_extracted() {
+        let mut img = looping_root(&[]);
+        img.superblock.size_fragments = 1 << 28; // "a terabyte" of 4 KiB fragments
+        let holes = ufs2::Inode {
+            number: 9,
+            mode: 0x81a4,
+            size: 1 << 40,
+            direct: [0; 12],
+            indirect: [0; 3],
+            mtime: 0,
+        };
+        let dest = tempdir().join("larger-than-image");
+        let _ = std::fs::remove_dir_all(&dest);
+        std::fs::create_dir_all(&dest).unwrap();
+        let e = extract_file(&mut img, &holes, &dest.join("holes.bin")).unwrap_err();
+        assert!(matches!(e, Ufs2Error::FileTooLarge { .. }), "{e}");
+        assert_eq!(std::fs::read_dir(&dest).unwrap().count(), 0);
+        // One that fits is still written.
+        let small = ufs2::Inode {
+            size: 8192,
+            ..holes
+        };
+        assert_eq!(
+            extract_file(&mut img, &small, &dest.join("ok.bin")).unwrap(),
+            8192
+        );
+        let _ = std::fs::remove_dir_all(&dest);
+    }
+
+    /// A directory that lists itself is refused at once. Two such entries in one directory used
+    /// to double the work at each of the 64 levels the depth cap allowed: an extract that never
+    /// ended, making folders all the while.
+    #[test]
+    fn a_directory_that_contains_itself_is_refused() {
+        for names in [&["loop"][..], &["a", "b"][..]] {
+            let mut img = looping_root(names);
+            let root = img.read_inode(2).unwrap();
+            assert!(root.is_dir());
+            let dest = tempdir().join(format!("cycle-{}", names.len()));
+            let _ = std::fs::remove_dir_all(&dest);
+            std::fs::create_dir_all(&dest).unwrap();
+            let mut result = FfpkgExtractResult {
+                file_count: 0,
+                bytes_written: 0,
+                sample_paths: Vec::new(),
+            };
+            let mut walked = std::collections::HashSet::from([root.number]);
+            let e = extract_dir_recursive(
+                &mut img,
+                &root,
+                &dest,
+                &mut result,
+                0,
+                &mut walked,
+                &mut ufs2::WalkBudget::default(),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(e, Ufs2Error::DirectoryCycle { inode: 2 }),
+                "{names:?}: {e}"
+            );
+            // Nothing was made for the entry that loops.
+            assert_eq!(std::fs::read_dir(&dest).unwrap().count(), 0, "{names:?}");
+            let _ = std::fs::remove_dir_all(&dest);
+        }
+    }
+
+    /// "." and ".." are real entries in the image, so they would resolve: "sce_sys/.." is the
+    /// root, written as `dest/..`, beside the folder that was chosen. Refused before the image
+    /// is even opened.
+    #[test]
+    fn an_extract_path_with_a_dot_component_is_refused() {
+        let nowhere = Path::new("/nonexistent/image.ffpkg");
+        let dest = tempdir().join("dot-component");
+        for inner in [
+            "..",
+            "sce_sys/..",
+            "sce_sys/../..",
+            ".",
+            "a/./b",
+            "a\\..\\b",
+        ] {
+            let e = extract_from_ffpkg(nowhere, inner, &dest).unwrap_err();
+            assert!(matches!(e, Ufs2Error::NotFound { .. }), "{inner}: {e}");
+        }
+        assert!(!dest.exists());
+        // A plain path gets as far as opening the image.
+        let e = extract_from_ffpkg(nowhere, "sce_sys/icon0.png", &dest).unwrap_err();
+        assert!(matches!(e, Ufs2Error::Io(_)), "{e}");
     }
 
     #[test]
@@ -2290,7 +2688,7 @@ mod tests {
             "UP0000-PPSA01234_00-TESTGAME00000000",
             &[("TITLE", "Reader")],
         );
-        let path = std::env::temp_dir().join(format!("pkg-reader-{}.pkg", std::process::id()));
+        let path = crate::test_tmp::temp_path(format!("pkg-reader-{}.pkg", std::process::id()));
         std::fs::write(&path, &bytes).unwrap();
         let by_path = parse_pkg(&path).unwrap();
         let mut cur = std::io::Cursor::new(bytes.clone());
@@ -2324,3 +2722,8 @@ mod tests {
         assert_eq!(known_entry_name(0x040A), None);
     }
 }
+
+// Test scratch paths removed when the test process exits (engine/test-support/test_tmp.rs).
+#[cfg(test)]
+#[path = "../../../test-support/test_tmp.rs"]
+mod test_tmp;

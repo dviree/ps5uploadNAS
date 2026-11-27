@@ -7,6 +7,7 @@
  * buffer is on the heap. */
 #include "webui_api.h"
 
+#include <errno.h>
 #include <pthread.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -20,6 +21,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include "appinfo_version.h"
 #include "archive_extract.h"
 #include "ava1_data.h"
 #include "console_convert.h"
@@ -37,6 +39,8 @@
 #include "path_policy.h"
 #include "proc_identity.h"
 #include "smbd_proto.h"
+#include "sony_api_lock.h"
+#include "sys_registry.h"
 #include "ps5_firmware.h"
 #include "storage_cleanup.h"
 #include "webui_cheats_store.h"
@@ -269,15 +273,53 @@ static void put_str(char *buf, size_t cap, size_t *at, const char *key, const ch
     put_fmt(buf, cap, at, "\"");
 }
 
-/* NODE_STATUS + HW_INFO (model) + HW_TEMPS + PROC_FOCUS. Each call is in-process and bounded by
- * its own handler; one that fails leaves its fields null instead of failing the route. */
+/* The console's time zone in minutes ahead of UTC, for /api/status (#928): the PS5's own browser
+ * reads UTC whatever zone the console is set to, so the page takes the zone from here.
+ *
+ * Two registry reads under sony_api_lock (sceRegMgr is not safe to call concurrently), kept for
+ * TZ_KEEP_S: the page asks for the status every 10 s, and the zone changes with a setting or twice
+ * a year. A read that failed is tried again after TZ_RETRY_S. The lock is only tried, never waited
+ * for: while another Sony call holds it (an install, say) the status keeps the last answer instead
+ * of standing still.
+ *
+ * 1 with *out set; 0 when the console does not say (the page then shows the browser's own time, as
+ * it always did). */
+#define TZ_KEEP_S  300
+#define TZ_RETRY_S 30
+static int console_tz_minutes(long *out) {
+    static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+    static time_t read_at;
+    static int have, read_once;
+    static long kept;
+    time_t now = time(NULL);
+    int ok;
+    pthread_mutex_lock(&mu);
+    if ((!read_once || now < read_at || now - read_at >= (have ? TZ_KEEP_S : TZ_RETRY_S)) &&
+        pthread_mutex_trylock(&sony_api_lock) == 0) {
+        int tz = 0, summer = 0, tz_rc, summer_rc;
+        tz_rc = sys_registry_get_int(SCE_KEY_DATE_TIMEZONE_OFFSET, &tz, NULL);
+        summer_rc = sys_registry_get_int(SCE_KEY_DATE_IS_SUMMER_TIME, &summer, NULL);
+        pthread_mutex_unlock(&sony_api_lock);
+        have = webui_tz_minutes(tz_rc == 0, tz, summer_rc == 0, summer, &kept) == 1;
+        read_at = now;
+        read_once = 1;
+    }
+    ok = have;
+    if (ok) *out = kept;
+    pthread_mutex_unlock(&mu);
+    return ok;
+}
+
+/* NODE_STATUS + HW_INFO (model) + HW_TEMPS + PROC_FOCUS, and the console's time zone. Each call is
+ * in-process and bounded by its own handler; one that fails leaves its fields null instead of
+ * failing the route. */
 static void r_status(const char *b, size_t n, uint8_t *out, int fd) {
     char version[96], firmware[64], model[128], title[16];
     const uint8_t *t;
     size_t ol, tl, at = 0;
-    long soc = 0, cpu = 0, temp = 0;
+    long soc = 0, cpu = 0, temp = 0, tz_min = 0;
     uint32_t app_id = 0;
-    int have_ver = 0, have_model = 0, have_temp = 0, running = 0;
+    int have_ver = 0, have_model = 0, have_temp = 0, running = 0, have_tz;
     (void)b;
     (void)n;
     if (call(AVA1_METHOD_NODE_STATUS, NULL, 0, out, &ol) == AVA1_STATUS_OK) {
@@ -304,6 +346,7 @@ static void r_status(const char *b, size_t n, uint8_t *out, int fd) {
     }
     if (call_text(AVA1_METHOD_PROC_FOCUS, NULL, 0, out, &ol, &t, &tl) == AVA1_STATUS_OK)
         running = webui_focus_running((const char *)t, tl, title, sizeof title, &app_id) == 1;
+    have_tz = console_tz_minutes(&tz_min);
     /* every string is copied out of `out` above: it is the JSON buffer now */
     {
         char *j = (char *)out;
@@ -324,7 +367,8 @@ static void r_status(const char *b, size_t n, uint8_t *out, int fd) {
         } else {
             put_fmt(j, cap, &at, "null");
         }
-        put_fmt(j, cap, &at, "}");
+        if (have_tz) put_fmt(j, cap, &at, ",\"tz_min\":%ld}", tz_min);
+        else put_fmt(j, cap, &at, ",\"tz_min\":null}");
         send_json(fd, 200, j, at);
     }
 }
@@ -539,7 +583,11 @@ static void r_fs_rename(const char *b, size_t n, uint8_t *out, int fd) {
                 size_t cl = ol < sizeof cause ? ol : sizeof cause;
                 size_t bl = 0;
                 if (cl) memcpy(cause, out, cl);
-                (void)rename_once(tmp, from, out, &bl);
+                /* When that fails too (a drive that stopped answering), the file is left under the
+                 * in-between name, which starts with a dot: said in the log, so it can be found. */
+                if (rename_once(tmp, from, out, &bl) != AVA1_STATUS_OK)
+                    fprintf(stderr, "webui: rename of %s failed and it could not be put back: it is now %s\n",
+                            from, tmp);
                 if (st < 0) send_bad(fd, "bad_path");
                 else send_status_error(fd, st, cause, cl);
             }
@@ -919,7 +967,9 @@ static void r_fs_extract_info(const char *b, size_t n, uint8_t *out, int fd) {
  * payload): {"path"}. A job, because the converter has to be started first; its result, read with
  * /api/jobs/status: {"path","format","size","files","data_bytes","title_id","content_id","title",
  * "content_version","master_version","packed","has_eboot","warnings","zstd_runtime"} (the newest
- * zstd runtime on the console, or null: a zstd build is refused without one). */
+ * zstd runtime on the console, or null: a zstd build is refused without one), and for a game in
+ * asset packs "unpacked_bytes" (about its size as plain files) and "unpack_keeps_emulator" (false:
+ * a .pkg with "unpack_packs" has to leave the emulator out). */
 static void r_convert_inspect(const char *b, size_t n, uint8_t *out, int fd) {
     run_path_job(b, n, out, fd, AVA1_JOB_OP_CONSOLE_CONVERT, ",\"action\":\"inspect\"");
 }
@@ -927,8 +977,10 @@ static void r_convert_inspect(const char *b, size_t n, uint8_t *out, int fd) {
 /* Convert a game on the console (CONSOLE_CONVERT "build"): {"path","dest","format": "exfat"|"ffpkg"|
  * "ffpfs"|"ffpfsc"|"pkg"|"folder", optional "zstd": bool, "zstd_level": 1..22 (sent on only with
  * zstd), "verify": "fast"|"full", "inner": "exfat"|"ffpkg"|"ffpfs" and "ffpfsc_level":
- * "fast"|"balanced"|"smallest" (with "ffpfsc"), "pkg_level": "stored"|"fast"|"balanced" (with
- * "pkg")}. The job's result: {"path"}. The helper's operation checks the paths again
+ * "fast"|"balanced"|"smallest" (with "ffpfsc"), "pkg_level": "stored"|"fast"|"balanced",
+ * "unpack_packs": bool and, with it, "leave_out_ampr_emu": bool (with "pkg": a game in asset packs
+ * as plain files, without its AMPR emulator)}. The job's result: {"path"}. The helper's operation
+ * checks the paths again
  * (console_convert.c); this route refuses what the page may never name and what is not
  * well-formed (cc_start_tail). */
 static void r_convert_start(const char *b, size_t n, uint8_t *out, int fd) {
@@ -1321,7 +1373,7 @@ static void r_apps_info(const char *b, size_t n, uint8_t *out, int fd) {
             return;
         }
         k = snprintf(req, sizeof req,
-                     "{\"title_id\":\"%s\",\"keys\":\"CONTENT_VERSION,APP_VER,#_size,#_last_access_time,#_install_time\"}",
+                     "{\"title_id\":\"%s\",\"keys\":\"" APPINFO_VERSION_KEYS ",#_size,#_last_access_time,#_install_time\"}",
                      tid); /* letters and digits only */
         st = call_text(AVA1_METHOD_APP_INFO_QUERY, req, (size_t)k, out, &ol, &t, &tl);
         if (st != AVA1_STATUS_OK || !tl || t[0] != '{') continue;
@@ -1485,22 +1537,26 @@ static void r_apps_launch(const char *b, size_t n, uint8_t *out, int fd) {
     else send_json(fd, 200, "{}", 2);
 }
 
-/* {title_id}: APP_UNREGISTER, the PC app's Uninstall. The helper judges the result itself (#476:
- * unregister_outcome.h): {"sony_uninstall_rc":N,"still_present":false} when the title is gone,
+/* {title_id, registration_only?}: APP_UNREGISTER, the PC app's Uninstall. The helper judges the
+ * result itself (#476: unregister_outcome.h): {"sony_uninstall_rc":N,"still_present":false} when the title is gone,
  * still_present:true when Sony accepted but its folders are still there (a big game takes minutes:
  * the page keeps checking), an error ("uninstall_refused:0x..", "uninstall_unavailable") otherwise.
  * Refused (409 game_running) while that game runs. */
 static void r_apps_uninstall(const char *b, size_t n, uint8_t *out, int fd) {
-    char tid[32], req[64];
+    char tid[32], req[96];
     const uint8_t *t;
     size_t ol, tl;
-    int k, st;
+    int k, st, reg_only = 0;
     if (need_app(fd, b, n, tid, sizeof tid, 1) != 0) return;
     if (game_running(out, tid, 0)) {
         send_error(fd, 409, "game_running", 12);
         return;
     }
-    k = snprintf(req, sizeof req, "{\"title_id\":\"%s\"}", tid);
+    /* "registration_only":true (the page is about to delete the game's folder or image): refused
+     * instead of uninstalled when the console's own installer installed this title id (#884). */
+    if (webui_json_bool(b, n, "registration_only", &reg_only) != 1) reg_only = 0;
+    k = snprintf(req, sizeof req, reg_only ? "{\"title_id\":\"%s\",\"registration_only\":true}" : "{\"title_id\":\"%s\"}",
+                 tid);
     st = call_text(AVA1_METHOD_APP_UNREGISTER, req, (size_t)k, out, &ol, &t, &tl);
     send_text_reply(fd, st, out, ol, t, tl);
 }
@@ -1929,6 +1985,12 @@ static void spawn_lan_apply(void) {
     if (rc != 0) fprintf(stderr, "webui: cannot start the rebind thread (%d); LAN applies at the next start\n", rc);
 }
 
+/* The downloads (GET /dl/<ticket>/<name>, serve_download): with the streamed uploads these are the
+ * transfers the server runs on at most all but one worker (webui_cfg_t.long_for). */
+static int api_long_for(const webui_req_t *r) {
+    return strcmp(r->method, "GET") == 0 && strncmp(r->path, "/dl/", 4) == 0;
+}
+
 /* Starts the :9180 server with the saved LAN setting (main.c at helper start, and turning Minion
  * back on). 0 when it runs (or already ran), -1 when it could not start (logged). */
 int webui_api_server_start(void) {
@@ -1944,6 +2006,7 @@ int webui_api_server_start(void) {
     wc.route = webui_api_route;
     wc.stream_for = webui_api_stream_for;
     wc.stream = webui_api_stream;
+    wc.long_for = api_long_for;
     if (webui_start(&wc) != 0) {
         if (webui_running()) return 0; /* another start won the race */
         fprintf(stderr, "webui: server did not start\n");
@@ -2275,7 +2338,7 @@ static void r_cheats_engine(const char *b, size_t n, uint8_t *out, int fd) {
 }
 
 /* {title_id}: the game's installed version, read like the PC app reads it (APP_INFO_QUERY's
- * CONTENT_VERSION, else APP_VER): {"version":"01.05"} or {"version":null} when appinfo.db does not
+ * CONTENT_VERSION, else the higher of VERSION and APP_VER): {"version":"01.05"} or {"version":null} when appinfo.db does not
  * say (the page then lists every version's cheats). Never an error for an unknown version. */
 static void r_cheats_version(const char *b, size_t n, uint8_t *out, int fd) {
     char title[32], req[96], ver[32], json[64];
@@ -2283,7 +2346,7 @@ static void r_cheats_version(const char *b, size_t n, uint8_t *out, int fd) {
     size_t ol, tl;
     int st, k;
     if (need_title(fd, b, n, title, sizeof title) != 0) return;
-    k = snprintf(req, sizeof req, "{\"title_id\":\"%s\",\"keys\":\"CONTENT_VERSION,APP_VER\"}", title);
+    k = snprintf(req, sizeof req, "{\"title_id\":\"%s\",\"keys\":\"" APPINFO_VERSION_KEYS "\"}", title);
     st = call_text(AVA1_METHOD_APP_INFO_QUERY, req, (size_t)k, out, &ol, &t, &tl);
     if (st == AVA1_STATUS_OK && webui_cheat_appinfo_version((const char *)t, tl, ver, sizeof ver) == 1)
         k = snprintf(json, sizeof json, "{\"version\":\"%s\"}", ver); /* digits and dots only */
@@ -2859,6 +2922,20 @@ static void s_cheats_store(const webui_req_t *r, const uint8_t *pre, size_t pre_
         send_error(fd, 500, why, strlen(why));
         return;
     }
+    /* The game's saved switches count positions across all of its cheat files, so a new or changed
+     * file moves them and the watcher would switch on cheats nobody chose: they are cleared first,
+     * as the app does, and nothing is written when they cannot be. */
+    {
+        char title[10], state[API_PATH];
+        if (webui_cheat_file_title(name, title) && webui_cheat_state_path(WEBUI_CHEATS_ROOT, title, state, sizeof state) == 0 &&
+            unlink(state) != 0 && errno != ENOENT) {
+            pthread_mutex_unlock(&g_cheat_mu);
+            free(buf);
+            drain_then(fd, left);
+            send_error(fd, 500, "state_not_cleared", 17);
+            return;
+        }
+    }
     if (folder_of(target, dir, sizeof dir) == 0) (void)wf_sweep_stale(dir, time(NULL), WF_STALE_PART_S);
     replaced = lstat(target, &old) == 0 && S_ISREG(old.st_mode); /* stores are serialized (g_cheat_mu) */
     rc = wf_receive_file(fd, pre, pre_len, total, target, 1, 0777, WF_IDLE_MS, NULL, buf, CHEAT_STORE_BUF);
@@ -3267,7 +3344,8 @@ static int nudge_old_page(const char *query) {
     return refuse;
 }
 
-/* GET /, GET /api/token, GET /strings/<lang>.json, GET /sw.js, GET /minion.appcache and the retired
+/* GET /, GET /api/token, GET /strings/<lang>.json, GET /sw.js, GET /minion.appcache, the
+ * Home Screen icon and manifest (webui_offline.h), and the retired
  * GET /cache.appcache (410): the server
  * checked Host/Origin but no token (is_api is 0 for all of them). None reaches a helper method, so they stay outside the in-flight RPC
  * gate. The token goes out as JSON with no CORS headers: another site's page cannot read the reply,

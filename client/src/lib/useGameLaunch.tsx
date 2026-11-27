@@ -7,15 +7,13 @@ import { humanizePs5Error } from "./humanizeError";
 import { askToSignIn, isSignInNeeded } from "./signInNeeded";
 import { DOC_ANCHORS, faqLink, installErrorLink } from "./installErrorDoc";
 import { killGame } from "./killGame";
+import { beginLaunch } from "./launchInFlight";
 import {
   handleHomebrewRefusal,
   isHomebrewRefusal,
   type RefusalOutcome,
 } from "./launchRefusal";
-import {
-  LAST_PS5_FAKE_GAME_FIRMWARE,
-  ps5FakeGameUnplayableFirmware,
-} from "./ps5Firmware";
+import { ps5FakeGameNeedsNewKstuff } from "./ps5Firmware";
 import { fetchRunningGames, type RunningGame } from "./runningGames";
 import { useStaleHostGuard } from "./staleHostGuard";
 import { useMakeWay } from "./useMakeWay";
@@ -88,12 +86,14 @@ export function useGameLaunch(
       const kernel =
         useConnectionStore.getState().runtimeByHost[hostOf(launchHost)]
           ?.ps5Kernel;
-      const fw = ps5FakeGameUnplayableFirmware(kernel, titleId);
-      if (!fw) return body;
+      // 11.61 to 13.60: an installed fake PS5 game starts only with the latest kstuff (fake-package
+      // support up to 13.60). The hint names both ways: load it, or mount the package with Kraken Mount.
+      const kfw = ps5FakeGameNeedsNewKstuff(kernel, titleId);
+      if (!kfw) return body;
       return `${body} ${tr(
-        "fakegame.fw.launch_v2",
-        { fw, last: LAST_PS5_FAKE_GAME_FIRMWARE },
-        `On firmware above ${LAST_PS5_FAKE_GAME_FIRMWARE} (this console is on ${fw}) a PS5 game installed from a fake package doesn't start. Mount the package with Kraken Mount instead; support for installed packages on newer firmware is coming. PS4 packages are fine.`,
+        "fakegame.fw.launch_kstuff_v3",
+        { fw: kfw },
+        `If this game was installed from a fake package: on FW ${kfw} it starts only with the latest kstuff (fake-package support up to 13.60) loaded. Load it and press Play again, or play it by mounting the package with Kraken Mount.`,
       )}`;
     },
     [tr],
@@ -104,6 +104,8 @@ export function useGameLaunch(
       const probe = guard.capture();
       if (!probe.host?.trim() || launchingId) return;
       setLaunchingId(t.titleId);
+      // Nothing replaces the helper under a game that is being started (lib/launchInFlight).
+      const launched = beginLaunch(probe.host);
       try {
         const clear = await makeWay(probe.host, t.titleId, t.titleName, nameOf);
         if (probe.isStale() || !clear) return;
@@ -172,7 +174,7 @@ export function useGameLaunch(
       } catch (e) {
         if (probe.isStale()) return;
         if (e instanceof HomebrewRefused) {
-          // Not this game's fault and not the 11.60 fake-package limit: the console is
+          // Not this game's fault and not the fake-package firmware limit: the console is
           // refusing every non-Sony title, so name the cause instead.
           pushNotification(
             "error",
@@ -212,6 +214,7 @@ export function useGameLaunch(
           link: installErrorLink(raw),
         });
       } finally {
+        launched();
         setLaunchingId(null);
       }
     },

@@ -344,7 +344,7 @@ impl ZipEntryReader {
         let dec = self.inflater.as_mut().expect("started above");
         let mut scratch = [0u8; 16 << 10];
         while self.pos < off {
-            let n = ((off - self.pos) as usize).min(scratch.len());
+            let n = crate::step(off - self.pos, scratch.len());
             let got = dec.read(&mut scratch[..n]).map_err(inflate_error)?;
             if got == 0 {
                 return Err(corrupt("zip entry ends before its declared size".into()));
@@ -510,7 +510,7 @@ mod tests {
 
     /// A stored archive of `a` then `b`; returns its path and where `a`'s data starts.
     fn stored_zip(tag: &str, a: &[u8], b: &[u8]) -> (PathBuf, u64) {
-        let p = std::env::temp_dir().join(format!("p5a-zs-{tag}-{}.zip", std::process::id()));
+        let p = crate::test_tmp::temp_path(format!("p5a-zs-{tag}-{}.zip", std::process::id()));
         let mut z = zip::ZipWriter::new(std::fs::File::create(&p).unwrap());
         let o = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Stored);
@@ -529,7 +529,7 @@ mod tests {
     /// preview normalises (`./sub/b.bin`) is sent the way the preview lists it.
     #[test]
     fn entry_names_follow_the_preview_rule() {
-        let p = std::env::temp_dir().join(format!("p5a-zs-names-{}.zip", std::process::id()));
+        let p = crate::test_tmp::temp_path(format!("p5a-zs-names-{}.zip", std::process::id()));
         let o = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Stored);
         let mut z = zip::ZipWriter::new(std::fs::File::create(&p).unwrap());

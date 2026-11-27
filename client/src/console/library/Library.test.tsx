@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { gamesViewOf } from "../games/GamesSection";
 import { SECTIONS } from "../sections";
 import { t } from "../strings";
-import { LibraryView, groupSize, type LibraryViewProps } from "./Library";
+import { DrivePicker, LibraryView, groupSize, type LibraryViewProps } from "./Library";
 import { baseTitleId, compareVersions, filterGroups, formatOf, groupEntries, nameKey, roleOf, titleFromFileName } from "./group";
 import { copyDest, displayName, entriesOf, parseScan, stagePath, STAGE_DIR, type Entry, type LibItem, type LibScan } from "./model";
 
@@ -75,6 +75,7 @@ const item = (over: Partial<LibItem>): LibItem => ({
   fake: false,
   size: 0,
   icon: "",
+  meta: "",
   ...over,
 });
 
@@ -160,6 +161,31 @@ describe("library grouping (#526)", () => {
     expect(compareVersions("13.60", "13.60")).toBe(0);
   });
 
+  it("names an image by what the console read inside it, and says when it could not (#963)", () => {
+    const scan = parseScan(
+      JSON.stringify({
+        complete: true,
+        items: [
+          { kind: "image", path: "PPSA23012.exfat", name: "PPSA23012.exfat", title: "Call of Duty: Modern Warfare II", title_id: "PPSA23012", meta: "read", mtime: 5 },
+          { kind: "image", path: "b/Modern Warfare.exfat", name: "Modern Warfare.exfat", title: "Call of Duty: Modern Warfare II", title_id: "PPSA23012", meta: "read" },
+          { kind: "image", path: "PPSA11111.ffpfsc", name: "PPSA11111.ffpfsc", title: "", title_id: "PPSA11111", meta: "img_compressed" },
+          { kind: "image", path: "PPSA22222.exfat", name: "PPSA22222.exfat", title: "", title_id: "PPSA22222", meta: "img_damaged" },
+          { kind: "image", path: "old/PPSA33333.exfat", name: "PPSA33333.exfat", title: "", title_id: "PPSA33333", meta: "../x" },
+        ],
+      }),
+    ) as LibScan;
+    expect(scan.items.map((i) => i.meta)).toEqual(["read", "read", "img_compressed", "img_damaged", ""]);
+    const g = groupEntries(entriesOf([{ id: "nas", name: "NAS" }], new Map([["nas", scan]])));
+    // two copies of one game under different file names: one card, its real title
+    expect(g.map((x) => [x.title, x.titleUnread, x.parts.length])).toEqual([
+      ["Call of Duty: Modern Warfare II", "", 2],
+      ["PPSA11111", "img_compressed", 1],
+      ["PPSA22222", "img_damaged", 1],
+      // an older helper never said: no "not read" claim, the id all the same
+      ["PPSA33333", "", 1],
+    ]);
+  });
+
   it("finds a game by title, title id or a part's file name", () => {
     expect(filterGroups(groups, "ppsa01650").length).toBe(1);
     expect(filterGroups(groups, "patch-old").length).toBe(1);
@@ -220,6 +246,18 @@ describe("Library section", () => {
     expect(h).toContain(t("cw_lib_role_backport"));
   });
 
+  it("tags a game whose image title was not read, and says why in its detail", () => {
+    const scans = new Map([
+      ["nas", { scanned: 1, complete: true, stopped: null, items: [item({ kind: "image", path: "PPSA11111.ffpfsc", name: "PPSA11111.ffpfsc", title_id: "PPSA11111", meta: "img_compressed" })] }],
+    ]);
+    const sources = [{ id: "nas", name: "NAS" }];
+    const card = html({ sources, scans });
+    expect(card).toContain(">PPSA11111<");
+    expect(card).toContain(t("cw_lib_title_unread"));
+    expect(html({ sources, scans, open: "ps5:PPSA11111" })).toContain(t("cw_lib_unread_compressed").replace("'", "&#x27;"));
+    expect(html()).not.toContain(t("cw_lib_title_unread"));
+  });
+
   it("marks a game installed on this console", () => {
     const h = html({ sources: GAME_SOURCES, scans: GAME_SCANS, installed: new Map([["PPSA01650", { version: null }]]) });
     expect(h).toContain("cw-libcard-installed");
@@ -258,5 +296,13 @@ describe("Library section", () => {
     expect(h).not.toContain(t("cw_lib_register"));
     expect(html({ open: "ps4:CUSA07842", copied: { key: folder.key, path: "/mnt/usb0/homebrew/CUSA07842" } })).toContain(t("cw_lib_register"));
     expect(html({ open: "ps4:CUSA07842", onShowInFiles: vi.fn() })).toContain(t("cw_cleanup_show_in_files"));
+  });
+
+  it("says when the drives for a copy could not be read, instead of reading them forever", () => {
+    const e = entriesOf(base().sources, new Map([["3fa2c1d0", parseScan(SCAN_JSON)]])).find((x) => x.kind === "folder")!;
+    const picker = (drives: LibraryViewProps["drives"]) => renderToStaticMarkup(<DrivePicker e={e} p={base({ drives })} onClose={vi.fn()} />);
+    expect(picker(null)).toContain(t("cw_games_loading"));
+    expect(picker([])).toContain(t("cw_home_err_load_storage"));
+    expect(picker([])).not.toContain(t("cw_games_loading"));
   });
 });

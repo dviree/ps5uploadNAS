@@ -276,6 +276,19 @@ impl Env for Live {
     }
 }
 
+/// The game a sync key is for, when neither console answers with the save itself: the key
+/// alone for a PS5 or PS4 save, `kind:game:user` for a PlayStation 2 emulator's, and for a
+/// Switch emulator's `switch:game` or, for any but ProsperoEden, `switch:emulator:game`.
+/// (That last one showed the emulator's own ID as the game on every such row.)
+fn title_of_key(key: &str) -> &str {
+    let mut parts = key.split(':');
+    match (parts.next(), parts.next(), parts.next()) {
+        (Some(kind), Some(_), Some(game)) if kind == crate::emulator_saves::KIND => game,
+        (_, Some(game), _) => game,
+        _ => key,
+    }
+}
+
 /// The helper's power phase in which nothing runs: going to rest (1) or settling after a wake
 /// (2). An older helper says 0; a phase a newer one adds is not waited on.
 pub fn settling_phase(phase: u8) -> bool {
@@ -312,7 +325,15 @@ pub fn items_of(saves: &[SaveEntry], user: u32) -> BTreeMap<String, SaveEntry> {
     for e in sorted {
         let key = if crate::emulator_saves::is_emulator_save(e) {
             if e.kind == crate::emulator_saves::KIND {
-                format!("{}:{}", e.kind, e.title_id)
+                // Two Switch emulators keep saves of the same game apart: ProsperoEden's keep the
+                // key they always had (so existing sync records still match), the others carry
+                // their app, so one emulator's save is never copied over another's.
+                match crate::emulator_saves::place_of(&e.path) {
+                    Some((emu, _)) if emu.app != crate::emulator_saves::APP => {
+                        format!("{}:{}:{}", e.kind, emu.app, e.title_id)
+                    }
+                    _ => format!("{}:{}", e.kind, e.title_id),
+                }
             } else {
                 format!("{}:{}:{}", e.kind, e.title_id, e.user_id)
             }
@@ -471,7 +492,7 @@ pub fn check(
         let kept = state.items.get(&ik).cloned().unwrap_or_default();
         let title_id = any
             .map(|e| e.title_id.clone())
-            .unwrap_or_else(|| key.split(':').nth(1).unwrap_or(&key).to_string());
+            .unwrap_or_else(|| title_of_key(&key).to_string());
         let mut row = SyncRow {
             key: key.clone(),
             title_id: title_id.to_ascii_uppercase(),
@@ -1284,6 +1305,19 @@ mod tests {
     use super::*;
     use std::cell::RefCell;
 
+    /// A row with no console answering names its game from the key, whatever shape the key
+    /// has. Another Switch emulator's key carries the emulator before the game.
+    #[test]
+    fn a_row_shown_offline_names_the_game_not_the_emulator() {
+        assert_eq!(title_of_key("PPSA01234"), "PPSA01234");
+        assert_eq!(title_of_key("ps2:SLUS20312:1"), "SLUS20312");
+        assert_eq!(title_of_key("switch:0100000000010000"), "0100000000010000");
+        assert_eq!(
+            title_of_key("switch:PPSA98515:0100000000010000"),
+            "0100000000010000"
+        );
+    }
+
     fn save(title: &str, user: u32, kind: &str, size: i64) -> SaveEntry {
         SaveEntry {
             title_id: title.into(),
@@ -1621,6 +1655,33 @@ mod tests {
             ["PPSA01234", "switch:0100000000010000"]
         );
         assert_eq!(items["PPSA01234"].kind, "ps5");
+    }
+
+    #[test]
+    fn two_switch_emulators_with_the_same_game_sync_apart() {
+        let mut eden = save("0100000000010000", 0x0123456, "switch", 5);
+        eden.path = format!(
+            "{}/0123456789abcdef0123456789abcdef/0100000000010000",
+            crate::emulator_saves::ROOT
+        );
+        let mut egl = save("0100000000010000", 0x1012_3456, "switch", 5);
+        egl.path = format!(
+            "{}/0123456789abcdef0123456789abcdef/0100000000010000",
+            crate::emulator_saves::EGLANTINE_ROOT
+        );
+        let both = items_of(&[eden.clone(), egl.clone()], 1);
+        assert_eq!(
+            both.keys().cloned().collect::<Vec<_>>(),
+            [
+                "switch:0100000000010000",
+                "switch:PPSA98515:0100000000010000"
+            ]
+        );
+        assert_eq!(both["switch:0100000000010000"].path, eden.path);
+        // One emulator on each console: never paired with each other.
+        let a = items_of(&[eden], 1);
+        let b = items_of(&[egl], 1);
+        assert!(a.keys().all(|k| !b.contains_key(k)));
     }
 
     #[test]

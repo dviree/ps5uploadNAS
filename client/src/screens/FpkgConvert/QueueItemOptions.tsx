@@ -6,10 +6,11 @@ import { Button } from "../../components";
 import { SegmentedControl } from "../../components/SegmentedControl";
 import { Toggle } from "../../components/Toggle";
 import { parentDir } from "../../lib/outputPlace";
-import { PLAYGO_LANGUAGES } from "../../lib/playgoLanguages";
+import { ALL_PLAYGO_LANGUAGES, PLAYGO_LANGUAGES } from "../../lib/playgoLanguages";
 import { useConvertPrefs } from "../../state/convertPrefs";
 import {
   DEFAULT_ZSTD_LEVEL,
+  archiveSurelyUnpacked,
   packsOf,
   thenFor,
   withPacks,
@@ -24,7 +25,8 @@ import { useTr } from "../../state/lang";
 import { CompressionTiles } from "./CompressionTiles";
 import { imageDestFor } from "../../lib/imageDest";
 import { ImageDestination } from "./ImageDestination";
-import { FullVerifyOption, ImageChoice } from "./ImageOptions";
+import { FullVerifyOption, ImageChoice, PackagePacks, type UnpackChoice } from "./ImageOptions";
+import { FreeArchiveOption } from "./SourceOptions";
 
 type Kind = ConvertBuild["kind"];
 
@@ -40,7 +42,9 @@ export function kindsFor(source: string, isDir?: boolean): Kind[] {
 }
 
 /** The change for choosing `kind`: an image keeps its own format choice when it was one, and an
- *  image or folder keeps the asset packs it had (#905: they are no longer lost on the way). */
+ *  image or folder keeps the asset packs it had (#905: they are no longer lost on the way).
+ *  Writing a packed game's files out plain goes along into any kind (#933); leaving its AMPR
+ *  emulator out is a package's choice only, so it stays behind. */
 export function changeForKind(item: ConvertItem, kind: Kind, canInstall: boolean, host: string | null): ConvertItemChange {
   const base: ConvertBuild =
     kind === "image"
@@ -49,8 +53,9 @@ export function changeForKind(item: ConvertItem, kind: Kind, canInstall: boolean
         : { kind: "image", format: "exfat", compress: false }
       : { kind };
   const packs = packsOf(item.build);
+  const plain: ConvertBuild = item.build?.unpackPacks && !base.unpackPacks ? { ...base, unpackPacks: true } : base;
   // The kind it already is (its segment picked again) keeps the build whole, packs included.
-  const build = item.build && kind === item.build.kind ? item.build : packs.kind === "none" ? base : withPacks(base, packs);
+  const build = item.build && kind === item.build.kind ? item.build : packs.kind === "none" ? plain : withPacks(base, packs);
   const then = thenFor(kind, item.then, canInstall);
   return { build, then, host: then !== "keep" ? (item.host ?? host) : null };
 }
@@ -121,6 +126,35 @@ function PacksChoice({ build, onChange }: { build: ConvertBuild; onChange: (chan
       )}
     </div>
   );
+}
+
+/** A waiting package's asset-pack choices, as ③ has them: for a game known to be in packs
+ *  (checked under ① when it was added, or queued with its packs unpacked before the queue
+ *  remembered that). None for any other game. */
+export function pkgUnpackChoice(
+  item: ConvertItem,
+  onChange: (change: ConvertItemChange) => void,
+): UnpackChoice | undefined {
+  const build = item.build?.kind === "pkg" ? item.build : undefined;
+  const packed = item.packs === "lz4" || item.packs === "zstd";
+  if (!packed && !build?.unpackPacks) return undefined;
+  const set = (unpackPacks: boolean, leaveOutAmprEmu: boolean) =>
+    onChange({
+      build: {
+        kind: "pkg",
+        // Said either way: unticked by hand, the packs stay (the runner only looks at a game
+        // nobody has decided for).
+        unpackPacks,
+        // Leaving the emulator out goes with unpacking.
+        ...(unpackPacks && leaveOutAmprEmu ? { leaveOutAmprEmu: true } : {}),
+      },
+    });
+  return {
+    kind: item.packs === "lz4" ? "lz4" : "zstd",
+    on: !!build?.unpackPacks,
+    onToggle: (on) => set(on, !!build?.leaveOutAmprEmu),
+    leaveOutEmulator: { on: !!build?.leaveOutAmprEmu, onToggle: (on) => set(true, on) },
+  };
 }
 
 /** The change for "Save next to its source" on one game: back to the Output folder when off. A
@@ -217,6 +251,11 @@ export function QueueItemOptions({
 
       {kind === "pkg" && (
         <>
+          <PackagePacks
+            compact
+            unpack={pkgUnpackChoice(item, onChange)}
+            state={item.packs === "none" ? "none" : "unchecked"}
+          />
           <div className="flex flex-col gap-1">
             <span className="text-xs text-[var(--color-muted)]">{tr("fpkg.compression", undefined, "Compression")}</span>
             <CompressionTiles value={item.compression} onChange={(compression) => onChange({ compression })} estimates={null} />
@@ -231,7 +270,8 @@ export function QueueItemOptions({
               value={item.language ?? ""}
               onChange={(e) => onChange({ language: e.target.value || undefined })}
             >
-              <option value="">{tr("fpkg.languageAll", undefined, "As the game ships (all languages)")}</option>
+              <option value="">{tr("fpkg.languageOwn", undefined, "The game's own languages")}</option>
+              <option value={ALL_PLAYGO_LANGUAGES}>{tr("fpkg.languageEvery", undefined, "Every language")}</option>
               {PLAYGO_LANGUAGES.map(([code, name]) => (
                 <option key={code} value={code}>
                   {name}
@@ -240,6 +280,19 @@ export function QueueItemOptions({
             </select>
           </div>
         </>
+      )}
+
+      {/* An archive this build is sure to unpack: its space can be freed on the way, which
+          deletes it. Asked for and confirmed here for this one game; never saved with the queue. */}
+      {archiveSurelyUnpacked(item.source, kind) && (
+        <FreeArchiveOption
+          source={item.source}
+          outputDir={item.outputDir?.trim() || undefined}
+          password={item.password}
+          kind={kind}
+          checked={!!item.freeArchive}
+          onChange={(on) => onChange({ freeArchive: on || undefined })}
+        />
       )}
 
       <div className="flex flex-col gap-1">

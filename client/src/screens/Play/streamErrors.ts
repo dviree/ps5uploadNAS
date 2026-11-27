@@ -29,6 +29,22 @@ export function streamErrorMessage(tr: Tr, e: StreamError): string {
         "Another device is using Remote Play on this PS5, or the PS5 is still finishing a session. Close Remote Play on that device, then press Start.",
       );
     case "console_ended":
+      // A Play Together friend put this stream's PS5 user on their controller (shown when the
+      // stream did not start again by itself).
+      if (e.guestPicked)
+        return tr(
+          "rp_err_guest_took_user",
+          { n: e.guestPicked },
+          `Player ${e.guestPicked} picked your PS5 user on the TV, so the PS5 ended your stream. Press Start to play again.`,
+        );
+      // Sony's words for a session taken over (#769): a controller at the PS5, another device,
+      // or the console turned off. Said plainly instead of as a server error.
+      if (/^\s*server shutting down\s*$/i.test(e.detail ?? ""))
+        return tr(
+          "rp_err_console_took_over",
+          undefined,
+          "The PS5 ended the stream because something else took it over: a controller at the console was used, another device started Remote Play, or the PS5 was turned off. Press Start to play here again.",
+        );
       return tr("rp_err_console_ended", { reason: e.detail }, `The PS5 ended the stream: ${e.detail}`);
     case "no_session":
       return tr("rp_err_no_session", undefined, "The stream ended while this page was away. Press Start to play again.");

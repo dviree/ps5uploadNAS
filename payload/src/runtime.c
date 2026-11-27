@@ -104,6 +104,7 @@
 #include "tailnet_node.h"
 #include "save_owner.h"
 #include "trophy_fix.h"
+#include "title_restore.h"
 #include "game_fps.h"
 #include "ava1_server.h"
 #include "ava1_data.h"
@@ -396,6 +397,9 @@
 /* trophy files that still name an old account id (trophy_fix.c, #853) */
 #define MGMT_FRAME_TROPHY_FIX 374u
 #define MGMT_FRAME_TROPHY_FIX_ACK 375u
+/* an installed package game back on the home screen after Rebuild Database (title_restore.c, #961) */
+#define MGMT_FRAME_TITLE_RESTORE 376u
+#define MGMT_FRAME_TITLE_RESTORE_ACK 377u
 #define MGMT_FRAME_SDK_SCAN 214u
 #define MGMT_FRAME_SDK_SCAN_ACK 215u
 #define MGMT_FRAME_SDK_PATCH 216u
@@ -621,6 +625,21 @@ static void extract_json_string_field(const char *json, const char *field,
     if (json_copy_unescaped_string(start, end, out, out_len) != 0) out[0] = '\0';
 }
 
+/* 1 when the body has `"field":"..."` with a value that is not empty. extract_json_string_field
+ * leaves "" for a value that does not fit its buffer, the same as for a field that is not there:
+ * a caller for whom "not there" means "choose for me" asks this to tell the two apart. */
+static int json_string_field_given(const char *json, const char *field) {
+    char needle[64];
+    const char *pos;
+    if (!json || !field) return 0;
+    snprintf(needle, sizeof(needle), "\"%s\":", field);
+    pos = strstr(json, needle);
+    if (!pos) return 0;
+    pos += strlen(needle);
+    while (*pos == ' ' || *pos == '\t' || *pos == '\n' || *pos == '\r') pos++;
+    return pos[0] == '"' && pos[1] != '"' && pos[1] != '\0';
+}
+
 static uint64_t extract_json_uint64_field(const char *json, const char *field) {
     char needle[64];
     const char *pos = NULL;
@@ -804,77 +823,11 @@ int mntinfo_snapshot(struct statfs **out) {
     return n;
 }
 
-/* Encode a mount_point to a filesystem-safe tracker filename (no
- * extension). Two formats coexist for backward compatibility:
- *
- *   - Legacy /mnt/ps5upload/<name> mounts use the leaf <name> as the
- *     key (matches files written by every payload up through 2.2.24).
- *   - User-chosen mount paths (anywhere `is_path_allowed` accepts —
- *     /mnt/ext1/games/foo, /data/mounts/bar, etc.) hex-escape every
- *     non-alphanumeric byte. So `/mnt/ext1/games/foo` becomes
- *     `mnt_2fext1_2fgames_2ffoo` (the `_2f` triplet is the hex of
- *     '/'; `_5f` would be the hex of a literal underscore).
- *
- * Why hex-escape rather than a flat `/` → `_` substitution: paths
- * `/mnt/ext1/foo_bar` and `/mnt/ext1/foo/bar` would both encode to
- * `mnt_ext1_foo_bar` under a flat substitution — silently
- * colliding. With per-byte hex escaping every distinct mount_point
- * has a distinct key, no matter how many underscores its segments
- * contain. The triplet form (`_HH`) is one byte longer per escaped
- * char but stays well within the 256-byte key buffer for any
- * realistic PS5 path.
- *
- * The legacy format is stable across upgrades — existing PS5s with
- * trackers from earlier versions keep showing source-image strings
- * in the Volumes tab without re-mount. */
+/* A mount point's tracker file name (no extension): include/image_mount.h, where the host
+ * self-test covers it. A /mnt/ps5upload/<name> mount keeps its leaf, any other mount point is
+ * hex-escaped, and one too long for a file name ends in a hash. */
 static void mount_tracker_key(const char *mount_point, char *out, size_t out_cap) {
-    if (!out || out_cap == 0) return;
-    out[0] = '\0';
-    if (!mount_point) return;
-    const size_t base_len = strlen(FS_MOUNT_BASE);
-    /* Legacy: /mnt/ps5upload/<name> with non-empty leaf. Use the leaf
-     * as the key so trackers written by 2.2.24 and earlier still
-     * resolve. The leaf is constrained by handle_fs_mount to contain
-     * no slashes / dots, so it's safe to use verbatim. Defensive
-     * extra check: if the "leaf" actually contains a slash (a path
-     * like /mnt/ps5upload/foo/bar can reach this code via a future
-     * caller that bypasses handle_fs_mount's name validation), fall
-     * through to the hex-escape branch so the tracker key stays
-     * collision-free instead of silently producing `foo/bar.src` —
-     * a path-traversal-shaped filename whose stat()/open() then
-     * fails on a non-existent intermediate directory. */
-    if (strncmp(mount_point, FS_MOUNT_BASE "/", base_len + 1) == 0 &&
-        mount_point[base_len + 1] != '\0' &&
-        strchr(mount_point + base_len + 1, '/') == NULL) {
-        snprintf(out, out_cap, "%s", mount_point + base_len + 1);
-        return;
-    }
-    /* New: hex-escape every non-alphanumeric byte, skipping a single
-     * leading slash. Each escaped byte takes 3 chars (`_` + 2 hex
-     * digits), so we need 3 bytes of headroom per escaped char plus
-     * 1 for the NUL. Stop early if the buffer would overflow rather
-     * than truncate mid-escape (a partial `_5` would be ambiguous). */
-    static const char HEX[] = "0123456789abcdef";
-    size_t i = (mount_point[0] == '/') ? 1u : 0u;
-    size_t j = 0;
-    while (mount_point[i] != '\0') {
-        unsigned char c = (unsigned char)mount_point[i++];
-        const int needs_escape =
-            !((c >= 'a' && c <= 'z') ||
-              (c >= 'A' && c <= 'Z') ||
-              (c >= '0' && c <= '9') ||
-              c == '-' || c == '.');
-        if (needs_escape) {
-            if (j + 4 > out_cap) break; /* room for "_HH\0" */
-            out[j++] = '_';
-            out[j++] = HEX[(c >> 4) & 0xF];
-            out[j++] = HEX[c & 0xF];
-        } else {
-            if (j + 2 > out_cap) break; /* room for "X\0" */
-            out[j++] = (char)c;
-        }
-    }
-    out[j] = '\0';
+    image_mount_tracker_key(mount_point, out, out_cap);
 }
 
 /* Read the .src tracker written at mount time. Returns 1 on success
@@ -957,8 +910,10 @@ static void mount_tracker_write(const char *mount_point, const char *src_path) {
      * a stable per-thread integer suffix. The suffix only needs to
      * disambiguate concurrent writers — collisions across distinct
      * (process, thread) pairs are vanishingly unlikely on PS5. */
-    n = snprintf(tracker_tmp, sizeof(tracker_tmp), "%s.tmp.%d.%lx",
-                 tracker, (int)getpid(),
+    /* Not "<tracker>.tmp...": added to a long key that made a name over 255 bytes, which cannot be
+     * created, and the mount was left with no tracker. */
+    n = snprintf(tracker_tmp, sizeof(tracker_tmp), "%s/.tracker-tmp.%d.%lx",
+                 PS5UPLOAD2_MOUNTS_DIR, (int)getpid(),
                  (unsigned long)(uintptr_t)pthread_self());
     if (n < 0 || (size_t)n >= sizeof(tracker_tmp)) return;
     int fd = open(tracker_tmp, O_WRONLY | O_CREAT | O_TRUNC, 0644);
@@ -2101,11 +2056,11 @@ static int handle_fs_list_volumes(runtime_state_t *state) {
             avail > safety_reserve ? avail - safety_reserve : 0;
         /* Reserve model: total is the FULL partition (f_blocks×f_bsize) and
          * the UFS root reserve (bfree-bavail) is left to fall into `used`
-         * (used = total - avail). This matches the PS5 Settings → Storage
-         * screen, which was confirmed against a live console to count the
-         * reserve as used rather than shaving it off the headline total.
+         * (used = total - avail). These are the filesystem's counters, not
+         * the PS5 Settings → Storage figures, which can show a smaller drive
+         * and much less free space (#944).
          * (An earlier build published total = raw - reserve here, which on a
-         * 2 TB Pro understated the /data total by ~292 GB / 15% vs Settings.)
+         * 2 TB Pro understated the /data total by ~292 GB / 15%.)
          * bfs/exfat report bavail≈bfree so their reserve is ~0 and this is a
          * no-op for USB/M.2 drives. */
         int writable   = (mnts[i].f_flags & MNT_RDONLY) ? 0 : 1;
@@ -3221,6 +3176,16 @@ static int fs_mount_request(runtime_state_t *state, const char *request_body,
          * instead of a JSON true/false keeps extract_json_uint64_field
          * happy and avoids adding a bool parser. */
         read_only = (extract_json_uint64_field(request_body, "read_only") != 0) ? 1 : 0;
+        /* A mount point or name too long for its buffer reads as "" (extract_json_string_field),
+         * and "" means "none given": the image was then mounted at /mnt/ps5upload/<a name made
+         * from the image's> instead of where the caller asked, and answered as a success.
+         * Refused instead, before anything is attached. */
+        if (mount_point[0] == '\0' && json_string_field_given(request_body, "mount_point")) {
+            return mgmt_reply(MGMT_FRAME_ERROR, "fs_mount_bad_mount_point", 24);
+        }
+        if (mount_name[0] == '\0' && json_string_field_given(request_body, "mount_name")) {
+            return mgmt_reply(MGMT_FRAME_ERROR, "fs_mount_name_too_long", 22);
+        }
     }
     if (!is_path_allowed(image_path)) {
         return mgmt_reply(MGMT_FRAME_ERROR, "fs_mount_path_not_allowed", 25);
@@ -3328,8 +3293,10 @@ static int fs_mount_request(runtime_state_t *state, const char *request_body,
         if (!is_path_allowed(mount_point) || path_tree_op_refused(mount_point)) {
             return mgmt_reply(MGMT_FRAME_ERROR, "fs_mount_path_not_allowed", 25);
         }
-        size_t mp_len = strlen(mount_point);
-        if (mp_len > 1 && mount_point[mp_len - 1] == '/') {
+        /* Written as the kernel will name it (one slash between components, no "."), before it
+         * is compared with the mount table, tracked or answered: image_mount.h. A trailing slash
+         * and ".." are refused there, as the trailing slash was here. */
+        if (image_mount_point_normalise(mount_point) != 0) {
             return mgmt_reply(MGMT_FRAME_ERROR, "fs_mount_bad_mount_point", 24);
         }
         if (strcmp(mount_point, FS_MOUNT_BASE) == 0) {
@@ -3405,9 +3372,14 @@ static int fs_mount_request(runtime_state_t *state, const char *request_body,
              * (or a log trawl) can tell whether LVD refused a policy
              * check or MD refused a sector-size, etc. */
             char errbuf[256];
+            /* strerror answers from one buffer of its own: two calls in one snprintf printed the
+             * same text twice (md's, or lvd's), so the reason LVD refused was lost. Copied out
+             * first. */
+            char lvd_why[96];
+            snprintf(lvd_why, sizeof(lvd_why), "%s", strerror(lvd_errno));
             int el = snprintf(errbuf, sizeof(errbuf),
-                              "fs_mount_attach_failed: lvd=%s md=%s",
-                              strerror(lvd_errno), strerror(md_errno));
+                              "fs_mount_attach_failed: lvd=%s (%d) md=%s (%d)",
+                              lvd_why, lvd_errno, strerror(md_errno), md_errno);
             if (el < 0) el = 0;
             if ((size_t)el >= sizeof(errbuf)) el = (int)sizeof(errbuf) - 1;
             return mgmt_reply(MGMT_FRAME_ERROR, errbuf, (uint64_t)el);
@@ -5499,23 +5471,26 @@ static int handle_backup_restore(runtime_state_t *state, const char *body) {
     char tag[64] = {0};
     extract_json_string_field(body, "tag", tag, sizeof(tag));
     int64_t ts = (int64_t)extract_json_uint64_field(body, "timestamp");
-    int restored = 0;
-    const char *err = "";
-    int rc = -1;
-    if (tag[0] && ts > 0) {
-        rc = backup_restore(tag, ts, &restored);
-        if (rc == BACKUP_CANCELLED)
-            return mgmt_reply(MGMT_FRAME_ERROR, "backup_cancelled", 16);
-        if (rc != 0) err = "snapshot not found or restore failed";
-    } else {
-        err = "missing tag or timestamp";
-    }
+    backup_restore_counts_t counts = { 0, 0, 0 };
     char tesc[160];
     json_escape_into(tag, tesc, sizeof(tesc));
     char resp[512];
-    int len = snprintf(resp, sizeof(resp),
-        "{\"ok\":%s,\"tag\":\"%s\",\"restored\":%d,\"err\":\"%s\"}",
-        rc == 0 ? "true" : "false", tesc, restored, err);
+    int len;
+    if (tag[0] && ts > 0) {
+        int rc = backup_restore_ex(tag, ts, &counts);
+        if (rc == BACKUP_CANCELLED)
+            return mgmt_reply(MGMT_FRAME_ERROR, "backup_cancelled", 16);
+        /* ok only when something was restored: a restore that wrote nothing back (every entry
+         * skipped or failed, or none listed) used to say ok:true with restored:0. */
+        len = backup_restore_reply(resp, sizeof(resp), tesc, rc, &counts);
+    } else {
+        len = snprintf(resp, sizeof(resp),
+            "{\"ok\":false,\"tag\":\"%s\",\"restored\":0,\"err\":\"missing tag or timestamp\"}", tesc);
+    }
+    if (len < 0 || (size_t)len >= sizeof(resp)) {
+        len = snprintf(resp, sizeof(resp), "{\"ok\":false,\"restored\":%d,\"err\":\"reply too long\"}",
+                       counts.restored);
+    }
     pthread_mutex_lock(&state->state_mtx);
     state->command_count += 1;
     pthread_mutex_unlock(&state->state_mtx);
@@ -5805,7 +5780,10 @@ static int handle_cheats_toggle(runtime_state_t *state, const char *body) {
                            err, sizeof(err));
     cheat_inc_cmd_count(state);
 
-    char resp[512];
+    /* Holds the longest reason whole: 255 bytes that are all quotes or backslashes double when
+     * escaped. At 512 such a reply did not fit, and the length snprintf returned (what it would
+     * have written) had mgmt_reply send up to 23 bytes from past the end of this buffer. */
+    char resp[2 * 256 + 2 + 64];
     int len;
     if (rc == 0) {
         char tid_esc[CHEATS_TITLE_ID_LEN * 6 + 1];
@@ -5822,7 +5800,11 @@ static int handle_cheats_toggle(runtime_state_t *state, const char *body) {
         len = snprintf(resp, sizeof(resp),
                        "{\"ok\":false,\"err\":\"%s\"}", err_esc);
     }
-    return mgmt_reply(MGMT_FRAME_CHEATS_TOGGLE_ACK, resp, (uint64_t)(len > 0 ? len : 0));
+    if (len < 0 || (size_t)len >= sizeof(resp)) {
+        const char *e = "{\"ok\":false,\"err\":\"reply too long\"}";
+        return mgmt_reply(MGMT_FRAME_CHEATS_TOGGLE_ACK, e, strlen(e));
+    }
+    return mgmt_reply(MGMT_FRAME_CHEATS_TOGGLE_ACK, resp, (uint64_t)len);
 }
 
 static int handle_cheats_delete(runtime_state_t *state, const char *body) {
@@ -7938,9 +7920,7 @@ static int save_do_unmount(int *written_back, char *kept, size_t kept_sz) {
         } else if (image_moved) {
             fprintf(stderr, "[payload2] save: %s changed since it was opened; edits not written back\n",
                     g_save_image);
-            if (kept_sz && snprintf(kept, kept_sz, "%s.unsaved", g_save_copy) < (int)kept_sz &&
-                rename(g_save_copy, kept) != 0)
-                snprintf(kept, kept_sz, "%s", g_save_copy);
+            (void)keep_aside(g_save_copy, kept, kept_sz);
             if (g_save_copy_key[0]) unlink(g_save_copy_key);
             sync();
             save_clear_state();
@@ -7953,10 +7933,9 @@ static int save_do_unmount(int *written_back, char *kept, size_t kept_sz) {
                     g_save_copy, g_save_image, strerror(errno));
             if (++g_save_wb_failures < 2) return -2;
             /* Twice: give up on writing back, keep the edits under a name the next open never
-             * reuses (same folder, so the rename stays on one device), and close the save. */
-            if (kept_sz && snprintf(kept, kept_sz, "%s.unsaved", g_save_copy) < (int)kept_sz &&
-                rename(g_save_copy, kept) != 0)
-                snprintf(kept, kept_sz, "%s", g_save_copy);
+             * reuses and no earlier kept copy has (same folder, so the rename stays on one
+             * device), and close the save. */
+            (void)keep_aside(g_save_copy, kept, kept_sz);
             if (g_save_copy_key[0]) unlink(g_save_copy_key);
             sync();
             save_clear_state();
@@ -8019,8 +7998,7 @@ static int save_release_orphan(void) {
                 unlink(path); /* the sealed key of the save that was open */
                 continue;
             }
-            snprintf(to, sizeof to, "%s.unsaved", path);
-            if (rename(path, to) == 0) kept++; /* same folder: one device */
+            if (keep_aside(path, to, sizeof to) == 0) kept++; /* same folder: one device */
         }
         closedir(d);
     }
@@ -10010,9 +9988,11 @@ static int handle_profile_info(void) {
 
 static int handle_profile_set_username(const char *body) {
     int slot = (int)extract_json_uint64_field(body, "slot");
-    char name[PROFILE_NAME_MAX] = {0};
+    /* Room for more than a name may hold, so one that is too long is seen as too long and refused
+     * (profile_slot_set_name), not cut down to the buffer and written. */
+    char name[64] = {0};
     extract_json_string_field(body, "name", name, sizeof(name));
-    uint32_t err = 0;
+    uint32_t err = SYS_REGISTRY_ERR_NULL_ARG; /* a bad slot or no name: nothing was asked of Sony */
     int rc = -1;
     if (slot >= 1 && slot <= PROFILE_SLOT_COUNT && name[0]) {
         pthread_mutex_lock(&sony_api_lock);
@@ -10020,12 +10000,14 @@ static int handle_profile_set_username(const char *body) {
         usleep(SONY_API_POST_SLEEP_US);
         pthread_mutex_unlock(&sony_api_lock);
     }
-    char nesc[PROFILE_NAME_MAX * 2 + 2];
+    /* A refused name may have been cut by the buffer in the middle of a letter: not echoed. */
+    if (strlen(name) > PROFILE_NAME_BYTES_MAX) name[0] = '\0';
+    char nesc[sizeof(name) * 2 + 2];
     json_escape_into(name, nesc, sizeof(nesc));
-    char resp[256];
+    char resp[320];
     int len = snprintf(resp, sizeof(resp),
         "{\"ok\":%s,\"slot\":%d,\"name\":\"%s\",\"err_code\":%u}",
-        rc == 0 ? "true" : "false", slot, nesc, err);
+        rc == 0 ? "true" : "false", slot, nesc, rc == 0 ? 0u : err);
     return mgmt_reply(MGMT_FRAME_PROFILE_SET_USERNAME_ACK, resp, (uint64_t)len);
 }
 
@@ -10185,6 +10167,76 @@ static int handle_trophy_fix(const char *body) {
     }
     if (n < 0) n = snprintf(out, TROPHY_FIX_OUT_MAX, "{\"ok\":false,\"err\":\"reply_too_large\"}");
     int rc = mgmt_reply(MGMT_FRAME_TROPHY_FIX_ACK, out, (uint64_t)n);
+    free(out);
+    return rc;
+}
+
+/* app.restore (title_restore.c, #961). Body {"op":"check"|"prepare"|"finish","title_id":"PPSA01234",
+ * "rollback":b,"install_ended":b}. File operations only (stat, mkdir, a same-device rename checked with
+ * cross_device.h, unlink of our own copy) plus read-only app.db / appinfo.db queries and SQLite backup
+ * copies of both: no Sony call, so no sony_api_lock. The install between prepare and finish is the
+ * engine's (installer daemon). */
+static int restore_appdb_has(const char *id) { return content_db_has_title(id); }
+static int restore_appinfo_has(const char *id) { return content_db_appinfo_has_title(id); }
+static int restore_backup_db(const char *which, const char *dst, char *err, size_t cap) {
+    const char *src = strcmp(which, "app.db") == 0       ? CONTENT_DB_APP
+                      : strcmp(which, "appinfo.db") == 0 ? CONTENT_DB_APPINFO
+                                                         : NULL;
+    if (!src) {
+        snprintf(err, cap, "backup: unknown database");
+        return -1;
+    }
+    return content_db_backup_file(src, dst, err, cap);
+}
+
+#define TITLE_RESTORE_OUT_MAX 4096u
+static int handle_title_restore(const char *body) {
+    char op[16] = {0}, title_id[16] = {0};
+    extract_json_string_field(body, "op", op, sizeof(op));
+    extract_json_string_field(body, "title_id", title_id, sizeof(title_id));
+    int rollback = 0, ended = 0;
+    (void)extract_json_bool_field(body, "rollback", &rollback);
+    (void)extract_json_bool_field(body, "install_ended", &ended);
+    /* The extended drives the mount table shows (/mnt/ext<N>), besides ext0 and ext1. */
+    char vols[TITLE_RESTORE_MAX_VOLUMES][32];
+    const char *extra[TITLE_RESTORE_MAX_VOLUMES];
+    int nextra = 0;
+    {
+        struct statfs *mnts = NULL;
+        int n = mntinfo_snapshot(&mnts);
+        for (int i = 0; i < n && nextra < TITLE_RESTORE_MAX_VOLUMES; i++) {
+            if (!install_guard_is_ext_volume(mnts[i].f_mntonname) || strlen(mnts[i].f_mntonname) >= sizeof vols[0])
+                continue;
+            snprintf(vols[nextra], sizeof vols[nextra], "%s", mnts[i].f_mntonname);
+            extra[nextra] = vols[nextra];
+            nextra++;
+        }
+        free(mnts);
+    }
+    title_restore_env_t env;
+    memset(&env, 0, sizeof env);
+    env.extra_volumes = extra;
+    env.nextra = nextra;
+    env.appdb_has = restore_appdb_has;
+    env.appinfo_has = restore_appinfo_has;
+    env.backup_db = restore_backup_db;
+    char stamp[32];
+    {
+        time_t now = time(NULL);
+        struct tm tmv;
+        if (!gmtime_r(&now, &tmv)) memset(&tmv, 0, sizeof(tmv));
+        strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", &tmv);
+    }
+    int flags = (rollback ? TITLE_RESTORE_ROLLBACK : 0) | (ended ? TITLE_RESTORE_INSTALL_ENDED : 0);
+    char *out = malloc(TITLE_RESTORE_OUT_MAX);
+    if (!out) {
+        static const char oom[] = "{\"ok\":false,\"err\":\"no_memory\"}";
+        return mgmt_reply(MGMT_FRAME_TITLE_RESTORE_ACK, oom, sizeof(oom) - 1);
+    }
+    int n = title_restore_run(&env, op[0] ? op : "check", title_id, flags, stamp, out, TITLE_RESTORE_OUT_MAX);
+    if (n < 0) n = snprintf(out, TITLE_RESTORE_OUT_MAX, "{\"ok\":false,\"err\":\"reply_too_large\"}");
+    PLOG(PLOG_INFO, PLOG_INSTALL, "[restore] %s %s: %.*s", op[0] ? op : "check", title_id, n > 300 ? 300 : n, out);
+    int rc = mgmt_reply(MGMT_FRAME_TITLE_RESTORE_ACK, out, (uint64_t)n);
     free(out);
     return rc;
 }
@@ -10553,6 +10605,11 @@ static int mgmt_w_trophy_fix(runtime_state_t *st, const char *b, uint64_t l) {
     (void)st;
     (void)l;
     return handle_trophy_fix(b);
+}
+static int mgmt_w_title_restore(runtime_state_t *st, const char *b, uint64_t l) {
+    (void)st;
+    (void)l;
+    return handle_title_restore(b);
 }
 static int mgmt_w_profile_activate(runtime_state_t *st, const char *b, uint64_t l) {
     (void)st;

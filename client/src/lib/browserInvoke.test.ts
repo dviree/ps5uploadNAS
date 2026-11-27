@@ -4,6 +4,7 @@ import {
   browserInvoke,
   BrowserUnsupportedError,
   parseSseBlock,
+  payloadSendReply,
   statusFailureFields,
   statusFailureText,
   timeSyncBody,
@@ -154,6 +155,115 @@ describe("loader-port commands the DPI fallback depends on", () => {
     expect(res).toEqual({ ok: true, job: "17-1" });
   });
 
+  it("sends each Restore to home screen step to its engine route, as the desktop command does (#961)", async () => {
+    const calls = captureFetch({ ok: true });
+    const req = { addr: "192.168.1.50", title_id: "PPSA01234" };
+    await browserInvoke("ps5_app_restore", { op: "check", req });
+    await browserInvoke("ps5_app_restore", { op: "status", req });
+    await browserInvoke("ps5_app_restore", { op: "candidates", req: { addr: "192.168.1.50" } });
+    await browserInvoke("ps5_app_restore", {
+      op: "start",
+      req: { addr: "192.168.1.50", title_ids: ["PPSA01234", "CUSA00900"] },
+    });
+    await browserInvoke("ps5_app_restore", { op: "finish", req: { ...req, rollback: true } });
+    expect(calls.map((c) => c.url)).toEqual([
+      "http://engine.test:19113/api/ps5/app/restore/check?addr=192.168.1.50&title_id=PPSA01234",
+      "http://engine.test:19113/api/ps5/app/restore/status?addr=192.168.1.50&title_id=PPSA01234",
+      "http://engine.test:19113/api/ps5/app/restore/candidates?addr=192.168.1.50",
+      "http://engine.test:19113/api/ps5/app/restore",
+      "http://engine.test:19113/api/ps5/app/restore/finish",
+    ]);
+    expect(JSON.parse(calls[3].init.body as string)).toEqual({
+      addr: "192.168.1.50",
+      title_id: null,
+      title_ids: ["PPSA01234", "CUSA00900"],
+    });
+    expect(JSON.parse(calls[4].init.body as string)).toEqual({
+      addr: "192.168.1.50",
+      title_id: "PPSA01234",
+      rollback: true,
+      install_ended: false,
+    });
+    await expect(browserInvoke("ps5_app_restore", { op: "nope", req })).rejects.toThrow("unknown restore step");
+  });
+
+  it("passes registration_only on to the engine's unregister, as the desktop app does", async () => {
+    const calls = captureFetch({ ok: true });
+    await browserInvoke("ps5_app_unregister", {
+      req: { addr: "192.168.1.50", title_id: "PPSA01234", registration_only: true },
+    });
+    expect(calls[0].url).toBe("http://engine.test:19113/api/ps5/app/unregister");
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({
+      addr: "192.168.1.50",
+      title_id: "PPSA01234",
+      registration_only: true,
+    });
+    await browserInvoke("ps5_app_unregister", {
+      req: { addr: "192.168.1.50", title_id: "PPSA01234" },
+    });
+    expect(JSON.parse(calls[1].init.body as string)).toMatchObject({ registration_only: false });
+  });
+
+  it("sends a payload with the gate's options and answers a refusal as the desktop app does", async () => {
+    const calls: { url: string; init: RequestInit }[] = [];
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (url: string, init: RequestInit) => {
+        calls.push({ url, init });
+        return new Response(
+          JSON.stringify({
+            ok: false,
+            error: "pkg_install_busy",
+            refused: "pkg_install_busy",
+            message: "An install is running on this PS5.",
+            forceable: true,
+            retry_after_ms: 5000,
+          }),
+          { status: 409 },
+        );
+      }),
+    );
+    const res = await browserInvoke("payload_send", {
+      ip: "192.168.1.50",
+      path: "/srv/x.elf",
+      port: null,
+      mode: "explicit",
+      force: true,
+      replace: null,
+      appVersion: "12.6.33",
+    });
+    expect(calls[0].url).toBe("http://engine.test:19113/api/payload/send");
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({
+      host: "192.168.1.50",
+      path: "/srv/x.elf",
+      mode: "explicit",
+      force: true,
+      replace: false,
+      app_version: "12.6.33",
+    });
+    expect(res).toEqual({
+      ok: false,
+      status: "An install is running on this PS5.",
+      refused: "pkg_install_busy",
+      forceable: true,
+      retry_after_ms: 5000,
+    });
+  });
+
+  it("answers a sent payload and a failed one in the desktop command's shape", () => {
+    expect(payloadSendReply(200, JSON.stringify({ status: "sent", bytes: 12 }))).toEqual({
+      ok: true,
+      status: "sent",
+      bytes: 12,
+      via_payload_manager: false,
+    });
+    expect(payloadSendReply(502, JSON.stringify({ error: "connect refused" }))).toEqual({
+      ok: false,
+      status: "connect refused",
+    });
+    expect(payloadSendReply(503, "")).toEqual({ ok: false, status: "engine returned HTTP 503" });
+  });
+
   it("routes pkg_install_status_v2 to the job-based status", async () => {
     const calls = captureFetch({ ok: true, phase: "done", verdict: "installed" });
     await browserInvoke("pkg_install_status_v2", { job: "17-1" });
@@ -274,6 +384,30 @@ describe("engine-backed commands the web UI depends on (#300)", () => {
     expect(JSON.parse(String(calls[0].init.body))).toMatchObject({ source: "/game.pkg", update: "/update.pkg" });
   });
 
+  it("sends a package build's unpacking and AMPR emulator choices (#933)", async () => {
+    const calls = captureFetch({ job_id: "j" });
+    await browserInvoke("fpkg_build", {
+      source: "/packed",
+      unpackPacks: true,
+      addAmprEmu: false,
+      amprEmuBuild: "ampr-emu-ng",
+      leaveOutAmprEmu: true,
+    });
+    expect(JSON.parse(String(calls[0].init.body))).toMatchObject({
+      source: "/packed",
+      unpack_packs: true,
+      add_ampr_emu: false,
+      ampr_emu_build: "ampr-emu-ng",
+      leave_out_ampr_emu: true,
+    });
+    await browserInvoke("fpkg_build", { source: "/plain" });
+    expect(JSON.parse(String(calls[1].init.body))).toMatchObject({
+      unpack_packs: false,
+      add_ampr_emu: true,
+      leave_out_ampr_emu: false,
+    });
+  });
+
   it("keeps since_seq=0 rather than dropping it as falsy", async () => {
     // Dropping it would make the engine replay the whole notification
     // backlog on every poll instead of returning only new rows.
@@ -346,6 +480,27 @@ describe("engine-backed commands the web UI depends on (#300)", () => {
       inner_path: "eboot.bin",
       dest_dir: "/tmp/out",
     });
+  });
+
+  it("asks for an archive to be deleted as it unpacks only when that was said", async () => {
+    const calls = captureFetch({ job_id: "x1" });
+    await browserInvoke("fpkg_extract", { source: "/dl/G.zip", outputDir: "/out", password: undefined });
+    expect(JSON.parse(calls[0].init.body as string)).toEqual({ source: "/dl/G.zip", output_dir: "/out" });
+    await browserInvoke("fpkg_extract", { source: "/dl/G.zip", outputDir: "/out", freeArchive: true });
+    expect(calls[1].url).toMatch(/\/api\/fpkg\/extract$/);
+    expect(JSON.parse(calls[1].init.body as string)).toEqual({
+      source: "/dl/G.zip",
+      output_dir: "/out",
+      free_archive: true,
+    });
+    await browserInvoke("fpkg_extract_free_check", { source: "/dl/G.zip", outputDir: "/out" });
+    expect(calls[2].url).toMatch(/\/api\/fpkg\/extract\/free-check$/);
+    expect(JSON.parse(calls[2].init.body as string)).toEqual({ source: "/dl/G.zip", output_dir: "/out" });
+    // A scratch unpack folder, and the kept folder of an unpack that deleted its archive.
+    await browserInvoke("fpkg_extract_cleanup", { path: "/out/.ps5upload-extract-1/G" });
+    expect(JSON.parse(calls[3].init.body as string)).toEqual({ path: "/out/.ps5upload-extract-1/G" });
+    await browserInvoke("fpkg_extract_cleanup", { path: "/out/G.unpacked/G", kept: true });
+    expect(JSON.parse(calls[4].init.body as string)).toEqual({ path: "/out/G.unpacked/G", kept: true });
   });
 
   it("still refuses commands that write to a host path", async () => {
@@ -431,7 +586,12 @@ describe("Payload Library and console tools in the web UI", () => {
   it("sends a file by path, with the port only when one is given", async () => {
     answer({ ok: true, status: "sent 5 bytes", bytes: 5 });
     await browserInvoke("payload_send", { ip: "10.0.0.2", path: "/d/k.elf", port: null });
-    expect(asked().body).toEqual({ host: "10.0.0.2", path: "/d/k.elf" });
+    expect(asked().body).toEqual({
+      host: "10.0.0.2",
+      path: "/d/k.elf",
+      force: false,
+      replace: false,
+    });
   });
 
   it("turns the desktop's arguments into the console routes", async () => {

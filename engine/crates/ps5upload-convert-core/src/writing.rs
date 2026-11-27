@@ -232,7 +232,15 @@ impl Writing {
     /// builds of one output would wreck each other's file. A leftover at `path` from a build
     /// that is not running any more (the app closed, the engine died) is removed, so the
     /// rebuild the queue starts is not refused as "output already exists".
+    ///
+    /// Also `None` for a finished output kept under this name because its rename failed
+    /// ([`ps5upload_fpkg::finish::is_kept`]): it is no leftover, and a retry of the same build
+    /// used to delete it here, hours of writing with it.
     pub fn claim(path: PathBuf) -> Option<Writing> {
+        // Still there, that is: once the user renamed or moved it the name is free again.
+        if ps5upload_fpkg::finish::is_kept(&path) && path.symlink_metadata().is_ok() {
+            return None;
+        }
         let mut active = active_partials().lock().unwrap_or_else(|e| e.into_inner());
         if active.contains(&path) {
             return None;
@@ -323,7 +331,7 @@ mod tests {
     /// else's is kept and named as in the way. A pack spool is ours either way.
     #[test]
     fn a_partial_folder_without_our_marker_is_never_cleared() {
-        let root = std::env::temp_dir().join(format!("ps5upload-claim-{}", std::process::id()));
+        let root = crate::test_tmp::temp_path(format!("ps5upload-claim-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let theirs = root.join("Game.partial");
         std::fs::create_dir_all(&theirs).unwrap();
@@ -353,11 +361,37 @@ mod tests {
         let _ = std::fs::remove_dir_all(&root);
     }
 
+    /// A finished output kept under its `.partial` name (its rename failed) is not a leftover:
+    /// the next build of the same output is refused, and the file stays. The claim used to
+    /// delete it.
+    #[test]
+    fn a_kept_finished_output_is_not_cleared_by_the_next_claim() {
+        let root =
+            crate::test_tmp::temp_path(format!("ps5upload-keptclaim-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let partial = root.join("Game.pkg.partial");
+        std::fs::write(&partial, b"a finished package").unwrap();
+        ps5upload_fpkg::finish::kept_message(&partial, &root.join("Game.pkg"), &"denied");
+        assert!(Writing::claim(partial.clone()).is_none());
+        assert_eq!(std::fs::read(&partial).unwrap(), b"a finished package");
+        // Renamed by hand, as the message asks: the name can be built again.
+        std::fs::rename(&partial, root.join("Game.pkg")).unwrap();
+        drop(Writing::claim(partial.clone()).unwrap());
+        // Another output's leftover is still cleared.
+        let other = root.join("Other.pkg.partial");
+        std::fs::write(&other, b"cut short").unwrap();
+        drop(Writing::claim(other.clone()).unwrap());
+        assert!(!other.exists());
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
     /// A claim is seen through its file by any process (here: another handle, which the OS lock
     /// treats the same), refuses a second claim, and leaves nothing behind once dropped.
     #[test]
     fn a_claim_is_seen_by_other_processes_and_cleared_when_dropped() {
-        let root = std::env::temp_dir().join(format!("ps5upload-claimlock-{}", std::process::id()));
+        let root =
+            crate::test_tmp::temp_path(format!("ps5upload-claimlock-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         let partial = root.join("Game.exfat.partial");
         let file = claim_file_of(&partial).unwrap();
@@ -395,7 +429,7 @@ mod tests {
         assert!(!retry_open(ErrorKind::PermissionDenied, false));
         assert!(!retry_open(ErrorKind::NotFound, true));
         // A parent that is a file: no claim file can exist there on any OS.
-        let root = std::env::temp_dir().join(format!("ps5upload-noclaim-{}", std::process::id()));
+        let root = crate::test_tmp::temp_path(format!("ps5upload-noclaim-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(&root).unwrap();
         let blocker = root.join("not-a-folder");

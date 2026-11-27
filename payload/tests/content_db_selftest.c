@@ -281,6 +281,37 @@ int main(void) {
     assert(content_db_has_title("bad'id") == -1);
     printf("✓ a title is found by a WHERE lookup, and a missing one is 0\n");
 
+    /* ── a name longer than a row holds is cut on a character ────────── */
+    {
+        char longname[512];
+        size_t at = 0;
+        longname[at++] = 'A';
+        for (int i = 0; i < 100; i++) { /* U+65E5, 3 bytes each: 301 bytes in all */
+            longname[at++] = (char)0xE6;
+            longname[at++] = (char)0x97;
+            longname[at++] = (char)0xA5;
+        }
+        longname[at] = '\0';
+        unlink(CONTENT_DB_APP);
+        sqlite3 *db = NULL;
+        assert(sqlite3_open(CONTENT_DB_APP, &db) == SQLITE_OK);
+        exec_or_die(db, "CREATE TABLE tbl_info_1000000 (titleId TEXT, appId INTEGER, titleName TEXT);");
+        sqlite3_stmt *st = NULL;
+        assert(sqlite3_prepare_v2(db, "INSERT INTO tbl_info_1000000 VALUES ('PPSA04321', 7, ?)", -1,
+                                  &st, NULL) == SQLITE_OK);
+        sqlite3_bind_text(st, 1, longname, -1, SQLITE_STATIC);
+        assert(sqlite3_step(st) == SQLITE_DONE);
+        sqlite3_finalize(st);
+        sqlite3_close(db);
+        content_db_app_t one[2];
+        assert(content_db_apps(one, 2, NULL) == 1);
+        /* 255 bytes would end in two bytes of a character: the whole ones are kept. */
+        assert(strlen(one[0].name) == 1 + 84 * 3);
+        assert(memcmp(one[0].name, longname, strlen(one[0].name)) == 0);
+        printf("✓ a long title name is cut between characters, never in one\n");
+        make_app_db(CONTENT_DB_APP);
+    }
+
     /* ── a database that is not a database falls back to the scanner ─── */
     {
         FILE *f = fopen(CONTENT_DB_APP, "wb");
@@ -343,6 +374,31 @@ int main(void) {
         assert(content_db_appinfo_get("PPSA03595", "_org_path", tiny, sizeof tiny) == 1);
         assert(strlen(tiny) == sizeof tiny - 1);
         printf("✓ one appinfo value read by title and key\n");
+    }
+
+    /* any appinfo row for a title, and a backup copy of a database (#961) */
+    {
+        assert(content_db_appinfo_has_title("PPSA03595") == 1);
+        assert(content_db_appinfo_has_title("PPSA99999") == 0);
+        assert(content_db_appinfo_has_title("nope") == -1);
+        char bk[512], e[160];
+        snprintf(bk, sizeof bk, "%s.restore-backup", CONTENT_DB_APPINFO);
+        unlink(bk);
+        assert(content_db_backup_file(CONTENT_DB_APPINFO, bk, e, sizeof e) == 0);
+        sqlite3 *b = NULL;
+        assert(sqlite3_open_v2(bk, &b, SQLITE_OPEN_READONLY, NULL) == SQLITE_OK);
+        sqlite3_stmt *q = NULL;
+        assert(sqlite3_prepare_v2(b, "SELECT val FROM tbl_appinfo WHERE titleId='PPSA03595' AND key='_org_path'", -1, &q, NULL) == SQLITE_OK);
+        assert(sqlite3_step(q) == SQLITE_ROW);
+        assert(strcmp((const char *)sqlite3_column_text(q, 0), "/mnt/ext1/user/app/PPSA03595") == 0);
+        sqlite3_finalize(q);
+        sqlite3_close(b);
+        /* never over an existing file, and a source that is not there leaves nothing behind */
+        assert(content_db_backup_file(CONTENT_DB_APPINFO, bk, e, sizeof e) == -1 && contains(e, "already exists"));
+        unlink(bk);
+        assert(content_db_backup_file("/nonexistent/x.db", bk, e, sizeof e) == -1);
+        assert(access(bk, F_OK) != 0);
+        printf("✓ appinfo presence by title, and a database copied aside (never over a file)\n");
     }
 
     /* ── appinfo.db writes ───────────────────────────────────────────── */

@@ -5,6 +5,8 @@ import en from "../locales/en.json";
 import { t } from "../strings";
 import { freeName } from "../files/paste";
 import {
+  bytesToWrite,
+  canUnpack,
   CONVERT_CAUSES,
   convertCauseText,
   convertErrorText,
@@ -24,6 +26,8 @@ import {
   startBody,
   startConvert,
   stopConvert,
+  unpackFor,
+  unpackNeedsEmulator,
   type JobDeps,
 } from "./model";
 
@@ -159,6 +163,67 @@ describe("names and requests", () => {
     expect(outputName("/data/Astro", "pkg")).toBe("Astro.pkg");
   });
 
+  it("sends the unpack only with a .pkg, and the emulator left out only with the unpack", () => {
+    const base = { source: "/data/g", dest: "/data/g.pkg", format: "pkg" as const, zstd: false, level: 5 as const, verify: "fast" as const };
+    // Not asked: neither word goes (an older helper, and this one, then package the game as it is).
+    const asis = startBody(base);
+    expect(asis).not.toHaveProperty("unpack_packs");
+    expect(asis).not.toHaveProperty("leave_out_ampr_emu");
+    expect(startBody({ ...base, unpack: true })).toEqual({
+      path: "/data/g",
+      dest: "/data/g.pkg",
+      format: "pkg",
+      zstd: false,
+      pkg_level: "fast",
+      unpack_packs: true,
+      verify: "fast",
+    });
+    expect(startBody({ ...base, unpack: true, leaveOutEmulator: true })).toMatchObject({ unpack_packs: true, leave_out_ampr_emu: true });
+    const packs = startBody({ ...base, unpack: false, leaveOutEmulator: true });
+    expect(packs).not.toHaveProperty("unpack_packs");
+    expect(packs).not.toHaveProperty("leave_out_ampr_emu");
+    const image = startBody({ ...base, format: "exfat", dest: "/data/g.exfat", unpack: true, leaveOutEmulator: true });
+    expect(image).not.toHaveProperty("unpack_packs");
+    expect(image).not.toHaveProperty("leave_out_ampr_emu");
+  });
+
+  it("the unpack applies to a .pkg of a packed game, and says when the emulator can't stay", () => {
+    const packed = parseInspection({ path: "/g", format: "folder", data_bytes: 20, packed: "zstd", unpacked_bytes: 50, unpack_keeps_emulator: false });
+    expect(packed).toMatchObject({ unpackedBytes: 50, unpackKeepsEmulator: false });
+    const plain = parseInspection({ path: "/g", format: "folder", data_bytes: 20 });
+    expect(plain).toMatchObject({ unpackedBytes: null, unpackKeepsEmulator: null });
+    // What is not a size or a yes/no reads as absent, never as 0 or false.
+    const odd = parseInspection({ path: "/g", format: "folder", packed: "lz4", unpacked_bytes: "50", unpack_keeps_emulator: 0 });
+    expect(odd).toMatchObject({ unpackedBytes: null, unpackKeepsEmulator: null });
+    expect([canUnpack(packed), canUnpack(plain), canUnpack(odd), canUnpack(null)]).toEqual([true, false, false, false]);
+
+    const both = { unpack: true, leaveOutEmulator: true };
+    expect(unpackFor("pkg", packed, both)).toEqual(both);
+    expect(unpackFor("pkg", packed, { unpack: false, leaveOutEmulator: true })).toEqual({ unpack: false, leaveOutEmulator: false });
+    for (const none of [unpackFor("exfat", packed, both), unpackFor("pkg", plain, both), unpackFor("pkg", odd, both)]) {
+      expect(none).toEqual({ unpack: false, leaveOutEmulator: false });
+    }
+
+    const keep = { unpack: true, leaveOutEmulator: false };
+    expect(unpackNeedsEmulator(packed, keep)).toBe(true);
+    expect(unpackNeedsEmulator(packed, both)).toBe(false);
+    expect(unpackNeedsEmulator(packed, { unpack: false, leaveOutEmulator: false })).toBe(false);
+    const fine = parseInspection({ path: "/g", format: "folder", packed: "lz4", unpacked_bytes: 50, unpack_keeps_emulator: true });
+    expect(unpackNeedsEmulator(fine, keep)).toBe(false);
+    // ampr_emu that the app put on this PS5: the helper says the emulator can stay, and the
+    // keep choice builds (its version is extra; an older page reads only the yes/no).
+    const onConsole = parseInspection({ path: "/g", format: "folder", packed: "zstd", unpacked_bytes: 50, unpack_keeps_emulator: true, ampr_emu: "0.4.2.1" });
+    expect(unpackNeedsEmulator(onConsole, keep)).toBe(false);
+    // The refusal names the way out: the app's button.
+    expect(t("cw_convert_unpack_needs_emulator_v2")).toContain("Put the AMPR emulator on this PS5");
+    // The converter's own refusal of it reads as the same sentence the page shows beforehand.
+    expect(convertFailureText("convert_unpack_needs_emulator")).toBe(t("cw_convert_unpack_needs_emulator_v2"));
+    expect(convertFailureText("convert_not_packed")).toBe(t("cw_convert_err_not_packed"));
+
+    expect(packed && bytesToWrite(packed, keep)).toBe(50);
+    expect(packed && bytesToWrite(packed, { unpack: false, leaveOutEmulator: false })).toBe(20);
+  });
+
   it("sends the image inside and its compression only with a .ffpfsc", () => {
     const base = { source: "/data/g", dest: "/data/g.ffpfsc", zstd: false, level: 5 as const, verify: "fast" as const };
     expect(startBody({ ...base, format: "ffpfsc", inner: "ffpkg", ffpfscLevel: "smallest" })).toMatchObject({
@@ -221,6 +286,45 @@ describe("jobs", () => {
     expect(ok).toMatchObject({ ok: true, info: { format: "exfat" } });
     const bad = await inspect("/data/g", deps({ end: "failed", status: status({ state: "failed", message: "convert_unsupported_source" }) }));
     expect(bad).toEqual({ ok: false, error: t("cw_convert_err_unsupported_source") });
+  });
+
+  it("inspect: another source picked mid-check stops the first, and the second starts once it ended", async () => {
+    const order: string[] = [];
+    let endFirst: (e: OpEnd) => void = () => undefined;
+    let first = true;
+    const d: JobDeps = {
+      start: vi.fn(async (_route: string, body?: object) => {
+        order.push(`start ${(body as { path: string }).path}`);
+        return (body as { path: string }).path;
+      }) as unknown as JobDeps["start"],
+      watch: vi.fn((job: string, o?: Parameters<JobDeps["watch"]>[1]) => {
+        if (first) {
+          first = false;
+          // the first check runs until it is stopped (watchOp asks the helper to cancel it)
+          return new Promise<OpEnd>((res) => {
+            endFirst = (e) => {
+              order.push(`end ${job} stopped=${o?.stopped?.()}`);
+              res(e);
+            };
+          });
+        }
+        return Promise.resolve({ end: "done", status: status({ state: "done", result: `{"path":"${job}","format":"exfat","size":1}` }) } as OpEnd);
+      }) as unknown as JobDeps["watch"],
+    };
+    let firstLive = true;
+    const a = inspect("/data/a", d, () => !firstLive);
+    const b = inspect("/data/b", d);
+    await vi.waitFor(() => expect(d.watch).toHaveBeenCalledTimes(1));
+    firstLive = false;
+    // the second has not started while the first runs: the helper takes one converter at a time
+    expect(order).toEqual(["start /data/a"]);
+    endFirst({ end: "cancelled", status: status({ state: "failed" }) });
+    expect(await a).toEqual({ ok: false, error: null });
+    expect(await b).toMatchObject({ ok: true, info: { path: "/data/b" } });
+    expect(order).toEqual(["start /data/a", "end /data/a stopped=true", "start /data/b"]);
+    // a check stopped before its turn never starts
+    expect(await inspect("/data/c", d, () => true)).toEqual({ ok: false, error: null });
+    expect(order).toHaveLength(3);
   });
 
   it("a conversion: progress, then the not-built-yet ending", async () => {

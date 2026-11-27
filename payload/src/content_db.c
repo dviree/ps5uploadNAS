@@ -11,6 +11,7 @@
 #include "appdb_scan.h"
 #include "proc_list.h"
 #include "sqlite3.h"
+#include "utf8_cut.h"
 
 /* ── small helpers ───────────────────────────────────────────────────── */
 
@@ -279,6 +280,10 @@ static void cdb_fill_row(content_db_app_t *r, const char *tid,
     memset(r, 0, sizeof(*r));
     snprintf(r->title_id, sizeof(r->title_id), "%s", tid);
     snprintf(r->name, sizeof(r->name), "%s", name ? name : "");
+    /* A name longer than the row holds (about 86 CJK characters) is cut on a character, never
+     * in one: half a character is invalid UTF-8, and the engine then refused the whole page of
+     * the list, so every title only app.db knew of went missing from the installed list. */
+    r->name[utf8_whole_prefix(r->name, strlen(r->name))] = '\0';
     r->app_id = app_id;
 }
 
@@ -679,6 +684,61 @@ int content_db_appinfo_get(const char *title_id, const char *key, char *out, siz
     sqlite3_finalize(st);
     sqlite3_close(db);
     return found;
+}
+
+int content_db_appinfo_has_title(const char *title_id) {
+    if (!cdb_valid_title_id(title_id)) return -1;
+    sqlite3 *db = NULL;
+    if (cdb_open_ro(CONTENT_DB_APPINFO, &db, NULL) != SQLITE_OK || !db) return -1;
+    sqlite3_stmt *st = NULL;
+    if (sqlite3_prepare_v2(db, "SELECT 1 FROM tbl_appinfo WHERE titleId = ? LIMIT 1", -1, &st,
+                           NULL) != SQLITE_OK) {
+        sqlite3_close(db);
+        return -1;
+    }
+    sqlite3_bind_text(st, 1, title_id, -1, SQLITE_STATIC);
+    int rc = sqlite3_step(st);
+    int found = rc == SQLITE_ROW ? 1 : rc == SQLITE_DONE ? 0 : -1;
+    sqlite3_finalize(st);
+    sqlite3_close(db);
+    return found;
+}
+
+int content_db_backup_file(const char *src_path, const char *dst_path, char *err, size_t errcap) {
+    if (!err || errcap == 0) return -1;
+    err[0] = '\0';
+    if (!src_path || !dst_path || !src_path[0] || !dst_path[0]) {
+        snprintf(err, errcap, "backup: no path");
+        return -1;
+    }
+    if (access(dst_path, F_OK) == 0) {
+        snprintf(err, errcap, "backup: the copy already exists");
+        return -1;
+    }
+    sqlite3 *src = NULL;
+    if (cdb_open_ro(src_path, &src, NULL) != SQLITE_OK || !src) {
+        snprintf(err, errcap, "backup: cannot read %s", src_path);
+        return -1;
+    }
+    sqlite3 *dst = NULL;
+    int ok = 0;
+    if (sqlite3_open_v2(dst_path, &dst, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, NULL) ==
+            SQLITE_OK &&
+        dst) {
+        sqlite3_backup *b = sqlite3_backup_init(dst, "main", src, "main");
+        if (b) {
+            ok = sqlite3_backup_step(b, -1) == SQLITE_DONE;
+            sqlite3_backup_finish(b);
+        }
+    }
+    if (dst) sqlite3_close(dst);
+    sqlite3_close(src);
+    if (!ok) {
+        unlink(dst_path);
+        snprintf(err, errcap, "backup: could not copy %s", src_path);
+        return -1;
+    }
+    return 0;
 }
 
 int content_db_appinfo_set(const char *title_id, const char *key,

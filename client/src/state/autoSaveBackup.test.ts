@@ -8,7 +8,6 @@ vi.mock("../api/saveBackup", async (importOriginal) => ({
 
 import { backupHosts, clampKeep, legacySettings, numberBoxLeft, startSaveBackupSync } from "./autoSaveBackup";
 import { useRosterStore } from "./roster";
-import { stampLabel } from "../screens/GameHub/SaveBackupsList";
 
 describe("automatic save backup (engine-run)", () => {
   it("hands over an older version's settings only when a folder was set", () => {
@@ -48,11 +47,6 @@ describe("automatic save backup (engine-run)", () => {
     expect(numberBoxLeft("999", 5, clampKeep)).toEqual({ save: 50, show: "50" });
     expect(numberBoxLeft("0", 5, clampKeep)).toEqual({ save: 1, show: "1" });
   });
-
-  it("labels a backup's time in UTC", () => {
-    expect(stampLabel("2026-10-24_101530")).toBe("2026-10-24 10:15 UTC");
-    expect(stampLabel("odd")).toBe("odd");
-  });
 });
 
 describe("giving the engine the console list", () => {
@@ -75,6 +69,22 @@ describe("giving the engine the console list", () => {
     expect(set).toHaveBeenLastCalledWith({ add_hosts: ["10.0.0.2"], remove_hosts: [] });
     await vi.advanceTimersByTimeAsync(600_000);
     expect(set).toHaveBeenCalledTimes(3);
+    stop();
+  });
+
+  it("a console removed while the first list is on its way is still taken off", async () => {
+    useRosterStore.setState({ profiles: [{ host: "10.0.0.2" }, { host: "10.0.0.3" }] as never });
+    let land: (v: unknown) => void = () => {};
+    set.mockImplementationOnce(() => new Promise((r) => (land = r))).mockResolvedValue({});
+    const stop = startSaveBackupSync();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(set).toHaveBeenCalledTimes(1);
+    // Deleted before the engine answered the first list.
+    useRosterStore.setState({ profiles: [{ host: "10.0.0.2" }] as never });
+    await vi.advanceTimersByTimeAsync(0);
+    land({});
+    await vi.advanceTimersByTimeAsync(0);
+    expect(set).toHaveBeenLastCalledWith({ add_hosts: ["10.0.0.2"], remove_hosts: ["10.0.0.3"] });
     stop();
   });
 

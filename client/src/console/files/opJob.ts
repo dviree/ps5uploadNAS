@@ -44,7 +44,10 @@ const defaultDeps: OpDeps = {
 /** POST `route` {path, …} and return the job it started. */
 export async function startOp(
   route: "/api/fs/hash" | "/api/fs/crc32" | "/api/fs/unpack" | "/api/fs/extract" | "/api/convert/inspect" | "/api/convert/start",
-  body: { path: string; name?: string } | ExtractBody | { path: string; dest: string; format: string; zstd: boolean; zstd_level?: number; verify: string },
+  body:
+    | { path: string; name?: string }
+    | ExtractBody
+    | { path: string; dest: string; format: string; zstd: boolean; zstd_level?: number; verify: string; unpack_packs?: true; leave_out_ampr_emu?: true },
 ): Promise<string> {
   const r = await call<{ job?: unknown }>(route, body);
   if (!r || typeof r.job !== "string") throw new ApiError(500, "bad_reply");
@@ -142,6 +145,14 @@ export async function unpackInfo(path: string): Promise<UnpackInfo> {
 }
 
 /** Why a decompress cannot start (checked on the page before it is sent), or null. */
+/**
+ * The pre-start check could not say (it timed out, or this helper has no such route: it answers
+ * 404 "not_found", a missing file has its own code): Start warns and lets the helper decide.
+ */
+export function checkUnavailable(e: unknown): boolean {
+  return e instanceof ApiError && (e.status === 0 || e.status >= 500 || e.code === "http_404" || e.code === "not_found");
+}
+
 export function unpackBlocker(info: UnpackInfo, name: string | null): "exists" | "space" | null {
   if (info.exists && (name == null || name === info.name)) return "exists";
   if (info.free != null && info.free < info.need) return "space";

@@ -6,6 +6,364 @@ What's new in ps5upload, written for humans.
 
 ## Unreleased
 
+**Docker and the self-hosted web UI**
+- **Go live works from a phone or another computer.** Opening the web UI from a device the engine lets in (`PS5UPLOAD_ALLOW_IP`), Go live said "Can't reach the engine": Docker Desktop makes every visitor look like the computer itself, so the engine refused them. It now lets in the devices the setting lists, as it does for everything else, and stream keys still never leave the engine. Play Together's host controls had the same problem and work now too.
+- **Go live can run in the Docker image**, on ARM (Apple Silicon, ARM NAS boxes) and x86 alike: the image now carries what the downloaded ffmpeg needs to start, including the certificates for secure stream sites.
+- When Go live is refused, the panel says why instead of "Can't reach the engine".
+
+## 12.6.41
+
+**Play Together**
+- **Your Play Together switches are kept for next time.** Block PS & Create, "A friend can play as me on Player 1", the number of players and the other host switches are saved, also across restarts, instead of going back to their defaults.
+- **Turning the phone sideways goes full screen in a browser**, on the friend's page and the controller page, as it already did in the app. On an Android phone the browser's bars go away; on an iPhone the page folds Safari's bars away as far as iOS allows (for the whole screen there, add the page to the Home Screen).
+- Each PS press a friend makes after picking a user is noted in the log, saying whether it went to the PS5, so "PS does nothing" can be traced.
+
+**Web pages**
+- **Added to a phone's Home Screen, every PS5Upload page shows the PS5Upload logo and the name "PS5Upload"**: the web UI (Docker or self-hosted), a friend's Play Together page, the controller page and the console's own page, in Safari, Chrome and other phone browsers. Remove an icon you added before and add it again to get the new one.
+
+## 12.6.40
+
+**Play Together**
+- **Full screen on an iPhone or iPad.** iOS browsers can't put a web page in full screen, so the guest page and the controller page hid their Full screen button there. It's back: it fills the page with the game, and the first time it explains how to get the whole screen (add the page to your Home Screen and open it from there; it rejoins the same game).
+
+## 12.6.39
+
+**Play Together**
+- **A friend joining can no longer end your game by taking your PS5 user.** When a friend's controller connected, the PS5 asked who was using it with your user picked, and pressing ✕ moved your user to them, which ended your Remote Play. A friend's plain ✕ is now held back until they move off your user, and their page says not to pick it. If the PS5 still ends your stream that way, the app starts it again by itself.
+
+**Remote Play**
+- **Show or hide the on-screen controller from the stream.** A button on the stream's bar on a computer, and in the stream menu on a phone or tablet (also in full screen). It was only in Settings before.
+
+**Games**
+- **Uninstall can also delete the game's files.** For a game played from a folder or a disk image, Uninstall asks whether to keep them or delete them too (it shows the size), and deletes only after the uninstall worked; an image is unmounted first. An installed fake package, or a game whose files are already gone, uninstalls as before.
+- **The console's page shows the real title and cover of disk images on a network share (#963)**, and lists several copies of one game as one. Compressed `.ffpfsc` images show their title id with "Title not read".
+
+**Fake packages**
+- **The Workshop says what it builds:** a fake PS5 package with a plaintext game image, the kind the latest kstuff (fake-package support up to 13.60) and Kraken Mount both take, with the two ways to play it side by side. a53_ppr is only mentioned for firmware up to 11.40, and a game installed with an older kstuff may need installing again.
+- **Converting a game in zstd packs to `.pkg` no longer warns that its ampr_emu.index is stale** when the only differences are the files the conversion itself rewrites.
+
+**Starting games**
+- **A game the PS5 refuses to start no longer restarts the PS5's menu.** After the console refused a launch outright (for example 0x80020016), the helper tried a second way in through the menu, which restarted it and could stop ShadowMount+. It now stops and says what the refusal means.
+- **Packages built in the Workshop write their content id into their fake-signed programs**, as the current signing tool does; they were zeros before.
+
+**Payloads**
+- **kstuff that stays in the kernel is explained.** Newer kstuff builds don't keep a running program, so they never show as running and can't be stopped. When the PS5 reports kernel access but no kstuff program runs, the Payloads page and Send payload say kstuff is probably active, how to check, and that changing it needs a restart.
+- **Your saved Payload Manager payloads stay listed on On your PS5.** A failed second request could hide the list while the count still included it.
+
+## 12.6.38
+
+**Games**
+- **Games that vanished from the home screen after Rebuild Database can be put back (#961).** A fake package game still on its drive but no longer on the PS5's home screen now shows **Not on the PS5's home screen** on its page, with **Restore to home screen**; **Restore all** in Games does every such game. The PS5's own installer takes the package back from the drive, so nothing is downloaded. Your database is backed up first, and if the PS5 won't take a game, its files are put back where they were. It needs room for one more copy of the game while it runs.
+- **Pressing Play on such a game no longer unsettles the console.** It used to try harder and harder ways to start a game the PS5 no longer knows, which could restart the PS5's menu. It now stops within seconds and points you to Restore.
+
+**Extract on the console**
+- **Password-protected RAR archives can be extracted on the PS5 (#958).** In Files on the console page and in the app's file screen, Extract now asks for the password of a `.rar` the way it does for `.zip` and `.7z`. This covers new and old RAR archives, multi-part sets (pick part 1), and archives whose file list is hidden behind the password. A wrong password is said plainly and leaves no files behind.
+
+## 12.6.37
+
+**Activity**
+- **An upload still going after you closed the page shows as running when you come back (#954).** The upload itself always carried on, but Activity listed it as "Interrupted" next to a second, running copy. It now picks up the same entry.
+
+## 12.6.36
+
+**Play Together over the internet**
+- **Friends joining from Firefox, a VPN or IPv6 are no longer turned away.** Their browser sends more connection details than the hub allowed per minute, so the hub closed the join and the page said it couldn't reach the hub. The hub now allows a realistic amount for every browser and for several devices behind one home connection, and the join page sends only the details the app can use.
+- The hub answers its address with a trailing slash too, tells search crawlers to stay away, and counts which limit stopped a connection, so problems like this show up straight away.
+
+## 12.6.35
+
+**Files on a phone**
+- **Name and path fields get the full width (#936).** New folder, New file, Rename, Download from a link and Go to path no longer squeeze the text box: on a phone the field takes the width of the card and its buttons sit on their own line, so you can see what you type and the buttons never break mid-word. Tablets and computers look as before.
+
+**Convert**
+- **A running build is found again even if the page closed within seconds of starting it (#954).** The link to the build is saved at once instead of with the next progress update.
+
+## 12.6.34
+
+**Payloads**
+- **Your own payload sources are back.** In Payloads, add a GitHub, Gitea or Forgejo project that publishes payload files, and pick the file once (for example `kstuff.elf`). Its card shows the release you have, says when a newer one is out, and has Download, Update and Send to PS5. Nothing happens on its own: it checks only when you open Payloads or press Check, downloads only when you press Download, and before sending shows the file, its release, size and checksum. Only add projects you trust. The built-in list stays a guide with links.
+
+**Files**
+- **Two panes on a wide screen (#952).** Turn on Two panes to keep the PS5 on one side and this computer, a saved server or another console on the other, and copy or move between them. Phones and tablets stay as they were.
+- **Copy or move from the PS5 to a saved server (#953),** in Move to… and on the console's own page. A move deletes the original only after the copy is checked, and keeps a folder that holds links, which a share can't hold.
+
+**Convert**
+- **Closing the page no longer marks a running build "Interrupted" (#954).** The build keeps going; the reopened page picks it up or shows it finished. The queue's next game, and the install after Convert & install, wait until the page is open again, and the page says so.
+
+**Games**
+- **Check the copy no longer shows 100% while it still reads the package (#951).** It counts both reads and says which part it is on, and Cancel works in both.
+
+**Upload & Install**
+- **"The file at this link changed" only when it really did.** Servers whose copies disagree on dates or tags no longer trip it; a different size or different first bytes still do.
+
+**Under the hood**
+- The tests no longer leave folders behind in the system's temp folder (a full run used to leave about 2 GB), and CI checks it. A signing script no longer leaves its key file behind.
+
+## 12.6.33
+
+**Fake PS5 packages**
+- **Two ways to play them, explained side by side.** Install the package (on firmware 11.61 to 13.60 with the latest kstuff, which supports fake packages up to 13.60), or mount it with Kraken Mount. Upload & Install, Convert, the hint after a game doesn't start, the Payloads catalog, the FAQ and the website now all say this the same way, and the note is information rather than a warning.
+
+**Files on a phone (#936)**
+- **The header stays put** when the list is pulled past its ends.
+- **Copy and Move use a bar at the bottom.** Staged items show there with Paste here and Cancel, and a short message says when they are copied or moved. Pasted items leave the clipboard. Back still goes up folders while something is staged, and lets go of it at the top of the drive.
+
+**Upload & Install**
+- **The console page's queue no longer says "Stopped part-way" while an upload is still running (#945).** After a reload it checks again before giving up, and picks up uploads that are still going or that finished meanwhile. The same fix stops a second upload starting beside a running one in Files.
+
+**Cheats**
+- **PS4 cheats find the game's code (#946).** A PS4 game now always gets a place to look, and nothing is written unless every location holds the cheat's original bytes. If it still fails, the message names the address and what it found.
+- Downloading another cheat file for a game no longer switches on cheats you never chose. Some cheat files lost lines when read; they don't any more.
+
+**Convert**
+- **"Put the AMPR emulator on this PS5"** (Settings › This PS5): the console's own Convert page can then keep an AMPR emulator when it unpacks asset packs, as the app does. Nothing is downloaded unless you press it.
+- A PFS image whose last block is short now reads. A game's AMPR index that won't read says why. Files a dumping tool leaves at a game's top level stay out of packages. The newest zstd AMPR emulators are recognised by name.
+
+**Saves**
+- Opening or closing a save in Save Data while a copy, sync or backup runs is refused, instead of putting the job's files into your save.
+- A save copy reports a failure when the save was closed under it, and puts the target's save back.
+- Unsaved edits kept aside after a crash no longer overwrite each other.
+- A game started during a long backup run is left alone until it closes.
+
+**Remote Play**
+- Typing "moved" in a console text field no longer ends the stream.
+- Stop works at once while a stream is starting, and a stopped stream no longer blocks other devices.
+
+**Games**
+- A game whose folder was left behind after an uninstall no longer shows as Installed.
+- Titles no longer show in the wrong language variant, and very long names no longer hide games from the installed list.
+- Covers show for titles on the M.2 drive.
+
+**Phones and the app**
+- **iPhone and iPad (#950):** when the engine inside the app isn't answering, the app says why and has Try again.
+- On a Mac, a crash during a transfer no longer keeps the Mac awake until restart. The engine restarts by itself after a crash again, and a restart during start-up no longer leaves no engine.
+
+**The console's own page**
+- Fixes on phones (the page no longer runs off the side), USB game scans, Files dialogs, Convert, Search, New file, user switching during a save task, device prompts, cheat downloads and covers on the M.2 drive. Refusals and counts are in plain words, game names show instead of IDs, and the sidebar fits the PS5's own browser.
+
+**Under the hood**
+- The transfer library AVA1 1.0.13 is in use everywhere.
+- The API documentation and the AI-agent tools cover the newest features; translations of the newest texts were reviewed in all 21 languages.
+
+## 12.6.32
+
+**Storage**
+- **Files shows the right free space (#944).** Files kept its own copy of the drives, and Refresh didn't read it again, so a chip could show 98 GiB when the drive had 163 GiB. Every screen that shows drives now reads the same list: on Refresh, when a screen comes back, and when a job on that console ends.
+- **The numbers say what they are.** Free space is in GiB everywhere, only space you can copy into is counted, and the Volumes and Hardware screens say that the PS5 holds space back for itself, so its own Storage screen can show less.
+
+**Collection**
+- **A package that is cut short or still being copied is no longer treated as whole.** Organize leaves it alone and Check says it is cut short.
+- Check reads every part of a split package.
+- Organize never files anything inside a folder that is itself a game.
+- When the undo log can't be saved after a move, Organize says what moved and that Undo may be incomplete.
+
+**Save Data**
+- A save is never written while its game is running, and a console that can't say what is running is treated as busy, not idle.
+- A restore is only accepted into the PS5's own save folders and the emulator save places the app supports.
+
+**Upload & Install**
+- **A package can't be renamed while an install of it is unfinished**, however long ago the PS5 last read it. The message says how to free it.
+- "Name on the PS5" shows how many bytes are left before it sends.
+- Covers show for game folders whose `SCE_SYS` folder is in capitals.
+- A stopped job in the queue shows as stopped, not failed, and no longer holds the queue.
+
+**Updates**
+- **Opening the app while an update is installing no longer says the update failed.** It shows "Finishing the update…" and starts the new version.
+
+**Play Together and phones**
+- A link that was replaced or has lapsed no longer reaches the host's "wants to play" prompt, and an invite after a lapsed one gets its internet link again.
+- A phone allowed to watch can't come back as a controller. A kicked phone can't get back in (the link's key changes; other phones carry on).
+- A guest's PS button stays blocked through a lost connection, and a kicked guest's input can't reach the next guest.
+- One guest can no longer cut the host off the internet hub, and idle guests can't hold seats.
+- Phone input is paced so a flood can't swamp the host; normal play is untouched.
+
+**Mesh Drive**
+- With three or more consoles, links no longer undo each other's changes.
+- A folder whose first entries were hidden files could be sent to the trash with files still in it; the whole folder is now read first.
+- A newer file here is never overwritten by an older copy during failover; both are kept.
+- A folder whose console is gone can be left.
+
+**Sharing and transfers**
+- Long file lists are no longer dropped, received settings are checked, and a retail game is refused whatever it is sent as.
+- A finished folder download no longer fails on retry. "Download to a saved server" can't write outside the chosen folder.
+- Transfers between devices: a use-after-free in the PS5 helper's receiver, a job being ended by another device, an upload that couldn't resume after a disk error, and memory a peer could make grow are fixed.
+
+**Look and wording**
+- On a phone, Upload & Install's buttons are one row, sideways Files shows more rows, payload rows are compact, and the Files menu's look-alike items are renamed and grouped.
+- Arabic and Persian keep names like "ShadowMount+", paths and versions in their order.
+
+**Fixes found in audits**
+- FTP folder checks can't be fooled by servers that treat names as patterns.
+- Crafted disk images and archives are refused instead of grinding or filling memory.
+- Guest IPs and names are no longer written to the log.
+
+## 12.6.31
+
+**Upload & Install**
+- **Change a fake package's name before installing it (#937).** Pick one package and edit "Name on the PS5". The name is changed inside the package, in place, without rebuilding it, and checked afterwards. Packages signed by Sony, split packages and packages on a server are refused.
+- **Stream & install no longer sits at 0% in silence (#942).** Before it starts, the app checks that the PS5 can reach this computer. If it can't, or the PS5 never fetches any of the package, the install stops with the likely cause (most often this computer's firewall) and offers Retry via upload.
+
+**Convert**
+- **Free an archive's space while it unpacks (dangerous, off by default).** For a drive with no room for the archive and the unpacked game together. A .zip is freed file by file, a .7z block by block, and a multi-part .rar part by part; other archives are deleted once unpacked and checked. The archive is deleted for good: if anything fails on the way, you keep only what was unpacked so far. It asks every time, and it is for one game only.
+- **".pkg" now says what it is:** a fake package (FPKG).
+- **The PS5's own Convert page has the unpack options too.** For a .pkg of a packed game: unpack the asset packs, and leave out the AMPR emulator. Keeping the emulator is offered only where it is known to work with plain files.
+- **The unpack options are easy to find.** For a package, Options starts with "Asset packs and AMPR", which says what to do before a game is checked and when a game has no packs. The queue's per-game choices have them too.
+- **A package follows the game's own languages (#939).** When the game's own PlayGo data names its languages, the package declares those, not all 31. "Every language" and a single language can still be chosen.
+- **No more false "ampr_emu.index is stale" warning** when the output gets a fresh index anyway.
+
+**The PS5 helper**
+- **The app says when the helper on the PS5 is out of date (#941).** A notice on Home, a toast and the bell, with an Update helper button. It never sends by itself, and waits while a transfer, an install or a game start is running.
+
+**Games**
+- **A damaged package says so in plain words.** The copy check now reads, for example, "This file's data is damaged: 56,116 of 1,529,208 blocks don't match (3.7%, about 3.43 GB)", with what to do. The technical lines are under Details.
+
+**Payloads**
+- A search box appears once the saved list is long, and each section shows how many it lists.
+- **Fake PS5 games on firmware 11.61 to 13.60 need kstuff 1.15 or newer.** The notes now name the version instead of a date, and say the catalog's copy may be older.
+
+**Accounts**
+- **Renaming a user works again (#940).** The console refused every rename with error 0x800D0208, because the name was sent with the wrong size. Names are limited to 16 bytes, and a refusal now says why instead of blaming missing privileges.
+
+**Files and the phone layout (#936)**
+- **Selecting no longer moves the rows.** On a phone the tick box appears at the end of the row, where ⋮ was.
+- **One short top bar.** On Android phones the back and forward arrows are gone (the system Back does that) and the bar is shorter; in Files the bell moves into the Files bar. iPhones keep the arrows.
+- **The bottom More menu has every action** the row's ⋮ has when one item is selected.
+
+**Save Data**
+- **Backup times on the console's own page are right (#928).** They showed three hours off for some time zones.
+- **Restoring a "before restore" backup can no longer delete that same backup.**
+- Copying an emulator save to a console that has no folder for it yet now works.
+
+**Fixes found in an audit**
+- A finished Convert output that could not be renamed at the end is no longer deleted when you start the same build again.
+- A folder upload from an SFTP or FTP server sends linked files whole, not their first few bytes.
+- Two downloads of the same file into one folder can no longer delete the finished copy.
+- Damaged or crafted packages and images are refused instead of crashing the engine or filling the disk. Extracting from an .ffpkg refuses a path with ".." in it.
+- A game folder whose ID belongs to a system app can no longer be registered over that app.
+- The shell's recursive chmod no longer follows links out of the folder.
+- A cancelled Remote Play PIN stops working on the console right away.
+- An image mounted at a long or oddly written path can be listed and unmounted again.
+- Notifications saved on the console read back correctly after a restart.
+
+**Look and wording**
+- Clipped labels fixed on phones and in long languages (bottom tabs, Files selection bar, Workshop choices, "1 copy" on game cards, the sidebar in German).
+- Arabic and Persian: paths, names and sizes keep their order.
+- A partial backup restore shows as a warning, not a success. Small close buttons are easier to hit.
+- Counts read right for one item ("Checks passed: 1").
+- Translations of the newest texts were reviewed in all 21 languages.
+
+**Website**
+- New screenshots from a made-up console with invented games, and the pages, README and FAQ cover the last ten releases.
+
+## 12.6.30
+
+**Files on phones**
+- **Back closes what's open first (#932).** On Android, Back used to leave Files even with a menu open. Now it closes the open menu or dialog, then leaves selection, then goes up one folder, and only leaves Files at the top of a drive.
+- **More room for your files (#936).** On a phone, the top of Files is now one compact bar that stays put while you scroll: the folder name, Search, the drive switcher and ⋮ for the rest, with the path below it (beside it when the phone is sideways).
+- **Long-press to select.** Checkboxes stay hidden until you long-press a row (or pick ⋮ → Select). While selecting, the top bar shows the count and Select all, and a bar at the bottom offers Copy, Move, Rename, Delete and More. Tablets and computers look the same as before.
+
+**Play Together on a TV (#926)**
+- **The join screen works with a TV remote.** The arrows move between buttons, OK presses one, and the first useful button already has focus. Back steps out in order: it closes a dialog, then shows the buttons, then leaves full screen. During the game the remote's arrows and OK play the game.
+- **On Android TV**, the app's first screen offers a big "Join Play Together" button, the game opens in full screen, and the focus ring is easy to see from the couch.
+
+**Convert**
+- **A packed game can become a plain package (#933).** When you make a .pkg from a game whose files are in asset packs (zstd or LZ4), Convert now writes the files out plain again, on by default. A second option leaves out the AMPR emulator files. That one is off by default, because it isn't known yet whether every game runs without them.
+
+**Games**
+- **Updated PS4 games show their real version (#934).** PS4 games with an update installed showed no version and were offered the update again. The app now reads the version where PS4 games keep it, so the game page, update installs and cheat matching see 01.32 instead of 01.00.
+
+**Backups and cheats**
+- **A restore that put nothing back no longer says it worked.** If only some files came back, the Backup screen says how many couldn't be restored.
+- **XML game patches check they're writing into the game itself**, as other game patches already do.
+- **The console page stays usable during big transfers.** One worker is always kept free for the page.
+
+**Safety fixes from an audit**
+- The app only installs an update file that matches the checksum of the release it checked, and checks it again right before installing.
+- The app's pages can only read the files they show (screenshot previews and game covers), not any file on disk.
+- Sending a payload by its path only sends payload files.
+- Adding the app to an AI agent only passes a clean web address, and a failed move keeps the agent's old entry.
+- NAS and FTP file names that aren't standard text now list and copy instead of failing.
+- A save restore can never write outside the save folder it names.
+- Replies from consoles and servers have size limits, so a bad reply can't fill memory.
+- Extracting from an .ffpkg image refuses a folder that contains itself instead of running forever.
+- Release builds check the tools they download and pin their base images.
+
+## 12.6.29
+
+**Fake packages (FPKG)**
+- **The "won't start" warning for fake PS5 games is gone.** Fake PS5 games now play up to firmware 13.60, the newest a public jailbreak reaches, so the warning could no longer appear anywhere. The fake-package note keeps its payload list, and a failed launch on 11.61 to 13.60 still says a fake package needs the November 2026 kstuff. Convert marks the package as the usual choice once a game is checked.
+
+**Files**
+- **Long names stay readable on a phone held sideways (#931).** In landscape, rows showed every action button and cut the name to nothing. A sideways phone now gets the same rows as upright: the name wraps, its type and size sit below, and the actions are behind ⋮. Computers keep one line per row.
+
+**Saves**
+- **Using a received save keeps the file.** "Use this save" on a save someone sent you deleted the received file, even when the save was refused. It now reads the file where it is.
+- **A failed backup zip no longer deletes the file you chose to replace.** The new zip is written in full first, then put over the old one.
+- **Backup clean-up only touches its own temporary folders.**
+- **A console removed while the backup list was being sent is no longer backed up.**
+- **Restoring a backup on the PS5 only reads files inside that backup.**
+
+**Cheats and the PS5 helper**
+- **Cheats never write into a system module mistaken for the game.** In some PS4 games another module sits where the game's own was expected; game patches no longer write there.
+- **A game patch that can't be recorded is not left in the game**, so turning it off always takes it out. An over-long cheat value is refused instead of written cut short.
+- **SDK Changer** no longer patches past the end of a short file, and stops 32 folders deep instead of running out of memory on a very deep game folder.
+
+**Fixes found in an audit**
+- Remote Play keys with a stray character are refused instead of crashing the engine.
+- WebDAV servers that answer with the wrong part of a file are caught, so a copy or install never gets wrong bytes.
+- A game whose content ID looks like a path can no longer place the built package outside the folder you chose.
+- A Play Together friend's player opens no new video decoder after it stopped (phones have only a few).
+- A bug report for a console that hasn't been checked yet no longer shows another console's details.
+- After sending the helper, every console's own status updates right away, not after the next check.
+- Release tooling never marks an older version as the latest.
+
+## 12.6.28
+
+**Fake packages (FPKG)**
+- **Fake PS5 games play up to firmware 13.60.** A kstuff build with fake-package support up to 13.60 came out in November 2026. The app no longer warns that an installed fake PS5 game won't start on 11.61, 12.xx or 13.xx: the warning now appears only above 13.60. The fake-package note, Convert, the Payloads list, the FAQ and the README say that firmware above 11.60 needs that November 2026 kstuff (or newer). Convert again suggests a package, not an image, for a PS5 game on 13.60.
+- **A fake PS5 game that won't start says why.** On 11.61 to 13.60, a launch that fails now adds that a game from a fake package needs the November 2026 kstuff, so load it and press Play again.
+
+**Play Together**
+- **A friend sees the whole picture (#929).** On some Windows PCs a friend's picture was zoomed into its top-left corner, and on a wide window the bottom could fall below the screen. The friend's player now shows the whole picture, fitted to the window.
+
+**Saves**
+- **Backup times show in your own time zone (#928).** Save backup times were shown in UTC. They now show in the device's local time, in the app's language. Backup names don't change.
+- **EglantinePS5 Switch saves are backed up (#927, thanks EnriqueWood).** Automatic backups, Back up now and Restore now include EglantinePS5's Switch and Switch 2 saves, listed in their own group. Restore waits until EglantinePS5 is closed, and its saves never mix with ProsperoEden's, in backups or when two consoles sync.
+
+## 12.6.27
+
+**Install**
+- **PS4 add-ons install even when their title ID differs from the game's (#924).** Some games use a different title ID for their add-ons than for the game itself (Dead or Alive 5 Last Round: game CUSA01778, add-ons CUSA01601). The app refused those add-ons with "the base game is not on this PS5", even though the PS5 installs them fine. Add-ons are no longer checked for a base game; the PS5 decides. Updates still are, because the PS5 accepts an update without its game and then installs nothing.
+
+**Files**
+- **Long names are readable on a phone (#923).** On a narrow screen a long file or folder name now wraps onto up to three lines, with its type and size underneath, instead of being cut off after a few characters. Wider windows keep one line per row.
+
+**Play**
+- **"Server shutting down" is explained.** When the PS5 ends the stream because something else took over (a controller at the console was used, another device started Remote Play, or the PS5 was turned off), the app now says that in plain words and tells you to press Start to play here again.
+
+**Your servers**
+- **Editing a server while it signs in uses the new settings.** If you changed or removed a server connection while the app was signing in to it, that sign-in could be kept with the old settings. It is now dropped, and the next use signs in with what you saved.
+
+## 12.6.26
+
+**Cheats**
+- **PS4 games' cheats can be switched on (#920).** In a PS4 game, the app looked for the game's code in the wrong place, so every switch answered "the game's code is not loaded yet". It now uses the PS4 game's own code. As before, nothing is written unless every location holds the cheat's original bytes, so a cheat for another version of the game is still refused.
+
+**Play**
+- **A PS5 that isn't jailbroken can use Remote Play (#921).** Play › Set up now says so when the helper isn't answering and opens pairing with the PIN the PS5 shows, with a note on what to type for the account ID. Play Together, starting a game from the app and the console checks still need the helper.
+
+## 12.6.25
+
+**Downloads from your servers**
+- **An FTP download that drops mid-file picks up where it stopped.** If the connection to the server was cut partway through a file, the copy failed with "ended early on the server" (or a stream to the PS5 failed with "short remote read") instead of carrying on. It now signs in again and continues from that byte.
+- **Stopping a server-folder copy while its file list is still loading stops right away.** It used to sign in to the server again first, which held up the stop on a slow or sleeping server and could end with a sign-in error instead of "cancelled".
+- Stop also takes effect between empty files, and a server that reports impossible file sizes can no longer crash the size count.
+
+**Security**
+- The SSH library used for SFTP servers is updated to the release that fixes a known timing weakness in RSA (RUSTSEC-2023-0071), and a cookie library to its fixed release.
+
+## 12.6.24
+
 **Play Together**
 - **"Press PS, then pick Quick Play on the TV" no longer stays over a friend's game (#916).** The app only learns that a friend picked a user when it sees PS and then ✕, so a pick made any other way left that hint, and the buttons with it, on top of the picture in full screen for the whole session. It now holds the screen for 30 seconds at most, then hides like the other buttons.
 

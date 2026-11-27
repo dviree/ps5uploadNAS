@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { ApiError } from "../api";
 import {
+  appName,
   assemble,
   filterGames,
   loadInstalled,
@@ -119,6 +120,16 @@ describe("games model", () => {
     });
     expect(i).toEqual({ version: "01.000.016", sizeBytes: 1073741824, lastPlayed: Date.UTC(2026, 9, 20, 12) });
     expect(parseInfo({ rows: [{ key: "APP_VER", val: "01.05" }] }).version).toBe("01.05");
+    // #934: an updated PS4 game keeps APP_VER at the base's 01.00 and says 01.32 in VERSION.
+    expect(
+      parseInfo({
+        ok: true,
+        rows: [
+          { key: "APP_VER", val: "01.00" },
+          { key: "VERSION", val: "01.32" },
+        ],
+      }).version,
+    ).toBe("01.32");
     expect(parseInfo(null)).toEqual({ version: null, sizeBytes: null, lastPlayed: null });
     expect(parseInfoTime("1760000000")).toBe(1760000000000);
     expect(parseInfoTime("1760000000000")).toBe(1760000000000);
@@ -209,5 +220,39 @@ describe("games model", () => {
     expect(await stillInstalled("PPSA01650", helperCalls({ appmeta: ["PPSA01650"] }).fn)).toBe(true);
     // app.db still has the row, but the folders are gone: not listed (the engine's rule).
     expect(await stillInstalled("PPSA01650", helperCalls({ appmeta: [] }).fn)).toBe(false);
+  });
+});
+
+describe("the running game's name", () => {
+  it("reads app.db a page at a time until the title is there, once per title", async () => {
+    const pages: Record<number, unknown> = {
+      0: { apps: [{ title_id: "CUSA00001", name: "Old Racer" }], more: true, next: 1 },
+      1: { apps: [{ title_id: "PPSA77001", name: "Astro Bot" }], more: true, next: 2 },
+      2: { apps: [], more: false, next: 2 },
+    };
+    const calls: number[] = [];
+    const fn = (async (_route: string, body?: object) => {
+      const offset = (body as { offset: number }).offset;
+      calls.push(offset);
+      return pages[offset];
+    }) as never;
+    expect(await appName("PPSA77001", fn)).toBe("Astro Bot");
+    expect(calls).toEqual([0, 1]);
+    expect(await appName("PPSA77001", fn)).toBe("Astro Bot");
+    expect(calls).toEqual([0, 1]);
+    // not in app.db: every page once, then null
+    expect(await appName("PPSA77002", fn)).toBeNull();
+    expect(calls).toEqual([0, 1, 0, 1, 2]);
+  });
+
+  it("asks again after a failed read", async () => {
+    let fail = true;
+    const fn = (async () => {
+      if (fail) throw new ApiError(0, "offline");
+      return { apps: [{ title_id: "PPSA77003", name: "Venus" }], more: false, next: 0 };
+    }) as never;
+    expect(await appName("PPSA77003", fn)).toBeNull();
+    fail = false;
+    expect(await appName("PPSA77003", fn)).toBe("Venus");
   });
 });

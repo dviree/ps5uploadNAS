@@ -58,7 +58,6 @@ import {
   Toggle,
 } from "../../components";
 import { BrowseButton } from "../../components/BrowseButton";
-import { FakeGameFirmwareNotice } from "../../components/FakeGameFirmwareNotice";
 import {
   DOC_ANCHORS,
   faqLink,
@@ -153,9 +152,6 @@ function PkgRow({
 }) {
   const tr = useTr();
   const navigate = useNavigate();
-  const kernel = useConnectionStore(
-    (s) => s.runtimeByHost[hostOf(host)]?.ps5Kernel ?? null,
-  );
   // After the console refused this package from its own storage, Retry with Stream is offered
   // beside Install when the engine says that is safe for this package.
   const streamOffered = !!entry.lastResult?.retryWithStream && !!onRetryStream;
@@ -587,15 +583,6 @@ function PkgRow({
       {/* Windows: the console could not reach this computer, and the engine knows why. */}
       {!busy && !entry.lastResult?.ok && entry.lastResult?.netDiag && (
         <NetworkFixActions diag={entry.lastResult.netDiag} />
-      )}
-      {/* A fake PS5 GAME on firmware above 11.60 installs but cannot be
-          played. Not shown for a retail-signed package, PS4, or homebrew. */}
-      {!installed && entry.authenticity !== "retail" && (
-        <FakeGameFirmwareNotice
-          compact
-          kernel={kernel}
-          contentId={entry.contentId || entry.titleId}
-        />
       )}
     </li>
   );
@@ -1283,14 +1270,16 @@ export default function InstallPackageScreen({
   // DLC ("ac") share a ContentID AND a title_id — they never overwrite each
   // other (the library stages them to separate sub-dirs; on the PS5 the base
   // lands in /user/app/<id>/app.pkg and the update in /user/patch/<id>/
-  // patch.pkg). The one thing that goes wrong is ORDER: a patch/DLC needs its
+  // patch.pkg). The one thing that goes wrong is ORDER: an update needs its
   // base installed FIRST. Install it without the base and Sony's installer
   // accepts the request (err_code 0) but nothing actually lands — a confusing
-  // "it said done but the game's missing". So before installing an add-on
+  // "it said done but the game's missing". So before installing an update
   // whose base isn't on the console, warn (advisory, not blocking).
   async function handleInstall(entry: PkgEntry) {
+    // Updates only: an add-on installs into its own folder, and its title id need not be the
+    // game's (Dead or Alive 5 Last Round's are CUSA01601, the game CUSA01778, #924).
     const baseMissing =
-      isAddonCategory(entry.category) &&
+      entry.category === "gp" &&
       !!entry.titleId &&
       !installedIds.has(entry.titleId);
     if (baseMissing) {

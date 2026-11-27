@@ -9,6 +9,7 @@
 mod api;
 mod cheats;
 pub(crate) mod consoles;
+mod convert;
 mod disk;
 mod engine;
 pub(crate) mod files;
@@ -97,6 +98,7 @@ fn all() -> &'static [ToolDef] {
             more_files::tools(),
             transfer::tools(),
             install::tools(),
+            convert::tools(),
             queue::tools(),
             power::tools(),
             hw::tools(),
@@ -893,6 +895,8 @@ mod tests {
         assert_eq!(hints("rp_stop"), (false, true));
         assert_eq!(hints("shell_run"), (false, true));
         assert_eq!(hints("payloads_send"), (false, true));
+        assert_eq!(hints("payloads_sources"), (true, false));
+        assert_eq!(hints("payloads_source_download"), (false, true));
         assert_eq!(hints("consoles_discover"), (true, false));
         for tool in all() {
             assert_eq!(

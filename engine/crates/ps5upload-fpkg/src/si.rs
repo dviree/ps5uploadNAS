@@ -13,6 +13,14 @@ pub struct Member {
     /// Absolute offset of the member's bytes in the package.
     pub offset: u64,
     pub size: u64,
+    /// Absolute offset of the member's local file header.
+    pub local: u64,
+    /// Absolute offset of the member's central directory record.
+    pub central: u64,
+    /// The CRC-32 the central directory records for it.
+    pub crc: u32,
+    /// Its general-purpose flags (bit 3: the sizes and CRC follow the data instead).
+    pub flags: u16,
 }
 
 pub struct Si {
@@ -52,7 +60,10 @@ pub fn read(file: &mut PkgFile) -> Result<Option<Si>> {
         if pos + 46 > cd.len() || le32(&cd, pos) != CENTRAL_SIG {
             return format_err("SI central directory is malformed");
         }
+        let central = cd_abs + pos as u64;
+        let flags = le16(&cd, pos + 8);
         let method = le16(&cd, pos + 10);
+        let crc = le32(&cd, pos + 16);
         let size = le32(&cd, pos + 24) as u64;
         let name_len = le16(&cd, pos + 28) as usize;
         let extra = le16(&cd, pos + 30) as usize;
@@ -71,20 +82,51 @@ pub fn read(file: &mut PkgFile) -> Result<Option<Si>> {
             return format_err(format!("SI member {name} has no local header"));
         }
         let offset = local + 30 + le16(&lh, 26) as u64 + le16(&lh, 28) as u64;
-        members.push(Member { name, offset, size });
+        members.push(Member {
+            name,
+            offset,
+            size,
+            local,
+            central,
+            crc,
+            flags,
+        });
     }
     Ok(Some(Si { zip_start, members }))
 }
 
 /// CRC-32C of every 64 KiB block before the SI ZIP, little-endian.
 pub fn chunk_crc_table(file: &mut PkgFile, zip_start: u64) -> Result<Vec<u8>> {
+    chunk_crc_table_with(file, zip_start, None, &mut |_| {})
+}
+
+/// [`chunk_crc_table`], which reads the whole package again: `progress` hears the bytes read so
+/// far (of `zip_start`) every 256 blocks and at the end, and it stops with a "cancelled" error
+/// once `cancel` is set (#951: a copy check of a 200 GB package sat at 100% through this pass,
+/// with Cancel unheard).
+pub fn chunk_crc_table_with(
+    file: &mut PkgFile,
+    zip_start: u64,
+    cancel: Option<&std::sync::atomic::AtomicBool>,
+    progress: &mut dyn FnMut(u64),
+) -> Result<Vec<u8>> {
     let blocks = zip_start.div_ceil(BLOCK);
     let mut out = Vec::with_capacity(blocks as usize * 4);
     for i in 0..blocks {
+        if i.is_multiple_of(256) {
+            if crate::workshop::checkpoint_opt(cancel) {
+                return format_err("cancelled");
+            }
+            progress(i * BLOCK);
+        }
         let start = i * BLOCK;
         let len = (zip_start - start).min(BLOCK) as usize;
         out.extend_from_slice(&crc32c(&file.read_at(start, len)?).to_le_bytes());
     }
+    if crate::workshop::checkpoint_opt(cancel) {
+        return format_err("cancelled");
+    }
+    progress(zip_start);
     Ok(out)
 }
 
@@ -119,7 +161,7 @@ mod tests {
     /// not draw, and always catches a wrong first or last one or a wrong length.
     #[test]
     fn chunk_crc_sampled_checks_its_draw_and_the_length() {
-        let path = std::env::temp_dir().join(format!("ps5upload-crc-{}", std::process::id()));
+        let path = crate::test_tmp::temp_path(format!("ps5upload-crc-{}", std::process::id()));
         let bytes: Vec<u8> = (0..BLOCK * 300).map(|i| (i * 7 % 251) as u8).collect();
         std::fs::write(&path, &bytes).unwrap();
         let mut f = PkgFile::open(&path).unwrap();

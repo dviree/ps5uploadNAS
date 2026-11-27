@@ -23,6 +23,8 @@ import { QueueItemOptions } from "./QueueItemOptions";
 export interface QueueCardProps {
   items: ConvertItem[];
   running: boolean;
+  /** The queue was making a game when its page was closed or reloaded: it waits for Start. */
+  stoppedByClose?: boolean;
   /** The game being made is paused (#631): the rest wait for it. */
   paused?: boolean;
   /** Open Upload & Install, where a made game installs or uploads. */
@@ -106,6 +108,10 @@ export function QueueCard(p: QueueCardProps) {
         return tr("cq_tag_lz4", undefined, "LZ4");
       case "unpack":
         return tr("cq_tag_unpack", undefined, "unpacked");
+      case "no-emulator":
+        return tr("cq_tag_no_emulator", undefined, "no AMPR emulator");
+      case "free-archive":
+        return tr("cq_tag_free_archive", undefined, "deletes archive");
       case "level":
         return t.level === "fast"
           ? tr("cq_tag_level_fast", undefined, "fast")
@@ -160,6 +166,24 @@ export function QueueCard(p: QueueCardProps) {
           )}
         </div>
 
+        {p.running ? (
+          <div className="text-xs text-[var(--color-muted)]" data-testid="cq-page-note">
+            {tr(
+              "cq_page_close_note",
+              undefined,
+              "Closing this page does not stop the game being made. The next game starts only while this page is open.",
+            )}
+          </div>
+        ) : p.stoppedByClose && pending > 0 ? (
+          <div className="text-xs text-[var(--color-warn)]" role="status" data-testid="cq-stopped-by-close">
+            {tr(
+              "cq_stopped_by_close",
+              undefined,
+              "The queue stopped when this page was closed. The game it was making went on. Start the queue again to continue.",
+            )}
+          </div>
+        ) : null}
+
         {sent && (
           <div>
             <Button size="sm" variant="secondary" leftIcon={<Send size={14} />} onClick={p.onOpenUpload}>
@@ -188,7 +212,10 @@ export function QueueCard(p: QueueCardProps) {
                     {queueTags(i).map((t) => (
                       <span
                         key={t.kind}
-                        className="shrink-0 rounded bg-[var(--color-surface-3)] px-1.5 py-px font-mono text-[10px] text-[var(--color-muted)]"
+                        className={`shrink-0 rounded bg-[var(--color-surface-3)] px-1.5 py-px font-mono text-[10px] ${
+                          // The one tag that says something is destroyed.
+                          t.kind === "free-archive" ? "text-[var(--color-bad)]" : "text-[var(--color-muted)]"
+                        }`}
                         data-testid={`cq-tag-${t.kind}`}
                       >
                         {tagText(t)}

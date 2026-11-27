@@ -260,6 +260,21 @@ test("Home's Play card can be hidden, and comes back from Play › Set up", asyn
   await expect(page.getByTestId("home-play")).toBeVisible({ timeout: 30_000 });
 });
 
+test.describe("on a phone", () => {
+  test.use({ viewport: { width: 360, height: 800 }, hasTouch: true, isMobile: true });
+  test("the Play card's hide button is wide enough for a finger", async ({ page }) => {
+    await consoleHalfSetUp(page, { paired: true });
+    await page.goto("/home", { waitUntil: "domcontentloaded" });
+    const hide = page.getByTestId("home-play").getByTestId("home-play-hide");
+    await expect(hide).toBeVisible({ timeout: 30_000 });
+    const box = (await hide.boundingBox())!;
+    // It was 28 px wide: the 14 px cross and its padding.
+    expect(box.width).toBeGreaterThanOrEqual(40);
+    expect(box.height).toBeGreaterThanOrEqual(40);
+    expect(box.x + box.width).toBeLessThanOrEqual(360);
+  });
+});
+
 test("pairing that fails on the console says why and offers the PIN shown on the PS5 (#609)", async ({ page }) => {
   const c = await consoleHalfSetUp(page);
   c.readiness = { ...c.readiness, service_enabled: 1, user_enabled: 1 };
@@ -301,4 +316,32 @@ test("the PIN shown on the PS5 pairs without the helper", async ({ page }) => {
   await page.getByTestId("pin-pair-account").fill("iHdmVUQzIhE=");
   await page.getByTestId("pin-pair-go").click();
   await expect(step).toHaveAttribute("data-state", "ok", { timeout: 15_000 });
+});
+
+test("a PS5 without the helper is told Remote Play still works and goes straight to the PIN (#921)", async ({ page }) => {
+  await consoleHalfSetUp(page);
+  await page.route(
+    (url) => url.pathname === "/api/ps5/status" || url.pathname === "/api/ps5/remoteplay/readiness",
+    (route) => route.fulfill({ status: 502, contentType: "application/json", body: JSON.stringify({ error: "no helper" }) }),
+  );
+  await page.goto("/play/setup", { waitUntil: "domcontentloaded" });
+  const stock = page.getByTestId("play-setup-stock");
+  await expect(stock).toBeVisible({ timeout: 15_000 });
+  await expect(stock).toContainText("Enable Remote Play");
+  await stock.getByTestId("play-setup-stock-pin").click();
+  // The account field says what to type when the app can't read it.
+  await expect(page.getByTestId("pin-pair-account-hint")).toBeVisible();
+  await page.getByTestId("pin-pair-pin").fill("87654321");
+  await page.getByTestId("pin-pair-account").fill("0x1122334455667788");
+  await page.getByTestId("pin-pair-go").click();
+  await expect(page.locator('[data-step="pair"]')).toHaveAttribute("data-state", "ok", { timeout: 15_000 });
+  // Paired: the callout has done its job.
+  await expect(stock).toHaveCount(0);
+});
+
+test("with the helper answering, the no-helper note stays away", async ({ page }) => {
+  await consoleHalfSetUp(page);
+  await page.goto("/play/setup", { waitUntil: "domcontentloaded" });
+  await expect(page.locator('[data-step="connect"]')).toHaveAttribute("data-state", "ok", { timeout: 15_000 });
+  await expect(page.getByTestId("play-setup-stock")).toHaveCount(0);
 });

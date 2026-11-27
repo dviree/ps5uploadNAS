@@ -928,7 +928,7 @@ async fn every_name_for_the_console_works_on_the_routes_that_lacked_them() {
 #[tokio::test]
 async fn ps4_updates_and_addons_are_told_and_refused_in_words() {
     let app = app();
-    let root = std::env::temp_dir().join(format!("ps5upload-ps4-kinds-{}", std::process::id()));
+    let root = crate::test_tmp::temp_path(format!("ps5upload-ps4-kinds-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     let put = |name: &str, gz: &[u8]| {
@@ -1032,7 +1032,7 @@ async fn ps4_updates_and_addons_are_told_and_refused_in_words() {
 #[tokio::test]
 async fn a_ps4_game_becomes_a_ps4_package() {
     let app = app();
-    let root = std::env::temp_dir().join(format!("ps5upload-ps4-pkg-{}", std::process::id()));
+    let root = crate::test_tmp::temp_path(format!("ps5upload-ps4-pkg-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     std::fs::create_dir_all(&root).unwrap();
     let put = |name: &str, gz: &[u8]| {
@@ -1123,12 +1123,87 @@ async fn a_ps4_game_becomes_a_ps4_package() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// A package of a game in asset packs (#933): with `unpack_packs` and `leave_out_ampr_emu` it
+/// carries the game's plain files and no AMPR emulator. Unpacking a game that is not packed, or
+/// leaving the emulator out of one that stays packed, is refused before any job.
+#[tokio::test]
+async fn a_packed_game_packages_as_plain_files_without_its_emulator() {
+    use crate::unpack_packs::tests::{game, zstd_packed, Scratch};
+    let app = app();
+    let scratch = Scratch::new("route-pkg");
+    let src = game(&scratch.0, true);
+    let packed = scratch.0.join("packed");
+    zstd_packed(&src, &packed);
+    let out = scratch.0.join("out");
+    let build = |body: Value| {
+        let app = app.clone();
+        async move {
+            let r = post_json(&app, "/api/fpkg/build", &body.to_string()).await;
+            let status = r.status();
+            (status, json_of(r).await)
+        }
+    };
+
+    for (body, want) in [
+        (
+            json!({ "source": src, "output_dir": out, "unpack_packs": true }),
+            "nothing to unpack",
+        ),
+        (
+            json!({ "source": packed, "output_dir": out, "leave_out_ampr_emu": true }),
+            "goes with unpacking",
+        ),
+    ] {
+        let (status, v) = build(body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{v}");
+        let text = v["error"].as_str().unwrap_or_default();
+        assert!(text.contains(want), "{text}");
+    }
+    assert!(!out.exists() || std::fs::read_dir(&out).unwrap().next().is_none());
+
+    let (status, v) = build(json!({
+        "source": packed, "output_dir": out, "compression": "fast",
+        "unpack_packs": true, "leave_out_ampr_emu": true,
+    }))
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "{v}");
+    let id = v["job_id"].as_str().unwrap().to_string();
+    let mut done = Value::Null;
+    for _ in 0..3000 {
+        done = json_of(get(&app, &format!("/api/jobs/{id}")).await).await;
+        if done["status"] != "running" {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(done["status"], "done", "{done}");
+    let mut pkg =
+        ps5upload_fpkg::source::open(std::path::Path::new(done["dest"].as_str().unwrap())).unwrap();
+    assert_eq!(
+        pkg.read("data/sub/table.bin").unwrap(),
+        std::fs::read(src.join("data/sub/table.bin")).unwrap()
+    );
+    let names: Vec<String> = pkg.files().iter().map(|f| f.path.clone()).collect();
+    assert!(
+        !names.iter().any(|n| n.ends_with("libSceAmpr.sprx")),
+        "{names:?}"
+    );
+    assert!(
+        !names.iter().any(|n| n.starts_with("ampr_zstd")),
+        "{names:?}"
+    );
+    assert!(
+        names.iter().any(|n| n == "ampr_emu.index"),
+        "a libSceAmpr game keeps its index: {names:?}"
+    );
+}
+
 /// A packed folder build: a game folder is a source only with `ampr_zstd`, and the request is
 /// refused before any job when its options cannot work. Nothing here starts a build.
 #[tokio::test]
 async fn a_folder_build_with_zstd_packs_takes_a_game_folder_and_refuses_what_cannot_work() {
     let app = app();
-    let root = std::env::temp_dir().join(format!("ps5upload-zstd-req-{}", std::process::id()));
+    let root = crate::test_tmp::temp_path(format!("ps5upload-zstd-req-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     let game = root.join("PPSA99996-app");
     std::fs::create_dir_all(game.join("sce_sys")).unwrap();
@@ -1247,7 +1322,7 @@ async fn job_end(st: &AppState, resp: HttpResponse<Body>) -> JobState {
 async fn lz4_packs_are_refused_in_this_fork() {
     let st = state();
     let app = app_with(st.clone(), Default::default(), "");
-    let root = std::env::temp_dir().join(format!("ps5upload-api-lz4-{}", std::process::id()));
+    let root = crate::test_tmp::temp_path(format!("ps5upload-api-lz4-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     let game = lz4_game(&root);
     let out = root.join("out");
@@ -1288,7 +1363,7 @@ async fn an_image_and_a_folder_go_straight_to_a_server() {
         .id;
     let st = state();
     let app = app_with(st.clone(), Default::default(), "");
-    let root = std::env::temp_dir().join(format!("ps5upload-api-toserver-{}", std::process::id()));
+    let root = crate::test_tmp::temp_path(format!("ps5upload-api-toserver-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&root);
     let game = root.join("PPSA99995-app");
     std::fs::create_dir_all(game.join("sce_sys")).unwrap();

@@ -59,6 +59,24 @@ export interface CollectionPkg {
 export interface CopyProblem {
   file: string;
   error: string;
+  /** For a package's failed check, what it looks at: `data`, `structure`, `metadata` or
+   *  `truncated`. Absent for any other problem. */
+  kind?: string;
+}
+
+/** What a package's problems add up to. Counts that don't belong to the `kind` are 0.
+ *  `data`: `blocks_bad` of `blocks_total` data blocks (`block_bytes` each) are not what the
+ *  package's digests say. `truncated`: the file is `bytes_have` long and needs at least
+ *  `bytes_need` (both 0 when only its end is missing). `structure` / `metadata`:
+ *  `checks_failed` checks of the image's tables, or of the package's own header information. */
+export interface CopyDamage {
+  kind: "data" | "truncated" | "structure" | "metadata" | (string & {});
+  blocks_bad: number;
+  blocks_total: number;
+  block_bytes: number;
+  bytes_have: number;
+  bytes_need: number;
+  checks_failed: number;
 }
 
 /** A copy check (`/api/collection/check`). `method` says how far it could look: `package`
@@ -68,12 +86,18 @@ export interface CopyCheck {
   path: string;
   state: "queued" | "running" | "ok" | "problems" | "failed" | "cancelled";
   method: "" | "package" | "archive" | "files" | "bytes";
+  /** Of the whole check: a package's two reads (its blocks, then the PlayGo chunk CRCs) count
+   *  in one total (#951). */
   bytes_done: number;
   bytes_total: number;
+  /** A package check while it runs: which read it is on. Absent from an engine that doesn't say. */
+  phase?: "blocks" | "playgo";
   files_done: number;
   files_total: number;
   problems: CopyProblem[];
   problems_total: number;
+  /** A package with problems: what they add up to. Absent from an engine that doesn't say. */
+  damage?: CopyDamage | null;
   error: string | null;
   started_ms: number;
   finished_ms: number;
@@ -276,6 +300,9 @@ export interface OrganizeResult {
   dropped: string[];
   kept_dirs: string[];
   logs: string[];
+  /** Folders whose items moved but whose undo log could not be saved afterwards ("folder: why"):
+   *  Undo may not put everything back. Absent when every log was saved. */
+  undo_incomplete?: string[];
 }
 
 export interface OrganizeRun {

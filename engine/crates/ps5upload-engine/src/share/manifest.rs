@@ -47,6 +47,21 @@ impl ItemKind {
             ItemKind::Note => "note",
         }
     }
+
+    /// The kind a word names, if it is one of this build's.
+    pub(crate) fn from_word(w: &str) -> Option<ItemKind> {
+        [
+            ItemKind::App,
+            ItemKind::Save,
+            ItemKind::Media,
+            ItemKind::Cheats,
+            ItemKind::Controls,
+            ItemKind::Stream,
+            ItemKind::Note,
+        ]
+        .into_iter()
+        .find(|k| k.word() == w)
+    }
 }
 
 /// Where one file's bytes come from.
@@ -450,7 +465,7 @@ pub(crate) mod tests {
     use super::*;
 
     pub(crate) fn tmp(name: &str) -> PathBuf {
-        let d = std::env::temp_dir().join(format!(
+        let d = crate::test_tmp::temp_path(format!(
             "ps5u-share-{name}-{}-{}",
             std::process::id(),
             crate::join_net::random_b64(6).unwrap()

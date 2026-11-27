@@ -24,6 +24,7 @@
  * part of ps5upload, GPL-3.0-or-later.
  */
 
+#include "appinfo_version.h"
 #include "cheats.h"
 #include "cheats_list.h"
 #include "cheats_json.h"
@@ -207,6 +208,63 @@ static int json_bool(const char *json, const char *key, int *out) {
 
 /* ── Running-game detection ──────────────────────────────────────── */
 
+static int module_info(pid_t pid, uint32_t handle, uint64_t *base, uint64_t *size, char *path,
+                       size_t path_cap);
+static int game_mem_read(pid_t pid, intptr_t addr, uint8_t *out, size_t len);
+
+/* dynlib handle 0 of the game's process, as its module list has it. */
+static void exe_seen(pid_t pid, cheat_exe_seen_t *h0) {
+    memset(h0, 0, sizeof *h0);
+    h0->found = module_info(pid, 0, &h0->base, &h0->size, h0->path, sizeof h0->path) == 0;
+}
+
+static int title_is_ps4(const char *title) { return title && strncmp(title, "CUSA", 4) == 0; }
+
+static void log_game_modules(pid_t pid, const char *title, const cheat_exe_seen_t *h0,
+                             intptr_t base, int how);
+
+/* The load address cheat offsets are relative to: the game's executable (cheat_exe_base_pick).
+ *
+ * For a PS5 game that is dynlib handle 0. For a PS4 game it is handle 0 when that is its
+ * eboot.bin at a usable address, else 0x400000 (#920, #946). `how` (may be NULL) says which. */
+static intptr_t game_exe_base_how(pid_t pid, const char *title, int *how) {
+    cheat_exe_seen_t h0, eboot;
+    exe_seen(pid, &h0);
+    int ps4 = title_is_ps4(title);
+    memset(&eboot, 0, sizeof eboot);
+    if (ps4 && !(h0.found && cheat_module_is_game(0, h0.path))) {
+        /* Handle 0 is not the PS4 game's eboot.bin: the module of that name, if the list has it
+         * under another handle. */
+        uint32_t eh = 0;
+        if (locked_dynlib_handle(pid, "eboot.bin", &eh) == 0 && eh != 0)
+            eboot.found = module_info(pid, eh, &eboot.base, &eboot.size, eboot.path,
+                                      sizeof eboot.path) == 0;
+    }
+    int picked = CHEAT_EXE_NONE;
+    intptr_t b = (intptr_t)cheat_exe_base_pick(ps4, &h0, &eboot, &picked);
+    if (how) *how = picked;
+    /* A PS4 game whose base is not its handle 0: say what the list held. A PS5 game with no base
+     * yet is the start-up window (the watcher asks every few ms), not worth a log. */
+    if (picked == CHEAT_EXE_PS4_DEFAULT || picked == CHEAT_EXE_NAMED)
+        log_game_modules(pid, title, &h0, b, picked);
+    return b;
+}
+
+static intptr_t game_exe_base(pid_t pid, const char *title) {
+    return game_exe_base_how(pid, title, NULL);
+}
+
+/* "the game's code is not loaded yet; try again", with what handle 0 is (#946). */
+static void exe_not_loaded(pid_t pid, char *err, size_t err_cap) {
+    if (!err || !err_cap) return;
+    cheat_exe_seen_t h0;
+    char h0_text[160];
+    exe_seen(pid, &h0);
+    cheat_exe_describe(&h0, h0_text, sizeof h0_text);
+    snprintf(err, err_cap, "the game's code is not loaded yet; try again (its executable, module "
+                           "handle 0, is %s)", h0_text);
+}
+
 /* Find the pid + base address of the running big app (game).
  * Walks sysctl(KERN_PROC_PROC) and uses sceKernelGetAppInfo to find
  * a non-NPXS app. Returns pid (>0) on success, 0 if no game running.
@@ -243,7 +301,7 @@ static pid_t find_running_game(char *title_out, size_t title_cap,
                 snprintf(title_out, title_cap, "%s", tid);
             }
             if (base_out) {
-                *base_out = locked_mapbase(pid, 0);
+                *base_out = game_exe_base(pid, tid);
             }
         }
         ptr += ki_structsize;
@@ -419,7 +477,7 @@ static int phys_write_allowed(pid_t pid, intptr_t addr, size_t len, char *why, s
             path[0] = '\0';
             if (h.path) (void)kernel_copyout(h.path, path, sizeof(path) - 1);
             path[sizeof(path) - 1] = '\0';
-            int game_module = (h.handle == 0) || strstr(path, "/app0/") != NULL;
+            int game_module = cheat_module_is_game(h.handle, path);
             if (!game_module) {
                 if (why) snprintf(why, why_cap, "inside %s", path[0] ? path : "a system module");
                 verdict = 0;
@@ -467,6 +525,76 @@ static int module_info(pid_t pid, uint32_t handle, uint64_t *base, uint64_t *siz
     }
     pthread_mutex_unlock(&kernel_rw_lock);
     return found;
+}
+
+/* The game process's module list, once per process, into the helper's log (stderr.log, which
+ * the app's bug report collects): what the base was taken from when it was not handle 0, so a
+ * report shows what the console had (#946). Handles, file names (never whole paths), load
+ * addresses and sizes: nothing of the user's. */
+#define EXE_LOG_MODULES_MAX 64
+static void log_game_modules(pid_t pid, const char *title, const cheat_exe_seen_t *h0,
+                             intptr_t base, int how) {
+    static pid_t told;
+    if (told == pid) return;
+    told = pid;
+    char h0_text[160];
+    cheat_exe_describe(h0, h0_text, sizeof h0_text);
+    fprintf(stderr, "[cheats] %s pid %d: cheat offsets from 0x%lx (%s); handle 0 is %s\n",
+            title ? title : "?", (int)pid, (unsigned long)base,
+            how == CHEAT_EXE_PS4_DEFAULT ? "the PS4 executable address"
+            : how == CHEAT_EXE_NAMED     ? "the module named eboot.bin"
+            : how == CHEAT_EXE_HANDLE0   ? "handle 0"
+                                         : "none yet",
+            h0_text);
+    typedef struct {
+        uint64_t handle, base, size;
+        int app0;
+        char leaf[64];
+    } mod_row_t;
+    /* On the heap: the watcher's thread stack is not the place for 6 KiB. */
+    mod_row_t *m = (mod_row_t *)calloc(EXE_LOG_MODULES_MAX, sizeof *m);
+    if (!m) return;
+    int n = 0, more = 0, walked = 0;
+    char path[256];
+    pthread_mutex_lock(&kernel_rw_lock);
+    unsigned long kproc = (unsigned long)kernel_get_proc(pid);
+    unsigned long obj = 0;
+    if (kproc && kernel_copyout(kproc + 0x3e8, &obj, sizeof(obj)) == 0) {
+        walked = 1;
+        for (int guard = 0; guard < 1024; guard++) {
+            if (kernel_copyout(obj, &obj, sizeof(obj)) != 0 || !obj) break;
+            dynlib_head_t h;
+            if (kernel_copyout(obj, &h, sizeof(h)) != 0) break;
+            if (n >= EXE_LOG_MODULES_MAX) {
+                more++;
+                continue;
+            }
+            path[0] = '\0';
+            if (h.path && kernel_copyout(h.path, path, sizeof(path) - 1) != 0) path[0] = '\0';
+            path[sizeof(path) - 1] = '\0';
+            const char *leaf = strrchr(path, '/');
+            leaf = leaf ? leaf + 1 : path;
+            m[n].handle = h.handle;
+            m[n].base = h.mapbase;
+            m[n].size = h.mapsize;
+            m[n].app0 = strstr(path, "/app0/") != NULL;
+            snprintf(m[n].leaf, sizeof m[n].leaf, "%s", leaf[0] ? leaf : "(no path)");
+            n++;
+        }
+    }
+    pthread_mutex_unlock(&kernel_rw_lock);
+    if (!walked) {
+        fprintf(stderr, "[cheats] %s pid %d: its module list could not be read\n",
+                title ? title : "?", (int)pid);
+        free(m);
+        return;
+    }
+    for (int i = 0; i < n; i++)
+        fprintf(stderr, "[cheats]   handle %llu %s%s at 0x%llx, 0x%llx bytes\n",
+                (unsigned long long)m[i].handle, m[i].leaf, m[i].app0 ? " (app0)" : "",
+                (unsigned long long)m[i].base, (unsigned long long)m[i].size);
+    if (more) fprintf(stderr, "[cheats]   and %d more\n", more);
+    free(m);
 }
 
 typedef struct {
@@ -757,35 +885,9 @@ static void xml_open_tag_copy(const char *start, const char *end, char *buf, siz
     buf[n] = '\0';
 }
 
-/* Extract text between <tag>...</tag>. */
-static int xml_text(const char *start, const char *tag_name,
-                    char *out, size_t cap) {
-    if (!start || !tag_name || !out || cap == 0) return -1;
-    out[0] = '\0';
-    char open_tag[64];
-    char close_tag[64];
-    snprintf(open_tag, sizeof(open_tag), "<%s", tag_name);
-    snprintf(close_tag, sizeof(close_tag), "</%s>", tag_name);
-
-    const char *p = strstr(start, open_tag);
-    if (!p) return -1;
-    p += strlen(open_tag);
-    while (*p && *p != '>') p++;  /* skip attrs */
-    if (*p == '>') p++;
-
-    const char *end = strstr(p, close_tag);
-    if (!end) return -1;
-
-    size_t len = (size_t)(end - p);
-    if (len >= cap) len = cap - 1;
-    memcpy(out, p, len);
-    out[len] = '\0';
-
-    /* Trim whitespace */
-    while (len > 0 && isspace((unsigned char)out[len-1])) out[--len] = '\0';
-    while (isspace((unsigned char)out[0])) memmove(out, out+1, strlen(out));
-
-    return 0;
+/* Extract text between <tag>...</tag> (include/cheats_xml_attr.h): 1 when it did not fit. */
+static int xml_text(const char *start, const char *tag_name, char *out, size_t cap) {
+    return cheats_xml_text(start, tag_name, out, cap);
 }
 
 /* Find next occurrence of <TagName in xml text starting from cursor.
@@ -841,9 +943,11 @@ static int parse_shn_file(const char *xml, size_t xml_len,
         const char *cheat_start, *cheat_end;
         if (!xml_find_tag(cursor, "Cheat", &cheat_start, &cheat_end)) break;
 
-        /* Extract the full Cheat tag content (to its matching </Cheat>) */
-        const char *close_cheat = strstr(cheat_end, "</Cheat>");
-        if (!close_cheat) break;
+        /* Extract the full Cheat tag content (to its matching </Cheat>; none for <Cheat .../>) */
+        const char *close_cheat;
+        const char *cheat_after = cheats_xml_element_end(cheat_start, cheat_end, "</Cheat>",
+                                                         &close_cheat);
+        if (!cheat_after) break;
 
         size_t cheat_len = (size_t)(close_cheat - cheat_end);
         char *cheat_buf = (char *)malloc(cheat_len + 1); /* a master code's runs long (#811) */
@@ -875,14 +979,14 @@ static int parse_shn_file(const char *xml, size_t xml_len,
             if (!xml_find_tag(cl_cursor, "Cheatline", &cl_start, &cl_end))
                 break;
 
-            const char *cl_close = strstr(cl_end, "</Cheatline>");
-            const char *cl_real_end;
-            if (cl_close) {
-                cl_real_end = cl_close + strlen("</Cheatline>");
-            } else {
-                /* Self-closing: <Cheatline ... /> */
+            /* Self-closing (<Cheatline ... />) by its own tag; an open tag with no close anywhere
+             * after it is read for its attributes alone, as before. */
+            const char *cl_close;
+            const char *cl_real_end =
+                cheats_xml_element_end(cl_start, cl_end, "</Cheatline>", &cl_close);
+            if (!cl_real_end) {
                 cl_real_end = cl_end;
-                cl_close = cl_start + strlen("<Cheatline");
+                cl_close = cl_end;
             }
 
             size_t cl_len;
@@ -925,8 +1029,11 @@ static int parse_shn_file(const char *xml, size_t xml_len,
             if (sec_str[0]) e->section = atoi(sec_str);
 
             /* Try child tags (paired form) */
-            if (!e->offset_str[0])
-                xml_text(cl_full, "Offset", e->offset_str, sizeof(e->offset_str));
+            /* An offset too long to hold is not cut into another address: it becomes one that does
+             * not parse, so the cheat is refused (resolve_mod_locs). */
+            if (!e->offset_str[0] &&
+                xml_text(cl_full, "Offset", e->offset_str, sizeof(e->offset_str)) == 1)
+                snprintf(e->offset_str, sizeof(e->offset_str), "too long");
             if (!e->on_str[0])
                 xml_text(cl_full, "ValueOn", e->on_str, sizeof(e->on_str));
             if (!e->off_str[0])
@@ -951,7 +1058,7 @@ static int parse_shn_file(const char *xml, size_t xml_len,
 
         if (m->name[0] || m->mem_count > 0) mod_idx++;
         else cheat_mod_clear(m); /* not kept: the next cheat reuses its place */
-        cursor = close_cheat + strlen("</Cheat>");
+        cursor = cheat_after;
     }
 
     cf->mod_count = mod_idx;
@@ -1216,8 +1323,17 @@ static int load_cheat_file(const char *path, int format, cheat_file_t *cf) {
 
 /* ── State persistence (sidecar JSON) ────────────────────────────── */
 
+/* Named by the title id in upper case, whatever the spelling asked with: the watcher reads it by
+ * the running game's own id (upper case), while a cheat file named in lower case listed its title
+ * that way and a toggle saved under it, so on a case-sensitive /data that game's saved switches
+ * were never applied at launch. */
 static void state_path(const char *title_id, char *out, size_t cap) {
-    snprintf(out, cap, "%s/%s.json", CHEATS_STATE_DIR, title_id);
+    char upper[64];
+    size_t i = 0;
+    for (; title_id[i] && i + 1 < sizeof upper; i++)
+        upper[i] = (char)toupper((unsigned char)title_id[i]);
+    upper[i] = '\0';
+    snprintf(out, cap, "%s/%s.json", CHEATS_STATE_DIR, upper);
 }
 
 /* The sidecar is {"<flat index>":true,...}: one flat index across every cheat file of the
@@ -1338,7 +1454,7 @@ static int resolve_mod_locs(pid_t pid, intptr_t base, const cheat_mod_t *mod, ch
     /* No base yet means the module is not mapped: a relative offset would be used as an
      * absolute address. */
     if (base <= 0) {
-        if (err) snprintf(err, err_cap, "the game's code is not loaded yet; try again");
+        exe_not_loaded(pid, err, err_cap);
         return -2;
     }
     int n = mod->mem_count;
@@ -1394,16 +1510,19 @@ static int resolve_mod_locs(pid_t pid, intptr_t base, const cheat_mod_t *mod, ch
 /* ── XML game patches (#527) ─────────────────────────────────────── */
 
 /* The game's version as the console reports it: appinfo.db's CONTENT_VERSION ("01.004.000") and
- * APP_VER ("01.04"), else the installed param.json's contentVersion. */
+ * a PS4 game's version ("01.32": the higher of VERSION and APP_VER, see appinfo_version.h), else
+ * the installed param.json's contentVersion. */
 typedef struct {
     char content[32];
-    char app[32];
+    char app[32];     /* the PS4 version picked from VERSION and APP_VER */
+    char version[32]; /* VERSION as read, for that pick */
 } game_ver_t;
 
 static int game_ver_row(void *ctx, int ncol, const char *const *vals) {
     game_ver_t *v = (game_ver_t *)ctx;
     if (ncol < 2 || !vals[0] || !vals[1]) return 0;
     if (strcmp(vals[0], "CONTENT_VERSION") == 0) snprintf(v->content, sizeof v->content, "%s", vals[1]);
+    else if (strcmp(vals[0], "VERSION") == 0) snprintf(v->version, sizeof v->version, "%s", vals[1]);
     else if (strcmp(vals[0], "APP_VER") == 0) snprintf(v->app, sizeof v->app, "%s", vals[1]);
     return 0;
 }
@@ -1416,9 +1535,15 @@ static void game_versions(const char *title, game_ver_t *v) {
         if (!((title[i] >= 'A' && title[i] <= 'Z') || (title[i] >= '0' && title[i] <= '9'))) return;
     char sql[200];
     snprintf(sql, sizeof sql,
-             "SELECT key, val FROM tbl_appinfo WHERE titleId='%s' AND key IN ('CONTENT_VERSION','APP_VER')",
+             "SELECT key, val FROM tbl_appinfo WHERE titleId='%s' AND key IN (" APPINFO_VERSION_SQL_KEYS ")",
              title);
     (void)content_db_select_text(CONTENT_DB_APPINFO, sql, 8, v, game_ver_row);
+    {
+        /* A PS4 update raises VERSION and leaves APP_VER at the base game's "01.00" (#934). */
+        char app[sizeof v->app];
+        snprintf(app, sizeof app, "%s", appinfo_version_pick(NULL, v->version, v->app));
+        memcpy(v->app, app, sizeof app);
+    }
     if (v->content[0] || v->app[0]) return;
     char path[128];
     snprintf(path, sizeof path, "/system_ex/app/%s/sce_sys/param.json", title);
@@ -1498,6 +1623,18 @@ static xml_applied_t *xml_applied_find(pid_t pid, const char *path, int entry) {
 static void xml_applied_forget(pid_t pid) {
     for (int i = 0; i < XML_APPLIED_MAX; i++)
         if (g_xml_applied[i].rec && g_xml_applied[i].pid == pid) xml_applied_free(&g_xml_applied[i]);
+}
+
+/* 1 when one more entry applied to `pid` can be recorded (an earlier game session's records are
+ * let go first, as xml_applied_find does). */
+static int xml_applied_room(pid_t pid) {
+    int room = 0;
+    for (int i = 0; i < XML_APPLIED_MAX; i++) {
+        xml_applied_t *a = &g_xml_applied[i];
+        if (a->rec && a->pid != pid) xml_applied_free(a);
+        if (!a->rec) room = 1;
+    }
+    return room;
 }
 
 static int xml_applied_add(pid_t pid, const char *path, int entry, const cheat_loc_t *locs, int n,
@@ -1832,9 +1969,17 @@ static int xml_apply_on(pid_t pid, const char *title, cheat_mod_t *mod, const xm
         }
         return -1;
     }
-    char exe[256] = "";
+    char exe[256] = "", base_path[256] = "", why[320] = "";
     uint64_t mbase = 0, msize = 0;
     (void)module_info(pid, 0, &mbase, &msize, exe, sizeof exe);
+    /* The patch's base must be one of the game's own modules, as for every other cheat write
+     * (phys_write_allowed). In a PS4 game's process handle 0 is another module (#920): a patch
+     * with no AppElf took it as the game's code and, with no original bytes to compare, wrote into
+     * it. Said before the AppElf check, whose "the game runs <that module>" would mislead. */
+    if (!gp_elf_is_module(m.app_elf) && !cheat_patch_base_ok(0, exe, why, sizeof why)) {
+        if (err) snprintf(err, err_cap, "%s", why);
+        return -1;
+    }
     if (!gp_elf_is_module(m.app_elf) && !gp_elf_ok(m.app_elf, exe)) {
         const char *b = strrchr(exe, '/');
         if (err) snprintf(err, err_cap, "this patch is for %s; the game runs %s", m.app_elf, b ? b + 1 : exe);
@@ -1846,9 +1991,22 @@ static int xml_apply_on(pid_t pid, const char *title, cheat_mod_t *mod, const xm
         hook_wait(hk);
         return -1;
     }
-    if (module_info(pid, handle, &mbase, &msize, NULL, 0) != 0 || !mbase || !msize) {
-        if (err) snprintf(err, err_cap, "the game's code is not loaded yet; try again");
+    if (module_info(pid, handle, &mbase, &msize, base_path, sizeof base_path) != 0 || !mbase || !msize) {
+        if (handle == 0) {
+            exe_not_loaded(pid, err, err_cap);
+        } else if (err) {
+            cheat_exe_seen_t mod_seen = { .found = 1, .base = mbase, .size = msize };
+            char mod_text[160];
+            snprintf(mod_seen.path, sizeof mod_seen.path, "%s", m.app_elf);
+            cheat_exe_describe(&mod_seen, mod_text, sizeof mod_text);
+            snprintf(err, err_cap, "the game's code is not loaded yet; try again (%s)", mod_text);
+        }
         hook_wait(hk);
+        return -1;
+    }
+    /* Again on the module the lines are placed in (a .prx AppElf, or handle 0 read just now). */
+    if (!cheat_patch_base_ok(handle, base_path, why, sizeof why)) {
+        if (err) snprintf(err, err_cap, "%s", why);
         return -1;
     }
 
@@ -1971,13 +2129,27 @@ static int xml_apply_on(pid_t pid, const char *title, cheat_mod_t *mod, const xm
         if (err) snprintf(err, err_cap, "patch has no lines");
         rc = -1;
     }
+    /* Only what can be recorded is written: without its record, turning it off finds nothing to
+     * put back, says it is off and leaves the bytes in the game. */
+    if (rc == 0 && !xml_applied_room(pid)) {
+        if (err) snprintf(err, err_cap, "%d game patches are on already; turn one off first; nothing was written",
+                          XML_APPLIED_MAX);
+        rc = -1;
+    }
     if (rc == 0) {
         hook_before_write(hk);
         rc = cheat_plan_apply(locs, n, 1, NULL, 0, &ops, err, err_cap);
     }
-    if (rc == 0 && xml_applied_add(pid, mod->xml_path, mod->xml_entry, locs, n, handle, mbase, msize) != 0)
-        fprintf(stderr, "[cheats] %s #%d applied but not recorded; restart the game to remove it\n",
-                mod->xml_path, mod->xml_entry);
+    if (rc == 0 && xml_applied_add(pid, mod->xml_path, mod->xml_entry, locs, n, handle, mbase, msize) != 0) {
+        /* Out of memory for the record: take the patch out again (what is there now is its bytes). */
+        for (int i = 0; i < n; i++) memcpy(locs[i].cur, locs[i].on, (size_t)locs[i].len);
+        char undo_err[160] = "";
+        int undo = cheat_plan_apply(locs, n, 0, NULL, 0, &ops, undo_err, sizeof undo_err);
+        fprintf(stderr, "[cheats] %s #%d applied but not recorded; %s\n", mod->xml_path, mod->xml_entry,
+                undo == 0 ? "taken out again" : "restart the game to remove it");
+        if (err) snprintf(err, err_cap, "out of memory; %s", undo == 0 ? "nothing was left written" : undo_err);
+        rc = -1;
+    }
     free(locs);
     return rc;
 }
@@ -2387,8 +2559,10 @@ static int sess_apply(void *vctx, cheats_session_t *s, const cheats_item_t *it, 
         intptr_t mb = c->base;
         if (mod->module_name[0]) mb = resolve_module_base(c->pid, mod->module_name);
         if (mb <= 0) {
-            snprintf(why, why_cap, "module %s is not loaded yet",
-                     mod->module_name[0] ? mod->module_name : "of the game");
+            if (mod->module_name[0])
+                snprintf(why, why_cap, "module %s is not loaded yet", mod->module_name);
+            else
+                exe_not_loaded(c->pid, why, why_cap);
             hk.wait = 1;
             rc = -1;
         } else {
@@ -2741,6 +2915,8 @@ static pid_t g_gate_pid;     /* its executable is loaded (or the wait for it is 
 static int g_gate_told;      /* "waiting for eboot.bin" was logged */
 static pid_t g_base_pid;
 static intptr_t g_base;      /* its eboot's load address (0: not yet) */
+static int g_base_how;       /* CHEAT_EXE_*: where g_base came from */
+static uint64_t g_base_at;   /* when g_base was looked up (mono_ms) */
 
 /* Applies to a launch wait for the game's own executable: a game execs more than once per launch
  * (fakelib_overlay.c), and code read before its eboot.bin is there is someone else's. */
@@ -2777,9 +2953,15 @@ static int exe_gate_locked(uint64_t now) {
 }
 
 static intptr_t pass_base(pid_t pid) {
-    if (g_base_pid != pid || g_base <= 0) {
-        g_base = locked_mapbase(pid, 0);
+    /* A PS4 game on the 0x400000 default is looked at again (at most once a second) until its
+     * handle 0 gives the address (game_exe_base_how). */
+    uint64_t now = mono_ms();
+    int ps4_default = (g_base_how == CHEAT_EXE_PS4_DEFAULT || g_base_how == CHEAT_EXE_NAMED) &&
+                      now - g_base_at >= 1000;
+    if (g_base_pid != pid || g_base <= 0 || ps4_default) {
+        g_base = game_exe_base_how(pid, g_sess.title, &g_base_how);
         g_base_pid = pid;
+        g_base_at = now;
     }
     return g_base > 0 ? g_base : 0;
 }
@@ -3304,6 +3486,10 @@ int cheats_toggle(const char *title_id, int mod_index, int turn_on,
                           rg_title, title_id);
         return -1;
     }
+    /* From here the running game's own id, as the watcher spells it: an off that could not be
+     * saved, and the crash guard's hold, are looked up by it. Asked with another case, the hold
+     * a switch is to lift stayed, and the game the guard paused could not be resumed. */
+    title_id = rg_title;
 
     /* Auto-enable the engine when a cheat of the running game is turned on. Only here, after the
      * checks above: done first, a request that was then refused (no game, another game, no cheat

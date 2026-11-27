@@ -59,11 +59,32 @@ pub struct BuildRequest {
     /// How hard the Kraken encoder works: `PS5UPLOAD_FPKG_LEVEL` (`fast`, `balanced`,
     /// `smallest`, or `stored` for no compression) overrides the default, Balanced.
     pub level: crate::kraken::Level,
-    /// Narrows the package's PlayGo languages to this one (`fr-FR`, …; see
-    /// [`cnt_write::playgo_scenario_json`]). Absent, it declares the game's own languages
-    /// ([`cnt_write::game_languages`]), or all of them with `en-US` as the default when the
-    /// game names none.
+    /// Narrows the package's PlayGo languages to this one (`fr-FR`, …), or widens them to all
+    /// 31 (`all`, [`cnt_write::ALL_LANGUAGES`]). Absent, the package declares the game's own
+    /// languages and no others ([`cnt_write::game_languages`]): only its default language when
+    /// the game names none.
     pub language: Option<String>,
+    /// Read the game through this instead of as it is on disk: the engine's "unpack the asset
+    /// packs" hands back a packed game's files as plain files, decoded as the package is
+    /// written. Everything after it (the checks, the `ampr_emu.index` made from the files
+    /// packaged, the plan) sees only what it gives.
+    pub reader: Option<SourceReader>,
+}
+
+/// The game as the build reads it, made from the source as it was opened, or why it can't be.
+pub type ReadSource = dyn Fn(Box<dyn source::SourceTree>) -> std::result::Result<Box<dyn source::SourceTree>, String>
+    + Send
+    + Sync;
+
+/// A game as the package build reads it, made from the source as it was opened: see
+/// [`BuildRequest::reader`].
+#[derive(Clone)]
+pub struct SourceReader(pub std::sync::Arc<ReadSource>);
+
+impl std::fmt::Debug for SourceReader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SourceReader")
+    }
 }
 
 impl BuildRequest {
@@ -89,6 +110,7 @@ impl BuildRequest {
                 .and_then(|v| v.parse().ok())
                 .unwrap_or_default(),
             language: None,
+            reader: None,
         }
     }
 }
@@ -244,6 +266,17 @@ pub struct BuildControl<'a> {
     pub sample: Option<u64>,
 }
 
+/// Whether `id` is a content id's characters only (`UP0000-PPSA00000_00-0123456789ABCDEF`:
+/// letters, digits, `-`, `_`), so it can name the package file. The id comes from the game's own
+/// param.json or param.sfo: one like `../../../../tmp/AAAA…` put the package outside the
+/// folder chosen for it.
+pub fn content_id_is_plain(id: &str) -> bool {
+    !id.is_empty()
+        && id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
+}
+
 /// Build the package. `progress` receives short phase lines.
 pub fn build(request: &BuildRequest, progress: &mut dyn FnMut(&str)) -> Result<BuildReport> {
     build_controlled(request, progress, &mut BuildControl::default())
@@ -290,8 +323,25 @@ fn build_mode(
     mode: Mode,
 ) -> Result<BuildReport> {
     enter(control, Stage::Check);
-    // An unsigned executable would install and then never start: it goes in fake-signed.
-    let (mut tree, signing) = crate::fself::wrap(source::open(&request.source)?);
+    let opened = source::open(&request.source)?;
+    let opened = match &request.reader {
+        Some(reader) => (reader.0)(opened).map_err(crate::Error::Format)?,
+        None => opened,
+    };
+    let mut opened = opened;
+    // An unsigned executable would install and then never start: it goes in fake-signed, its
+    // NPDRM block naming the content id the package is built under (checked again below).
+    let signing_id = request.content_id.clone().or_else(|| {
+        source::read_small(
+            opened.as_mut(),
+            "sce_sys/param.json",
+            source::MAX_PARAM_BYTES,
+        )
+        .ok()
+        .and_then(|p| source::content_id(&p))
+    });
+    let signing_id = signing_id.filter(|id| id.len() == 36 && content_id_is_plain(id));
+    let (mut tree, signing) = crate::fself::wrap_with(opened, signing_id.as_deref());
     if let Some(line) = signing.describe() {
         progress(&line);
     }
@@ -315,8 +365,13 @@ fn build_mode(
         ));
     }
     let readiness = source::readiness(tree.as_mut());
+    // Only what this package will carry: `tree` is the game as it is packaged, so a game still
+    // in packs here keeps its own `ampr_emu.index`, and any other gets one generated below. A
+    // stale index that is about to be replaced is no warning.
+    let packs_kept = source::packed_kind(tree.as_mut()).ok().flatten().is_some();
     let warnings: Vec<String> = readiness
         .warnings()
+        .filter(|c| source::applies::to_output(c.applies_to, packs_kept))
         .map(|c| format!("{}: {}", c.name, c.detail))
         .collect();
     let param_json =
@@ -341,6 +396,12 @@ fn build_mode(
         return format_err(format!(
             "content id {content_id:?} is {} characters, not 36",
             content_id.len()
+        ));
+    }
+    if !content_id_is_plain(&content_id) {
+        return format_err(format!(
+            "content id {content_id:?} has characters a content id never has \
+             (only letters, digits, - and _)"
         ));
     }
     // The packaged copy has to name the id the package is built under, both in `contentId`
@@ -476,26 +537,23 @@ fn build_mode(
     // The debug license the console's launch checks need (see `license`), generated for this
     // content id. A dump's own license files are never used: they belong to another console.
     extras.extend(cnt_write::license_extras(&content_id));
-    // The game's own languages (its dump's scenario is left out above as a stale copy, but its
-    // language list and default are the game's). Packages used to declare all 31 languages,
-    // Japanese first, with en-US as the default, whatever the game shipped with.
-    let own_scenario = source::read_small(
-        tree.as_mut(),
-        "sce_sys/playgo-scenario.json",
-        source::MAX_PARAM_BYTES,
-    )
-    .unwrap_or_default();
-    let game_languages = cnt_write::game_languages(&own_scenario, &param_json);
-    if let (None, Some(g)) = (request.language.as_deref(), &game_languages) {
-        progress(&format!(
-            "languages as the game declares them: {} ({} by default)",
-            g.supported.join(", "),
-            g.default
-        ));
-    }
+    // The game's own languages. Its dump's PlayGo scenario and chunk table are left out above as
+    // stale copies, but what they say about languages is the game's. Packages used to declare
+    // all 31 languages for a game that has neither file, and the console then listed a language
+    // pack for each one (#939).
+    let mut own = |name: &str| {
+        source::read_small(tree.as_mut(), name, source::MAX_PARAM_BYTES).unwrap_or_default()
+    };
+    let own_scenario = own("sce_sys/playgo-scenario.json");
+    let own_chunks = own("sce_sys/playgo-chunk.dat");
+    let game_languages = cnt_write::game_languages(&own_scenario, &own_chunks, &param_json);
+    progress(&languages_line(
+        request.language.as_deref(),
+        &game_languages,
+    ));
     extras.push(cnt_write::playgo_scenario_extra(
         request.language.as_deref(),
-        game_languages.as_ref(),
+        &game_languages,
     ));
     // What the container now carries, the image leaves out (see `CONTAINER_ONLY`).
     let mut carried: std::collections::HashSet<&str> = cnt_write::PRESENTATION
@@ -1060,7 +1118,7 @@ mod tests {
     #[test]
     fn inspect_tells_ps4_kinds_apart() {
         use crate::ps4_pkg::Ps4Kind;
-        let dir = std::env::temp_dir().join(format!("fpkg-ps4-kinds-{}", std::process::id()));
+        let dir = crate::test_tmp::temp_path(format!("fpkg-ps4-kinds-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let put = |name: &str| {
             let path = dir.join(format!("{name}.pkg"));
@@ -1111,7 +1169,7 @@ mod tests {
     /// A build's `.partial` goes on every way out but success, a panic included; kept, it stays.
     #[test]
     fn a_leftover_is_removed_unless_kept() {
-        let dir = std::env::temp_dir().join(format!("fpkg-leftover-{}", std::process::id()));
+        let dir = crate::test_tmp::temp_path(format!("fpkg-leftover-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let (a, b, c) = (
             dir.join("a.partial"),
@@ -1227,6 +1285,31 @@ mod tests {
         assert!(secs > 1_600_000_000);
         let _ = nanos;
     }
+}
+
+/// What the package says about languages, for the build's log: the languages declared, the one
+/// it starts in, and where they came from.
+fn languages_line(language: Option<&str>, game: &cnt_write::GameLanguages) -> String {
+    use cnt_write::DeclaredBy;
+    let (supported, default) = cnt_write::declared_languages(language, game);
+    let chosen = (supported.as_slice(), default) != (game.supported.as_slice(), game.default);
+    let listed = if supported.len() == cnt_write::SCENARIO_LANGUAGES.len() {
+        "all 31".to_string()
+    } else {
+        supported.join(", ")
+    };
+    let why = if chosen {
+        "as chosen for this package"
+    } else {
+        match game.declared_by {
+            DeclaredBy::Scenario => "as the game's own playgo-scenario.json declares them",
+            DeclaredBy::ChunkTable => "as the game's own playgo-chunk.dat declares them",
+            DeclaredBy::ParamDefault | DeclaredBy::Nothing => {
+                "the game declares no PlayGo languages, so all of them; choose one under Game language to declare only that one"
+            }
+        }
+    };
+    format!("languages: {listed} ({default} by default; {why})")
 }
 
 /// The title a `param.json` declares. Real PS5 titles keep it in
@@ -1541,6 +1624,7 @@ fn licence_only(source_path: &Path, info: &crate::ps4_pkg::Ps4Info) -> Inspectio
         planned_size: 0,
         output_free: None,
         checks: vec![source::Check {
+            applies_to: None,
             name: "add-on data".into(),
             ok: false,
             detail: crate::ps4_pkg::LICENCE_ONLY.into(),
@@ -1589,6 +1673,7 @@ pub fn inspect_with_update(
         name: "nothing left out".into(),
         ok: false,
         detail,
+        applies_to: None,
     }));
     // A PS4 game: param.sfo, no param.json. What a PS5 package needs is no warning for it.
     let has = |name: &str| files.iter().any(|f| f.path.eq_ignore_ascii_case(name));

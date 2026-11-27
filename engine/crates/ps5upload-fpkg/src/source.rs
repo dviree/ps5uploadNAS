@@ -482,6 +482,35 @@ pub struct Check {
     pub name: String,
     pub ok: bool,
     pub detail: String,
+    /// Set on a finding about a file of the source that not everything made from it carries:
+    /// which outputs the finding matters for ([`applies`]). Absent: it matters whatever is
+    /// made.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub applies_to: Option<&'static str>,
+}
+
+/// The outputs a finding about the source's own `ampr_emu.index` matters for
+/// ([`Check::applies_to`]). The source is checked before anyone has said what to make of it,
+/// and most of what is made gets a fresh index; a warning about the old one is then about a
+/// file that never ships.
+pub mod applies {
+    /// Only an output that keeps the game's asset packs (a package, image or folder with the
+    /// packs as they are): it carries the source's index byte for byte. Unpacking the packs or
+    /// making new ones writes a fresh index.
+    pub const PACKS_KEPT: &str = "packs_kept";
+    /// Only the source used as it is (uploaded or mounted): a game that is not in packs gets a
+    /// fresh index in every package, image and folder made from it.
+    pub const SOURCE_AS_IS: &str = "source_as_is";
+
+    /// Whether a finding marked `applies_to` matters for an output whose game is still in the
+    /// packs the source has it in (`packs_kept`; `false` too for a game in no packs).
+    pub fn to_output(applies_to: Option<&str>, packs_kept: bool) -> bool {
+        match applies_to {
+            Some(PACKS_KEPT) => packs_kept,
+            Some(SOURCE_AS_IS) => false,
+            _ => true,
+        }
+    }
 }
 
 #[derive(Debug, Default)]
@@ -504,6 +533,7 @@ impl Readiness {
             name: name.to_string(),
             ok,
             detail: detail.into(),
+            applies_to: None,
         });
     }
 }
@@ -974,9 +1004,21 @@ fn scan_for(tree: &mut dyn SourceTree, rel: &str, start: u64, len: u64, needle: 
 
 /// Does the folder's own `ampr_emu.index` describe the folder? `ampr_emu` trusts its sizes, so
 /// a stale one is worth saying, even though a package always carries a freshly generated one.
-fn ampr_index_check(tree: &mut dyn SourceTree) -> (bool, String) {
-    let name = crate::ampr_index::NAME;
+/// A finding that does not hold says which outputs it matters for ([`applies`]): the index of
+/// a game in packs ships only in an output that keeps the packs, and anyone else's ships in
+/// nothing made from the game.
+fn ampr_index_check(tree: &mut dyn SourceTree) -> (bool, String, Option<&'static str>) {
     let packs = packed_kind(tree).ok().flatten();
+    let (ok, detail) = ampr_index_verdict(tree, packs);
+    let applies_to = (!ok).then_some(match packs {
+        Some(_) => applies::PACKS_KEPT,
+        None => applies::SOURCE_AS_IS,
+    });
+    (ok, detail, applies_to)
+}
+
+fn ampr_index_verdict(tree: &mut dyn SourceTree, packs: Option<&'static str>) -> (bool, String) {
+    let name = crate::ampr_index::NAME;
     let Some(at) = tree
         .files()
         .iter()
@@ -988,7 +1030,8 @@ fn ampr_index_check(tree: &mut dyn SourceTree) -> (bool, String) {
                 false,
                 format!(
                     "the game is in {} asset packs and has no {name}: the AMPR runtime finds a \
-                     packed file only through its record there, so none would be served",
+                     packed file only through its record there, so none would be served from \
+                     anything that keeps the packs",
                     packs.unwrap_or_default()
                 ),
             );
@@ -1001,12 +1044,19 @@ fn ampr_index_check(tree: &mut dyn SourceTree) -> (bool, String) {
             ),
         );
     };
-    // A packed game's index goes into a package or image as it is; anyone else's is made again.
-    let regenerated = if packs.is_some() {
-        "a packed game keeps its index as it is, so convert it again (zstd packs) or rebuild \
-         the index"
-    } else {
-        "a package or a game image carries one generated from its files instead"
+    // A packed game's index goes as it is into whatever keeps the packs; anyone else's is made
+    // again in everything made from the game.
+    let regenerated = match packs {
+        Some("zstd") => {
+            "it goes as it is into a package, image or folder that keeps the packs; unpacking \
+             the asset packs or making new zstd packs writes a fresh one, and so does Rebuild \
+             AMPR index"
+        }
+        Some(_) => {
+            "it goes as it is into a package, image or folder that keeps the packs; unpacking \
+             the asset packs writes a fresh one"
+        }
+        None => "a package, image or folder made from it carries one generated from its files",
     };
     let Ok(bytes) = read_small(tree, &at, MAX_INDEX_BYTES) else {
         return (
@@ -1014,16 +1064,17 @@ fn ampr_index_check(tree: &mut dyn SourceTree) -> (bool, String) {
             format!("the folder's {name} could not be read: {regenerated}"),
         );
     };
+    // The runtime's own checks first: one bad record and it refuses the whole file, and the
+    // finding says which (adapted from PS5 Dump Forge, its #62: a damaged index names why).
+    if let Err(why) = crate::ampr_index::check(&bytes) {
+        return (false, format!("{why}; {regenerated}"));
+    }
     let Some(listed) = crate::ampr_index::parse(&bytes) else {
         return (
             false,
             format!("the folder's {name} is not a readable AMPRIDX3 index: {regenerated}"),
         );
     };
-    // The runtime's own checks: one bad record and it refuses the whole file.
-    if let Err(why) = crate::ampr_index::check(&bytes) {
-        return (false, format!("{why}; {regenerated}"));
-    }
     let joined = match packs {
         Some("zstd") => crate::ampr_index::zstd_packed(tree).and_then(|packed| {
             crate::ampr_index::check_zstd(&bytes, packed.iter().map(|(p, s)| (p.as_str(), *s)))?;
@@ -1055,13 +1106,13 @@ fn ampr_index_check(tree: &mut dyn SourceTree) -> (bool, String) {
     };
     let on_disk: std::collections::HashMap<String, u64> = expected
         .into_iter()
-        .filter(|(p, _)| !p.eq_ignore_ascii_case(name))
+        .filter(|(p, _)| !p.eq_ignore_ascii_case(name) && read_through_ampr(p))
         .map(|(p, s)| (p.to_ascii_lowercase(), s))
         .collect();
     let mut first: Option<String> = None;
     let (mut gone, mut resized) = (0usize, 0usize);
     let mut seen = std::collections::HashSet::new();
-    for e in &listed {
+    for e in listed.iter().filter(|e| read_through_ampr(&e.path)) {
         let key = e.path.to_ascii_lowercase();
         match on_disk.get(&key) {
             None => {
@@ -1099,6 +1150,28 @@ fn ampr_index_check(tree: &mut dyn SourceTree) -> (bool, String) {
             ),
         ),
     }
+}
+
+/// Whether the AMPR runtime reads `path` through its `ampr_emu.index` record. The system loads
+/// the executables (eboot.bin, the .sprx/.prx modules) and reads `sce_sys/` itself, and a run's
+/// own logs are no game files: a dump's index lists these as they were in the dump, before the
+/// executables were signed, param.json rewritten and the icons moved into the container, so
+/// their records differ in every converted game and say nothing about whether it plays (a
+/// zstd .ffpkg warned "7 listed missing, 10 sizes differ" and played).
+fn read_through_ampr(path: &str) -> bool {
+    let p = path.to_ascii_lowercase();
+    let suffix = |s: &str| p.ends_with(s);
+    !(p == "eboot.bin"
+        || p.starts_with("sce_sys/")
+        || p.starts_with("sce_module/")
+        || suffix(".sprx")
+        || suffix(".prx")
+        || suffix(".self")
+        || suffix(".elf")
+        || matches!(
+            p.as_str(),
+            "ampr_commands.bin" | "ampr_emu.log" | "apr_emu.log"
+        ))
 }
 
 /// Report readiness for a source tree. Never blocks: the caller decides which findings
@@ -1168,8 +1241,13 @@ pub fn readiness(tree: &mut dyn SourceTree) -> Readiness {
     // CE-108255-1); the same build with the index at the folder root played (FW 5.10).
     // A game in packs is read through its index whatever its eboot imports.
     if imports_ampr(tree, "eboot.bin") || packed_kind(tree).ok().flatten().is_some() {
-        let (ok, detail) = ampr_index_check(tree);
-        r.push("ampr_emu.index for a libSceAmpr title", ok, detail);
+        let (ok, detail, applies_to) = ampr_index_check(tree);
+        r.checks.push(Check {
+            name: "ampr_emu.index for a libSceAmpr title".to_string(),
+            ok,
+            detail,
+            applies_to,
+        });
     }
 
     // A module named in another letter case than the path eboot.bin loads: fine in an exFAT
@@ -1210,7 +1288,7 @@ mod tests {
 
     #[test]
     fn packed_kind_reads_the_pack_index_magic() {
-        let base = std::env::temp_dir().join(format!("fpkg-packed-kind-{}", std::process::id()));
+        let base = crate::test_tmp::temp_path(format!("fpkg-packed-kind-{}", std::process::id()));
         std::fs::remove_dir_all(&base).ok();
         let kind = |name: &str, files: &[(&str, &[u8])]| {
             let dir = base.join(name);
@@ -1237,11 +1315,37 @@ mod tests {
         std::fs::remove_dir_all(&base).ok();
     }
 
+    /// A folder's `ampr_emu.index` that doesn't read: the finding says why, not only that.
+    #[test]
+    fn a_damaged_index_finding_names_the_reason() {
+        let dir = crate::test_tmp::temp_path(format!("fpkg-index-why-{}", std::process::id()));
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("eboot.bin"), b"x").unwrap();
+        let good = crate::ampr_index::build(&[("eboot.bin".to_string(), 1)], 0).expect("an index");
+        let verdict = |index: &[u8]| {
+            std::fs::write(dir.join(crate::ampr_index::NAME), index).unwrap();
+            let mut tree = super::FolderSource::open(&dir).unwrap();
+            super::ampr_index_verdict(&mut tree, None)
+        };
+        // Another header: named as such.
+        let mut magic = good.clone();
+        magic[0] = b'X';
+        let (ok, detail) = verdict(&magic);
+        assert!(!ok && detail.contains("no AMPRIDX3 header"), "{detail}");
+        // A record whose path runs past the path blob: named as such.
+        let mut path = good.clone();
+        path[0x30 + 4..0x30 + 8].copy_from_slice(&0xFFFFu32.to_le_bytes());
+        let (ok, detail) = verdict(&path);
+        assert!(!ok && detail.contains("out of bounds"), "{detail}");
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// A folder's headers come back in the order asked, the same as one file at a time, and
     /// the progress callback sees the count climb to the total.
     #[test]
     fn folder_heads_match_one_at_a_time_and_keep_order() {
-        let dir = std::env::temp_dir().join(format!("fpkg-heads-{}", std::process::id()));
+        let dir = crate::test_tmp::temp_path(format!("fpkg-heads-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         let mut paths = Vec::new();
@@ -1271,7 +1375,7 @@ mod tests {
     /// A file that cannot be opened fails the read with its own name, as before.
     #[test]
     fn folder_heads_name_the_missing_file() {
-        let dir = std::env::temp_dir().join(format!("fpkg-heads-miss-{}", std::process::id()));
+        let dir = crate::test_tmp::temp_path(format!("fpkg-heads-miss-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         for i in 0..40 {
@@ -1292,7 +1396,7 @@ mod tests {
     /// Stop while the headers are read ends the walk as cancelled.
     #[test]
     fn folder_heads_stop_when_asked() {
-        let dir = std::env::temp_dir().join(format!("fpkg-heads-stop-{}", std::process::id()));
+        let dir = crate::test_tmp::temp_path(format!("fpkg-heads-stop-{}", std::process::id()));
         std::fs::remove_dir_all(&dir).ok();
         std::fs::create_dir_all(&dir).unwrap();
         let paths: Vec<String> = (0..2000).map(|i| format!("f{i}.bin")).collect();
@@ -1312,7 +1416,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn symlinks_count_as_their_targets() {
-        let base = std::env::temp_dir().join(format!("fpkg-symlink-{}", std::process::id()));
+        let base = crate::test_tmp::temp_path(format!("fpkg-symlink-{}", std::process::id()));
         let (real, staged) = (base.join("real"), base.join("staged"));
         std::fs::remove_dir_all(&base).ok();
         std::fs::create_dir_all(real.join("sub")).unwrap();
@@ -1333,7 +1437,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn a_dangling_link_and_a_backslash_name_are_refused_by_name() {
-        let base = std::env::temp_dir().join(format!("fpkg-badname-{}", std::process::id()));
+        let base = crate::test_tmp::temp_path(format!("fpkg-badname-{}", std::process::id()));
         std::fs::remove_dir_all(&base).ok();
         std::fs::create_dir_all(&base).unwrap();
         std::fs::write(base.join("eboot.bin"), b"12345").unwrap();
@@ -1661,7 +1765,7 @@ mod tests {
 
     #[test]
     fn junk_is_skipped_and_sizes_are_recorded() {
-        let dir = std::env::temp_dir().join(format!("fpkg-scan-{}", std::process::id()));
+        let dir = crate::test_tmp::temp_path(format!("fpkg-scan-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("sce_sys/about")).unwrap();
         std::fs::write(dir.join("eboot.bin"), [0u8; 10]).unwrap();
@@ -1691,7 +1795,7 @@ mod tests {
 
     #[test]
     fn content_version_packs_as_bcd() {
-        let dir = std::env::temp_dir().join(format!("fpkg-ver-{}", std::process::id()));
+        let dir = crate::test_tmp::temp_path(format!("fpkg-ver-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("sce_sys")).unwrap();
         std::fs::write(
@@ -1709,7 +1813,7 @@ mod tests {
 
     #[test]
     fn a_folder_source_reads_ranges_and_reports_itself() {
-        let dir = std::env::temp_dir().join(format!("fpkg-tree-{}", std::process::id()));
+        let dir = crate::test_tmp::temp_path(format!("fpkg-tree-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("eboot.bin"), b"0123456789").unwrap();
@@ -1744,7 +1848,7 @@ mod tests {
     /// is never called would be invisible, which is the failure this guards.
     #[test]
     fn readiness_reports_an_ampr_dependency() {
-        let dir = std::env::temp_dir().join(format!(
+        let dir = crate::test_tmp::temp_path(format!(
             "fpkg-ready-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
@@ -1798,13 +1902,50 @@ mod tests {
         let ampr = check(&dir);
         assert!(ampr.ok, "{}", ampr.detail);
         assert!(ampr.detail.contains("matches"), "{}", ampr.detail);
+        // A finding that holds matters whatever is made.
+        assert_eq!(ampr.applies_to, None);
 
-        // A stale one (a file grew after it was made) is reported, never passed unchecked.
+        // The records of what the system loads or reads itself (the executables, sce_sys) are
+        // never served by ampr_emu, and differ in every converted dump (signed executables, a
+        // rewritten param.json, icons in the container): no finding.
         std::fs::write(dir.join("eboot.bin"), [eboot.clone(), vec![0; 16]].concat()).unwrap();
+        let mut dumped = listed.clone();
+        dumped.push(("sce_sys/icon0.png".to_string(), 40_000));
+        dumped.push(("sce_module/libc.prx".to_string(), 1234));
+        std::fs::write(
+            dir.join("ampr_emu.index"),
+            crate::ampr_index::build(&dumped, 0).unwrap(),
+        )
+        .unwrap();
+        let ampr = check(&dir);
+        assert!(ampr.ok, "{}", ampr.detail);
+
+        // A stale one (a game file listed and gone, or resized) is reported, never passed
+        // unchecked.
+        std::fs::create_dir_all(dir.join("data")).unwrap();
+        std::fs::write(dir.join("data/table.bin"), [1u8; 32]).unwrap();
+        dumped.push(("data/table.bin".to_string(), 16));
+        dumped.push(("data/gone.bin".to_string(), 5));
+        std::fs::write(
+            dir.join("ampr_emu.index"),
+            crate::ampr_index::build(&dumped, 0).unwrap(),
+        )
+        .unwrap();
         let ampr = check(&dir);
         assert!(!ampr.ok, "{}", ampr.detail);
         assert!(
-            ampr.detail.contains("eboot.bin is listed at 8192 bytes"),
+            ampr.detail
+                .contains("is stale (1 listed missing, 0 unlisted, 1 sizes differ;"),
+            "{}",
+            ampr.detail
+        );
+        std::fs::remove_dir_all(dir.join("data")).unwrap();
+        // The game is in no packs: everything made from it gets a fresh index, so the finding
+        // is about this folder used as it is and no warning for a package, image or folder.
+        assert_eq!(ampr.applies_to, Some(applies::SOURCE_AS_IS));
+        assert!(!applies::to_output(ampr.applies_to, false));
+        assert!(
+            ampr.detail.contains("carries one generated from its files"),
             "{}",
             ampr.detail
         );
@@ -1849,11 +1990,34 @@ mod tests {
         std::fs::write(dir.join("ampr_emu.index"), with(1_000_000)).unwrap();
         let ampr = check(&dir);
         assert!(ampr.ok, "{}", ampr.detail);
+        // A zstd .ffpkg made from a dump: its index lists the dump's executables and sce_sys
+        // as they were (eboot.bin since signed, icons gone into the container). The runtime
+        // serves the packed files and plays it: no warning for a package that keeps the packs.
+        let mut l = listed.clone();
+        l[0].1 = 4096;
+        l.push(("sce_sys/pic0.png".to_string(), 9));
+        l.push(("data/big.bin".to_string(), 1_000_000));
+        std::fs::write(
+            dir.join("ampr_emu.index"),
+            crate::ampr_index::build(&l, 0).unwrap(),
+        )
+        .unwrap();
+        let ampr = check(&dir);
+        assert!(ampr.ok, "{}", ampr.detail);
         std::fs::write(dir.join("ampr_emu.index"), with(999)).unwrap();
         let ampr = check(&dir);
         assert!(!ampr.ok, "{}", ampr.detail);
         assert!(
             ampr.detail.contains("serves no packed file"),
+            "{}",
+            ampr.detail
+        );
+        // A packed game's index ships in whatever keeps the packs, and only there.
+        assert_eq!(ampr.applies_to, Some(applies::PACKS_KEPT));
+        assert!(applies::to_output(ampr.applies_to, true));
+        assert!(!applies::to_output(ampr.applies_to, false));
+        assert!(
+            ampr.detail.contains("unpacking the asset packs"),
             "{}",
             ampr.detail
         );
@@ -1870,9 +2034,44 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A finding with no scope matters for every output; one about the source's own index
+    /// only where that index ships.
+    #[test]
+    fn a_finding_matters_only_where_its_file_ships() {
+        for packs_kept in [false, true] {
+            assert!(applies::to_output(None, packs_kept));
+            assert!(applies::to_output(Some("something new"), packs_kept));
+            assert!(!applies::to_output(Some(applies::SOURCE_AS_IS), packs_kept));
+            assert_eq!(
+                applies::to_output(Some(applies::PACKS_KEPT), packs_kept),
+                packs_kept
+            );
+        }
+        // On the wire only when set, so a reader that knows nothing of it sees what it did.
+        let plain = Check {
+            name: "x".into(),
+            ok: true,
+            detail: "y".into(),
+            applies_to: None,
+        };
+        assert_eq!(
+            serde_json::to_string(&plain).unwrap(),
+            r#"{"name":"x","ok":true,"detail":"y"}"#
+        );
+        let scoped = Check {
+            ok: false,
+            applies_to: Some(applies::PACKS_KEPT),
+            ..plain
+        };
+        assert_eq!(
+            serde_json::to_string(&scoped).unwrap(),
+            r#"{"name":"x","ok":false,"detail":"y","applies_to":"packs_kept"}"#
+        );
+    }
+
     #[test]
     fn readiness_names_the_source_and_its_size() {
-        let dir = std::env::temp_dir().join(format!("fpkg-named-{}", std::process::id()));
+        let dir = crate::test_tmp::temp_path(format!("fpkg-named-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(dir.join("sce_sys")).unwrap();
         std::fs::write(dir.join("eboot.bin"), [0u8; 1024]).unwrap();
@@ -1902,7 +2101,7 @@ mod tests {
 
     #[test]
     fn an_unknown_source_kind_is_an_error() {
-        let dir = std::env::temp_dir().join(format!("fpkg-kind-{}", std::process::id()));
+        let dir = crate::test_tmp::temp_path(format!("fpkg-kind-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         let img = dir.join("game.iso");
@@ -1925,7 +2124,7 @@ mod tests {
         send::<crate::ufs2_source::Ufs2Source>();
         send::<Box<dyn SourceTree>>();
 
-        let dir = std::env::temp_dir().join(format!("fpkg-send-{}", std::process::id()));
+        let dir = crate::test_tmp::temp_path(format!("fpkg-send-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("eboot.bin"), b"moved").unwrap();
         let mut tree = open(&dir).unwrap();

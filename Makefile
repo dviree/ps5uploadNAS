@@ -1025,6 +1025,12 @@ test-payload: payload
 	@cc -O2 -Wall -Wextra -Werror -o $(SELFTEST_DIR)/ps5upload-app-info-selftest \
 		$(PAYLOAD_DIR)/tests/app_info_selftest.c
 	@$(RUN_LIMITED) $(SELFTEST_DIR)/ps5upload-app-info-selftest
+	@echo "Running param.json key self-test (host build)..."
+	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
+		-o $(SELFTEST_DIR)/ps5upload-json-key-selftest \
+		$(PAYLOAD_DIR)/tests/json_key_selftest.c
+	@$(RUN_LIMITED) $(SELFTEST_DIR)/ps5upload-json-key-selftest
+	@echo "✓ a registered game's title is its en-US block's, not the one after defaultLanguage"
 	@echo "Running file compare self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
 		-o $(SELFTEST_DIR)/ps5upload-file-compare-selftest \
@@ -1100,7 +1106,7 @@ test-payload: payload
 		$(PAYLOAD_DIR)/tests/webui_server_selftest.c $(PAYLOAD_DIR)/src/webui_server.c \
 		$(PAYLOAD_DIR)/src/webui_http.c $(PAYLOAD_DIR)/src/webui_auth.c
 	@$(RUN_LIMITED) $(SELFTEST_DIR)/ps5upload-webui-server-selftest
-	@echo "✓ silent, half-sent and flooding web clients never stall the helper; an idle connection holds no worker"
+	@echo "✓ silent, half-sent and flooding web clients never stall the helper; an idle connection holds no worker; transfers leave one worker for the page"
 	@echo "Running webui codec self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include -I$(AVA1_C) -I$(AVA1_C)/gen -I$(PAYLOAD_DIR)/gen \
 		-o $(SELFTEST_DIR)/ps5upload-webui-codec-selftest \
@@ -1129,10 +1135,16 @@ test-payload: payload
 	@echo "Running game library scan self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/smb -I$(PAYLOAD_DIR)/include \
 		-o $(SELFTEST_DIR)/ps5upload-smbd-library-selftest $(PAYLOAD_DIR)/tests/smbd_library_selftest.c \
-		$(PAYLOAD_DIR)/smb/smbd_library.c $(PAYLOAD_DIR)/smb/smbd_localfs.c $(PAYLOAD_DIR)/smb/smbd_path.c \
-		$(PAYLOAD_DIR)/smb/smbd_json.c $(PAYLOAD_DIR)/src/pkg_info.c
+		$(PAYLOAD_DIR)/smb/smbd_library.c $(PAYLOAD_DIR)/smb/smbd_image.c $(PAYLOAD_DIR)/smb/smbd_localfs.c \
+		$(PAYLOAD_DIR)/smb/smbd_path.c $(PAYLOAD_DIR)/smb/smbd_json.c $(PAYLOAD_DIR)/src/pkg_info.c
 	@$(RUN_LIMITED) $(SELFTEST_DIR)/ps5upload-smbd-library-selftest
 	@echo "✓ the library scan finds packages, folder dumps and images with their covers, stays inside its limits and never walks a dump"
+	@echo "Running disk image metadata self-test (host build)..."
+	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/smb -I$(PAYLOAD_DIR)/include \
+		-o $(SELFTEST_DIR)/ps5upload-smbd-image-selftest $(PAYLOAD_DIR)/tests/smbd_image_selftest.c \
+		$(PAYLOAD_DIR)/smb/smbd_image.c $(PAYLOAD_DIR)/src/pkg_info.c
+	@$(RUN_LIMITED) $(SELFTEST_DIR)/ps5upload-smbd-image-selftest
+	@echo "✓ .exfat, .ffpkg and .ffpfs images name themselves from sce_sys/param.json with their icon0.png in a few small reads; a compressed or foreign one says why"
 	@echo "Running console page network-share routes self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -pthread -I$(PAYLOAD_DIR)/include -I$(PAYLOAD_DIR)/smb \
 		-I$(AVA1_C) -I$(AVA1_C)/gen -I$(PAYLOAD_DIR)/gen -I$(AVA1_C)/third_party/monocypher \
@@ -1254,7 +1266,7 @@ test-payload: payload
 		-o $(SELFTEST_DIR)/ps5upload-backup-selftest \
 		$(PAYLOAD_DIR)/tests/backup_selftest.c
 	@$(RUN_LIMITED) $(SELFTEST_DIR)/ps5upload-backup-selftest
-	@echo "✓ a snapshot restores byte for byte, the newest five are kept, the list stays valid and inside its buffer"
+	@echo "✓ a snapshot restores byte for byte, the newest five are kept, the list stays valid and inside its buffer; a restore that put nothing back is not ok"
 	@echo "Running file replace self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
 		-o $(SELFTEST_DIR)/ps5upload-atomic-file-selftest \
@@ -1267,6 +1279,12 @@ test-payload: payload
 		$(PAYLOAD_DIR)/tests/profile_np_selftest.c
 	@$(RUN_LIMITED) $(SELFTEST_DIR)/ps5upload-profile-np-selftest
 	@echo "✓ a sign-in backup restores byte for byte, stays the first one, and a damaged one writes nothing wrong"
+	@echo "Running account name self-test (host build)..."
+	@cc -O2 -Wall -Wextra -Werror -pthread -I$(PAYLOAD_DIR)/include \
+		-o $(SELFTEST_DIR)/ps5upload-profile-name-selftest \
+		$(PAYLOAD_DIR)/tests/profile_name_selftest.c
+	@$(RUN_LIMITED) $(SELFTEST_DIR)/ps5upload-profile-name-selftest
+	@echo "✓ a rename passes the registry field's own size, and a name too long is refused, not cut"
 	@echo "Running notification store self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -pthread -I$(PAYLOAD_DIR)/include \
 		-o $(SELFTEST_DIR)/ps5upload-notif-selftest \
@@ -1279,6 +1297,12 @@ test-payload: payload
 		$(PAYLOAD_DIR)/tests/json_escape_selftest.c
 	@$(RUN_LIMITED) $(SELFTEST_DIR)/ps5upload-json-escape-selftest
 	@echo "✓ a quote, a backslash or a control byte in a string cannot break a reply"
+	@echo "Running UTF-8 cut self-test (host build)..."
+	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
+		-o $(SELFTEST_DIR)/ps5upload-utf8-cut-selftest \
+		$(PAYLOAD_DIR)/tests/utf8_cut_selftest.c
+	@$(RUN_LIMITED) $(SELFTEST_DIR)/ps5upload-utf8-cut-selftest
+	@echo "✓ a path cut short on a status line keeps whole characters"
 	@echo "Running user delete gate self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
 		-o $(SELFTEST_DIR)/ps5upload-user-guard-selftest \
@@ -1293,7 +1317,7 @@ test-payload: payload
 	@echo "✓ a request an extractor never read (it can hold a password) is deleted, one it may still read is kept"
 	@echo "Running console convert self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -pthread -DCONSOLE_CONVERT_SELFTEST -DCONVERT_START_MS=1500 \
-		-DCONVERT_KILL_AFTER_MS=1000 -DCONVERT_POWER_TICK_MS=100 \
+		-DCONVERT_KILL_AFTER_MS=1000 -DCONVERT_KILL_WAIT_MS=1000 -DCONVERT_POWER_TICK_MS=100 \
 		-I$(PAYLOAD_DIR)/include -I$(AVA1_C) -I$(AVA1_C)/gen -I$(PAYLOAD_DIR)/gen \
 		-o $(SELFTEST_DIR)/ps5upload-console-convert-selftest \
 		$(PAYLOAD_DIR)/tests/console_convert_selftest.c $(PAYLOAD_DIR)/src/console_convert.c \
@@ -1363,6 +1387,12 @@ test-payload: payload
 		$(PAYLOAD_DIR)/tests/trophy_fix_selftest.c $(PAYLOAD_DIR)/src/trophy_fix.c $(PAYLOAD_DIR)/src/app_dump_sha256.c
 	@$(RUN_LIMITED) $(SELFTEST_DIR)/ps5upload-trophy-fix-selftest
 	@echo "✓ trophy files: only the exact old account id is replaced (both byte orders, hashes written again), links never followed, a dry run changes nothing, a backup is kept first and puts the file back"
+	@echo "Running home-screen restore self-test (host build)..."
+	@cc -O2 -Wall -Wextra -Werror -pthread -I$(PAYLOAD_DIR)/include \
+		-o $(SELFTEST_DIR)/ps5upload-title-restore-selftest \
+		$(PAYLOAD_DIR)/tests/title_restore_selftest.c $(PAYLOAD_DIR)/src/title_restore.c
+	@$(RUN_LIMITED) $(SELFTEST_DIR)/ps5upload-title-restore-selftest
+	@echo "✓ restore: only a package no database knows is moved aside (same drive, databases backed up first); a failed install puts it back into a free place, a finished one deletes only the copy aside"
 	@echo "Running console clean-up rules self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -I$(PAYLOAD_DIR)/include \
 		-o $(SELFTEST_DIR)/ps5upload-cleanup-rules-selftest \
@@ -1488,6 +1518,11 @@ test-payload: payload
 		$(PAYLOAD_DIR)/tests/shellui_launch_selftest.c
 	@$(RUN_LIMITED) $(SELFTEST_DIR)/ps5upload-shellui-launch-selftest
 	@echo "✓ a Sony launch error reaches the caller as an error with its code, not as 'never ran'"
+	@echo "Running launch route self-test (host build)..."
+	@cc -O2 -Wall -Wextra -Werror -o $(SELFTEST_DIR)/ps5upload-launch-route-selftest \
+		$(PAYLOAD_DIR)/tests/launch_route_selftest.c
+	@$(RUN_LIMITED) $(SELFTEST_DIR)/ps5upload-launch-route-selftest
+	@echo "✓ a launch the console refuses for the title itself stops before the ShellUI route"
 	@echo "Running app.db raw-scan self-test (host build)..."
 	@cc -O2 -Wall -Wextra -Werror -o $(SELFTEST_DIR)/ps5upload-appdb-scan-selftest \
 		$(PAYLOAD_DIR)/tests/appdb_scan_selftest.c

@@ -92,7 +92,9 @@ vi.mock("./roster", async (orig) => ({
 
 import {
   POLL_MS,
+  archiveIsUnpacked,
   archiveStem,
+  failureText,
   pausedSoFar,
   resumeRememberedRun,
   sourceNoteOf,
@@ -100,7 +102,7 @@ import {
   useFpkgConversion,
 } from "./fpkgConversion";
 import { commandTask, taskCapabilities } from "./taskControls";
-import { useTaskStore } from "./tasks";
+import { interruptedAtLoad, useTaskStore } from "./tasks";
 
 const req = { source: "/games/a", outputDir: "/out" };
 const tick = () => vi.advanceTimersByTimeAsync(POLL_MS + 50);
@@ -1129,6 +1131,122 @@ describe("fpkg pipeline", () => {
     });
   });
 
+  /** As a reload leaves things: the page's run is gone, and its task (which a fresh start-up
+   *  loads from storage) is marked interrupted. */
+  const reload = async () => {
+    useFpkgConversion.setState({ pipeline: { phase: "idle" } });
+    // The closed page's poll ends with it.
+    await tick();
+    useTaskStore.setState((s) => ({
+      tasks: s.tasks.map((t) => {
+        if (t.status !== "running" && t.status !== "paused") return t;
+        interruptedAtLoad.add(t.id);
+        return { ...t, status: "interrupted" as const, endedAtMs: t.updatedAtMs };
+      }),
+    }));
+  };
+  const convertTasks = () => useTaskStore.getState().tasks.filter((t) => t.kind === "fpkg-convert");
+
+  it("a build still running after the page was closed goes on in its own task (#954)", async () => {
+    const running = { status: "running", started_at_ms: 1000, stage: { id: "write", index: 2, count: 4, done: 5, total: 10 } };
+    jobStatus.mockResolvedValue(running);
+    await useFpkgConversion.getState().start(req, { install: false, host: null });
+    await tick();
+    const [task] = convertTasks();
+    expect(task).toMatchObject({ engineJobId: "j1", payload: { jobKind: "build", source: "/games/a" } });
+    await reload();
+    expect(convertTasks()[0].status).toBe("interrupted");
+    // The engine lists it as a Workshop run too: followed once, in the task it had.
+    runningJobs.mockResolvedValueOnce([{ job_id: "j1", kind: "package", source: "/games/a", started_at_ms: 1000 }]);
+    await useFpkgConversion.getState().attachRunning();
+    expect(useFpkgConversion.getState().pipeline).toMatchObject({
+      phase: "running",
+      source: "/games/a",
+      jobId: "j1",
+      attached: true,
+      taskId: task.id,
+      startedMs: 1000,
+    });
+    expect(convertTasks()).toHaveLength(1);
+    expect(convertTasks()[0]).toMatchObject({ id: task.id, status: "running" });
+    expect(interruptedAtLoad.has(task.id)).toBe(false);
+    await tick();
+    expect(convertTasks()[0].progress).toMatchObject({ current: 5, total: 10 });
+    jobStatus.mockResolvedValue({ status: "done", dest: "/out/a.pkg", bytes_sent: 9 });
+    await tick();
+    expect(useFpkgConversion.getState().pipeline).toMatchObject({ phase: "done", packagePath: "/out/a.pkg", attached: true });
+    expect(convertTasks()[0].status).toBe("done");
+  });
+
+  it("a build that finished while the page was closed shows as finished, with its result (#954)", async () => {
+    jobStatus.mockResolvedValue({ status: "running" });
+    await useFpkgConversion.getState().start(req, { install: false, host: null });
+    await tick();
+    await reload();
+    jobStatus.mockResolvedValue({ status: "done", dest: "/out/a.pkg", bytes_sent: 9, started_at_ms: 1 });
+    await useFpkgConversion.getState().attachRunning();
+    await tick();
+    expect(useFpkgConversion.getState().pipeline).toMatchObject({
+      phase: "done",
+      source: "/games/a",
+      packagePath: "/out/a.pkg",
+      attached: true,
+    });
+    expect(convertTasks()).toHaveLength(1);
+    expect(convertTasks()[0].status).toBe("done");
+  });
+
+  it("a build that failed while the page was closed says why (#954)", async () => {
+    jobStatus.mockResolvedValue({ status: "running" });
+    await useFpkgConversion.getState().start(req, { install: false, host: null });
+    await tick();
+    await reload();
+    jobStatus.mockResolvedValue({ status: "failed", error: "disk full" });
+    await useFpkgConversion.getState().attachRunning();
+    await tick();
+    expect(convertTasks()[0]).toMatchObject({ status: "failed", lastError: { message: "disk full" } });
+  });
+
+  it("a failed read is asked again before a run is called interrupted (#954)", async () => {
+    jobStatus.mockResolvedValue({ status: "running" });
+    await useFpkgConversion.getState().start(req, { install: false, host: null });
+    await tick();
+    await reload();
+    jobStatus.mockReset().mockRejectedValueOnce(new Error("HTTP 503")).mockResolvedValue({ status: "running" });
+    const attached = useFpkgConversion.getState().attachRunning();
+    await vi.advanceTimersByTimeAsync(1500);
+    await attached;
+    expect(useFpkgConversion.getState().pipeline).toMatchObject({ phase: "running", jobId: "j1", attached: true });
+    expect(convertTasks()).toHaveLength(1);
+    expect(convertTasks()[0].status).toBe("running");
+  });
+
+  it("a run the engine no longer knows stays interrupted (#954)", async () => {
+    jobStatus.mockResolvedValue({ status: "running" });
+    await useFpkgConversion.getState().start(req, { install: false, host: null });
+    await tick();
+    await reload();
+    // The engine restarted (the desktop app quit, the container was recreated): the job died.
+    jobStatus.mockReset().mockRejectedValue(new Error("job not found"));
+    await useFpkgConversion.getState().attachRunning();
+    expect(useFpkgConversion.getState().pipeline.phase).toBe("idle");
+    expect(convertTasks()).toHaveLength(1);
+    expect(convertTasks()[0].status).toBe("interrupted");
+    expect(jobStatus).toHaveBeenCalledTimes(1);
+  });
+
+  it("a Convert & install found after a reload is followed as a build: Install waits for the user (#954)", async () => {
+    jobStatus.mockResolvedValue({ status: "running" });
+    await useFpkgConversion.getState().start(req, { install: true, host: "10.0.0.2", method: "stream" });
+    await tick();
+    await reload();
+    jobStatus.mockResolvedValue({ status: "done", dest: "/out/a.pkg", bytes_sent: 9 });
+    await useFpkgConversion.getState().attachRunning();
+    await tick();
+    expect(useFpkgConversion.getState().pipeline).toMatchObject({ phase: "done", mode: "convert", packagePath: "/out/a.pkg" });
+    expect(installStream).not.toHaveBeenCalled();
+  });
+
   it("does not take over a window that is already busy", async () => {
     await useFpkgConversion.getState().start(req, { install: false, host: null });
     runningJobs.mockResolvedValueOnce([{ job_id: "j9", kind: "image", source: "/g/A", started_at_ms: 5 }]);
@@ -1218,23 +1336,6 @@ describe("fpkg pipeline", () => {
     const second = remoteFetch.mock.calls[0][1] as string;
     expect(first.startsWith("/out/.ps5upload-source/")).toBe(true);
     expect(second).not.toBe(first);
-  });
-
-  it("says after unpacking when the game inside would not play as a package here", async () => {
-    const { pushNotification } = await import("./notifications");
-    vi.mocked(pushNotification).mockClear();
-    const was = (conn as { ps5Kernel?: string | null }).ps5Kernel;
-    (conn as { ps5Kernel?: string | null }).ps5Kernel = "r229358/releases/13.60";
-    inspect.mockResolvedValueOnce({ content_id: "UP9000-PPSA03671_00-X" });
-    jobStatus
-      .mockResolvedValueOnce({ status: "done", dest: "/out/.ps5upload-extract-x2/G", bytes_sent: 1 })
-      .mockResolvedValueOnce({ status: "failed", error: "stop here" });
-    await useFpkgConversion.getState().start({ source: "/dl/g.7z", outputDir: "/out" }, { install: false, host: null });
-    await tick();
-    await tick();
-    expect(inspect).toHaveBeenCalledWith("/out/.ps5upload-extract-x2/G", "/out");
-    expect(pushNotification).toHaveBeenCalledWith("warning", expect.anything(), expect.objectContaining({ link: "/workshop" }));
-    (conn as { ps5Kernel?: string | null }).ps5Kernel = was;
   });
 
   it("unpacks a local archive, builds the game inside, then removes the unpack", async () => {
@@ -1464,5 +1565,135 @@ describe("fpkg pipeline", () => {
     expect(useFpkgConversion.getState().pipeline.phase).toBe("idle");
     expect(localStorage.getItem("ps5upload.convert.running_job")).toBeNull();
     vi.unstubAllGlobals();
+  });
+
+  // ── "Free the archive's space while it unpacks": the archive is deleted on the way ──────
+
+  it("frees the archive only when asked, and drops the kept unpack once the package is made", async () => {
+    const game = "/out/game.unpacked/My Game";
+    jobStatus
+      .mockResolvedValueOnce({ status: "done", dest: game, bytes_sent: 10 })
+      .mockResolvedValueOnce({ status: "done", dest: "/out/a.pkg", bytes_sent: 1 });
+    await useFpkgConversion
+      .getState()
+      .start({ source: "/dl/game.zip", outputDir: "/out" }, { install: false, host: null, freeArchive: true });
+    expect(extract).toHaveBeenCalledWith("/dl/game.zip", "/out", undefined, true);
+    await tick();
+    expect(build).toHaveBeenCalledWith(expect.objectContaining({ source: game }));
+    await tick();
+    expect(useFpkgConversion.getState().pipeline).toMatchObject({ phase: "done", packagePath: "/out/a.pkg" });
+    // The folder that held the only copy of the game goes now, asked for by name.
+    expect(cleanupExtract).toHaveBeenCalledTimes(1);
+    expect(cleanupExtract).toHaveBeenCalledWith(game, true);
+  });
+
+  it("keeps the unpacked game, and says where it is, when the build fails after the archive went", async () => {
+    const game = "/out/game.unpacked/My Game";
+    jobStatus
+      .mockResolvedValueOnce({ status: "done", dest: game, bytes_sent: 10 })
+      .mockResolvedValueOnce({ status: "failed", error: "disk full" });
+    await useFpkgConversion
+      .getState()
+      .start({ source: "/dl/game.zip", outputDir: "/out" }, { install: false, host: null, freeArchive: true });
+    await tick();
+    await tick();
+    const p = useFpkgConversion.getState().pipeline;
+    expect(p).toMatchObject({
+      phase: "failed",
+      message: "disk full",
+      archiveGone: { kept: game, partly: false },
+    });
+    expect(cleanupExtract).not.toHaveBeenCalled();
+    // A list row says both: what went wrong, and where the game is.
+    const text = p.phase === "failed" ? failureText(p) : "";
+    expect(text).toContain("disk full");
+    expect(text).toContain(game);
+    expect(text).toMatch(/archive was deleted/i);
+  });
+
+  it("an unpack stopped with the archive partly deleted keeps what came out and says so, stopped or not", async () => {
+    jobStatus.mockResolvedValueOnce({
+      status: "failed",
+      error:
+        "cancelled. The archive is partly deleted and can't be used again. Everything unpacked before it stopped is kept in /out/game.unpacked. What is left of the archive: /dl/game.zip.partial-deleted.",
+      error_reason: "archive_partly_deleted",
+      error_detail: "/out/game.unpacked",
+    });
+    await useFpkgConversion
+      .getState()
+      .start({ source: "/dl/game.zip", outputDir: "/out" }, { install: false, host: null, freeArchive: true });
+    await tick();
+    const p = useFpkgConversion.getState().pipeline;
+    expect(p).toMatchObject({
+      phase: "failed",
+      stage: "extract",
+      // The cause alone: the rest is said in the user's language.
+      message: "cancelled",
+      cancelled: true,
+      archiveGone: { kept: "/out/game.unpacked", partly: true },
+    });
+    expect(cleanupExtract).not.toHaveBeenCalled();
+    expect(build).not.toHaveBeenCalled();
+    expect(p.phase === "failed" ? failureText(p) : "").toMatch(/partly deleted.*\/out\/game\.unpacked/);
+  });
+
+  it("a failed unpack that left the archive whole is an ordinary failure", async () => {
+    jobStatus.mockResolvedValueOnce({ status: "failed", error: "more than one game in the archive (a, b)" });
+    await useFpkgConversion
+      .getState()
+      .start({ source: "/dl/game.zip", outputDir: "/out" }, { install: false, host: null, freeArchive: true });
+    await tick();
+    const p = useFpkgConversion.getState().pipeline;
+    expect(p).toMatchObject({ phase: "failed", stage: "extract" });
+    expect(p.phase === "failed" && p.archiveGone).toBeUndefined();
+  });
+
+  it("never deletes a copy fetched from a server, whatever was asked", async () => {
+    const game = "/out/.ps5upload-extract-x1/G";
+    jobStatus
+      .mockResolvedValueOnce({ status: "done", dest: "/out/.ps5upload-source/r/g.zip", bytes_sent: 1 })
+      .mockResolvedValueOnce({ status: "done", dest: game, bytes_sent: 1 })
+      .mockResolvedValueOnce({ status: "done", dest: "/out/a.pkg", bytes_sent: 1 });
+    await useFpkgConversion
+      .getState()
+      .start(
+        { source: "remote://nas-1/dl/g.zip", outputDir: "/out" },
+        { install: false, host: null, freeArchive: true },
+      );
+    await tick();
+    await tick();
+    expect(extract).toHaveBeenCalledWith("/out/.ps5upload-source/r/g.zip", "/out", undefined);
+    await tick();
+    await tick();
+    expect(cleanupExtract).toHaveBeenCalledWith(game);
+  });
+
+  it("an unpack that freed its archive and lost its page keeps the folder and names it", async () => {
+    runningJobs.mockResolvedValueOnce([{ job_id: "x9", kind: "extract", source: "/g/A.zip", started_at_ms: 5 }]);
+    jobStatus.mockResolvedValueOnce({ status: "done", dest: "/out/A.unpacked/G" });
+    await useFpkgConversion.getState().attachRunning();
+    await tick();
+    expect(cleanupExtract).not.toHaveBeenCalled();
+    expect(useFpkgConversion.getState().pipeline).toMatchObject({
+      phase: "failed",
+      archiveGone: { kept: "/out/A.unpacked/G", partly: false },
+    });
+  });
+
+  it("knows which runs unpack an archive to disk, so freeing it gives room back", () => {
+    // A package is always made from the unpacked game; a tar is always unpacked.
+    expect(archiveIsUnpacked("/dl/G.zip", "pkg")).toBe(true);
+    expect(archiveIsUnpacked("/dl/G.part1.rar", "pkg")).toBe(true);
+    expect(archiveIsUnpacked("/dl/G.tar.zst", "image")).toBe(true);
+    // An image or folder is made straight from the archive, unless a game image is inside
+    // or an update is merged in.
+    expect(archiveIsUnpacked("/dl/G.zip", "image")).toBe(false);
+    expect(archiveIsUnpacked("/dl/G.7z", "folder", { game: "folder" })).toBe(false);
+    expect(archiveIsUnpacked("/dl/G.zip", "image", { game: "image" })).toBe(true);
+    expect(archiveIsUnpacked("/dl/G.zip", "folder", { merge: true })).toBe(true);
+    // Not an archive, or not on this computer.
+    expect(archiveIsUnpacked("/dl/G.exfat", "pkg")).toBe(false);
+    expect(archiveIsUnpacked("remote://nas-1/dl/G.zip", "pkg")).toBe(false);
+    expect(archiveIsUnpacked("ps5://10.0.0.2/data/G.zip", "pkg")).toBe(false);
   });
 });

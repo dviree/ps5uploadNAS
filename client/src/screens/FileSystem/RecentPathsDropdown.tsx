@@ -1,6 +1,7 @@
 import { useMemo, useRef, useState } from "react";
-import { ChevronRight, Star, StarOff } from "lucide-react";
+import { ChevronRight, History, Star, StarOff } from "lucide-react";
 
+import { useBackDismiss } from "../../lib/systemBack";
 import { useTr } from "../../state/lang";
 import { useRecentPathsStore } from "../../state/recentPaths";
 import { useFitOnScreen } from "../../components/useFitOnScreen";
@@ -152,6 +153,8 @@ export function RecentPathsDropdown({
   const remove = useRecentPathsStore((s) => s.remove);
   const clear = useRecentPathsStore((s) => s.clear);
   const [open, setOpen] = useState(false);
+  // System Back closes the list first.
+  useBackDismiss(open, () => setOpen(false));
 
   // Filter out the current path — no value in offering "go where you
   // already are." Keeps the list focused on actual destinations.
@@ -171,10 +174,15 @@ export function RecentPathsDropdown({
           setOpen((v) => !v);
         }}
         title={tr("fs_recent_tooltip", undefined, "Recent destinations")}
+        aria-label={tr("fs_recent_tooltip", undefined, "Recent destinations")}
         aria-expanded={open}
-        className="flex items-center gap-1 rounded-full px-1.5 py-0.5 text-xs uppercase tracking-wider text-[var(--color-muted)] hover:bg-[var(--color-surface-3)] hover:text-[var(--color-text)]"
+        data-testid="fs-recent-open"
+        className="flex shrink-0 items-center gap-1 rounded-full px-1.5 py-0.5 text-xs uppercase tracking-wider text-[var(--color-muted)] hover:bg-[var(--color-surface-3)] hover:text-[var(--color-text)]"
       >
-        {tr("fs_recent", "Recent")}
+        {/* On a phone an icon: the word ("Zuletzt verwendet") took the open folder's room in the
+            path row. */}
+        <History size={14} className="roomy:hidden" aria-hidden />
+        <span className="phone:hidden">{tr("fs_recent", "Recent")}</span>
         <ChevronRight
           size={10}
           className={`transition-transform ${open ? "rotate-90" : "rtl:rotate-180"}`}
