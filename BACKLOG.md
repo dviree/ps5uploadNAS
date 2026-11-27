@@ -19,8 +19,8 @@
   pinned 0.4.0) for the NAS converter.
 - Docker run 61 failed: upstream's `COPY --from=glibc /rootfs-glibc/ /` in Dockerfile.webui
   breaks on the fork's Debian final image (/lib is a symlink). Removed the glibc stage and the
-  COPY (Debian already has glibc 2.36 and CA certificates). Next: verify the rebuilt image,
-  then run the NAS updater.
+  COPY (Debian already has glibc 2.36 and CA certificates). Run 62 is green and published
+  (merge and merge-webui ran). Next: the user runs the NAS updater.
 
 - 2026-11-23: merged PS5Upload 12.6.24 (4bfce98e; 12.6.19-12.6.24: save-backup progress and
   continue, folder backups, Extract here, Kraken-safe cleanup, capture card, Android TV,
